@@ -3792,7 +3792,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         acknowledge_reactor_wakes,
         coalescible_reactor_wakes,
         read_reactor_wake,
-        reactor_urgent_wake_reason,
+        reactor_urgent_wake_identity,
     )
 
     wake = read_reactor_wake()
@@ -3873,7 +3873,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
     if day0_wake:
         try:
-            next_urgent_reason = reactor_urgent_wake_reason()
+            next_urgent_identity = reactor_urgent_wake_identity()
         except Exception:
             logger.warning(
                 "Day0 urgent wake state could not be refreshed after acknowledgement; "
@@ -3881,7 +3881,11 @@ def _edli_reactor_wake_poll_once() -> bool:
                 exc_info=True,
             )
         else:
-            if next_urgent_reason == "day0_extreme_event_committed":
+            if (
+                next_urgent_identity is not None
+                and next_urgent_identity[0] != wake.wake_id
+                and next_urgent_identity[1] == "day0_extreme_event_committed"
+            ):
                 _day0_urgent_wake_pending.set()
             else:
                 _day0_urgent_wake_pending.clear()

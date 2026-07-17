@@ -403,3 +403,12 @@ def reactor_urgent_wake_reason(*, path: Path | None = None) -> str | None:
 
     wake = _read_reactor_wake_path(_urgent_wake_path(path))
     return wake.reason if wake is not None else None
+
+
+def reactor_urgent_wake_identity(
+    *, path: Path | None = None
+) -> tuple[str, str] | None:
+    """Return the wake id and reason from one atomic urgent-marker read."""
+
+    wake = _read_reactor_wake_path(_urgent_wake_path(path))
+    return (wake.wake_id, wake.reason) if wake is not None else None

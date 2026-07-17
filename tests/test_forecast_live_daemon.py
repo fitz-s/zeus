@@ -658,6 +658,7 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wake,
         publish_reactor_wake,
+        reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
         reactor_urgent_wake_revision,
         reactor_wake_revision,
@@ -667,6 +668,7 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     path = tmp_path / "wake.json"
     assert reactor_wake_revision(path=path) is None
     assert reactor_urgent_wake_reason(path=path) is None
+    assert reactor_urgent_wake_identity(path=path) is None
     assert reactor_urgent_wake_revision(path=path) is None
     published = publish_reactor_wake(
         source="test",
@@ -701,6 +703,10 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     urgent_revision = reactor_urgent_wake_revision(path=path)
     assert urgent_revision is not None
     assert reactor_urgent_wake_reason(path=path) == "day0_extreme_event_committed"
+    assert reactor_urgent_wake_identity(path=path) == (
+        "wake-43",
+        "day0_extreme_event_committed",
+    )
     publish_reactor_wake(
         source="test",
         reason="forecast_posterior_advanced",
@@ -1000,7 +1006,7 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
         "acknowledge_reactor_wake",
         lambda _wake: True,
     )
-    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_reason", lambda: None)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_edli_event_reactor_cycle", _run_reactor)
@@ -1118,7 +1124,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
         "acknowledge_reactor_wake",
         lambda _wake: True,
     )
-    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_reason", lambda: None)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
@@ -1187,8 +1193,8 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
     )
     monkeypatch.setattr(
         reactor_wake,
-        "reactor_urgent_wake_reason",
-        lambda: "day0_extreme_event_committed",
+        "reactor_urgent_wake_identity",
+        lambda: ("wake-day0-newer", "day0_extreme_event_committed"),
     )
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
@@ -1294,7 +1300,7 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
         "acknowledge_reactor_wake",
         lambda _wake: True,
     )
-    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_reason", lambda: None)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
