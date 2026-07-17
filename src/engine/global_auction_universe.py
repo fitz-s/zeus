@@ -900,8 +900,18 @@ def refresh_current_global_book_epoch_tokens(
     ],
     required_tokens: Sequence[str],
     checked_at_utc: datetime,
+    metadata_overrides: Mapping[
+        tuple[str, str], Mapping[str, object]
+    ] | None = None,
 ) -> tuple[CurrentGlobalBookEpoch, int]:
-    """Replace newer projected token books while preserving the epoch cut."""
+    """Replace newer projected token books while preserving the epoch cut.
+
+    ``metadata_overrides`` carries current Gamma metadata already certified by
+    this still-live epoch. Price-channel depth can then advance independently
+    of the persisted snapshot metadata clock. Persisted metadata remains bound
+    to the exact projected snapshot id; only same-epoch Gamma authority may
+    cross that boundary.
+    """
 
     if (
         checked_at_utc.tzinfo is None
@@ -937,6 +947,16 @@ def refresh_current_global_book_epoch_tokens(
         token = str(metadata.get("selected_outcome_token_id") or "").strip()
         if token in clean_projected and token not in metadata_by_token:
             metadata_by_token[token] = metadata
+    for raw_key, metadata in (metadata_overrides or {}).items():
+        condition_id = str(raw_key[0] or "").strip()
+        token = str(raw_key[1] or "").strip()
+        if (
+            token in clean_projected
+            and str(metadata.get("condition_id") or "").strip() == condition_id
+            and str(metadata.get("selected_outcome_token_id") or "").strip()
+            == token
+        ):
+            metadata_by_token[token] = metadata
 
     assets_by_token = {asset.token_id: asset for asset in epoch.assets}
     sell_assets_by_token = {asset.token_id: asset for asset in epoch.sell_assets}
@@ -963,7 +983,14 @@ def refresh_current_global_book_epoch_tokens(
         if captured_at > checked_at_utc.astimezone(timezone.utc):
             raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_FROM_FUTURE:{token}")
         metadata = metadata_by_token.get(token)
-        if metadata is None or str(metadata.get("snapshot_id") or "") != snapshot_id:
+        current_gamma = bool(
+            metadata is not None
+            and metadata.get("_global_current_gamma") is True
+        )
+        if metadata is None or (
+            not current_gamma
+            and str(metadata.get("snapshot_id") or "") != snapshot_id
+        ):
             raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_METADATA_MISSING:{token}")
         if not _global_book_metadata_is_current(
             metadata,

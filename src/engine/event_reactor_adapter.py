@@ -328,6 +328,9 @@ class _GlobalBookEpochCacheEntry:
     topology: tuple[tuple[str, str, str, str, str], ...]
     bound_probabilities: tuple[tuple[str, object], ...]
     epoch: object
+    metadata_by_key: tuple[
+        tuple[tuple[str, str], Mapping[str, object]], ...
+    ] = ()
 
 
 _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
@@ -1953,12 +1956,46 @@ def _probe_global_book_epoch_cache(
         return None, f"current_identity_invalid:{type(exc).__name__}"
 
 
+def _cached_global_book_metadata(
+    trade_conn: sqlite3.Connection,
+    *,
+    checked_at: datetime,
+) -> dict[tuple[str, str], Mapping[str, object]]:
+    """Return Gamma metadata only while its owning book epoch is current."""
+
+    if checked_at.tzinfo is None:
+        return {}
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    if namespace is None:
+        return {}
+    with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        entry = _GLOBAL_BOOK_EPOCH_CACHE
+    if entry is None or entry.namespace != namespace:
+        return {}
+    current_identity = getattr(entry.epoch, "current_identity", None)
+    if not callable(current_identity):
+        return {}
+    try:
+        if current_identity(checked_at.astimezone(UTC)) is None:
+            return {}
+    except (TypeError, ValueError):
+        return {}
+    return {
+        (str(key[0]), str(key[1])): dict(metadata)
+        for key, metadata in entry.metadata_by_key
+        if metadata.get("_global_current_gamma") is True
+    }
+
+
 def _store_global_book_epoch(
     trade_conn: sqlite3.Connection,
     bound_probabilities: Mapping[str, object],
     epoch: object,
     *,
     checked_at: datetime,
+    metadata_by_key: Mapping[
+        tuple[str, str], Mapping[str, object]
+    ] | None = None,
 ) -> str:
     global _GLOBAL_BOOK_EPOCH_CACHE
 
@@ -1984,6 +2021,16 @@ def _store_global_book_epoch(
             topology=topology,
             bound_probabilities=tuple(sorted(bound_probabilities.items())),
             epoch=epoch,
+            metadata_by_key=tuple(
+                sorted(
+                    (
+                        (str(key[0]), str(key[1])),
+                        dict(metadata),
+                    )
+                    for key, metadata in (metadata_by_key or {}).items()
+                    if metadata.get("_global_current_gamma") is True
+                )
+            ),
         )
     return "stored"
 
@@ -7155,7 +7202,10 @@ def event_bound_live_adapter_from_trade_conn(
 
         book_metadata_by_key: dict[
             tuple[str, str], Mapping[str, object]
-        ] = {}
+        ] = _cached_global_book_metadata(
+            trade_conn,
+            checked_at=datetime.now(UTC),
+        )
 
         def _current_book_epoch(probabilities, _at):
             from src.contracts.executable_market_snapshot import (
@@ -7699,6 +7749,7 @@ def event_bound_live_adapter_from_trade_conn(
                                 projected_books=projected_rows,
                                 required_tokens=tuple(exact_refresh_tokens),
                                 checked_at_utc=cache_checked_at,
+                                metadata_overrides=book_metadata_by_key,
                             )
                         )
                         cached_probability_slice = {
@@ -7721,6 +7772,7 @@ def event_bound_live_adapter_from_trade_conn(
                             rebound_probabilities,
                             refreshed_epoch,
                             checked_at=cache_checked_at,
+                            metadata_by_key=book_metadata_by_key,
                         )
                         logging.getLogger(__name__).info(
                             "global book token projection refresh completed: "
@@ -8022,6 +8074,7 @@ def event_bound_live_adapter_from_trade_conn(
                         merged_probabilities,
                         merged_epoch,
                         checked_at=datetime.now(UTC),
+                        metadata_by_key=book_metadata_by_key,
                     )
                     if cache_store_status != "stored":
                         logging.getLogger(__name__).warning(
@@ -8072,6 +8125,7 @@ def event_bound_live_adapter_from_trade_conn(
                     bound_probabilities,
                     epoch,
                     checked_at=datetime.now(UTC),
+                    metadata_by_key=book_metadata_by_key,
                 )
                 if cache_store_status != "stored":
                     logging.getLogger(__name__).warning(
