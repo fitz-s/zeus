@@ -6214,27 +6214,6 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
     return int(row[0] or 0) if row is not None else 0
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
-_EDLI_MISSING_PROCESSING_REPAIR_CONVERGED = False
-
-
-def _edli_repair_missing_processing_rows_until_converged(
-    store,
-    *,
-    decision_time: str,
-    batch_limit: int,
-) -> int:
-    """Run legacy orphan repair until one scan proves the process-local window clean."""
-
-    global _EDLI_MISSING_PROCESSING_REPAIR_CONVERGED
-    if _EDLI_MISSING_PROCESSING_REPAIR_CONVERGED:
-        return 0
-    repaired = store.repair_missing_processing_rows(
-        decision_time=decision_time,
-        batch_limit=batch_limit,
-    )
-    if repaired == 0:
-        _EDLI_MISSING_PROCESSING_REPAIR_CONVERGED = True
-    return repaired
 
 def _edli_prune_pending_working_set(
     store,
@@ -6394,50 +6373,6 @@ def _edli_prune_pending_working_set(
         _log.warning(
             "EDLI reactor: archive_unmarketed_day0_events sweep failed (non-fatal): %r",
             _d0_unmarketed_sweep_exc,
-        )
-
-    try:
-        if _budget_exhausted("repair_missing_processing_rows"):
-            return
-        _step_started = time.monotonic()
-        _processing_repaired = _edli_repair_missing_processing_rows_until_converged(
-            store,
-            decision_time=decision_time.isoformat(),
-            batch_limit=min(batch_limit, 1000),
-        )
-        _log_prune_step("repair_missing_processing_rows", _step_started, _processing_repaired)
-        if _processing_repaired:
-            _log.warning(
-                "EDLI reactor: repaired %d decision events missing processing rows "
-                "so fetch_pending can claim them",
-                _processing_repaired,
-            )
-    except Exception as _missing_processing_repair_exc:  # noqa: BLE001 — fail-soft
-        _log.warning(
-            "EDLI reactor: missing processing-row repair sweep failed "
-            "(non-fatal; normal pending events still drain): %r",
-            _missing_processing_repair_exc,
-        )
-
-    try:
-        if _budget_exhausted("requeue_misclassified_local_pre_submit_rejections"):
-            return
-        _step_started = time.monotonic()
-        _recovered = store.requeue_misclassified_local_pre_submit_rejections(
-            batch_limit=min(batch_limit, 1000),
-        )
-        _log_prune_step("requeue_misclassified_local_pre_submit_rejections", _step_started, _recovered)
-        if _recovered:
-            _log.warning(
-                "EDLI reactor: requeued %d processed events that old executor-boundary "
-                "code misclassified as venue rejects for local entries_paused pre-submit blocks",
-                _recovered,
-            )
-    except Exception as _pre_submit_recovery_exc:  # noqa: BLE001 — fail-soft
-        _log.warning(
-            "EDLI reactor: local pre-submit rejection recovery sweep failed "
-            "(non-fatal; normal pending events still drain): %r",
-            _pre_submit_recovery_exc,
         )
 
     try:

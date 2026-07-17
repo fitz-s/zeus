@@ -19,9 +19,10 @@ is mutated; the immutable opportunity_events row is never deleted.
 """
 from __future__ import annotations
 
-from pathlib import Path
+import inspect
 import sqlite3
 
+from src.events import reactor
 from src.events.event_store import EventStore
 from src.events.opportunity_event import (
     Day0ExtremeUpdatedPayload,
@@ -195,20 +196,16 @@ def test_archive_unmarketed_day0_events_expires_only_non_admitted_processing_row
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
 
 
-def test_reactor_prune_archives_unmarketed_day0_before_legacy_repair_sweeps():
+def test_reactor_prune_archives_unmarketed_day0_without_legacy_repair_sweeps():
     # R4-b3 (2026-07-08): _edli_prune_pending_working_set moved from src/main.py
     # to src.events.reactor alongside the reactor cycle that is its sole caller.
-    source = (Path(__file__).resolve().parents[2] / "src" / "events" / "reactor.py").read_text()
-    prune_start = source.index("def _edli_prune_pending_working_set(")
-    prune_source = source[
-        prune_start:
-        source.index("def _edli_day0_fast_lane_enabled(", prune_start)
-    ]
+    prune_source = inspect.getsource(reactor._edli_prune_pending_working_set)
 
     unmarketed_idx = prune_source.index('archive_unmarketed_day0_events"')
     assert prune_source.index('archive_expired_candidates"') < unmarketed_idx
-    assert unmarketed_idx < prune_source.index('repair_missing_processing_rows"')
     assert unmarketed_idx < prune_source.index('archive_superseded_channel_events"')
+    assert "repair_missing_processing_rows" not in prune_source
+    assert "requeue_misclassified_local_pre_submit_rejections" not in prune_source
 
 
 # Decision time 2026-06-05T12:00:00Z: Chicago (UTC-5) local 06-05 07:00 → 06-04 is a PAST
