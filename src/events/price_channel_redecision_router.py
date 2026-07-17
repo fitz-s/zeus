@@ -115,12 +115,34 @@ def _edli_money_path_family_keys_for_tokens(
             pass
 
     condition_ids: set[str] = set()
-    if _edli_table_exists(trade_conn, "executable_market_snapshots", schema=trade_schema):
+    snapshot_table = "executable_market_snapshots"
+    latest_table = "executable_market_snapshot_latest"
+    if _edli_table_exists(trade_conn, latest_table, schema=trade_schema):
+        pragma = (
+            f"PRAGMA {trade_schema}.table_info({latest_table})"
+            if trade_schema
+            else f"PRAGMA table_info({latest_table})"
+        )
+        try:
+            latest_columns = {str(row[1]) for row in trade_conn.execute(pragma).fetchall()}
+            if {
+                "condition_id",
+                "selected_outcome_token_id",
+                "yes_token_id",
+                "no_token_id",
+            } <= latest_columns and trade_conn.execute(
+                f"SELECT 1 FROM {trade_prefix}{latest_table} LIMIT 1"
+            ).fetchone():
+                snapshot_table = latest_table
+        except Exception:
+            pass
+
+    if _edli_table_exists(trade_conn, snapshot_table, schema=trade_schema):
         try:
             rows = trade_conn.execute(
                 f"""
                 SELECT DISTINCT condition_id
-                  FROM {trade_prefix}executable_market_snapshots
+                  FROM {trade_prefix}{snapshot_table}
                  WHERE selected_outcome_token_id IN ({placeholders})
                     OR yes_token_id IN ({placeholders})
                     OR no_token_id IN ({placeholders})

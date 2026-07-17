@@ -744,6 +744,62 @@ def test_price_channel_money_path_tokens_resolve_to_redecision_families():
     }
 
 
+def test_price_channel_money_path_latest_snapshot_does_not_resurrect_old_tokens():
+    from src.ingest.price_channel_ingest import _edli_money_path_family_keys_for_tokens
+
+    trade = sqlite3.connect(":memory:")
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("condition-a", "old-no", "old-yes", "old-no"),
+    )
+    trade.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?)",
+        ("condition-a", "new-no", "new-yes", "new-no"),
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?)",
+        ("condition-a", "Paris", "2026-07-18", "high"),
+    )
+
+    assert _edli_money_path_family_keys_for_tokens(trade, forecasts, {"old-no"}) == set()
+    assert _edli_money_path_family_keys_for_tokens(
+        trade,
+        forecasts,
+        {"new-no"},
+    ) == {("Paris", "2026-07-18", "high")}
+
+
 def test_price_channel_held_tokens_resolve_separately_from_entry_candidates():
     from src.ingest.price_channel_ingest import _edli_held_family_keys_for_tokens
 
