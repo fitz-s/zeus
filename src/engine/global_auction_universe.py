@@ -616,6 +616,133 @@ def _global_book_metadata_is_executable(
     )
 
 
+def _current_global_book_asset_state(
+    *,
+    family_key: str,
+    bin_id: str,
+    condition_id: str,
+    side: str,
+    token_id: str,
+    metadata: Mapping[str, object],
+    raw_book: Mapping[str, object] | None,
+    captured_at_utc: datetime,
+    checked_at_utc: datetime,
+    max_age: timedelta,
+) -> tuple[
+    tuple[str, ...],
+    CurrentGlobalBookAsset | None,
+    CurrentGlobalSellAsset | None,
+]:
+    if not metadata.get("_global_current_gamma") and bool(
+        metadata.get("snapshot_invalidated")
+    ):
+        raise ValueError(f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}")
+    market_event_id = str(metadata.get("event_id") or "").strip()
+    gamma_market_id = str(metadata.get("gamma_market_id") or "").strip()
+    if not gamma_market_id:
+        raise ValueError(f"GLOBAL_BOOK_GAMMA_MARKET_ID_MISSING:{condition_id}:{token_id}")
+    if not market_event_id:
+        raise ValueError(f"GLOBAL_BOOK_MARKET_EVENT_ID_MISSING:{condition_id}:{token_id}")
+
+    metadata_current = _global_book_metadata_is_current(
+        metadata,
+        checked_at_utc=checked_at_utc,
+    )
+    executable_metadata = _global_book_metadata_is_executable(
+        metadata,
+        checked_at_utc=checked_at_utc,
+    )
+    curve = None
+    sell_curve = None
+    status = "VENUE_NOT_EXECUTABLE" if metadata_current else "VENUE_METADATA_STALE"
+    if executable_metadata:
+        if raw_book is None:
+            raise ValueError(f"GLOBAL_BOOK_RESPONSE_INCOMPLETE:{token_id}")
+        raw_asset_id = str(
+            raw_book.get("asset_id")
+            or raw_book.get("assetId")
+            or raw_book.get("token_id")
+            or ""
+        ).strip()
+        if raw_asset_id != token_id:
+            raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
+        book_hash = _canonical_raw_book_hash(raw_book)
+        curve = _global_book_curve(
+            family_key=family_key,
+            bin_id=bin_id,
+            condition_id=condition_id,
+            side=side,
+            token_id=token_id,
+            raw_book=raw_book,
+            metadata=metadata,
+            captured_at_utc=captured_at_utc,
+            max_age=max_age,
+        )
+        sell_curve = _global_sell_curve(
+            family_key=family_key,
+            bin_id=bin_id,
+            condition_id=condition_id,
+            side=side,
+            token_id=token_id,
+            raw_book=raw_book,
+            metadata=metadata,
+            captured_at_utc=captured_at_utc,
+            max_age=max_age,
+        )
+        status = "EXECUTABLE" if curve is not None else "NO_ASK"
+    else:
+        book_hash = "metadata:" + hashlib.sha256(
+            json.dumps(
+                dict(metadata),
+                default=str,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    state = (
+        family_key,
+        bin_id,
+        condition_id,
+        side,
+        token_id,
+        status,
+        book_hash,
+        market_event_id,
+        gamma_market_id,
+    )
+    asset = (
+        CurrentGlobalBookAsset(
+            family_key=family_key,
+            bin_id=bin_id,
+            condition_id=condition_id,
+            gamma_market_id=gamma_market_id,
+            market_event_id=market_event_id,
+            side=side,
+            token_id=token_id,
+            curve=curve,
+            captured_at_utc=captured_at_utc,
+        )
+        if curve is not None
+        else None
+    )
+    sell_asset = (
+        CurrentGlobalSellAsset(
+            family_key=family_key,
+            bin_id=bin_id,
+            condition_id=condition_id,
+            gamma_market_id=gamma_market_id,
+            market_event_id=market_event_id,
+            side=side,
+            token_id=token_id,
+            curve=sell_curve,
+            captured_at_utc=captured_at_utc,
+        )
+        if sell_curve is not None
+        else None
+    )
+    return state, asset, sell_asset
+
+
 def capture_current_global_book_epoch(
     trade_conn: sqlite3.Connection,
     *,
@@ -732,119 +859,23 @@ def capture_current_global_book_epoch(
         metadata = metadata_by_key.get((condition_id, token_id))
         if metadata is None:
             raise ValueError(f"GLOBAL_BOOK_METADATA_MISSING:{condition_id}:{token_id}")
-        if not metadata.get("_global_current_gamma") and bool(
-            metadata.get("snapshot_invalidated")
-        ):
-            raise ValueError(f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}")
-        market_event_id = str(metadata.get("event_id") or "").strip()
-        gamma_market_id = str(metadata.get("gamma_market_id") or "").strip()
-        if not gamma_market_id:
-            raise ValueError(
-                f"GLOBAL_BOOK_GAMMA_MARKET_ID_MISSING:{condition_id}:{token_id}"
-            )
-        if not market_event_id:
-            raise ValueError(
-                f"GLOBAL_BOOK_MARKET_EVENT_ID_MISSING:{condition_id}:{token_id}"
-            )
-        metadata_current = _global_book_metadata_is_current(
-            metadata,
+        state, asset, sell_asset = _current_global_book_asset_state(
+            family_key=family_key,
+            bin_id=bin_id,
+            condition_id=condition_id,
+            side=side,
+            token_id=token_id,
+            metadata=metadata,
+            raw_book=books.get(token_id),
+            captured_at_utc=started_at,
             checked_at_utc=started_at,
+            max_age=max_age,
         )
-        executable_metadata = _global_book_metadata_is_executable(
-            metadata,
-            checked_at_utc=started_at,
-        )
-        curve = None
-        sell_curve = None
-        status = (
-            "VENUE_NOT_EXECUTABLE"
-            if metadata_current
-            else "VENUE_METADATA_STALE"
-        )
-        if executable_metadata:
-            raw_book = books[token_id]
-            raw_asset_id = str(
-                raw_book.get("asset_id")
-                or raw_book.get("assetId")
-                or raw_book.get("token_id")
-                or ""
-            ).strip()
-            if raw_asset_id != token_id:
-                raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
-            book_hash = _canonical_raw_book_hash(raw_book)
-            curve = _global_book_curve(
-                family_key=family_key,
-                bin_id=bin_id,
-                condition_id=condition_id,
-                side=side,
-                token_id=token_id,
-                raw_book=raw_book,
-                metadata=metadata,
-                captured_at_utc=started_at,
-                max_age=max_age,
-            )
-            sell_curve = _global_sell_curve(
-                family_key=family_key,
-                bin_id=bin_id,
-                condition_id=condition_id,
-                side=side,
-                token_id=token_id,
-                raw_book=raw_book,
-                metadata=metadata,
-                captured_at_utc=started_at,
-                max_age=max_age,
-            )
-            status = "EXECUTABLE" if curve is not None else "NO_ASK"
-        else:
-            book_hash = "metadata:" + hashlib.sha256(
-                json.dumps(
-                    dict(metadata),
-                    default=str,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
-        states.append(
-            (
-                family_key,
-                bin_id,
-                condition_id,
-                side,
-                token_id,
-                status,
-                book_hash,
-                market_event_id,
-                gamma_market_id,
-            )
-        )
-        if curve is not None:
-            assets.append(
-                CurrentGlobalBookAsset(
-                    family_key=family_key,
-                    bin_id=bin_id,
-                    condition_id=condition_id,
-                    gamma_market_id=gamma_market_id,
-                    market_event_id=market_event_id,
-                    side=side,
-                    token_id=token_id,
-                    curve=curve,
-                    captured_at_utc=started_at,
-                )
-            )
-        if sell_curve is not None:
-            sell_assets.append(
-                CurrentGlobalSellAsset(
-                    family_key=family_key,
-                    bin_id=bin_id,
-                    condition_id=condition_id,
-                    gamma_market_id=gamma_market_id,
-                    market_event_id=market_event_id,
-                    side=side,
-                    token_id=token_id,
-                    curve=sell_curve,
-                    captured_at_utc=started_at,
-                )
-            )
+        states.append(state)
+        if asset is not None:
+            assets.append(asset)
+        if sell_asset is not None:
+            sell_assets.append(sell_asset)
     identity = current_global_book_epoch_identity(
         asset_states=states,
         captured_at_utc=started_at,
@@ -943,107 +974,30 @@ def refresh_current_global_book_epoch_tokens(
             or expected_token != token
         ):
             raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_TOPOLOGY_CHANGED:{token}")
-        if bool(metadata.get("snapshot_invalidated")):
-            raise ValueError(f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token}")
-
-        metadata_current = _global_book_metadata_is_current(
-            metadata,
+        new_state, asset, sell_asset = _current_global_book_asset_state(
+            family_key=family_key,
+            bin_id=bin_id,
+            condition_id=condition_id,
+            side=side,
+            token_id=token,
+            metadata=metadata,
+            raw_book=raw_book,
+            captured_at_utc=captured_at,
             checked_at_utc=checked_at_utc,
+            max_age=epoch.max_age,
         )
-        executable_metadata = _global_book_metadata_is_executable(
-            metadata,
-            checked_at_utc=checked_at_utc,
-        )
-        curve = None
-        sell_curve = None
-        status = "VENUE_NOT_EXECUTABLE" if metadata_current else "VENUE_METADATA_STALE"
-        if executable_metadata:
-            raw_asset_id = str(
-                raw_book.get("asset_id")
-                or raw_book.get("assetId")
-                or raw_book.get("token_id")
-                or ""
-            ).strip()
-            if raw_asset_id != token:
-                raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token}")
-            book_hash = _canonical_raw_book_hash(raw_book)
-            curve = _global_book_curve(
-                family_key=family_key,
-                bin_id=bin_id,
-                condition_id=condition_id,
-                side=side,
-                token_id=token,
-                raw_book=raw_book,
-                metadata=metadata,
-                captured_at_utc=captured_at,
-                max_age=epoch.max_age,
-            )
-            sell_curve = _global_sell_curve(
-                family_key=family_key,
-                bin_id=bin_id,
-                condition_id=condition_id,
-                side=side,
-                token_id=token,
-                raw_book=raw_book,
-                metadata=metadata,
-                captured_at_utc=captured_at,
-                max_age=epoch.max_age,
-            )
-            status = "EXECUTABLE" if curve is not None else "NO_ASK"
-        else:
-            book_hash = "metadata:" + hashlib.sha256(
-                json.dumps(
-                    dict(metadata),
-                    default=str,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
-        new_state = (
-            family_key,
-            bin_id,
-            condition_id,
-            side,
-            token,
-            status,
-            book_hash,
-            str(metadata.get("event_id") or "").strip(),
-            str(metadata.get("gamma_market_id") or "").strip(),
-        )
-        if not new_state[7] or not new_state[8]:
-            raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_IDENTITY_MISSING:{token}")
         if new_state == state:
             continue
         state_by_token[token] = new_state
         changed += 1
-        if curve is None:
+        if asset is None:
             assets_by_token.pop(token, None)
         else:
-            assets_by_token[token] = CurrentGlobalBookAsset(
-                family_key=family_key,
-                bin_id=bin_id,
-                condition_id=condition_id,
-                gamma_market_id=new_state[8],
-                market_event_id=new_state[7],
-                side=side,
-                token_id=token,
-                curve=curve,
-                captured_at_utc=captured_at,
-            )
-        if sell_curve is None:
+            assets_by_token[token] = asset
+        if sell_asset is None:
             sell_assets_by_token.pop(token, None)
         else:
-            sell_assets_by_token[token] = CurrentGlobalSellAsset(
-                family_key=family_key,
-                bin_id=bin_id,
-                condition_id=condition_id,
-                gamma_market_id=new_state[8],
-                market_event_id=new_state[7],
-                side=side,
-                token_id=token,
-                curve=sell_curve,
-                captured_at_utc=captured_at,
-            )
+            sell_assets_by_token[token] = sell_asset
 
     if not changed:
         return epoch, 0
