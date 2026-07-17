@@ -2381,8 +2381,9 @@ def _pending_entry_endowments(
     ``position.shares`` can advance before ``chain_shares`` and an admitted
     command can precede both.  The endowment therefore takes the larger of the
     local fill-projection gap and still-open obligations for each token.  A
-    FILLED obligation is omitted only when a later positive chain observation
-    proves that fill is already represented by sellable inventory.
+    An OPEN obligation remains non-sellable endowment until its own durable
+    lifecycle is RESOLVED. A later chain timestamp alone cannot prove that an
+    incremental fill is included in an unchanged aggregate balance.
     """
 
     rows = trade_conn.execute(
@@ -2485,29 +2486,11 @@ def _pending_entry_endowments(
         if shares_micro <= 0 or cost_micro < 0:
             raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID")
 
-        represented = False
         position = positions_by_id.get(command_position_id)
         chain_seen_raw = str(
             getattr(position, "chain_verified_at", "") if position is not None else ""
         ).strip()
-        if command_state == "FILLED" and fill_confirmed_at_raw and chain_seen_raw:
-            try:
-                fill_confirmed_at = datetime.fromisoformat(
-                    fill_confirmed_at_raw.replace("Z", "+00:00")
-                )
-                chain_seen_at = datetime.fromisoformat(
-                    chain_seen_raw.replace("Z", "+00:00")
-                )
-            except ValueError as exc:
-                raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_TIME_INVALID") from exc
-            if fill_confirmed_at.tzinfo is None or chain_seen_at.tzinfo is None:
-                raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_TIME_INVALID")
-            represented = (
-                _position_token(position) == obligation_token
-                and native_holdings_micro.get(obligation_token, 0) > 0
-                and chain_seen_at.astimezone(timezone.utc)
-                >= fill_confirmed_at.astimezone(timezone.utc)
-            )
+        represented = status == "RESOLVED"
 
         classification = "represented" if represented else "pending"
         identities.append(

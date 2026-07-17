@@ -8549,6 +8549,20 @@ def test_global_selection_counts_open_entry_without_granting_sell_inventory():
     position.shares = Decimal("39.1")
     position.chain_shares = Decimal("39.1")
     position.chain_verified_at = "2026-07-17T05:44:42+00:00"
+    unresolved = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=at + _dt.timedelta(seconds=10),
+        max_age=_dt.timedelta(seconds=10),
+        portfolio_state=portfolio,
+    )
+    assert unresolved.pending_entry_endowments_micro == (
+        ("command-a", "no-a", 7_500_000),
+    )
+
+    conn.execute(
+        "UPDATE entry_exposure_obligations SET status = 'RESOLVED' "
+        "WHERE command_id = 'command-a'"
+    )
     represented = current_portfolio_wealth_witness(
         conn,
         decision_at_utc=at + _dt.timedelta(seconds=10),
