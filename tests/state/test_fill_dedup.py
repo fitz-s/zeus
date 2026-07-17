@@ -280,3 +280,57 @@ class TestCommandsAreIsolated:
         assert economic_a[0]["trade_id"] == "0xshared"
         assert len(economic_b) == 1
         assert economic_b[0]["trade_id"] == "child-shared"
+
+
+def test_edli_source_pointer_alias_is_not_a_second_economic_fill(conn):
+    from src.state.venue_command_repo import append_trade_fact
+
+    _seed_bare_command(conn, "cmd-edli-alias")
+    source_fact_id = append_trade_fact(
+        conn,
+        trade_id="venue-trade-1",
+        venue_order_id="ord-alias-test",
+        command_id="cmd-edli-alias",
+        state="CONFIRMED",
+        filled_size="31.6",
+        fill_price="0.6",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="1" * 64,
+        raw_payload_json={"status": "CONFIRMED"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="edli:venue-trade-1",
+        venue_order_id="ord-alias-test",
+        command_id="cmd-edli-alias",
+        state="CONFIRMED",
+        filled_size="31.6",
+        fill_price="0.6",
+        source="WS_USER",
+        observed_at=NOW,
+        raw_payload_hash="2" * 64,
+        raw_payload_json={
+            "source_module": "src.events.edli_position_bridge",
+            "raw_fill_payload": {"source_trade_fact_id": source_fact_id},
+        },
+    )
+    append_trade_fact(
+        conn,
+        trade_id="venue-trade-1",
+        venue_order_id="ord-alias-test",
+        command_id="cmd-edli-alias",
+        state="CONFIRMED",
+        filled_size="31.6",
+        fill_price="0.6",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash="5" * 64,
+        raw_payload_json={"status": "CONFIRMED", "source": "later_rest"},
+    )
+
+    economic = economic_trade_facts_for_command(conn, "cmd-edli-alias")
+
+    assert [row["trade_id"] for row in economic] == ["venue-trade-1"]
+    assert sum(Decimal(row["filled_size"]) for row in economic) == Decimal("31.6")

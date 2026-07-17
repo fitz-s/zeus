@@ -378,7 +378,7 @@ def _economic_trade_fact_cte(
                 )
                AND NOT EXISTS (
                        SELECT 1
-                         FROM {canonical_cte_name} source_fact
+                         FROM venue_trade_facts source_fact
                         WHERE source_fact.trade_fact_id = CASE
                                   WHEN json_valid(fact.raw_payload_json)
                                   THEN CAST(json_extract(

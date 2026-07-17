@@ -132,10 +132,11 @@ def economic_trade_fact_cte(
     canonical_cte_name: str = "canonical_trade_fact",
     cte_name: str = "economic_trade_fact",
 ) -> str:
-    """Exclude a tx-hash alias once an exact child trade fact exists.
+    """Exclude every derived alias once its source economic fact exists.
 
-    Moved verbatim from ``src.execution.exchange_reconcile._economic_trade_fact_cte``
-    (2026-07-13, LX-T4 alias-graph consolidation) — see module docstring.
+    Tx-hash aggregate aliases are excluded when an exact child exists.  EDLI
+    aliases are excluded when ``raw_fill_payload.source_trade_fact_id`` binds
+    them to a positive source fact for the same command and venue order.
     """
 
     return f"""
@@ -159,6 +160,22 @@ def economic_trade_fact_cte(
                            AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
                     )
                 )
+               AND NOT EXISTS (
+                       SELECT 1
+                         FROM venue_trade_facts source_fact
+                        WHERE source_fact.trade_fact_id = CASE
+                                  WHEN json_valid(fact.raw_payload_json)
+                                  THEN CAST(json_extract(
+                                      fact.raw_payload_json,
+                                      '$.raw_fill_payload.source_trade_fact_id'
+                                  ) AS INTEGER)
+                              END
+                          AND source_fact.command_id = fact.command_id
+                          AND source_fact.venue_order_id = fact.venue_order_id
+                          AND UPPER(COALESCE(source_fact.state, ''))
+                              IN ('MATCHED', 'MINED', 'CONFIRMED')
+                          AND CAST(COALESCE(source_fact.filled_size, '0') AS REAL) > 0
+                    )
         )
     """
 

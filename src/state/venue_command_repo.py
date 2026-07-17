@@ -2525,7 +2525,7 @@ def _actual_review_confirmed_fill_predicates(
                     )
                    AND NOT EXISTS (
                            SELECT 1
-                             FROM canonical_trade_fact source_fact
+                             FROM venue_trade_facts source_fact
                             WHERE source_fact.trade_fact_id = CASE
                                       WHEN json_valid(fact.raw_payload_json)
                                       THEN CAST(json_extract(

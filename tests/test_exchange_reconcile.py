@@ -2593,6 +2593,118 @@ def test_entry_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(c
     ) == (Decimal("2.5"), Decimal("0.40"), Decimal("1.000"))
 
 
+def test_entry_reobservation_repairs_edli_alias_double_projection(conn):
+    from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    seed_command(conn, size=31.6, price=0.6)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    source_fact_id = append(
+        conn,
+        trade_id="tokyo-venue-trade",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="31.6",
+        fill_price="0.6",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="3" * 64,
+        raw_payload_json={"status": "CONFIRMED"},
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = 'cmd-m5'"
+        ).fetchone()
+    )
+    _ensure_entry_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id="ord-m5",
+        filled_size="31.6",
+        fill_price="0.6",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+        order_fact_source="WS_USER",
+    )
+    append(
+        conn,
+        trade_id="edli:tokyo-venue-trade",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="31.6",
+        fill_price="0.6",
+        source="WS_USER",
+        observed_at=NOW + timedelta(minutes=1),
+        raw_payload_hash="4" * 64,
+        raw_payload_json={
+            "source_module": "src.events.edli_position_bridge",
+            "raw_fill_payload": {"source_trade_fact_id": source_fact_id},
+        },
+    )
+    append(
+        conn,
+        trade_id="tokyo-venue-trade",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="31.6",
+        fill_price="0.6",
+        source="REST",
+        observed_at=NOW + timedelta(minutes=1, seconds=1),
+        raw_payload_hash="6" * 64,
+        raw_payload_json={"status": "CONFIRMED", "source": "later_rest"},
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET shares = 63.2,
+               cost_basis_usd = 37.92,
+               entry_price = 0.6,
+               chain_state = 'synced',
+               chain_shares = 31.6,
+               chain_cost_basis_usd = 18.96,
+               chain_avg_price = 0.6
+         WHERE position_id = 'pos-m5'
+        """
+    )
+
+    _ensure_entry_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id="ord-m5",
+        filled_size="31.6",
+        fill_price="0.6",
+        observed_at=NOW + timedelta(minutes=2),
+        command_event="FILL_CONFIRMED",
+        order_fact_source="REST",
+    )
+
+    projection = conn.execute(
+        """
+        SELECT shares, cost_basis_usd, entry_price, chain_shares
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
+    ).fetchone()
+    assert Decimal(str(projection["shares"])) == Decimal("31.6")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("18.96")
+    assert Decimal(str(projection["entry_price"])) == Decimal("0.6")
+    assert Decimal(str(projection["chain_shares"])) == Decimal("31.6")
+    execution = conn.execute(
+        """
+        SELECT shares, fill_price
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert Decimal(str(execution["shares"])) == Decimal("31.6")
+    assert Decimal(str(execution["fill_price"])) == Decimal("0.6")
+
+
 def test_exit_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(conn):
     from src.execution.exchange_reconcile import _exit_fill_economics_for_command
 

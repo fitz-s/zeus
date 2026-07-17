@@ -4792,9 +4792,13 @@ def _entry_fill_economics_for_command(
     """Aggregate latest authoritative trade facts for an entry command."""
 
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?") + """
+        "WITH "
+        + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?")
+        + ", "
+        + _economic_trade_fact_cte()
+        + """
         SELECT tf.state, tf.filled_size, tf.fill_price
-          FROM canonical_trade_fact tf
+          FROM economic_trade_fact tf
          WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
         (command_id,),

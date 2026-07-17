@@ -32,6 +32,7 @@ in_scope:
 - src/execution/exit_lifecycle.py
 - src/architecture/gate_runtime.py
 - src/state/portfolio.py
+- src/state/fill_dedup.py
 - src/state/venue_command_repo.py
 - src/engine/global_auction_universe.py
 - src/engine/global_batch_runtime.py
@@ -52,6 +53,7 @@ in_scope:
 - tests/test_runtime_guards.py
 - tests/test_command_recovery.py
 - tests/test_exchange_reconcile.py
+- tests/state/test_fill_dedup.py
 - tests/test_executor_command_split.py
 - tests/test_exit_safety.py
 - tests/test_gate_runtime.py
