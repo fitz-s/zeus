@@ -299,9 +299,6 @@ def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> 
 
     scheduler = _Scheduler()
     monkeypatch.setattr(
-        daemon, "_replacement_forecast_publish_cron_hours", lambda: (0,)
-    )
-    monkeypatch.setattr(
         daemon, "_replacement_forecast_materialize_interval_minutes", lambda: 1
     )
     monkeypatch.setattr(
@@ -325,6 +322,9 @@ def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> 
     assert trigger == "interval"
     assert kwargs["seconds"] == 1
     assert "minutes" not in kwargs
+    job_ids = {job[2].get("id") for job in scheduler.jobs}
+    assert daemon.REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID not in job_ids
+    assert daemon.REPLACEMENT_FORECAST_STARTUP_JOB_ID not in job_ids
 
 
 def test_replacement_materialize_queue_poll_defaults_to_one_second(monkeypatch) -> None:

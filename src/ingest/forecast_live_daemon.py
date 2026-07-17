@@ -1201,42 +1201,15 @@ def _replacement_forecast_materialize_poll_seconds() -> int:
 def _register_replacement_forecast_production_jobs(
     scheduler: object, *, startup_run_date: datetime | None = None
 ) -> None:
-    """Register the replacement-forecast download (publish-time cron + boot catch-up) and the
-    light materialize (interval) jobs on their own dedicated executor lane. Called AFTER the
-    registry/cutover/legacy scheduler is built, so these jobs are OUTSIDE the registry boot-
-    assert's expected set (they are not OpenData jobs) and SURVIVE the OpenData cutover (under
-    cutover the legacy OpenData jobs are filtered out but the replacement production — which IS
-    the cutover target — must run)."""
-    startup_at = (startup_run_date or _utcnow())
-    publish_hours = _replacement_forecast_publish_cron_hours()
+    """Register forecast-live's replacement materializer and bounded cross-check.
+
+    ``ingest_main`` is the sole owner of current-target and source-clock downloads. Registering
+    the legacy publish cron or boot catch-up here duplicates provider traffic whenever this
+    restart-heavy daemon respawns and can consume the quota needed by the time-sensitive ingest
+    lane. The download wrapper remains importable for explicit operator diagnostics only.
+    """
     materialize_minutes = _replacement_forecast_materialize_interval_minutes()
     materialize_poll_seconds = _replacement_forecast_materialize_poll_seconds()
-    cron_hours = ",".join(str(h) for h in publish_hours)
-
-    # Heavy download: publish-time cron (fires twice daily when each cycle is released).
-    scheduler.add_job(  # type: ignore[attr-defined]
-        _replacement_forecast_download_job,
-        "cron",
-        hour=cron_hours,
-        minute=10,
-        id=REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID,
-        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=3600,
-    )
-    # Boot catch-up: fetch the current cycle immediately on a fresh boot (a single date trigger
-    # a short delay after startup, on the same dedicated lane).
-    scheduler.add_job(  # type: ignore[attr-defined]
-        _replacement_forecast_download_job,
-        "date",
-        run_date=startup_at + timedelta(seconds=90),
-        id=REPLACEMENT_FORECAST_STARTUP_JOB_ID,
-        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=None,
-    )
     # Light materialize: interval (consumes already-downloaded manifests; no download).
     scheduler.add_job(  # type: ignore[attr-defined]
         _replacement_forecast_materialize_poll_job,
@@ -1267,10 +1240,10 @@ def _register_replacement_forecast_production_jobs(
         misfire_grace_time=600,
     )
     logger.info(
-        "replacement-forecast production jobs registered (download cron hour=%s min=10 + boot "
-        "catch-up; materialize queue poll=%ds discovery=%dmin; lane=%s; "
+        "replacement-forecast production jobs registered (downloads_owner=ingest_main; "
+        "materialize queue poll=%ds discovery=%dmin; lane=%s; "
         "live_runtime_enabled=%s)",
-        cron_hours, materialize_poll_seconds, materialize_minutes,
+        materialize_poll_seconds, materialize_minutes,
         REPLACEMENT_FORECAST_EXECUTOR_LANE,
         _replacement_forecast_live_runtime_enabled(),
     )
