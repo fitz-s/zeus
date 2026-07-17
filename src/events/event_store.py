@@ -177,15 +177,14 @@ class EventStore:
             raise
 
         inserted = cur.rowcount == 1
-        now = _utc_now()
         if event.event_type in self._CHANNEL_EVENT_TYPES:
-            processing_status = "ignored"
-            processed_at = now
-            last_error = "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
-        else:
-            processing_status = "pending"
-            processed_at = None
-            last_error = None
+            # Channel rows are immutable cache provenance, not reactor work. A
+            # terminal processing row says nothing beyond the event type itself
+            # and permanently amplifies every quote tick across all processing
+            # indexes. Legacy rows remain compatible with the archive helpers.
+            return inserted
+
+        now = _utc_now()
         self.conn.execute(
             """
             INSERT OR IGNORE INTO opportunity_event_processing (
@@ -196,9 +195,9 @@ class EventStore:
             (
                 self.consumer_name,
                 event.event_id,
-                processing_status,
-                processed_at,
-                last_error,
+                "pending",
+                None,
+                None,
                 now,
             ),
         )

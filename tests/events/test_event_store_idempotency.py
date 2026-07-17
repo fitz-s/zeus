@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-17
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
@@ -503,20 +503,18 @@ def test_channel_cache_events_are_immutable_inputs_not_pending_reactor_work(even
         "SELECT event_type, payload_json FROM opportunity_events WHERE event_id = ?",
         (event.event_id,),
     ).fetchone()
-    processing_row = conn.execute(
+    processing_row_count = conn.execute(
         """
-        SELECT processing_status, processed_at, last_error
+        SELECT COUNT(*)
           FROM opportunity_event_processing
          WHERE event_id = ?
         """,
         (event.event_id,),
-    ).fetchone()
+    ).fetchone()[0]
 
     assert event_row["event_type"] == event_type
     assert json.loads(event_row["payload_json"])["token_id"] == "token-yes"
-    assert processing_row["processing_status"] == "ignored"
-    assert processing_row["processed_at"]
-    assert processing_row["last_error"] == "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
+    assert processing_row_count == 0
     assert store.fetch_pending(decision_time="2026-05-24T05:00:00+00:00") == []
 
 

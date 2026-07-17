@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-17
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -49,11 +49,12 @@ def _store() -> tuple[sqlite3.Connection, EventStore]:
     return conn, EventStore(conn)
 
 
-def _processing_status(conn: sqlite3.Connection, event_id: str) -> str:
-    return conn.execute(
+def _processing_status(conn: sqlite3.Connection, event_id: str) -> str | None:
+    row = conn.execute(
         "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
         (event_id,),
-    ).fetchone()[0]
+    ).fetchone()
+    return None if row is None else str(row[0])
 
 
 def test_global_family_ineligible_is_explicitly_transient(caplog):
@@ -539,7 +540,7 @@ def test_market_channel_event_not_direct_reactor_input():
     assert result.rejected == 0
     assert rejected == []
     assert submitted == []
-    assert _processing_status(_conn, event.event_id) == "ignored"
+    assert _processing_status(_conn, event.event_id) is None
 
 
 def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
