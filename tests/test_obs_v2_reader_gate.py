@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-04-25
 # Purpose: Protect P3 obs_v2 reader gates for canonical diurnal analytics.
 # Reuse: Run with tests/test_truth_surface_health.py when changing obs_v2 read predicates.
-# Last reused/audited: 2026-04-25
+# Last reused/audited: 2026-07-17
 # Authority basis: P3 4.5.B-lite observation_instants reader gate packet.
 """Regression coverage for obs_v2 reader-gate consumers."""
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import etl_diurnal_curves
+from scripts import etl_diurnal_curves, etl_temp_persistence
 from src.state.db import init_schema
 
 
@@ -213,3 +213,50 @@ def test_diurnal_etl_fails_closed_when_current_rows_are_not_reader_safe(
         "error": "no_reader_safe_observation_instants_current",
         "current_rows": 5,
     }
+
+
+def test_derived_etls_read_and_compute_before_projection_replace(tmp_path, monkeypatch):
+    diurnal_path = tmp_path / "diurnal.db"
+    _seed_world(diurnal_path, {"authority": "UNVERIFIED"})
+    diurnal_sql: list[str] = []
+
+    def _diurnal_connection():
+        conn = _connect(diurnal_path)
+        conn.set_trace_callback(diurnal_sql.append)
+        return conn
+
+    monkeypatch.setattr(etl_diurnal_curves, "get_connection", _diurnal_connection)
+    etl_diurnal_curves.run_etl()
+
+    persistence_path = tmp_path / "persistence.db"
+    conn = _connect(persistence_path)
+    init_schema(conn)
+    conn.commit()
+    conn.close()
+    persistence_sql: list[str] = []
+
+    def _persistence_connection():
+        conn = _connect(persistence_path)
+        conn.set_trace_callback(persistence_sql.append)
+        return conn
+
+    monkeypatch.setattr(etl_temp_persistence, "get_connection", _persistence_connection)
+    etl_temp_persistence.run_etl()
+
+    diurnal_select = next(
+        index
+        for index, sql in enumerate(diurnal_sql)
+        if "FROM observation_instants_current" in sql
+    )
+    diurnal_delete = next(
+        index for index, sql in enumerate(diurnal_sql) if "DELETE FROM diurnal_curves" in sql
+    )
+    persistence_select = next(
+        index for index, sql in enumerate(persistence_sql) if "FROM observations" in sql
+    )
+    persistence_delete = next(
+        index for index, sql in enumerate(persistence_sql) if "DELETE FROM temp_persistence" in sql
+    )
+
+    assert diurnal_select < diurnal_delete
+    assert persistence_select < persistence_delete

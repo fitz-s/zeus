@@ -2,7 +2,8 @@
 # Lifecycle: created=2026-04-23; last_reviewed=2026-04-25; last_reused=2026-06-10
 # Purpose: Build canonical diurnal analytics from reader-safe obs_v2 instants.
 # Reuse: Check active packet scope and obs_v2 reader-gate predicates before running; writes state/zeus-world.db.
-# Last reused/audited: 2026-06-10 (STALE_REWRITE of p_high_set semantics —
+# Last reused/audited: 2026-07-17 (short atomic projection replacement; no read/compute under WAL writer)
+#   2026-06-10: STALE_REWRITE of p_high_set semantics —
 #   adversarial review /tmp/day0_adversarial_review.md finding 3: the prior
 #   computation compared the PER-HOUR bucket max against the daily max, i.e.
 #   "P(the peak occurs at hour h)" — a PMF-shaped, non-monotone quantity that
@@ -53,7 +54,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_world_connection as get_connection, init_schema
+from src.state.db import get_world_connection as get_connection, init_schema  # noqa: E402
 
 
 OBSERVATION_READER_GATE_SQL = """
@@ -153,9 +154,7 @@ def _cumulative_high_set_indicators(samples: list) -> list:
 def run_etl() -> dict:
     zeus = get_connection()
     init_schema(zeus)
-
-    zeus.execute("DELETE FROM diurnal_curves")
-    zeus.execute("DELETE FROM diurnal_peak_prob")
+    zeus.commit()
 
     current_count = zeus.execute(
         "SELECT COUNT(*) FROM observation_instants_current"
@@ -283,21 +282,23 @@ def run_etl() -> dict:
         key: _isotonic_by_hour(means) for key, means in seasonal_means.items()
     }
 
-    stored = 0
+    curve_rows: list[tuple] = []
     for (city, season, hour), temps in sorted(grouped.items()):
         if len(temps) < 5:
             continue
         arr = np.array(temps, dtype=float)
         p_high_set = seasonal_iso.get((city, season), {}).get(int(hour))
-        zeus.execute(
-            """
-            INSERT OR REPLACE INTO diurnal_curves
-            (city, season, hour, avg_temp, std_temp, n_samples, p_high_set)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (city, season, hour, float(arr.mean()), float(arr.std()), len(temps), p_high_set),
+        curve_rows.append(
+            (
+                city,
+                season,
+                hour,
+                float(arr.mean()),
+                float(arr.std()),
+                len(temps),
+                p_high_set,
+            )
         )
-        stored += 1
 
     monthly_means = defaultdict(dict)
     monthly_counts = defaultdict(dict)
@@ -307,21 +308,51 @@ def run_etl() -> dict:
         monthly_means[(city, month)][int(hour)] = float(np.mean(obs))
         monthly_counts[(city, month)][int(hour)] = len(obs)
 
-    monthly_rows = 0
+    peak_rows: list[tuple] = []
     for (city, month), means in sorted(monthly_means.items()):
         iso = _isotonic_by_hour(means)
         for hour in sorted(iso):
-            zeus.execute(
-                """
-                INSERT OR REPLACE INTO diurnal_peak_prob
-                (city, month, hour, p_high_set, n_obs)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (city, month, hour, iso[hour], monthly_counts[(city, month)][hour]),
+            peak_rows.append(
+                (
+                    city,
+                    month,
+                    hour,
+                    iso[hour],
+                    monthly_counts[(city, month)][hour],
+                )
             )
-            monthly_rows += 1
 
-    zeus.commit()
+    # Full-table reads and NumPy aggregation are intentionally outside the
+    # transaction. The previous DELETE-first shape held SQLite's single WAL
+    # writer for the entire multi-minute ETL and starved live observation facts.
+    try:
+        zeus.execute("BEGIN IMMEDIATE")
+        zeus.execute("DELETE FROM diurnal_curves")
+        zeus.execute("DELETE FROM diurnal_peak_prob")
+        zeus.executemany(
+            """
+            INSERT OR REPLACE INTO diurnal_curves
+            (city, season, hour, avg_temp, std_temp, n_samples, p_high_set)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            curve_rows,
+        )
+        zeus.executemany(
+            """
+            INSERT OR REPLACE INTO diurnal_peak_prob
+            (city, month, hour, p_high_set, n_obs)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            peak_rows,
+        )
+        zeus.commit()
+    except BaseException:
+        zeus.rollback()
+        zeus.close()
+        raise
+
+    stored = len(curve_rows)
+    monthly_rows = len(peak_rows)
 
     peak_check = zeus.execute(
         """

@@ -1,3 +1,5 @@
+# Created: (pre-rule legacy)
+# Last reused or audited: 2026-07-17
 """ETL: Temperature persistence from daily observations.
 
 Source: zeus.db:observations (daily, already imported via legacy-predecessor migration)
@@ -27,7 +29,7 @@ def season_from_date(date_str: str, city_name: str = "") -> str:
     return _sfd(date_str, lat=lat)
 
 
-from src.state.db import get_world_connection as get_connection, init_schema
+from src.state.db import get_world_connection as get_connection, init_schema  # noqa: E402
 
 # Delta buckets for temperature change classification
 DELTA_BUCKETS = [
@@ -54,9 +56,7 @@ def _classify_delta(delta: float) -> str:
 def run_etl() -> dict:
     zeus = get_connection()
     init_schema(zeus)
-
-    # Always recompute from full observation dataset (aggregation table)
-    zeus.execute("DELETE FROM temp_persistence")
+    zeus.commit()
 
     # Get daily observations — prefer wu_daily_observed, then noaa, then openmeteo
     # Use one observation per city-date (highest priority source)
@@ -125,8 +125,7 @@ def run_etl() -> dict:
     for (city, season, bucket), reversions in persistence_data.items():
         total_per_cs[(city, season)] += len(reversions)
 
-    # Store
-    stored = 0
+    persistence_rows: list[tuple] = []
     for (city, season, bucket), reversions in sorted(persistence_data.items()):
         n = len(reversions)
         if n < 3:
@@ -138,15 +137,36 @@ def run_etl() -> dict:
         valid_reversions = [r for r in reversions if r is not None]
         avg_reversion = float(np.mean(valid_reversions)) if valid_reversions else None
 
-        zeus.execute("""
+        persistence_rows.append(
+            (
+                city,
+                season,
+                bucket,
+                round(frequency, 4),
+                round(avg_reversion, 2) if avg_reversion is not None else None,
+                n,
+            )
+        )
+
+    # Compute from the full history before taking SQLite's single WAL writer.
+    # Only the atomic projection replacement belongs in the write transaction.
+    try:
+        zeus.execute("BEGIN IMMEDIATE")
+        zeus.execute("DELETE FROM temp_persistence")
+        zeus.executemany(
+            """
             INSERT OR REPLACE INTO temp_persistence
             (city, season, delta_bucket, frequency, avg_next_day_reversion, n_samples)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (city, season, bucket, round(frequency, 4), 
-              round(avg_reversion, 2) if avg_reversion is not None else None, n))
-        stored += 1
-
-    zeus.commit()
+            """,
+            persistence_rows,
+        )
+        zeus.commit()
+    except BaseException:
+        zeus.rollback()
+        zeus.close()
+        raise
+    stored = len(persistence_rows)
     zeus.close()
 
     print(f"Stored {stored} persistence entries")

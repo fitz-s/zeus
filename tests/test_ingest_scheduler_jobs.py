@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-07-17
 # Authority basis: F35 + F9 structural fixes — oracle bridge and calibration
 #                  auto-promote jobs added to ingest_main APScheduler.
 #                  2026-06-09: oracle snapshot listener promoted to scheduler
@@ -19,7 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -171,6 +171,30 @@ class TestF35OracleBridgeRegistered:
         assert result == {"status": "failed_subprocess"}
 
 
+def test_live_ingest_recalibration_never_runs_diagnostic_replay(monkeypatch) -> None:
+    import src.ingest_main as im
+
+    commands: list[list[str]] = []
+
+    def _run(command, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(im, "_etl_subprocess_python", lambda: sys.executable)
+    monkeypatch.setattr(
+        "src.state.db_writer_lock.subprocess_run_with_write_class",
+        _run,
+    )
+
+    im._etl_recalibrate_body()
+
+    assert [Path(command[1]).name for command in commands] == [
+        "etl_diurnal_curves.py",
+        "etl_temp_persistence.py",
+    ]
+    assert all("run_replay.py" not in command for command in commands)
+
+
 # ---------------------------------------------------------------------------
 # Oracle snapshot antibodies — 2026-06-09 outage post-mortem
 # ---------------------------------------------------------------------------
@@ -234,8 +258,6 @@ class TestOracleSnapshotScheduled:
         that would kill subsequent scheduler ticks.
         """
         import src.ingest_main as im
-        import logging
-
         warnings: list[str] = []
         with patch.object(
             im.logger, "warning", side_effect=lambda msg, *a, **k: warnings.append(msg % a)

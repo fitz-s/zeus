@@ -1364,16 +1364,11 @@ def _etl_recalibrate_body():
     results["calibration_pairs"] = "SKIP: run rebuild_calibration_pairs_canonical post-fillback"
     results["platt_refit"] = "SKIP: run explicit post-fillback canonical refit"
 
-    try:
-        r = subprocess_run_with_write_class(
-            [venv_python, str(scripts_dir / "run_replay.py"),
-             "--mode", "audit", "--start", "2025-01-01", "--end", "2099-12-31"],
-            WriteClass.BULK,
-            capture_output=True, text=True, timeout=600,
-        )
-        results["replay_audit"] = "OK" if r.returncode == 0 else "FAIL"
-    except Exception as e:
-        results["replay_audit"] = f"ERROR: {e}"
+    # Replay is diagnostic, scans the complete historical WORLD DB, and writes
+    # replay_results only after the scan. Running it inside the live data-ingest
+    # daemon consumed a CPU and page cache for ten minutes every day while adding
+    # no source truth. Keep scripts/run_replay.py operator/offline-only.
+    results["replay_audit"] = "SKIP: operator_offline_only"
 
     logger.info("ETL recalibration: %s", results)
 
