@@ -1761,8 +1761,8 @@ def _run_replacement_forecast_live_materialization_queue_once(
             and reactor_wake_published_count == committed_posterior_count
         ):
             logger.info(
-                "forecast posterior advanced rowid=%d->%d; %d per-family reactor "
-                "wakes already published at commit",
+                "forecast posterior advanced rowid=%d->%d; %d committed posteriors "
+                "already covered by commit wakes",
                 revision_before,
                 revision_after,
                 reactor_wake_published_count,

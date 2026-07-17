@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-01
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-20; last_reused=2026-07-01
+# Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -24,7 +24,6 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
-from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
 from src.data.replacement_forecast_materializer import (
     _BayesPrecisionFusionFusionOverride,
     REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
@@ -981,12 +980,58 @@ def test_materialize_script_batch_reuses_connection_and_reports_each_request(
     assert [call[0] for call in calls] == inputs
     assert all(call[1]["conn"] is conn for call in calls)
     assert all(call[1]["commit"] is True for call in calls)
+    assert all(call[1]["publish_wake"] is True for call in calls)
     envelopes = [
         json.loads(line)
         for line in capsys.readouterr().out.splitlines()
     ]
     assert [Path(envelope["input_json"]) for envelope in envelopes] == inputs
     assert [envelope["returncode"] for envelope in envelopes] == [0, 0]
+
+
+def test_materialize_script_batch_keeps_first_wake_immediate_and_batches_rest(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db as state_db
+
+    inputs = [tmp_path / "a.json", tmp_path / "b.json"]
+    families = [
+        ("Shanghai", "2026-07-18", "high"),
+        ("Paris", "2026-07-18", "low"),
+    ]
+    conn = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_: conn)
+
+    def _run_one(input_json, **kwargs):
+        index = inputs.index(input_json)
+        response = {
+            "status": "READY",
+            "committed": True,
+            "posterior_id": index + 1,
+            "reactor_wake_published": kwargs["publish_wake"],
+            "forecast_family": list(families[index]),
+        }
+        return 0, json.dumps(response) + "\n", ""
+
+    published = []
+    monkeypatch.setattr(cli, "_run_one", _run_one)
+    monkeypatch.setattr(
+        cli,
+        "_publish_materialization_wake_families",
+        lambda changed: published.append(changed) or True,
+    )
+
+    rc = cli.main(
+        ["--batch-input-json", *(str(path) for path in inputs), "--commit"]
+    )
+
+    assert rc == 0
+    assert published == [(families[1],)]
+    envelopes = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(envelopes) == 3
+    latest = {Path(row["input_json"]): json.loads(row["stdout"]) for row in envelopes}
+    assert all(response["reactor_wake_published"] is True for response in latest.values())
 
 
 def test_materialize_script_publishes_family_wake_after_commit(monkeypatch) -> None:

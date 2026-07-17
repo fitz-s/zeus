@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Purpose: Materialize replacement live forecast posteriors and publish commit wakes.
+# Reuse: Inspect forecast materialization and reactor-wake contracts before changing.
 """Materialize Open-Meteo ECMWF IFS 9km + Bayes fusion posterior."""
 
 from __future__ import annotations
@@ -128,33 +131,44 @@ def _publish_materialization_wake(
     request: ReplacementForecastMaterializeRequest,
 ) -> bool:
     """Wake the reactor immediately after this family's durable commit."""
+    return _publish_materialization_wake_families(
+        (
+            (
+                request.city,
+                request.target_date.isoformat(),
+                request.temperature_metric,
+            ),
+        )
+    )
+
+
+def _publish_materialization_wake_families(
+    forecast_families: tuple[tuple[str, str, str], ...],
+) -> bool:
+    """Publish one wake covering one or more durably committed families."""
+    if not forecast_families:
+        return False
     try:
         from src.runtime.reactor_wake import publish_reactor_wake
 
-        wake = publish_reactor_wake(
-            source="replacement_forecast_materializer",
-            reason="forecast_posterior_advanced",
-            forecast_families=(
-                (
-                    request.city,
-                    request.target_date.isoformat(),
-                    request.temperature_metric,
-                ),
-            ),
-        )
+        for start in range(0, len(forecast_families), 100):
+            batch = forecast_families[start : start + 100]
+            wake = publish_reactor_wake(
+                source="replacement_forecast_materializer",
+                reason="forecast_posterior_advanced",
+                forecast_families=batch,
+            )
+            logging.getLogger(__name__).info(
+                "forecast posterior wake published families=%d id=%s",
+                len(batch),
+                wake.wake_id,
+            )
     except Exception:
         logging.getLogger(__name__).warning(
-            "forecast posterior committed but per-family reactor wake failed",
+            "forecast posterior committed but reactor wake failed",
             exc_info=True,
         )
         return False
-    logging.getLogger(__name__).info(
-        "forecast posterior family wake published city=%s date=%s metric=%s id=%s",
-        request.city,
-        request.target_date,
-        request.temperature_metric,
-        wake.wake_id,
-    )
     return True
 
 
@@ -164,6 +178,7 @@ def _materialize(
     commit: bool,
     init_schema: bool,
     conn=None,
+    publish_wake: bool = True,
 ) -> tuple[int, dict[str, object]]:
     payload = _load_json(input_json)
     if not isinstance(payload, Mapping):
@@ -308,7 +323,7 @@ def _materialize(
         result = materialize_replacement_forecast_live(conn, request)
         if commit:
             conn.commit()
-            if result.ok:
+            if result.ok and publish_wake:
                 wake_published = _publish_materialization_wake(request)
         else:
             conn.rollback()
@@ -328,6 +343,11 @@ def _materialize(
         "openmeteo_anchor_artifact_id": anchor_artifact_id,
         "committed": commit,
         "reactor_wake_published": wake_published,
+        "forecast_family": [
+            request.city,
+            request.target_date.isoformat(),
+            request.temperature_metric,
+        ],
     }
     return (0 if result.ok else 1), response
 
@@ -339,6 +359,7 @@ def _run_one(
     init_schema: bool,
     conn=None,
     capture_logs: bool = False,
+    publish_wake: bool = True,
 ) -> tuple[int, str, str]:
     log_output = StringIO()
     handler: logging.Handler | None = None
@@ -352,6 +373,7 @@ def _run_one(
             commit=commit,
             init_schema=init_schema,
             conn=conn,
+            publish_wake=publish_wake,
         )
         return returncode, json.dumps(response, sort_keys=True) + "\n", log_output.getvalue()
     except Exception as exc:
@@ -364,6 +386,55 @@ def _run_one(
     finally:
         if handler is not None:
             logging.getLogger().removeHandler(handler)
+
+
+def _committed_batch_family(stdout: str) -> tuple[str, str, str] | None:
+    try:
+        response = json.loads(stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not response.get("committed") or response.get("posterior_id") is None:
+        return None
+    raw = response.get("forecast_family")
+    if not isinstance(raw, list) or len(raw) != 3:
+        return None
+    family = tuple(str(value or "").strip() for value in raw)
+    if not all(family):
+        return None
+    return family[0], family[1], family[2]
+
+
+def _mark_batch_wake_published(stdout: str) -> str:
+    response = json.loads(stdout)
+    response["reactor_wake_published"] = True
+    return json.dumps(response, sort_keys=True) + "\n"
+
+
+def _batch_wake_published(stdout: str) -> bool:
+    try:
+        return bool(json.loads(stdout).get("reactor_wake_published"))
+    except (TypeError, json.JSONDecodeError):
+        return False
+
+
+def _print_batch_envelope(
+    input_json: Path,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> None:
+    print(
+        json.dumps(
+            {
+                "input_json": str(input_json),
+                "returncode": returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -401,6 +472,8 @@ def main(argv: list[str] | None = None) -> int:
         from src.state.db import get_forecasts_connection
 
         conn = get_forecasts_connection(write_class="live")
+        completed: list[tuple[Path, int, str, str]] = []
+        immediate_wake_published = False
         try:
             for index, input_json in enumerate(args.batch_input_json):
                 returncode, stdout, stderr = _run_one(
@@ -409,19 +482,34 @@ def main(argv: list[str] | None = None) -> int:
                     init_schema=args.init_schema and index == 0,
                     conn=conn,
                     capture_logs=True,
+                    publish_wake=not immediate_wake_published,
                 )
-                print(
-                    json.dumps(
-                        {
-                            "input_json": str(input_json),
-                            "returncode": returncode,
-                            "stdout": stdout,
-                            "stderr": stderr,
-                        },
-                        sort_keys=True,
-                    ),
-                    flush=True,
+                completed.append((input_json, returncode, stdout, stderr))
+                _print_batch_envelope(input_json, returncode, stdout, stderr)
+                immediate_wake_published = (
+                    immediate_wake_published or _batch_wake_published(stdout)
                 )
+            families = tuple(
+                dict.fromkeys(
+                    family
+                    for _, _, stdout, _ in completed
+                    if (family := _committed_batch_family(stdout)) is not None
+                    and not _batch_wake_published(stdout)
+                )
+            )
+            if _publish_materialization_wake_families(families):
+                for input_json, returncode, stdout, stderr in completed:
+                    if (
+                        _committed_batch_family(stdout) is None
+                        or _batch_wake_published(stdout)
+                    ):
+                        continue
+                    _print_batch_envelope(
+                        input_json,
+                        returncode,
+                        _mark_batch_wake_published(stdout),
+                        stderr,
+                    )
         finally:
             conn.close()
         return 0
