@@ -31,6 +31,13 @@ DEFAULT_CITY_ONE_SCHEME_PATH = (
 ENV_CITY_ONE_SCHEME_PATH = "ZEUS_SOURCE_CLOCK_CITY_WEIGHTS"
 GRID_AWARE_ARTIFACT_NAME = "grid_aware_retest_20260625"
 
+# Present-weight floor for fixed_weight_center_from_values: a center built from
+# a sliver of the fitted basket is not the fitted estimator. Fail-closed (return
+# None) when the present sources' configured weight sums to less than this
+# fraction of the basket, i.e. when more than 75% of the fitted basket is
+# absent. Not configurable — no new knob for a threshold this is not tuned to.
+PRESENT_WEIGHT_FLOOR = 0.25
+
 
 @dataclass(frozen=True)
 class CityOneScheme:
@@ -203,7 +210,6 @@ def fixed_weight_center_from_values(
     city: str,
     values_c_by_source: Mapping[str, float],
     path: str | Path | None = None,
-    allow_incomplete: bool = False,
 ) -> FixedWeightCenter | None:
     scheme = scheme_for_city(city, path=path)
     if scheme is None:
@@ -220,10 +226,17 @@ def fixed_weight_center_from_values(
             missing.append(source)
             continue
         used[source] = float(configured_weight)
-    if missing and not allow_incomplete:
-        return None
     total = sum(used.values())
-    if total <= 0.0:
+    if total < PRESENT_WEIGHT_FLOOR:
+        # A selected source that has not arrived is omitted and the remaining
+        # weights are renormalized (2026-07-17 consult verdict P2-C); basket
+        # membership is never a readiness requirement. But a center built from
+        # a sliver of the fitted basket is not the fitted estimator: refuse
+        # when more than 75% of the configured weight is absent. Incident
+        # 2026-07-13/14: a frozen dominant-weight source (gem_hrdps, weight
+        # 0.766) going capturable-but-unservable made this function return
+        # None outright, darkening CONUS for 30-37h even though the OTHER
+        # configured sources were fine.
         return None
     normalized = {source: weight / total for source, weight in used.items()}
     mu = sum(float(values_c_by_source[source]) * weight for source, weight in normalized.items())

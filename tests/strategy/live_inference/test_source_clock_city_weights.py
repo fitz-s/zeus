@@ -62,11 +62,39 @@ def test_loads_grid_aware_scheme_schema(tmp_path: Path) -> None:
     assert scheme.one_scheme_status == "GRID_CAP10_LIVE_READY"
 
 
-def test_fixed_weight_center_rejects_missing_source_by_default(tmp_path: Path) -> None:
+def test_fixed_weight_center_renormalizes_over_present_sources(tmp_path: Path) -> None:
+    # Incident 2026-07-13/14: a missing configured source (kma_ldps, weight
+    # 0.25) must be omitted and the remaining weight renormalized, never
+    # collapse the whole center to None. Consult verdict P2-C: basket
+    # membership is never a readiness requirement.
     path = tmp_path / "city_one_scheme_final.csv"
     path.write_text(
         "city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
         "Seoul,SOURCE_SELECTOR_FIT,ecmwf_ifs+kma_ldps,ecmwf_ifs:0.75+kma_ldps:0.25,200,True,FINAL_ONE_SCHEME_PASS\n",
+        encoding="utf-8",
+    )
+
+    center = fixed_weight_center_from_values(
+        city="Seoul",
+        values_c_by_source={"ecmwf_ifs": 20.0},
+        path=path,
+    )
+
+    assert center is not None
+    assert center.mu_c == 20.0
+    assert center.missing_sources == ("kma_ldps",)
+    assert center.renormalized is True
+    assert center.used_weights == {"ecmwf_ifs": 1.0}
+
+
+def test_fixed_weight_center_refuses_below_present_weight_floor(tmp_path: Path) -> None:
+    # Present configured weight sum for ecmwf_ifs alone is 0.1 < the 0.25
+    # floor (i.e. >75% of the fitted basket is absent) -> fail closed. A
+    # center from a sliver of the basket is not the fitted estimator.
+    path = tmp_path / "city_one_scheme_final.csv"
+    path.write_text(
+        "city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
+        "Seoul,SOURCE_SELECTOR_FIT,ecmwf_ifs+kma_ldps,ecmwf_ifs:0.1+kma_ldps:0.9,200,True,FINAL_ONE_SCHEME_PASS\n",
         encoding="utf-8",
     )
 
@@ -79,7 +107,9 @@ def test_fixed_weight_center_rejects_missing_source_by_default(tmp_path: Path) -
     assert center is None
 
 
-def test_fixed_weight_center_allows_incomplete_only_when_requested(tmp_path: Path) -> None:
+def test_fixed_weight_center_full_basket_matches_prior_weights(tmp_path: Path) -> None:
+    # Regression: a full basket must serve byte-identical weights to before
+    # this change (renormalization must not touch the complete-basket path).
     path = tmp_path / "city_one_scheme_final.csv"
     path.write_text(
         "city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
@@ -89,16 +119,15 @@ def test_fixed_weight_center_allows_incomplete_only_when_requested(tmp_path: Pat
 
     center = fixed_weight_center_from_values(
         city="Seoul",
-        values_c_by_source={"ecmwf_ifs": 20.0},
+        values_c_by_source={"ecmwf_ifs": 20.0, "kma_ldps": 10.0},
         path=path,
-        allow_incomplete=True,
     )
 
     assert center is not None
-    assert center.mu_c == 20.0
-    assert center.missing_sources == ("kma_ldps",)
-    assert center.renormalized is True
-    assert center.used_weights == {"ecmwf_ifs": 1.0}
+    assert center.missing_sources == ()
+    assert center.renormalized is False
+    assert center.used_weights == {"ecmwf_ifs": 0.75, "kma_ldps": 0.25}
+    assert center.mu_c == 20.0 * 0.75 + 10.0 * 0.25
 
 
 def test_affected_cities_follow_updated_sources(tmp_path: Path) -> None:

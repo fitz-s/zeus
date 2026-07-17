@@ -1983,25 +1983,32 @@ def _replacement_bayes_precision_fusion_override(
                         values_c_by_source=_source_values,
                     )
                     if _source_clock_center is None:
-                        _incomplete_probe = fixed_weight_center_from_values(
-                            city=request.city,
-                            values_c_by_source=_source_values,
-                            allow_incomplete=True,
-                        )
-                        if _incomplete_probe is not None and _incomplete_probe.missing_sources:
-                            try:
-                                import logging  # noqa: PLC0415
+                        try:
+                            import logging  # noqa: PLC0415
 
-                                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                                    "source-clock one-scheme center skipped for %s %s %s: missing "
-                                    "configured sources %s; live center is not renormalized",
-                                    request.city,
-                                    metric,
-                                    target_date,
-                                    list(_incomplete_probe.missing_sources),
-                                )
-                            except Exception:
-                                pass
+                            logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                                "source-clock one-scheme center skipped for %s %s %s: present "
+                                "configured weight below floor (>75%% of basket missing)",
+                                request.city,
+                                metric,
+                                target_date,
+                            )
+                        except Exception:
+                            pass
+                    elif _source_clock_center.missing_sources:
+                        try:
+                            import logging  # noqa: PLC0415
+
+                            logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                                "source-clock one-scheme center renormalized for %s %s %s: missing "
+                                "configured sources %s",
+                                request.city,
+                                metric,
+                                target_date,
+                                list(_source_clock_center.missing_sources),
+                            )
+                        except Exception:
+                            pass
                 if _source_clock_center is not None:
                     _source_clock_used_models = tuple(_source_clock_center.used_weights)
                     _mu_diagonal = float(_source_clock_center.mu_c)
