@@ -1045,6 +1045,119 @@ def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
     assert proofs[-1]["observed_at"] >= proofs[-1]["connected_at"]
 
 
+def test_websocket_initial_book_eliminates_redundant_rest_seed(monkeypatch):
+    import websockets
+
+    conn, writer = _conn_writer()
+    stop = asyncio.Event()
+    fetch_calls: list[str] = []
+
+    class FakeWebSocket:
+        emitted = False
+
+        async def send(self, _payload):  # noqa: ANN001
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.emitted:
+                stop.set()
+                raise StopAsyncIteration
+            self.emitted = True
+            return json.dumps(
+                {
+                    "event_type": "book",
+                    "asset_id": "token-1",
+                    "market": "0xcondition",
+                    "bids": [{"price": "0.48", "size": "10"}],
+                    "asks": [{"price": "0.52", "size": "10"}],
+                    "hash": "initial-ws-book",
+                    "timestamp": "1766789469958",
+                }
+            )
+
+    class FakeConnect:
+        async def __aenter__(self):
+            return FakeWebSocket()
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+    monkeypatch.setattr(websockets, "connect", lambda *_args, **_kwargs: FakeConnect())
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+            coalescer=EventCoalescer(max_market_keys=8),
+        ),
+        fetch_orderbook=lambda token_id: fetch_calls.append(token_id) or {},
+        initial_book_grace_seconds=0.05,
+    )
+
+    asyncio.run(
+        service.run_websocket_forever(
+            stop_event=stop,
+            reconnect_delay_seconds=0,
+            quote_write_gate=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    )
+
+    assert fetch_calls == []
+    assert service._current_generation_depth_tokens == {"token-1"}
+    assert conn.execute(
+        "SELECT book_hash_before FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()[0] == "initial-ws-book"
+
+
+def test_priority_rest_seed_precedes_ws_covered_broad_fallback():
+    conn, writer = _conn_writer()
+    metadata = {
+        "token-priority": _metadata("token-priority")["token-priority"],
+        "token-ws": _metadata("token-ws")["token-ws"],
+    }
+    fetch_calls: list[str] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"rest-{token_id}",
+        }
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids=set(metadata),
+            token_metadata=metadata,
+        ),
+        fetch_orderbook=fetch,
+        seed_first_token_ids={"token-priority"},
+        initial_book_grace_seconds=0,
+    )
+    service._current_generation_depth_tokens.add("token-ws")
+
+    written = asyncio.run(
+        service._seed_subscribed_books(
+            active_token_ids=set(metadata),
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            logger=None,
+        )
+    )
+
+    assert written == 1
+    assert fetch_calls == ["token-priority"]
+
+
 def test_websocket_routes_quote_and_world_events_to_independent_write_lanes(
     monkeypatch,
 ):

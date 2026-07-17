@@ -29,6 +29,7 @@ from src.events.idempotency import stable_event_id
 UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 REST_SEED_COMMIT_CHUNK_SIZE = 16
+MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
 _logger = logging.getLogger(__name__)
 
 
@@ -1190,11 +1191,22 @@ class MarketChannelOnlineService:
     max_refresh_actions_per_window: int = 5
     refresh_window_seconds: float = 60.0
     seed_first_token_ids: set[str] = field(default_factory=set)
+    initial_book_grace_seconds: float = MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS
     rest_seed_backpressure_count: int = 0
     rest_seed_backpressure_reason: str | None = None
     _connected_at: str | None = None
     _refresh_window_start: datetime | None = None
     _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
+    _current_generation_depth_tokens: set[str] = field(default_factory=set)
+
+    def _record_current_generation_depth(self, message: dict[str, Any]) -> None:
+        event_type = str(message.get("event_type") or message.get("type") or "")
+        if event_type != "book":
+            return
+        token_id = _message_token_id(message)
+        cached = self.ingestor.quote_cache.get(token_id)
+        if cached is not None and cached.depth_json not in (None, ""):
+            self._current_generation_depth_tokens.add(token_id)
 
     def _publish_continuity(
         self,
@@ -1380,6 +1392,7 @@ class MarketChannelOnlineService:
         commit: Callable[[], None] | None,
         logger: Any | None = None,
         chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
+        skip_current_generation_depth: bool = False,
     ) -> int:
         """Fetch seed books off-loop while the subscribed WS buffers deltas."""
 
@@ -1390,12 +1403,26 @@ class MarketChannelOnlineService:
         written = 0
         for offset in range(0, len(ordered), size):
             chunk = ordered[offset : offset + size]
+            if skip_current_generation_depth:
+                chunk = [
+                    token_id
+                    for token_id in chunk
+                    if token_id not in self._current_generation_depth_tokens
+                ]
+            if not chunk:
+                continue
             captured = await asyncio.to_thread(
                 self._fetch_rest_seed_books,
                 chunk,
                 logger=logger,
                 log_prefix="market_channel: subscribed REST seed",
             )
+            if skip_current_generation_depth:
+                captured = {
+                    token_id: book
+                    for token_id, book in captured.items()
+                    if token_id not in self._current_generation_depth_tokens
+                }
             if not captured:
                 continue
             written += self.seed_rest_books_in_chunks(
@@ -1432,11 +1459,26 @@ class MarketChannelOnlineService:
                 commit=commit,
                 logger=logger,
             )
+        await asyncio.sleep(max(0.0, float(self.initial_book_grace_seconds)))
+        rest_fallback = (
+            active_token_ids
+            - seed_first
+            - self._current_generation_depth_tokens
+        )
+        if logger is not None:
+            logger.info(
+                "EDLI market-channel initial book coverage: ws=%d priority_rest=%d "
+                "rest_fallback=%d",
+                len(self._current_generation_depth_tokens),
+                len(seed_first),
+                len(rest_fallback),
+            )
         written += await self.seed_rest_books_after_subscribe(
-            token_ids=active_token_ids - seed_first,
+            token_ids=rest_fallback,
             write_gate=write_gate,
             commit=commit,
             logger=logger,
+            skip_current_generation_depth=True,
         )
         return written
 
@@ -1714,6 +1756,7 @@ class MarketChannelOnlineService:
                     self.connected = True
                     self.gap_start = None
                     self._connected_at = connected_at
+                    self._current_generation_depth_tokens.clear()
                     with _quote_write_gate:
                         insert_market_channel_connectivity_event(
                             self.ingestor._feasibility_conn,
@@ -1772,6 +1815,7 @@ class MarketChannelOnlineService:
                                         message,
                                         received_at=datetime.now(UTC).isoformat(),
                                     )
+                                    self._record_current_generation_depth(message)
                                 queued = self.ingestor._coalescer.pending_counts()
                                 should_flush_quotes = bool(
                                     queued["lossless"] or queued["market"]
@@ -1795,6 +1839,7 @@ class MarketChannelOnlineService:
                                                         message,
                                                         received_at=datetime.now(UTC).isoformat(),
                                                     )
+                                                    self._record_current_generation_depth(message)
                                                 if not self.ingestor._market_event_sink_independently_coordinated:
                                                     self.ingestor.flush_deferred_market_event_sink()
                                                 if commit is not None:
