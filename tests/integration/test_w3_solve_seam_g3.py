@@ -63,6 +63,7 @@ from src.engine.global_auction_universe import (
     current_portfolio_wealth_witness,
     current_global_auction_scope_from_events,
     current_global_book_epoch_identity,
+    probe_inflight_buy_ambiguity,
     refresh_current_global_book_epoch_tokens,
 )
 from src.events.opportunity_event import (
@@ -7988,7 +7989,66 @@ def test_current_portfolio_wealth_bounds_unverified_claim_without_spendable_cred
     assert witness.wealth_ceiling_usd == Decimal("28")
 
 
-def test_current_portfolio_wealth_witness_refuses_inflight_or_unknown_inventory():
+def test_current_portfolio_wealth_witness_bounds_inflight_buy_reservation():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    portfolio = PortfolioState(
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    reserved = _wealth_test_conn(captured_at=decision_at)
+    reserved.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            intent_kind TEXT,
+            side TEXT,
+            size REAL
+        )
+        """
+    )
+    reserved.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?)",
+        ("cmd", "ENTRY", "BUY", 2.0),
+    )
+    reserved.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?)",
+        ("filled-cmd", "ENTRY", "BUY", 1.5),
+    )
+    reserved.execute(
+        "INSERT INTO collateral_reservations ("
+        "command_id,reservation_type,token_id,amount,created_at"
+        ") VALUES (?,?,?,?,?)",
+        ("cmd", "PUSD_BUY", None, 1_000_000, decision_at.isoformat()),
+    )
+    reserved.execute(
+        "INSERT INTO collateral_unsettled_proceeds ("
+        "command_id,direction,reservation_type,token_id,amount_micro,created_at"
+        ") VALUES (?,?,?,?,?,?)",
+        (
+            "filled-cmd",
+            "OUTGOING_DEDUCTION",
+            "PUSD_BUY",
+            None,
+            500_000,
+            decision_at.isoformat(),
+        ),
+    )
+
+    witness = current_portfolio_wealth_witness(
+        reserved,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.spendable_cash_usd == Decimal("23.5")
+    assert witness.reservations_usd == Decimal("1.5")
+    assert witness.wealth_floor_usd == Decimal("25.5")
+    assert witness.wealth_ceiling_usd == Decimal("29.0")
+    assert probe_inflight_buy_ambiguity(reserved) is False
+
+
+def test_current_portfolio_wealth_witness_refuses_unbounded_inflight_buy():
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     portfolio = PortfolioState(
         authority="canonical_db",
@@ -8001,6 +8061,7 @@ def test_current_portfolio_wealth_witness_refuses_inflight_or_unknown_inventory(
         ") VALUES (?,?,?,?,?)",
         ("cmd", "PUSD_BUY", None, 1_000_000, decision_at.isoformat()),
     )
+
     with pytest.raises(ValueError, match="CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS"):
         current_portfolio_wealth_witness(
             reserved,
@@ -8009,6 +8070,13 @@ def test_current_portfolio_wealth_witness_refuses_inflight_or_unknown_inventory(
             portfolio_state=portfolio,
         )
 
+
+def test_current_portfolio_wealth_witness_refuses_unknown_inventory():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    portfolio = PortfolioState(
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
     unknown = _wealth_test_conn(captured_at=decision_at, ctf={"unknown-token": 1_000_000})
     with pytest.raises(ValueError, match="CURRENT_WEALTH_CHAIN_POSITION_SET_MISMATCH"):
         current_portfolio_wealth_witness(

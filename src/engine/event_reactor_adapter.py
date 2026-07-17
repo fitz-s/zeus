@@ -1161,7 +1161,7 @@ def _latest_market_channel_book_rows(
     checked_at: datetime,
     max_age: timedelta,
 ) -> dict[str, tuple[Mapping[str, object] | None, datetime, str]]:
-    """Read the latest full-depth market-channel event for each token.
+    """Read the compact latest market-channel projection for each token.
 
     A newer BBA-only event invalidates an older full book instead of reviving
     stale depth. Callers use the ``None`` book marker to force a venue refresh.
@@ -1177,48 +1177,76 @@ def _latest_market_channel_book_rows(
         for start in range(0, len(token_ids), 400):
             chunk = token_ids[start : start + 400]
             requested = ",".join("(?)" for _ in chunk)
-            rows = trade_conn.execute(
-                f"""
-                WITH requested(token_id) AS (VALUES {requested})
-                SELECT requested.token_id,
-                       latest_event.event_id,
-                       latest_event.quote_seen_at,
-                       depth_event.depth_before_json,
-                       latest_event.book_hash_before,
-                       snapshot.min_tick_size,
-                       snapshot.min_order_size,
-                       snapshot.neg_risk
-                  FROM requested
-                  JOIN execution_feasibility_evidence AS latest_event
-                    ON latest_event.rowid = (
-                        SELECT rowid
-                          FROM execution_feasibility_evidence AS candidate
-                               INDEXED BY idx_execution_feasibility_evidence_token_created
-                         WHERE candidate.token_id = requested.token_id
-                         ORDER BY candidate.created_at DESC
-                         LIMIT 1
-                    )
-             LEFT JOIN execution_feasibility_evidence AS depth_event
-                    ON depth_event.rowid = (
-                        SELECT rowid
-                          FROM execution_feasibility_evidence AS candidate
-                               INDEXED BY idx_execution_feasibility_evidence_token_created
-                         WHERE candidate.token_id = requested.token_id
-                           AND candidate.event_id = latest_event.event_id
-                           AND candidate.depth_before_json IS NOT NULL
-                           AND candidate.depth_before_json != ''
-                         ORDER BY candidate.created_at DESC
-                         LIMIT 1
-                    )
-                  JOIN executable_market_snapshot_latest AS latest
-                       INDEXED BY idx_snapshot_latest_selected_token_captured
-                    ON latest.selected_outcome_token_id = requested.token_id
-                   AND latest.condition_id = latest_event.condition_id
-                  JOIN executable_market_snapshots AS snapshot
-                    ON snapshot.snapshot_id = latest.snapshot_id
-                """,
-                chunk,
-            ).fetchall()
+            try:
+                rows = trade_conn.execute(
+                    f"""
+                    WITH requested(token_id) AS (VALUES {requested})
+                    SELECT requested.token_id,
+                           latest_event.event_id,
+                           latest_event.quote_seen_at,
+                           latest_event.depth_before_json,
+                           latest_event.book_hash_before,
+                           snapshot.min_tick_size,
+                           snapshot.min_order_size,
+                           snapshot.neg_risk
+                      FROM requested
+                      JOIN execution_feasibility_latest AS latest_event
+                        ON latest_event.token_id = requested.token_id
+                       AND latest_event.direction IN ('buy_yes', 'buy_no')
+                      JOIN executable_market_snapshot_latest AS latest
+                           INDEXED BY idx_snapshot_latest_selected_token_captured
+                        ON latest.selected_outcome_token_id = requested.token_id
+                       AND latest.condition_id = latest_event.condition_id
+                      JOIN executable_market_snapshots AS snapshot
+                        ON snapshot.snapshot_id = latest.snapshot_id
+                    """,
+                    chunk,
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                if "execution_feasibility_latest" not in str(exc):
+                    raise
+                rows = trade_conn.execute(
+                    f"""
+                    WITH requested(token_id) AS (VALUES {requested})
+                    SELECT requested.token_id,
+                           latest_event.event_id,
+                           latest_event.quote_seen_at,
+                           depth_event.depth_before_json,
+                           latest_event.book_hash_before,
+                           snapshot.min_tick_size,
+                           snapshot.min_order_size,
+                           snapshot.neg_risk
+                      FROM requested
+                      JOIN execution_feasibility_evidence AS latest_event
+                        ON latest_event.rowid = (
+                            SELECT rowid
+                              FROM execution_feasibility_evidence AS candidate
+                                   INDEXED BY idx_execution_feasibility_evidence_token_created
+                             WHERE candidate.token_id = requested.token_id
+                             ORDER BY candidate.created_at DESC
+                             LIMIT 1
+                        )
+                 LEFT JOIN execution_feasibility_evidence AS depth_event
+                        ON depth_event.rowid = (
+                            SELECT rowid
+                              FROM execution_feasibility_evidence AS candidate
+                                   INDEXED BY idx_execution_feasibility_evidence_token_created
+                             WHERE candidate.token_id = requested.token_id
+                               AND candidate.event_id = latest_event.event_id
+                               AND candidate.depth_before_json IS NOT NULL
+                               AND candidate.depth_before_json != ''
+                             ORDER BY candidate.created_at DESC
+                             LIMIT 1
+                        )
+                      JOIN executable_market_snapshot_latest AS latest
+                           INDEXED BY idx_snapshot_latest_selected_token_captured
+                        ON latest.selected_outcome_token_id = requested.token_id
+                       AND latest.condition_id = latest_event.condition_id
+                      JOIN executable_market_snapshots AS snapshot
+                        ON snapshot.snapshot_id = latest.snapshot_id
+                    """,
+                    chunk,
+                ).fetchall()
             for row in rows:
                 token_id = str(row[0] or "").strip()
                 event_id = str(row[1] or "").strip()

@@ -2151,24 +2151,102 @@ def _position_token(position: object) -> str:
 def probe_inflight_buy_ambiguity(
     trade_conn: sqlite3.Connection,
 ) -> bool | None:
-    """Cheaply reject work that the later wealth witness cannot authorize."""
+    """Reject only in-flight BUY cash effects lacking a persisted command bound."""
 
     execute = getattr(trade_conn, "execute", None)
     if execute is None:
         return None
     try:
-        row = execute(
-            "SELECT "
-            "EXISTS(SELECT 1 FROM collateral_reservations "
-            "WHERE reservation_type='PUSD_BUY' AND released_at IS NULL) "
-            "OR EXISTS(SELECT 1 FROM collateral_unsettled_proceeds "
-            "WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL)"
-        ).fetchone()
+        return _inflight_buy_wealth_bounds(trade_conn) is None
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower():
             return None
         raise
-    return bool((row or (0,))[0])
+
+
+def _inflight_buy_wealth_bounds(
+    trade_conn: sqlite3.Connection,
+) -> tuple[int, Decimal, tuple[tuple[str, str, int, str], ...]] | None:
+    """Bound pending BUYs by reserved cash below and persisted order shares above."""
+    pending = trade_conn.execute(
+        """
+        SELECT EXISTS(
+                   SELECT 1
+                     FROM collateral_reservations
+                    WHERE reservation_type = 'PUSD_BUY'
+                      AND released_at IS NULL
+               )
+            OR EXISTS(
+                   SELECT 1
+                     FROM collateral_unsettled_proceeds
+                    WHERE direction = 'OUTGOING_DEDUCTION'
+                      AND settled_at IS NULL
+               )
+        """
+    ).fetchone()
+    if not bool((pending or (0,))[0]):
+        return 0, Decimal("0"), ()
+    if not _table_exists(trade_conn, "venue_commands"):
+        return None
+
+    rows = trade_conn.execute(
+        """
+        SELECT r.command_id,
+               r.amount AS amount_micro,
+               vc.size,
+               vc.side,
+               vc.intent_kind,
+               'RESERVATION' AS basis
+          FROM collateral_reservations r
+          LEFT JOIN venue_commands vc ON vc.command_id = r.command_id
+         WHERE r.reservation_type = 'PUSD_BUY'
+           AND r.released_at IS NULL
+        UNION ALL
+        SELECT u.command_id,
+               u.amount_micro,
+               vc.size,
+               vc.side,
+               vc.intent_kind,
+               'OUTGOING_DEDUCTION' AS basis
+          FROM collateral_unsettled_proceeds u
+          LEFT JOIN venue_commands vc ON vc.command_id = u.command_id
+         WHERE u.direction = 'OUTGOING_DEDUCTION'
+           AND u.settled_at IS NULL
+        """
+    ).fetchall()
+    if not rows:
+        return 0, Decimal("0"), ()
+
+    cash_micro = 0
+    upper = Decimal("0")
+    identities: list[tuple[str, str, int, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        command_id = str(row[0] or "").strip()
+        try:
+            amount_micro = int(row[1])
+            size = Decimal(str(row[2]))
+        except (TypeError, ValueError):
+            return None
+        side = str(row[3] or "").strip().upper()
+        intent_kind = str(row[4] or "").strip().upper()
+        basis = str(row[5] or "").strip().upper()
+        if (
+            not command_id
+            or command_id in seen
+            or amount_micro < 0
+            or not size.is_finite()
+            or size <= 0
+            or side != "BUY"
+            or intent_kind != "ENTRY"
+        ):
+            return None
+        seen.add(command_id)
+        cash_micro += amount_micro
+        amount_usd = Decimal(amount_micro) / Decimal("1000000")
+        upper += max(amount_usd, size)
+        identities.append((command_id, basis, amount_micro, str(size)))
+    return cash_micro, upper, tuple(sorted(identities))
 
 
 def current_portfolio_wealth_witness(
@@ -2184,9 +2262,9 @@ def current_portfolio_wealth_witness(
     binary claim and every unresolved local claim at its maximum $1 payoff.
     An unresolved claim is never spendable cash: representing only its maximum
     terminal payoff makes new-order growth no less conservative without turning
-    one confirmed-fill dispute into a portfolio-wide veto. Unknown chain assets
-    and in-flight buys still fail closed because their size or cash effect is not
-    bounded by the canonical open-position projection.
+    one confirmed-fill dispute into a portfolio-wide veto. In-flight buys use
+    their durable cash reservation as the loss bound and their persisted command
+    size as the maximum $1 claim; missing command bounds still fail closed.
     """
 
     if decision_at_utc.tzinfo is None or max_age <= timedelta(0):
@@ -2226,8 +2304,10 @@ def current_portfolio_wealth_witness(
         if age.total_seconds() < 0.0 or age > max_age:
             raise ValueError("CURRENT_WEALTH_COLLATERAL_EXPIRED")
 
-        if probe_inflight_buy_ambiguity(trade_conn):
+        inflight_bounds = _inflight_buy_wealth_bounds(trade_conn)
+        if inflight_bounds is None:
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
+        inflight_cash_micro, inflight_upper_usd, inflight_identities = inflight_bounds
 
         if portfolio_state is None:
             from src.state.portfolio import load_runtime_open_portfolio
@@ -2333,7 +2413,7 @@ def current_portfolio_wealth_witness(
         pusd_micro = int(row.get("pusd_balance_micro") or 0)
         allowance_micro = int(row.get("pusd_allowance_micro") or 0)
         legacy_micro = int(row.get("usdc_e_legacy_balance_micro") or 0)
-        spendable_micro = pusd_micro
+        spendable_micro = pusd_micro - inflight_cash_micro
         if spendable_micro < 0:
             raise ValueError("CURRENT_WEALTH_SPENDABLE_CASH_INVALID")
         # Allowance is submit-time permission, not owned cash.  The executor
@@ -2341,7 +2421,7 @@ def current_portfolio_wealth_witness(
         # before persistence or SDK contact; selection keeps the wallet's pUSD
         # balance as its cash endowment instead of erasing every BUY on one
         # transient zero-allowance snapshot.
-        floor = (Decimal(pusd_micro) + Decimal(legacy_micro)) / Decimal(
+        floor = (Decimal(spendable_micro) + Decimal(legacy_micro)) / Decimal(
             "1000000"
         )
         ceiling = floor + sum(
@@ -2352,8 +2432,9 @@ def current_portfolio_wealth_witness(
             (Decimal(amount) / Decimal("1000000") for amount in uncertain_micro.values()),
             Decimal("0"),
         )
+        ceiling += inflight_upper_usd
         spendable = Decimal(spendable_micro) / Decimal("1000000")
-        reservations = Decimal("0")
+        reservations = Decimal(inflight_cash_micro) / Decimal("1000000")
 
         ledger_snapshot_id = hashlib.sha256(
             repr(
@@ -2366,6 +2447,7 @@ def current_portfolio_wealth_witness(
                     allowance_micro,
                     legacy_micro,
                     tuple(sorted(token_balances.items())),
+                    inflight_identities,
                 )
             ).encode("utf-8")
         ).hexdigest()

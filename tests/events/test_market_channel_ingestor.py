@@ -729,6 +729,9 @@ def test_price_change_updates_full_depth_even_when_touch_is_unchanged():
     ).fetchone()
     assert latest[:2] == ("2026-05-24T10:00:02+00:00", "hash-3")
     assert json.loads(latest[2]) == depth
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_evidence"
+    ).fetchone()[0] == 2
 
 
 def test_price_change_packet_expands_every_asset_delta():

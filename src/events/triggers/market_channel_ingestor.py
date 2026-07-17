@@ -344,14 +344,11 @@ class MarketChannelIngestor:
             gap_start=gap_start if gap_marked else None,
             gap_recovered_at=received_at if gap_marked else None,
         )
-        event = _event_from_payload(
+        return _event_from_payload(
             payload,
             source="polymarket_market_channel",
             received_at=received_at,
         )
-        if depth_json is not None:
-            self._mark_latest_projection_event(event.event_id)
-        return event
 
     def _bba_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
         source_event_type = str(message.get("event_type") or message.get("type") or "")
@@ -385,7 +382,14 @@ class MarketChannelIngestor:
             neg_risk=metadata.neg_risk,
             executable_snapshot_id=metadata.executable_snapshot_id,
         )
-        return _event_from_payload(payload, source="polymarket_market_channel", received_at=received_at)
+        event = _event_from_payload(
+            payload,
+            source="polymarket_market_channel",
+            received_at=received_at,
+        )
+        if depth_json is not None:
+            self._mark_latest_projection_event(event.event_id)
+        return event
 
     def _cache_event_payload(self, event: OpportunityEvent) -> None:
         try:
@@ -1851,6 +1855,7 @@ def insert_execution_feasibility_evidence(
     row: dict[str, Any],
     *,
     schema: str = "",
+    append_evidence: bool = True,
 ) -> None:
     assert_market_channel_not_fill_authority(source=str(row.get("fill_truth_source", "")))
     if schema not in _FEASIBILITY_EVIDENCE_ALLOWED_SCHEMAS:
@@ -1882,35 +1887,36 @@ def insert_execution_feasibility_evidence(
             str(values.get("direction")),
         ),
     )
-    conn.execute(
-        f"""
-        INSERT INTO {table} (
-            evidence_id, event_id, condition_id, token_id, outcome_label, direction,
-            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
-            depth_before_json, order_intent_time, submit_time, accepted_or_rejected,
-            venue_order_id, fok_full_fill, fak_partial_fill, filled_shares,
-            fill_price, cancel_remainder_status, book_hash_after, latency_ms,
-            maker_cancel_before_submit, would_have_edge_after_fee, created_at, schema_version
-        ) VALUES (
-            :evidence_id, :event_id, :condition_id, :token_id, :outcome_label, :direction,
-            :quote_seen_at, :book_hash_before, :best_bid_before, :best_ask_before,
-            :depth_before_json, :order_intent_time, :submit_time, :accepted_or_rejected,
-            :venue_order_id, :fok_full_fill, :fak_partial_fill, :filled_shares,
-            :fill_price, :cancel_remainder_status, :book_hash_after, :latency_ms,
-            :maker_cancel_before_submit, :would_have_edge_after_fee, :created_at, :schema_version
+    if append_evidence:
+        conn.execute(
+            f"""
+            INSERT INTO {table} (
+                evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+                quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+                depth_before_json, order_intent_time, submit_time, accepted_or_rejected,
+                venue_order_id, fok_full_fill, fak_partial_fill, filled_shares,
+                fill_price, cancel_remainder_status, book_hash_after, latency_ms,
+                maker_cancel_before_submit, would_have_edge_after_fee, created_at, schema_version
+            ) VALUES (
+                :evidence_id, :event_id, :condition_id, :token_id, :outcome_label, :direction,
+                :quote_seen_at, :book_hash_before, :best_bid_before, :best_ask_before,
+                :depth_before_json, :order_intent_time, :submit_time, :accepted_or_rejected,
+                :venue_order_id, :fok_full_fill, :fak_partial_fill, :filled_shares,
+                :fill_price, :cancel_remainder_status, :book_hash_after, :latency_ms,
+                :maker_cancel_before_submit, :would_have_edge_after_fee, :created_at, :schema_version
+            )
+            ON CONFLICT(evidence_id) DO UPDATE SET
+                book_hash_before = excluded.book_hash_before,
+                best_bid_before = excluded.best_bid_before,
+                best_ask_before = excluded.best_ask_before,
+                depth_before_json = excluded.depth_before_json,
+                maker_cancel_before_submit = excluded.maker_cancel_before_submit,
+                would_have_edge_after_fee = excluded.would_have_edge_after_fee,
+                created_at = excluded.created_at,
+                schema_version = excluded.schema_version
+            """,
+            values,
         )
-        ON CONFLICT(evidence_id) DO UPDATE SET
-            book_hash_before = excluded.book_hash_before,
-            best_bid_before = excluded.best_bid_before,
-            best_ask_before = excluded.best_ask_before,
-            depth_before_json = excluded.depth_before_json,
-            maker_cancel_before_submit = excluded.maker_cancel_before_submit,
-            would_have_edge_after_fee = excluded.would_have_edge_after_fee,
-            created_at = excluded.created_at,
-            schema_version = excluded.schema_version
-        """,
-        values,
-    )
     try:
         conn.execute(
             f"""
