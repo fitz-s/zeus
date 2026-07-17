@@ -6596,6 +6596,33 @@ def event_bound_live_adapter_from_trade_conn(
 
         def _prepare_current_scope_event(event, at):
             payload = _payload(event)
+            if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
+                phase_evidence = _edli_forecast_lane_phase_evidence(
+                    city=str(payload.get("city") or ""),
+                    target_date=str(payload.get("target_date") or ""),
+                    decision_time=at,
+                    selected_market_row=None,
+                )
+                if not _forecast_lane_phase_admits(phase_evidence):
+                    phase = (
+                        phase_evidence.phase.value
+                        if phase_evidence.phase is not None
+                        else "unknown"
+                    )
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        city=str(payload.get("city") or "") or None,
+                        target_date=str(payload.get("target_date") or "") or None,
+                        metric=str(payload.get("metric") or "") or None,
+                        reason=(
+                            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+                            f"EVENT_BOUND_MARKET_PHASE_CLOSED:{phase}:"
+                            f"{phase_evidence.phase_source}"
+                        ),
+                        proof_accepted=False,
+                    )
             try:
                 family_key = weather_family_id(
                     city=str(payload.get("city") or ""),

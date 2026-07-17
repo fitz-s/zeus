@@ -3088,6 +3088,51 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
     assert expired_refresh.probability_witness.captured_at_utc == at_expired
 
 
+def test_live_adapter_excludes_closed_forecast_family_before_probability_prepare(
+    monkeypatch,
+):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    callbacks = []
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: callbacks.append(kwargs["prepare_event"])
+        or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a closed forecast family must not rebuild probability"
+        ),
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    settlement_day = _dt.datetime(
+        2026, 7, 11, 8, 0, tzinfo=_dt.timezone.utc
+    )
+
+    adapter.process_global_batch((event,), settlement_day)
+    receipt = callbacks[-1](event, settlement_day)
+
+    assert receipt.prepared_global_family is None
+    assert receipt.reason is not None
+    assert receipt.reason.startswith(
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day:"
+    )
+
+
 def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(
     monkeypatch,
 ):
