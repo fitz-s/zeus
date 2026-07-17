@@ -3976,8 +3976,6 @@ def _current_global_held_samples(
     if (
         not current_yes
         or not current_no
-        or position_yes != current_yes
-        or position_no != current_no
         or binding_yes != current_yes
         or binding_no != current_no
     ):
@@ -3987,6 +3985,10 @@ def _current_global_held_samples(
     held_token = position_no if direction == "buy_no" else position_yes
     if held_token != expected_token:
         raise ValueError("monitor held token does not match current global witness side")
+    complementary_token = position_yes if direction == "buy_no" else position_no
+    expected_complement = current_yes if direction == "buy_no" else current_no
+    if complementary_token and complementary_token != expected_complement:
+        raise ValueError("monitor complementary token conflicts with current global witness")
 
     samples = np.asarray(witness.yes_q_samples[:, indexes[0]], dtype=float)
     if (
@@ -4125,6 +4127,8 @@ def _refresh_current_global_day0_probability(
     held_probability = float(held_samples.mean())
 
     refreshed = replace(position)
+    refreshed.token_id = token_map[condition_id][0]
+    refreshed.no_token_id = token_map[condition_id][1]
     is_final_daily = (
         witness.band_basis
         == _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS

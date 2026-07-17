@@ -368,7 +368,77 @@ def test_current_global_monitor_token_mismatch_fails_closed() -> None:
 
     with pytest.raises(
         ValueError,
-        match="position token pair does not match current global witness",
+        match="held token does not match current global witness side",
+    ):
+        monitor_refresh_module._current_global_held_samples(
+            pos,
+            witness,
+            current_token_pair=("exact-yes-token", "exact-no-token"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("direction", "position_yes", "position_no", "expected"),
+    [
+        ("buy_no", None, "exact-no-token", [0.9, 0.7]),
+        ("buy_yes", "exact-yes-token", None, [0.1, 0.3]),
+    ],
+)
+def test_current_global_monitor_requires_held_token_not_stale_complement(
+    direction: str,
+    position_yes: str | None,
+    position_no: str | None,
+    expected: list[float],
+) -> None:
+    import numpy as np
+
+    condition_id = "0x" + "5f" * 32
+    pos = _make_position()
+    pos.direction = direction
+    pos.condition_id = condition_id
+    pos.token_id = position_yes
+    pos.no_token_id = position_no
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                condition_id=condition_id,
+                yes_token_id="exact-yes-token",
+                no_token_id="exact-no-token",
+            ),
+        ),
+        yes_q_samples=np.array([[0.1], [0.3]]),
+    )
+
+    assert monitor_refresh_module._current_global_held_samples(
+        pos,
+        witness,
+        current_token_pair=("exact-yes-token", "exact-no-token"),
+    ) == pytest.approx(expected)
+
+
+def test_current_global_monitor_stale_complement_fails_closed() -> None:
+    import numpy as np
+
+    condition_id = "0x" + "6e" * 32
+    pos = _make_position()
+    pos.direction = "buy_no"
+    pos.condition_id = condition_id
+    pos.token_id = "stale-yes-token"
+    pos.no_token_id = "exact-no-token"
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                condition_id=condition_id,
+                yes_token_id="exact-yes-token",
+                no_token_id="exact-no-token",
+            ),
+        ),
+        yes_q_samples=np.array([[0.1], [0.3]]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="monitor complementary token conflicts with current global witness",
     ):
         monitor_refresh_module._current_global_held_samples(
             pos,
