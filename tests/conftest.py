@@ -18,6 +18,26 @@ os.environ.setdefault("ZEUS_MODE", "live")
 
 
 @pytest.fixture(autouse=True)
+def _ens_member_dependence_test_isolation(monkeypatch, tmp_path):
+    """Member-dependence artifact isolation: tests default to artifact-ABSENT.
+
+    The CP effective-n correction (src/forecast/ens_member_dependence.py) is
+    fail-open: no artifact => rho=0 => the exact integer Clopper-Pearson
+    identity. Tests pinning exact CP values (e.g. 1-0.05**(1/51)) must not
+    silently read a fitted live artifact from state/ens_member_dependence/.
+    Point the loader at an empty per-test dir and clear its cache; tests that
+    exercise a fitted rho write their own ACTIVE.json into the override dir
+    and clear the cache again.
+    """
+    from src.forecast import ens_member_dependence as emd
+
+    monkeypatch.setenv(emd.ENV_ARTIFACT_DIR, str(tmp_path / "ens_member_dependence"))
+    emd._load_active_artifact.cache_clear()
+    yield
+    emd._load_active_artifact.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _bankroll_provider_test_isolation(monkeypatch):
     """P0-A antibody: deterministic bankroll, no live wallet fetches in tests.
 

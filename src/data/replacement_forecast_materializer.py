@@ -2540,8 +2540,29 @@ def _finite_evidence_binomial_ucb(
     member_count: int,
     *,
     alpha: float = _FINITE_EVIDENCE_BAND_ALPHA,
+    metric: str | None = None,
 ) -> float:
-    """Exact one-sided Clopper-Pearson UCB for current member hits."""
+    """One-sided Clopper-Pearson UCB for current member hits, dependence-corrected.
+
+    MEMBER-DEPENDENCE EFFECTIVE-N (2026-07-17, upstream_data_physical consult v2
+    (f)): the ~51 ENS members share the model's synoptic state, so their
+    settlement-preimage hit indicators are NOT independent binomial trials and
+    the integer-n CP bound is overconfident. When a fitted member-dependence
+    artifact is ACTIVE (state/ens_member_dependence/, written only by
+    scripts/fit_ens_member_dependence.py), the bound applies the Kish design
+    effect:
+
+        n_eff = n / (1 + (n - 1) * rho),   k_eff = k * n_eff / n
+        UCB   = betaincinv(k_eff + 1, n_eff - k_eff, 1 - alpha)
+
+    the continuous generalization of the exact CP identity. Conservative-only:
+    UCB is monotone non-decreasing in rho (numerically verified over k in 0..n,
+    n in {2,5,10,51,200}, rho in [0.01, 1.0]; zero violations). Fail-open:
+    artifact absent or rho == 0 takes the EXACT integer path (byte-identical to
+    pre-artifact behavior); k == n stays 1.0. ``metric`` ('high'/'low') selects
+    the per-metric fitted rho; None or unfitted maps to the MAX fitted rho
+    (pooled conservative fallback — larger rho only widens).
+    """
 
     k = int(hit_count)
     n = int(member_count)
@@ -2554,17 +2575,25 @@ def _finite_evidence_binomial_ucb(
         return 1.0
     from scipy.special import betaincinv  # noqa: PLC0415
 
-    return float(betaincinv(k + 1, n - k, 1.0 - a))
+    from src.forecast.ens_member_dependence import member_dependence_rho  # noqa: PLC0415
+
+    rho = member_dependence_rho(metric)
+    if rho <= 0.0:
+        return float(betaincinv(k + 1, n - k, 1.0 - a))
+    n_eff = n / (1.0 + (n - 1) * rho)
+    k_eff = k * n_eff / n
+    return float(betaincinv(k_eff + 1.0, n_eff - k_eff, 1.0 - a))
 
 
 def _finite_evidence_zero_hit_ucb_floor(
     member_count: int,
     *,
     alpha: float = _FINITE_EVIDENCE_BAND_ALPHA,
+    metric: str | None = None,
 ) -> float:
     """Smallest exact binomial UCB possible with ``member_count`` samples."""
 
-    return _finite_evidence_binomial_ucb(0, member_count, alpha=alpha)
+    return _finite_evidence_binomial_ucb(0, member_count, alpha=alpha, metric=metric)
 
 
 def _stress_coherent_samples_to_marginal_ucb_floors(
@@ -2630,8 +2659,13 @@ def _current_evidence_tail_ucb_floors(
     half_step: float,
     rounding_rule: str,
     members_c: Sequence[float],
+    metric: str | None = None,
 ) -> dict[str, float]:
-    """Per-bin UCB floors from exact member hits and current first two moments."""
+    """Per-bin UCB floors from exact member hits and current first two moments.
+
+    ``metric`` selects the fitted member-dependence rho for the CP term (see
+    ``_finite_evidence_binomial_ucb``); the Cantelli moment term is untouched.
+    """
 
     from src.contracts.settlement_semantics import settlement_preimage_offsets  # noqa: PLC0415
 
@@ -2667,6 +2701,7 @@ def _current_evidence_tail_ucb_floors(
         sample_ucb = _finite_evidence_binomial_ucb(
             hit_counts[str(bin_.bin_id)],
             len(members),
+            metric=metric,
         )
         floors[str(bin_.bin_id)] = max(sample_ucb, moment)
     return floors
@@ -3217,6 +3252,11 @@ def _build_fused_q_bounds(
             half_step=half_step,
             rounding_rule=rounding_rule,
             members_c=evidence_members_c,
+            # day0_metric doubles as the market metric on the non-day0 path
+            # (both materializer call sites always pass the family metric);
+            # None (e.g. direct test calls) => pooled/max-rho conservative
+            # fallback inside the dependence loader.
+            metric=day0_metric,
         )
         required_ucb = np.array([finite_floors[bin_id] for bin_id in bin_ids])
         probs = _stress_coherent_samples_to_marginal_ucb_floors(
@@ -3411,6 +3451,11 @@ def _compute_posterior_payload(
     _finite_evidence_member_hits_by_bin: dict[str, int] | None = None
     _finite_evidence_ucb_floor_by_bin: dict[str, float] | None = None
     _finite_evidence_tail_bin_count: int = 0
+    # Member-dependence effective-n provenance (2026-07-17). None when the fitted
+    # rho artifact is absent or rho=0 (exact integer CP identity — byte-identical
+    # pre-artifact behavior); the applied (rho, n_eff) when the correction fired.
+    _finite_evidence_member_rho_applied: float | None = None
+    _finite_evidence_member_n_eff: float | None = None
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
         replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
@@ -3454,8 +3499,18 @@ def _compute_posterior_payload(
                         "source-clock current member values do not match member_count"
                     )
                 _finite_evidence_ucb_floor = _finite_evidence_zero_hit_ucb_floor(
-                    _finite_evidence_member_count
+                    _finite_evidence_member_count, metric=metric
                 )
+                from src.forecast.ens_member_dependence import (  # noqa: PLC0415
+                    member_dependence_rho,
+                )
+
+                _member_rho = member_dependence_rho(metric)
+                if _member_rho > 0.0:
+                    _finite_evidence_member_rho_applied = _member_rho
+                    _finite_evidence_member_n_eff = _finite_evidence_member_count / (
+                        1.0 + (_finite_evidence_member_count - 1) * _member_rho
+                    )
             replacement_sigma_basis = (
                 "decision_time_current_ensemble_within_plus_provider_between"
                 if _current_shape is not None
@@ -3525,6 +3580,7 @@ def _compute_posterior_payload(
                     half_step=_half_step,
                     rounding_rule=_rounding_rule,
                     members_c=_finite_evidence_members_c,
+                    metric=metric,
                 )
             # k provenance: stamped iff the scale fired (k != 1.0, k > 0.0) — the k=1 no-op stays None.
             _sigma_after_k = _sigma_pred_raw * _k if (_k != 1.0 and _k > 0.0) else _sigma_pred_raw
@@ -4065,6 +4121,12 @@ def _compute_posterior_payload(
         "finite_evidence_tail_band_applied": _finite_evidence_tail_bin_count > 0,
         "finite_evidence_member_count": _finite_evidence_member_count,
         "finite_evidence_member_hits_by_bin": _finite_evidence_member_hits_by_bin,
+        # Member-dependence effective-n provenance (2026-07-17, consult v2 (f)):
+        # the fitted ICC rho and the Kish n_eff = n/(1+(n-1)rho) applied inside the
+        # Clopper-Pearson bound. Both None when the artifact is absent or rho=0
+        # (exact integer CP — byte-identical pre-artifact behavior).
+        "finite_evidence_member_rho_applied": _finite_evidence_member_rho_applied,
+        "finite_evidence_member_n_eff": _finite_evidence_member_n_eff,
         "finite_evidence_zero_hit_ucb_floor": _finite_evidence_ucb_floor,
         "finite_evidence_tail_ucb_floor_by_bin": _finite_evidence_ucb_floor_by_bin,
         "finite_evidence_tail_bin_count": _finite_evidence_tail_bin_count,

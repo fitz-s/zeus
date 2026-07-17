@@ -26729,11 +26729,16 @@ def _day0_current_evidence_yes_ucb_floors(
         }
         if declared_absorbing_no != absorbing_no:
             raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_ABSORBING_MASK_MISMATCH")
+    # Member-dependence effective-n (2026-07-17): thread the family metric so the
+    # CP bound reads the per-metric fitted rho; artifact-absent => exact identity.
+    _dependence_metric = str(payload.get("metric") or "").strip().lower() or None
     floors = np.asarray(
         [
             0.0
             if condition in absorbing_no
-            else _finite_evidence_binomial_ucb(int(hit), int(members.size))
+            else _finite_evidence_binomial_ucb(
+                int(hit), int(members.size), metric=_dependence_metric
+            )
             for condition, hit in zip(conditions, hits, strict=True)
         ],
         dtype=float,
