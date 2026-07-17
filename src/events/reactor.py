@@ -1552,6 +1552,34 @@ class OpportunityEventReactor:
         between windows (and between events) and the ingestor gets frequent write
         windows. ``fetch_pending`` (a read) stays OUTSIDE the lock.
         """
+        # Once one event has exhausted the claim wait, prove that BOTH writer
+        # boundaries have cleared before repeating read-only gates for another
+        # event.  The previous implementation made later claims nonblocking but
+        # still ran every source/risk gate first; under a long writer hold that
+        # converted a cheap queue retry into N repeated gate evaluations.
+        if bool(getattr(self, "_claim_contention_seen", False)):
+            probe_mutex = world_write_mutex()
+            if not probe_mutex.acquire(timeout=0.0):
+                result.claim_lock_bounces += 1
+                result.retried += 1
+                return
+            try:
+                try:
+                    with _scoped_sqlite_busy_timeout(self._store.conn, 0):
+                        self._store.conn.execute("BEGIN IMMEDIATE")
+                        self._store.conn.rollback()
+                except Exception as exc:
+                    with contextlib.suppress(Exception):
+                        self._store.conn.rollback()
+                    if _is_sqlite_lock_error(exc):
+                        result.claim_lock_bounces += 1
+                        result.retried += 1
+                        return
+                    raise
+            finally:
+                probe_mutex.release()
+            self._claim_contention_seen = False
+
         # Read-only gates run before Window A. They can touch large SQLite truth
         # surfaces, so holding the single world writer while evaluating them would
         # block observation/event producers without protecting any mutation.

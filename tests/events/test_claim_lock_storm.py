@@ -434,6 +434,41 @@ def test_claim_contention_waits_once_then_probes_nonblocking(monkeypatch, caplog
     assert sum("claim mutex-bounce" in record.message for record in caplog.records) == 1
 
 
+def test_claim_contention_skips_repeated_pre_submit_gates(monkeypatch):
+    class _ContendedMutex:
+        def acquire(self, *, timeout: float) -> bool:
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("an unacquired mutex must not be released")
+
+    gate_calls = 0
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "50")
+    monkeypatch.setattr(
+        "src.events.reactor.world_write_mutex", lambda: _ContendedMutex()
+    )
+    reactor = object.__new__(OpportunityEventReactor)
+
+    def _gate(*_args, **_kwargs):
+        nonlocal gate_calls
+        gate_calls += 1
+        return object()
+
+    reactor._check_one_pre_submit = _gate
+    result = ReactorResult()
+
+    for index in range(4):
+        reactor._process_event_unit(
+            _event(f"snap-gate-probe-{index}"),
+            decision_time=_DT,
+            result=result,
+        )
+
+    assert gate_calls == 1
+    assert result.claim_lock_bounces == 4
+    assert result.retried == 4
+
+
 def test_successful_claim_probe_restores_normal_wait(monkeypatch):
     class _RecoveringMutex:
         def __init__(self) -> None:
@@ -466,7 +501,7 @@ def test_successful_claim_probe_restores_normal_wait(monkeypatch):
     result = ReactorResult()
 
     try:
-        for index in range(3):
+        for index in range(2):
             reactor._process_event_unit(
                 _event(f"snap-recover-{index}"),
                 decision_time=_DT,
