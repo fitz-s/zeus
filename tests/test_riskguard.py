@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-17
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
@@ -1340,6 +1340,60 @@ class TestRiskGuardSettlementSource:
 
         with pytest.raises(ValueError, match="execution_fact_filled_at"):
             riskguard_module._portfolio_position_from_loader_row(loader_row)
+
+    def test_portfolio_loader_accepts_chain_corrected_fill_truth(self, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        conn = get_connection(zeus_db)
+        from src.state.db import init_schema, query_portfolio_loader_view
+
+        init_schema(conn)
+        _insert_position_current(
+            conn,
+            position_id="db-pos-chain-corrected",
+            strategy_key="center_buy",
+            size_usd=18.83,
+            shares=29.15,
+            cost_basis_usd=18.83,
+            last_monitor_market_price=0.64,
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET fill_authority = 'venue_confirmed_full',
+                   chain_state = 'synced',
+                   chain_shares = 29.15,
+                   chain_avg_price = 0.645969,
+                   chain_cost_basis_usd = 18.83,
+                   chain_seen_at = '2026-07-17T06:00:00+00:00'
+             WHERE position_id = 'db-pos-chain-corrected'
+            """
+        )
+        _insert_execution_fact(
+            conn,
+            intent_id="db-pos-chain-corrected",
+            strategy_key="center_buy",
+            terminal_exec_status="filled",
+            posted_at="2026-07-17T05:59:00+00:00",
+            filled_at="2026-07-17T05:59:03+00:00",
+            fill_price=0.64,
+            shares=23.55,
+            venue_status="filled",
+        )
+        conn.commit()
+
+        loader_row = query_portfolio_loader_view(
+            conn,
+            runtime_exposure_only=True,
+        )["positions"][0]
+        portfolio, metadata = riskguard_module._load_riskguard_portfolio_truth(conn)
+
+        assert loader_row["entry_economics_source"] == "position_current_chain_corrected"
+        assert loader_row["execution_fact_intent_id"] == "db-pos-chain-corrected"
+        assert metadata["consistency_lock"] == "pass"
+        assert metadata["unloadable_count"] == 0
+        assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].effective_shares == pytest.approx(29.15)
+        assert portfolio.positions[0].effective_cost_basis_usd == pytest.approx(18.83)
 
     def test_portfolio_loader_accepts_balance_only_chain_observed_economics(self):
         """Current chain exposure is not a claim of verified fill history.

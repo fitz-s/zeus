@@ -242,7 +242,8 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
     entry_authority = str(row.get("entry_economics_authority") or ENTRY_ECONOMICS_LEGACY_UNKNOWN)
     fill_authority = str(row.get("fill_authority") or FILL_AUTHORITY_NONE)
     if fill_authority in FILL_GRADE_FILL_AUTHORITIES:
-        if str(row.get("entry_economics_source") or "") != "execution_fact":
+        entry_source = str(row.get("entry_economics_source") or "")
+        if entry_source not in {"execution_fact", "position_current_chain_corrected"}:
             raise ValueError("fill-grade loader row missing execution_fact source provenance")
         if not str(row.get("execution_fact_intent_id") or ""):
             raise ValueError("fill-grade loader row missing execution_fact_intent_id provenance")
