@@ -1110,7 +1110,10 @@ def _snapshot_projected_global_book_rows(
                        snapshot.orderbook_depth_json,
                        snapshot.captured_at,
                        latest.freshness_deadline,
-                       snapshot.snapshot_id
+                       snapshot.snapshot_id,
+                       snapshot.min_tick_size,
+                       snapshot.min_order_size,
+                       snapshot.neg_risk
                   FROM executable_market_snapshot_latest AS latest
                        INDEXED BY idx_snapshot_latest_selected_token_captured
                   JOIN executable_market_snapshots AS snapshot
@@ -1144,14 +1147,47 @@ def _snapshot_projected_global_book_rows(
                     or str(book.get("asset_id") or "").strip() != token_id
                 ):
                     continue
+                book = dict(book)
+                book.update(
+                    {
+                        "tick_size": str(row[5]),
+                        "min_order_size": str(row[6]),
+                        "neg_risk": bool(row[7]),
+                    }
+                )
                 books[token_id] = (
-                    dict(book),
+                    book,
                     captured_at,
                     str(row[4] or "").strip(),
                 )
     except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
         return None
     return books or None
+
+
+def _book_levels_align_to_tick(
+    depth: Mapping[str, object],
+    raw_tick: object,
+) -> bool:
+    """Return whether projected depth still obeys its snapshot tick."""
+
+    try:
+        tick = Decimal(str(raw_tick))
+        if not tick.is_finite() or tick <= 0:
+            return False
+        for side in ("bids", "asks"):
+            levels = depth.get(side)
+            if not isinstance(levels, list):
+                return False
+            for level in levels:
+                if not isinstance(level, Mapping):
+                    return False
+                price = Decimal(str(level.get("price")))
+                if not price.is_finite() or price <= 0 or price % tick:
+                    return False
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _latest_market_channel_book_rows(
@@ -1275,6 +1311,13 @@ def _latest_market_channel_book_rows(
                     or not isinstance(depth.get("bids"), list)
                     or not isinstance(depth.get("asks"), list)
                 ):
+                    projected[token_id] = (None, captured_at, event_id)
+                    continue
+                if not _book_levels_align_to_tick(depth, row[5]):
+                    # The channel has crossed a tick-size change while the latest
+                    # executable snapshot still carries the old grid.  Invalidate
+                    # this projection so the caller fetches a current REST book,
+                    # whose explicit tick_size can authorize the new ladder.
                     projected[token_id] = (None, captured_at, event_id)
                     continue
                 book = dict(depth)

@@ -3076,6 +3076,7 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
             accepting_orders INTEGER,
             min_tick_size TEXT NOT NULL,
             min_order_size TEXT NOT NULL,
+            neg_risk INTEGER NOT NULL,
             fee_details_json TEXT NOT NULL,
             tradeability_status_json TEXT NOT NULL,
             orderbook_depth_json TEXT NOT NULL,
@@ -3110,6 +3111,7 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
             1,
             '0.01',
             '5',
+            0,
             '{}',
             '{}',
             '{"asset_id":"yes-token-a","hash":"hash-yes-token-a"}',
@@ -3253,11 +3255,20 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
 
     def fake_capture(_trade_conn, **kwargs):
         capture_calls.append(kwargs)
+        expected_yes = {
+            "asset_id": "yes-token-a",
+            "hash": "hash-yes-token-a",
+        }
+        if projection_survives:
+            expected_yes.update(
+                {
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "neg_risk": False,
+                }
+            )
         assert kwargs["prefetched_books"] == {
-            "yes-token-a": {
-                "asset_id": "yes-token-a",
-                "hash": "hash-yes-token-a",
-            },
+            "yes-token-a": expected_yes,
             "no-token-a": {
                 "asset_id": "no-token-a",
                 "hash": "hash-no-token-a",
@@ -5974,6 +5985,9 @@ def test_global_book_prefetch_reads_complete_fresh_price_channel_projection():
             snapshot_id TEXT PRIMARY KEY,
             selected_outcome_token_id TEXT NOT NULL,
             orderbook_depth_json TEXT NOT NULL,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            neg_risk INTEGER NOT NULL,
             captured_at TEXT NOT NULL
         );
         CREATE TABLE executable_market_snapshot_latest (
@@ -5999,8 +6013,9 @@ def test_global_book_prefetch_reads_complete_fresh_price_channel_projection():
         conn.execute(
             """
             INSERT INTO executable_market_snapshots
-                (snapshot_id, selected_outcome_token_id, orderbook_depth_json, captured_at)
-            VALUES (?, ?, ?, ?)
+                (snapshot_id, selected_outcome_token_id, orderbook_depth_json,
+                 min_tick_size, min_order_size, neg_risk, captured_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot_id,
@@ -6010,9 +6025,17 @@ def test_global_book_prefetch_reads_complete_fresh_price_channel_projection():
                         "asset_id": token_id,
                         "hash": f"book-{token_id}",
                         "bids": [{"price": "0.20", "size": "100"}],
-                        "asks": [{"price": "0.30", "size": "100"}],
+                        "asks": [
+                            {
+                                "price": "0.034" if token_id == "yes-a" else "0.30",
+                                "size": "100",
+                            }
+                        ],
                     }
                 ),
+                "0.001" if token_id == "yes-a" else "0.01",
+                "5",
+                1,
                 captured_at,
             ),
         )
@@ -6040,6 +6063,27 @@ def test_global_book_prefetch_reads_complete_fresh_price_channel_projection():
     assert projected is not None
     books, captured_at = projected
     assert set(books) == {"yes-a", "no-a"}
+    assert books["yes-a"]["tick_size"] == "0.001"
+    assert books["yes-a"]["min_order_size"] == "5"
+    assert books["yes-a"]["neg_risk"] is True
+    curve = universe._global_book_curve(
+        family_key="Paris|2026-07-17|high",
+        bin_id="35c",
+        condition_id="condition-a",
+        side="YES",
+        token_id="yes-a",
+        raw_book=books["yes-a"],
+        metadata={
+            "min_tick_size": "0.01",
+            "min_order_size": "5",
+            "fee_details_json": '{"fee_rate_fraction":0}',
+        },
+        captured_at_utc=captured_at,
+        max_age=_dt.timedelta(minutes=3),
+    )
+    assert curve is not None
+    assert curve.min_tick == Decimal("0.001")
+    assert curve.levels[0].price == Decimal("0.034")
     assert captured_at == _dt.datetime(
         2026, 7, 17, 0, 12, 11, tzinfo=_dt.timezone.utc
     )
@@ -6064,7 +6108,7 @@ def test_global_book_prefetch_reads_complete_fresh_price_channel_projection():
     ) is None
 
 
-def test_global_book_prefetch_reuses_latest_market_channel_depth():
+def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates_stale_tick():
     conn = sqlite3.connect(":memory:")
     conn.executescript(
         """
@@ -6189,6 +6233,55 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth():
     )
     assert projected_rows is not None
     assert projected_rows["yes-a"][2] == "book-event"
+
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots VALUES
+            ('snapshot-b', 'yes-b', ?, '0.01', '5', 1,
+             '2026-07-17T00:11:00+00:00')
+        """,
+        (
+            json.dumps(
+                {
+                    "asset_id": "yes-b",
+                    "bids": [{"price": "0.02", "size": "100"}],
+                    "asks": [{"price": "0.04", "size": "100"}],
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('condition-b', 'yes-b', 'snapshot-b',
+             '2026-07-17T00:15:00+00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence VALUES
+            ('tick-row', 'tick-event', 'condition-b', 'yes-b',
+             '2026-07-17T00:12:11+00:00', 'tick-book-hash', ?,
+             '2026-07-17T00:12:11.100000+00:00')
+        """,
+        (
+            json.dumps(
+                {
+                    "bids": [{"price": "0.021", "size": "20"}],
+                    "asks": [{"price": "0.034", "size": "30"}],
+                }
+            ),
+        ),
+    )
+
+    assert era._projected_global_book_rows(
+        conn,
+        ("yes-b",),
+        checked_at=_dt.datetime(
+            2026, 7, 17, 0, 12, 12, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+    ) is None
 
 
 def test_global_book_prefetch_newer_bba_invalidates_older_depth():
@@ -7036,6 +7129,55 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert gamma_calls == []
     assert local.bindings == original.bindings
     assert local.sample_matrix_identity == missing.sample_matrix_identity
+
+    local_metadata = {}
+    local_complete = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda _slug: pytest.fail("fresh local metadata missed"),
+        get_gamma_markets=lambda _conditions: pytest.fail(
+            "fresh local metadata missed"
+        ),
+        trade_conn=_global_book_metadata_conn(
+            original,
+            captured_at="2026-07-10T07:59:00+00:00",
+            freshness_deadline="2026-07-10T08:00:30+00:00",
+        ),
+        checked_at_utc=_dt.datetime(
+            2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc
+        ),
+        metadata_sink=local_metadata,
+    )[original.family_key]
+    assert local_complete.witness_identity == original.witness_identity
+    assert len(local_metadata) == 2 * len(original.bindings)
+    assert {row["captured_at"] for row in local_metadata.values()} == {
+        "2026-07-10T07:59:00+00:00"
+    }
+
+    stale_metadata_calls = []
+    stale_metadata = {}
+    stale_remote = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda _slug: pytest.fail("batch Gamma path expected"),
+        get_gamma_markets=lambda condition_ids: (
+            stale_metadata_calls.append(tuple(condition_ids)) or batch_markets
+        ),
+        trade_conn=_global_book_metadata_conn(
+            original,
+            captured_at="2026-07-10T07:59:00+00:00",
+            freshness_deadline="2026-07-10T08:00:30+00:00",
+        ),
+        checked_at_utc=_dt.datetime(
+            2026, 7, 10, 8, 1, tzinfo=_dt.timezone.utc
+        ),
+        metadata_sink=stale_metadata,
+    )[original.family_key]
+    assert stale_remote.witness_identity == original.witness_identity
+    assert stale_metadata_calls == [
+        tuple(binding.condition_id for binding in original.bindings)
+    ]
+    assert stale_metadata == batch_metadata
 
     stale_calls = []
     stale_fallback = bind_current_global_probability_tokens(
