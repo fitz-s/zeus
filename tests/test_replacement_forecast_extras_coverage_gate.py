@@ -863,6 +863,93 @@ def test_source_clock_scoped_capture_isolates_source_cycle_and_cities(
     assert no_targets["status"] == "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS"
 
 
+def test_source_clock_scoped_capture_stops_queued_tasks_after_quota_abort(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_updates as updates
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
+
+    class _Report:
+        updated_sources = ("ecmwf_ifs", "icon_global")
+        affected_cities = ("Paris", "Seoul")
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+            }
+
+    keys = (
+        target_plan.ReplacementForecastTargetKey("Paris", "2026-07-17", "high"),
+        target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-17", "high"),
+    )
+    called: list[str] = []
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        updates,
+        "read_model_updates_jsonl",
+        lambda _path: tuple(
+            updates.OpenMeteoModelUpdate(
+                model=source,
+                last_run_initialisation_time=_CYCLE,
+                last_run_availability_time=_CYCLE,
+            )
+            for source in _Report.updated_sources
+        ),
+    )
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: keys,
+    )
+    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda sources: {
+            "ecmwf_ifs": ("Paris",),
+            "icon_global": ("Seoul",),
+        }[tuple(sources)[0]],
+    )
+
+    def _download(**kwargs):
+        source = tuple(kwargs["models"])[0]
+        called.append(source)
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "target_count": len(kwargs["targets"]),
+            "written_row_count": 0,
+            "transport_errors": ("single_runs:Paris:429",),
+            "transport_aborted_remaining_targets": True,
+        }
+
+    monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 1,
+        },
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert called == ["ecmwf_ifs"]
+    assert report["transport_aborted_remaining_targets"] is True
+    assert report["source_results"]["icon_global"]["status"] == (
+        "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
+    )
+
+
 def test_downloaded_extras_records_fixpoint_and_success_health(_cfg_with_db, _redirect_health):
     cfg, db = _cfg_with_db
     for c in _NEAR_DAY_CITIES:

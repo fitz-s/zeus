@@ -33,6 +33,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 
 from src.config import settings
 
@@ -613,12 +614,27 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             if max_wall_clock_seconds is not None
             else None
         )
+        quota_abort = Event()
 
         def _download_task(
             source: str,
             cycle: datetime,
             chunk: list[BayesPrecisionFusionDownloadTarget],
         ) -> tuple[str, dict[str, object]]:
+            cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+            if quota_abort.is_set() or cooldown_seconds > 0:
+                quota_abort.set()
+                return source, {
+                    "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+                    "target_count": len(chunk),
+                    "written_row_count": 0,
+                    "transport_errors": (
+                        f"source_clock_quota_abort:cooldown_seconds={cooldown_seconds}",
+                    ),
+                    "transport_aborted_remaining_targets": True,
+                    "global_models_expected": 1,
+                    "global_models_unavailable": (source,),
+                }
             remaining = (
                 max(0.0, deadline - time.monotonic())
                 if deadline is not None
@@ -637,6 +653,8 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 ),
                 max_wall_clock_seconds=remaining,
             )
+            if bool(report.get("transport_aborted_remaining_targets")):
+                quota_abort.set()
             return source, report
 
         reports_by_source: dict[str, list[dict[str, object]]] = {
