@@ -6083,6 +6083,18 @@ def test_targeted_exit_monitor_filters_positions_without_mutating_full_portfolio
     assert _portfolio_for_target_families(portfolio, None) is portfolio
 
 
+def test_targeted_exit_monitor_pushes_family_scope_into_portfolio_loader() -> None:
+    import inspect
+
+    from src.execution.exit_lifecycle import run_exit_monitor_cycle
+
+    source = inspect.getsource(run_exit_monitor_cycle)
+
+    assert "target_families=target_families" in source
+    assert "if portfolio_dirty and target_families is None" in source
+    assert "if target_families is None:" in source
+
+
 def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> None:
     import src.execution.exit_lifecycle as exit_module
     import src.main as main_module

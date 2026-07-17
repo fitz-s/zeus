@@ -11589,6 +11589,7 @@ def query_portfolio_loader_view(
     temperature_metric: str | None = None,
     runtime_exposure_only: bool = False,
     open_positions_only: bool = False,
+    target_families: Iterable[tuple[str, str, str]] | None = None,
 ) -> dict:
     if conn is None:
         return {
@@ -11627,6 +11628,31 @@ def query_portfolio_loader_view(
     if temperature_metric is not None:
         predicates.append("temperature_metric = ?")
         params.append(temperature_metric)
+    if target_families is not None:
+        family_keys = tuple(
+            dict.fromkeys(
+                (
+                    str(city or "").strip().casefold(),
+                    str(target_date or "").strip()[:10],
+                    str(metric or "").strip().lower(),
+                )
+                for city, target_date, metric in target_families
+            )
+        )
+        if family_keys:
+            predicates.append(
+                "("
+                + " OR ".join(
+                    "(lower(trim(city)) = ? "
+                    "AND substr(trim(target_date), 1, 10) = ? "
+                    "AND lower(trim(temperature_metric)) = ?)"
+                    for _ in family_keys
+                )
+                + ")"
+            )
+            params.extend(value for family in family_keys for value in family)
+        else:
+            predicates.append("0")
     if runtime_exposure_only or open_positions_only:
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to
         # also OR in every phase='quarantined' row (unless chain truth had

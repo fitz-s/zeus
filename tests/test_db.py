@@ -1940,6 +1940,45 @@ def test_portfolio_loader_open_only_retains_transition_hints(tmp_path):
     assert view["positions"][0]["exit_state"] == "retry_pending"
 
 
+def test_portfolio_loader_open_only_filters_target_families_in_sql(tmp_path):
+    from src.state.db import query_portfolio_loader_view
+
+    conn = get_connection(tmp_path / "target-open-portfolio.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="paris-position",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET city = 'Paris', target_date = '2026-07-17', temperature_metric = 'high'
+         WHERE position_id = 'paris-position'
+        """
+    )
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="shanghai-position",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET city = 'Shanghai', target_date = '2026-07-18', temperature_metric = 'low'
+         WHERE position_id = 'shanghai-position'
+        """
+    )
+    conn.commit()
+
+    view = query_portfolio_loader_view(
+        conn,
+        open_positions_only=True,
+        target_families=(("paris", "2026-07-17", "HIGH"),),
+    )
+    conn.close()
+
+    assert [row["position_id"] for row in view["positions"]] == ["paris-position"]
+
+
 def test_position_current_views_use_fill_authority_current_open_economics(tmp_path):
     from src.state.db import (
         query_portfolio_loader_view,

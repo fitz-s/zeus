@@ -6695,18 +6695,25 @@ def run_exit_monitor_cycle(
     # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence (whole-book
     # silence) on the first cycle after recovery. Detection only; the underlying
     # daemon supervision is operator infra.
+    if target_families is None:
+        try:
+            _check_monitor_cadence_watchdog(conn, summary)
+        except Exception as _wd_exc:  # noqa: BLE001 — watchdog must never break the cycle
+            logger.warning("exit_monitor: cadence watchdog failed (non-fatal): %s", _wd_exc)
     try:
-        _check_monitor_cadence_watchdog(conn, summary)
-    except Exception as _wd_exc:  # noqa: BLE001 — watchdog must never break the cycle
-        logger.warning("exit_monitor: cadence watchdog failed (non-fatal): %s", _wd_exc)
-    try:
-        portfolio = load_portfolio(open_positions_only=True)
+        portfolio = load_portfolio(
+            open_positions_only=True,
+            target_families=target_families,
+        )
         held_monitor_allocator_refresh = _refresh_global_allocator_for_held_position_monitor(
             conn,
             portfolio,
         )
         summary["held_monitor_allocator_refresh"] = held_monitor_allocator_refresh
-        if held_monitor_allocator_refresh.get("configured"):
+        if (
+            target_families is None
+            and held_monitor_allocator_refresh.get("configured")
+        ):
             summary["held_monitor_allocator_retry_release"] = (
                 _release_allocator_config_blocked_exit_retries_after_refresh(
                     conn,
@@ -6798,7 +6805,7 @@ def run_exit_monitor_cycle(
             return _aid_box[0]
 
         def _export_portfolio():
-            if portfolio_dirty:
+            if portfolio_dirty and target_families is None:
                 save_portfolio(
                     portfolio,
                     last_committed_artifact_id=_aid_box[0],
@@ -6834,24 +6841,25 @@ def run_exit_monitor_cycle(
     # (open orders, risk, portfolio, capability) -> it reflects REAL current state,
     # never a hardcoded healthy value. Non-fatal: a pulse failure must not abort the
     # chain-sync job. Authority: fix/edli-stage-readiness-2026-05-31 (status_summary).
-    try:
-        from src.observability.status_summary import write_cycle_pulse
-        write_cycle_pulse(summary)
-    except Exception as exc:
-        logger.error(
-            "exit_monitor: status pulse failed (non-fatal): %s",
-            exc,
-            exc_info=True,
-        )
+    if target_families is None:
+        try:
+            from src.observability.status_summary import write_cycle_pulse
+            write_cycle_pulse(summary)
+        except Exception as exc:
+            logger.error(
+                "exit_monitor: status pulse failed (non-fatal): %s",
+                exc,
+                exc_info=True,
+            )
 
-    _write_scheduler_health(
-        "exit_monitor",
-        failed=not succeeded,
-        reason=summary.get("monitoring_error"),
-        extra={
-            "exit_order_submit_enabled": real_order_submit_enabled,
-            "monitors": summary.get("monitors", 0),
-            "exits": summary.get("exits", 0),
-        },
-    )
+        _write_scheduler_health(
+            "exit_monitor",
+            failed=not succeeded,
+            reason=summary.get("monitoring_error"),
+            extra={
+                "exit_order_submit_enabled": real_order_submit_enabled,
+                "monitors": summary.get("monitors", 0),
+                "exits": summary.get("exits", 0),
+            },
+        )
     return succeeded

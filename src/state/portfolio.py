@@ -23,7 +23,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Collection, Literal, Optional
 
 from src.config import (
     STATE_DIR,
@@ -2771,8 +2771,11 @@ def load_portfolio(
     path: Optional[Path] = None,
     *,
     open_positions_only: bool = False,
+    target_families: Collection[tuple[str, str, str]] | None = None,
 ) -> PortfolioState:
     """Load canonical portfolio truth, optionally limited to runtime-open rows."""
+    if target_families is not None and not open_positions_only:
+        raise ValueError("target_families requires open_positions_only=True")
     path = path or POSITIONS_PATH
 
     current_mode = get_mode()
@@ -2843,6 +2846,7 @@ def load_portfolio(
         snapshot = query_portfolio_loader_view(
             conn,
             open_positions_only=open_positions_only,
+            target_families=target_families,
         )
         if not open_positions_only:
             entry_proof_review_reasons = _query_edli_entry_proof_review_reasons(
@@ -2974,6 +2978,9 @@ def load_portfolio(
         ignored_tokens=ignored_tokens,
         chain_only_facts=chain_only_facts,
         authority="canonical_db",
+        authority_scope=(
+            "runtime_exposure" if target_families is not None else "full_portfolio"
+        ),
     )
 
 
