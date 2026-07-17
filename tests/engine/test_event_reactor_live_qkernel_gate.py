@@ -3402,6 +3402,16 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
         source_cycle_time="2026-07-13T06:00:00+00:00",
         provenance=source_clock,
     ) == (33.0, 34.0)
+    assert era._posterior_bound_spine_inputs(
+        conn,
+        family=family,
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=source_clock,
+    ) == (
+        (33.0, 34.0),
+        "2026-07-13T06:00:00+00:00",
+        (0.5, 0.5),
+    )
     present, certificate = era._source_clock_model_count_certificate(source_clock)
     assert present is True
     assert certificate == {
@@ -3429,6 +3439,12 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
         "missing_sources"
     ] = ["b"]
     assert era._posterior_bound_multimodel_members(
+        conn,
+        family=family,
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=incomplete,
+    ) is None
+    assert era._posterior_bound_spine_inputs(
         conn,
         family=family,
         source_cycle_time="2026-07-13T06:00:00+00:00",

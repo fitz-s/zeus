@@ -108,7 +108,7 @@ from src.decision.family_decision_engine import (
     FamilyDecisionEngine,
     FamilyDecisionError,
 )
-from src.forecast.day0_conditioner import Day0ObservationState
+from src.forecast.day0_conditioner import Day0ObservationState, condition_day0
 from src.forecast.debias_authority import AppliedDebias
 from src.forecast.forecast_case_factory import forecast_case_metadata
 from src.forecast.predictive_distribution_builder import (
@@ -921,6 +921,25 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
     # and walk_forward_model_weights adds it AFTER the residual floor (Form A). Absent ⇒
     # all-zero ⇒ byte-identical (no geometry penalty).
     repr_m2_by_index = _coerce_optional_float_list(payload.get("_edli_spine_repr_m2_by_index"))
+    provider_weights_by_index = None
+    if "_edli_spine_provider_weights_by_index" in payload:
+        provider_weights_by_index = _coerce_provider_weights(
+            payload.get("_edli_spine_provider_weights_by_index")
+        )
+        member_count = len(members or raw_members or ())
+        if (
+            provider_weights_by_index is None
+            or len(provider_weights_by_index) != member_count
+        ):
+            return None
+    center_authority = payload.get("_edli_spine_served_center_authority")
+    if center_authority is not None:
+        center_authority = str(center_authority)
+        if center_authority not in {
+            "replacement_current_provider_center",
+            "pre_day0_low_empirical_carryover",
+        }:
+            return None
     return {
         "mu_native": mu_f,
         "sigma_native": sigma_f,
@@ -930,6 +949,8 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
         "raw_m2_by_index": raw_m2_by_index,
         "n_by_index": n_by_index,
         "repr_m2_by_index": repr_m2_by_index,
+        "provider_weights_by_index": provider_weights_by_index,
+        "served_center_authority": center_authority,
     }
 
 
@@ -958,6 +979,21 @@ def _coerce_int_list(value: Any) -> Optional[tuple[int, ...]]:
         return tuple(int(v) for v in value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_provider_weights(value: Any) -> Optional[tuple[float, ...]]:
+    """Normalize a complete, non-negative posterior provider-weight vector."""
+
+    try:
+        weights = tuple(float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    if not weights or any(not np.isfinite(v) or v < 0.0 for v in weights):
+        return None
+    total = float(sum(weights))
+    if not np.isfinite(total) or total <= 0.0:
+        return None
+    return tuple(v / total for v in weights)
 
 
 def _parse_source_cycle_time(value: Any) -> Optional[datetime]:
@@ -1131,17 +1167,32 @@ class _ReactorServedFreshModelReader:
 
 
 class _ReactorServedPredictiveBuilder:
-    """Build the spine predictive distribution while preserving reactor-served σ.
+    """Build the spine distribution while preserving the served belief identity.
 
-    The bridge payload already carries the live materializer's served predictive
-    width. The generic builder is still the owner of center assembly, day0 support,
-    raw-law validation, and the receipt shape, but this seam must not recompute a
-    second sigma and feed q a different width than the live entry/monitor belief.
+    The generic builder proves member-envelope and raw-law validity. A replacement
+    posterior additionally carries the exact current provider center and width that
+    produced its q. Once the center is proven inside the member envelope, preserve
+    that center and width instead of rebuilding a second probability regime.
     """
 
-    def __init__(self, debias_authority, *, served_sigma_native: float) -> None:
+    def __init__(
+        self,
+        debias_authority,
+        *,
+        served_mu_native: float,
+        served_sigma_native: float,
+        served_center_authority: str | None = None,
+        provider_weights_by_index: Sequence[float] | None = None,
+    ) -> None:
         self._delegate = PredictiveDistributionBuilder(debias_authority)
+        self._served_mu_native = float(served_mu_native)
         self._served_sigma_native = float(served_sigma_native)
+        self._served_center_authority = served_center_authority
+        self._provider_weights_by_index = (
+            tuple(float(v) for v in provider_weights_by_index)
+            if provider_weights_by_index is not None
+            else None
+        )
 
     def build(
         self,
@@ -1163,18 +1214,18 @@ class _ReactorServedPredictiveBuilder:
             sigma_resid_native=sigma_resid_native,
             has_fusion_capture=has_fusion_capture,
         )
-        return self._with_served_sigma(base)
+        return self._with_served_belief(base, case=case, obs=obs)
 
-    def _with_served_sigma(
-        self, base: PredictiveDistribution
+    def _with_served_belief(
+        self,
+        base: PredictiveDistribution,
+        *,
+        case: ForecastCase,
+        obs: Optional[Day0ObservationState],
     ) -> PredictiveDistribution:
         sigma = self._served_sigma_native
         if not (np.isfinite(sigma) and sigma > 0.0):
-            return replace(
-                base,
-                live_eligible=False,
-                ineligibility_reason="REACTOR_SERVED_SIGMA_INVALID",
-            )
+            return self._refuse(base, "REACTOR_SERVED_SIGMA_INVALID")
 
         # Keep genuine non-sigma refusals closed. A missing local sigma authority is
         # exactly what the reactor-served sigma resolves; center/raw-law refusals are not.
@@ -1183,6 +1234,58 @@ class _ReactorServedPredictiveBuilder:
         if not base.live_eligible and not sigma_only_refusal:
             return base
 
+        center = base.center
+        day0 = base.day0
+        mu = float(base.mu_native)
+        authority = self._served_center_authority
+        if authority is not None:
+            served_mu = self._served_mu_native
+            if not np.isfinite(served_mu):
+                return self._refuse(base, "REACTOR_SERVED_MU_INVALID")
+            lo = float(base.member_min_native)
+            hi = float(base.member_max_native)
+            if not (np.isfinite(lo) and np.isfinite(hi) and lo <= served_mu <= hi):
+                return self._refuse(
+                    base,
+                    "REACTOR_SERVED_MU_OUTSIDE_MEMBER_ENVELOPE:"
+                    f"mu={served_mu:.6f}:lo={lo:.6f}:hi={hi:.6f}",
+                )
+            weights_by_model = center.weights_by_model
+            if self._provider_weights_by_index is not None:
+                model_ids = tuple(center.weights_by_model)
+                if len(model_ids) != len(self._provider_weights_by_index):
+                    return self._refuse(base, "REACTOR_PROVIDER_WEIGHT_COUNT_MISMATCH")
+                weights_by_model = dict(
+                    zip(model_ids, self._provider_weights_by_index, strict=True)
+                )
+            method = (
+                "CURRENT_PROVIDER_CENTER"
+                if authority == "replacement_current_provider_center"
+                else "PRE_DAY0_LOW_EMPIRICAL_CARRYOVER"
+            )
+            center = replace(
+                center,
+                mu_native=served_mu,
+                raw_consensus_native=served_mu,
+                debiased_consensus_native=served_mu,
+                center_method=method,
+                weights_by_model=weights_by_model,
+                reason=f"served_center_authority={authority}",
+            )
+            if obs is None:
+                day0 = replace(
+                    day0,
+                    center_before_native=served_mu,
+                    center_after_native=served_mu,
+                )
+            else:
+                day0 = condition_day0(
+                    metric=case.metric,
+                    obs=obs,
+                    center_before_native=served_mu,
+                )
+            mu = float(day0.center_after_native)
+
         components = replace(
             base.sigma_components,
             sigma_before_floor_native=sigma,
@@ -1190,24 +1293,49 @@ class _ReactorServedPredictiveBuilder:
             artifact_id="reactor_served_predictive_sigma_payload",
         )
         identity_hash = _identity_hash(
-            base.case,
-            base.mu_native,
+            case,
+            mu,
             sigma,
             base.debiased_members_native,
             base.distribution_family,
-            base.center,
+            center,
             base.debias,
-            base.day0,
+            day0,
             components,
             True,
             None,
         )
         return replace(
             base,
+            mu_native=mu,
             sigma_native=sigma,
+            center=center,
+            day0=day0,
             sigma_components=components,
             live_eligible=True,
             ineligibility_reason=None,
+            identity_hash=identity_hash,
+        )
+
+    @staticmethod
+    def _refuse(base: PredictiveDistribution, reason: str) -> PredictiveDistribution:
+        identity_hash = _identity_hash(
+            base.case,
+            base.mu_native,
+            base.sigma_native,
+            base.debiased_members_native,
+            base.distribution_family,
+            base.center,
+            base.debias,
+            base.day0,
+            base.sigma_components,
+            False,
+            reason,
+        )
+        return replace(
+            base,
+            live_eligible=False,
+            ineligibility_reason=reason,
             identity_hash=identity_hash,
         )
 
@@ -1681,7 +1809,10 @@ def decide_family_via_spine(
             # then score a different distribution than the live materializer served.
             predictive_builder=_ReactorServedPredictiveBuilder(
                 _spine_debias_authority(case),
+                served_mu_native=float(served["mu_native"]),
                 served_sigma_native=float(served["sigma_native"]),
+                served_center_authority=served.get("served_center_authority"),
+                provider_weights_by_index=served.get("provider_weights_by_index"),
             ),
             # ROUTE IDENTITY (consult_review_pr409.md §5 BLOCKER): DIRECT native routes
             # ONLY. The unchanged submit path executes ONE native leg, so the decision

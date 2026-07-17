@@ -19150,6 +19150,67 @@ def _posterior_bound_multimodel_members(
     return tuple(members)
 
 
+def _posterior_bound_spine_inputs(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    source_cycle_time: object,
+    provenance: Mapping[str, object],
+) -> tuple[tuple[float, ...], str, tuple[float, ...] | None] | None:
+    """Return the exact posterior inputs and its recorded provider weights.
+
+    The replacement posterior may serve provider rows from earlier source cycles
+    under its current-value policy.  Re-selecting rows by the posterior cycle date
+    therefore creates a second, usually empty, forecast identity.  This accessor
+    binds the qkernel spine to the same exact rows already verified by
+    :func:`_posterior_bound_multimodel_members` and, for source-clock posteriors,
+    carries the exact weights that produced the persisted provider center.
+    """
+
+    members = _posterior_bound_multimodel_members(
+        conn,
+        family=family,
+        source_cycle_time=source_cycle_time,
+        provenance=provenance,
+    )
+    source_cycle = str(source_cycle_time or "").strip()
+    if members is None or not source_cycle:
+        return None
+
+    source_clock_present, source_clock_certificate = (
+        _source_clock_model_count_certificate(provenance)
+    )
+    if not source_clock_present:
+        return members, source_cycle, None
+    if source_clock_certificate is None:
+        return None
+
+    fusion = provenance.get("bayes_precision_fusion")
+    if not isinstance(fusion, Mapping):
+        return None
+    models_raw = fusion.get("used_models")
+    scheme = fusion.get("source_clock_one_scheme")
+    if not isinstance(models_raw, (list, tuple)) or not isinstance(scheme, Mapping):
+        return None
+    weights_raw = scheme.get("used_weights")
+    if not isinstance(weights_raw, Mapping):
+        return None
+
+    models = tuple(str(model or "").strip() for model in models_raw)
+    try:
+        weights = tuple(float(weights_raw[model]) for model in models)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        len(weights) != len(members)
+        or any(not math.isfinite(weight) or weight < 0.0 for weight in weights)
+        or sum(weights) <= 0.0
+    ):
+        return None
+    total = sum(weights)
+    return members, source_cycle, tuple(weight / total for weight in weights)
+
+
 def _source_clock_model_count_certificate(
     provenance: Mapping[str, object],
 ) -> tuple[bool, dict[str, object] | None]:
@@ -22554,45 +22615,95 @@ def _generate_candidate_proofs(
     # SQL query (NOT the ~22-CLOB-fetch q-build), so running it unconditionally is cheap.
     if getattr(event, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES:
         try:
-            # Bind the spine belief to the event's CAUSAL forecast snapshot.
-            # All forecast lead buckets are now admitted (the 24h-only replay gate is removed),
-            # so the causal cycle's lead (e.g. a 06-16 target on the 06-14 cycle = ~48h = the
-            # 72h bucket) is tradeable with its conservative per-lead σ-floor. The causal
-            # snapshot is the family's own bound forecast and reliably carries its member
-            # envelope.
-            #
-            # ROOT-CAUSE FIX (2026-06-16 COLD-CENTER / 100%-buy_no-losing-book): source the
-            # spine member envelope from the MULTI-MODEL DETERMINISTIC fusion table
-            # (raw_model_forecasts, ~7-13 decorrelated NWP providers) via
-            # _spine_multimodel_members_for_event — NOT from ensemble_snapshots.members_json
-            # (51 ecmwf_ens members). The probability authority (AGENTS.md) mandates μ* = T2
-            # Bayesian precision fusion over DECORRELATED providers, σ_pred = fusion variance —
-            # neither from the ECMWF ensemble. The strategy-of-record, the de-bias provider, AND
-            # the ARM-replay validation all use raw_model_forecasts; a 213-family settlement
-            # audit found 0/213 ensemble-vs-multimodel member sets equal (mean |Δμ*|=1.14°C),
-            # with the ensemble center systematically colder — the cold-center / failed-de-bias-
-            # transfer root cause. The new accessor binds to the event's CAUSAL cycle (the bound
-            # ensemble snapshot's source_cycle_time DATE, available_at ≤ decision_time), keeps
-            # the latest cycle per model, and converts °C→native EXACTLY as build_family_spine —
-            # so the live producer stashes the SAME member set the validated replay produces.
-            #
-            # CHEAP belief stash — ONE indexed SQL query, NO full q-build, NO network. Calling
-            # _market_analysis_from_event_snapshot here (with its ~22 sequential CLOB /book
-            # fetches) per spine family DOUBLED the q-build and HUNG the reactor (a single cycle
-            # ran >12 min). De-bias is OFF live (edli_bias_correction_enabled=False +
-            # emos_sole_calibrator), so the RAW multi-model member envelope IS the debiased
-            # envelope the ARM replay validated; the spine's build_center (NoOpDebiasAuthority)
-            # locks to it. mu/sigma are the empirical mean/std of that envelope (the already-
-            # implied center/width). FAIL-CLOSED: <3 members or no causal cycle => None => stash
-            # NOTHING => honest SPINE_INPUTS_UNAVAILABLE; NEVER falls back to the ensemble.
-            _spine_multimodel = _spine_multimodel_members_for_event(
-                forecast_conn,
-                event=event,
-                family=family,
-                decision_time=decision_time,
-            )
-            if _spine_multimodel is not None:
-                _spine_raw, _spine_source_cycle, _spine_precision = _spine_multimodel
+            # A forecast event may already carry canonical/legacy observability keys.
+            # Clear them before constructing the decision-consumed spine so a failed
+            # replacement binding cannot silently fall through to another probability
+            # identity.
+            for _key in (
+                "_edli_spine_mu_native",
+                "_edli_spine_sigma_native",
+                "_edli_spine_raw_members_native",
+                "_edli_spine_debiased_members_native",
+                "_edli_spine_source_cycle_time_utc",
+                "_edli_spine_raw_m2_by_index",
+                "_edli_spine_n_by_index",
+                "_edli_spine_repr_m2_by_index",
+                "_edli_spine_provider_weights_by_index",
+                "_edli_spine_served_center_authority",
+            ):
+                payload.pop(_key, None)
+
+            _spine_raw: list[float] | None = None
+            _spine_source_cycle: str | None = None
+            _spine_precision: list[tuple[str, float | None, int, float]] = []
+            _spine_provider_weights: tuple[float, ...] | None = None
+            _spine_authoritative_mu_native: float | None = None
+            _spine_authoritative_sigma_native: float | None = None
+            _spine_center_authority: str | None = None
+
+            # Replacement q already binds exact served provider rows. Consume that
+            # certificate directly; never infer a second row set from its cycle date.
+            _replacement_bundle = probability_evidence.get("replacement_bundle")
+            if _replacement_bundle is not None:
+                _replacement_provenance = getattr(
+                    _replacement_bundle, "provenance_json", None
+                )
+                _replacement_cycle = getattr(
+                    _replacement_bundle, "source_cycle_time", None
+                )
+                if isinstance(_replacement_provenance, Mapping):
+                    _posterior_spine = _posterior_bound_spine_inputs(
+                        forecast_conn,
+                        family=family,
+                        source_cycle_time=_replacement_cycle,
+                        provenance=_replacement_provenance,
+                    )
+                else:
+                    _posterior_spine = None
+                if _posterior_spine is not None:
+                    _posterior_members, _spine_source_cycle, _spine_provider_weights = (
+                        _posterior_spine
+                    )
+                    _spine_raw = list(_posterior_members)
+                    _unit = str(
+                        getattr(
+                            runtime_cities_by_name().get(str(family.city)),
+                            "settlement_unit",
+                            "C",
+                        )
+                        or "C"
+                    ).upper()
+                    _mu_c = float(probability_evidence.get("forecast_mu_c"))
+                    _sigma_c = float(
+                        probability_evidence.get("forecast_predictive_sigma_c")
+                    )
+                    if _unit == "F":
+                        _spine_authoritative_mu_native = _mu_c * 9.0 / 5.0 + 32.0
+                        _spine_authoritative_sigma_native = _sigma_c * 9.0 / 5.0
+                    else:
+                        _spine_authoritative_mu_native = _mu_c
+                        _spine_authoritative_sigma_native = _sigma_c
+                    if not (
+                        math.isfinite(_spine_authoritative_mu_native)
+                        and math.isfinite(_spine_authoritative_sigma_native)
+                        and _spine_authoritative_sigma_native > 0.0
+                    ):
+                        _spine_raw = None
+                    else:
+                        _spine_center_authority = "replacement_current_provider_center"
+            else:
+                # Legacy/non-source-clock carrier: retain the replay-equivalent
+                # same-cycle multi-model accessor and its raw precision evidence.
+                _legacy_spine = _spine_multimodel_members_for_event(
+                    forecast_conn,
+                    event=event,
+                    family=family,
+                    decision_time=decision_time,
+                )
+                if _legacy_spine is not None:
+                    _spine_raw, _spine_source_cycle, _spine_precision = _legacy_spine
+
+            if _spine_raw is not None:
                 (
                     _spine_conditioned,
                     _pre_day0_low_carryover,
@@ -22613,6 +22724,10 @@ def _generate_candidate_proofs(
                     # member x residual-quantile sample space. The original per-model
                     # precision arrays are no longer index-aligned and must not be reused.
                     _spine_precision = []
+                    _spine_provider_weights = None
+                    _spine_authoritative_mu_native = None
+                    _spine_authoritative_sigma_native = None
+                    _spine_center_authority = "pre_day0_low_empirical_carryover"
                 _spine_arr = np.asarray(_spine_raw, dtype=float).ravel()
                 if _spine_arr.size:
                     _spine_lst = [float(_x) for _x in _spine_arr.tolist()]
@@ -22635,11 +22750,29 @@ def _generate_candidate_proofs(
                         payload["_edli_spine_repr_m2_by_index"] = [
                             float(_rr) for (_mid, _m2, _n, _rr) in _spine_precision
                         ]
-                    _spine_mean = sum(_spine_lst) / len(_spine_lst)
+                    if (
+                        _spine_provider_weights is not None
+                        and len(_spine_provider_weights) == len(_spine_lst)
+                    ):
+                        payload["_edli_spine_provider_weights_by_index"] = list(
+                            _spine_provider_weights
+                        )
+                    if _spine_authoritative_mu_native is not None:
+                        _spine_mean = _spine_authoritative_mu_native
+                    else:
+                        _spine_mean = sum(_spine_lst) / len(_spine_lst)
                     payload["_edli_spine_mu_native"] = float(_spine_mean)
-                    if len(_spine_lst) >= 2:
+                    if _spine_authoritative_sigma_native is not None:
+                        payload["_edli_spine_sigma_native"] = float(
+                            _spine_authoritative_sigma_native
+                        )
+                    elif len(_spine_lst) >= 2:
                         _spine_var = sum((_v - _spine_mean) ** 2 for _v in _spine_lst) / (len(_spine_lst) - 1)
                         payload["_edli_spine_sigma_native"] = float(_spine_var ** 0.5)
+                    if _spine_center_authority is not None:
+                        payload["_edli_spine_served_center_authority"] = (
+                            _spine_center_authority
+                        )
                     if _spine_source_cycle:
                         payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
             else:
@@ -22686,6 +22819,8 @@ def _generate_candidate_proofs(
                     "_edli_spine_day0_observed_extreme_native",
                     "_edli_spine_pre_day0_low_carryover",
                     "_edli_spine_pre_day0_low_block_reason",
+                    "_edli_spine_provider_weights_by_index",
+                    "_edli_spine_served_center_authority",
                     "_edli_q_source",
                 )
                 if k in payload

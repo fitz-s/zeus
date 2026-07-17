@@ -884,6 +884,89 @@ def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypa
     assert result.selected_proof.candidate.bin.label == "20C"
 
 
+def test_spine_preserves_posterior_provider_center_identity(monkeypatch):
+    """The qkernel consumes the persisted provider center, not a second Huber center."""
+
+    from src.decision import qlcb_reliability_guard as guard_mod
+
+    monkeypatch.setattr(
+        guard_mod,
+        "_RELIABILITY_CACHE",
+        _fully_licensed_reliability_cells(guard_mod),
+    )
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.0, 1.0, 0.0, 0.0],
+        q_lcb_by_bin=[0.0, 0.999, 0.0, 0.0],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+    payload = _payload(mu=20.2574, sigma=1.7149, members=[20.0, 23.3])
+    payload.update(
+        {
+            "_edli_spine_provider_weights_by_index": [0.922, 0.078],
+            "_edli_spine_served_center_authority": (
+                "replacement_current_provider_center"
+            ),
+        }
+    )
+
+    result = _drive(family, proofs, payload)
+
+    assert result.decision is not None
+    predictive = result.decision.predictive
+    assert predictive.live_eligible is True
+    assert predictive.mu_native == pytest.approx(20.2574)
+    assert predictive.sigma_native == pytest.approx(1.7149)
+    assert predictive.center.center_method == "CURRENT_PROVIDER_CENTER"
+    assert tuple(predictive.center.weights_by_model.values()) == pytest.approx(
+        (0.922, 0.078)
+    )
+
+
+def test_spine_refuses_posterior_center_outside_exact_member_envelope(monkeypatch):
+    from src.decision import qlcb_reliability_guard as guard_mod
+
+    monkeypatch.setattr(
+        guard_mod,
+        "_RELIABILITY_CACHE",
+        _fully_licensed_reliability_cells(guard_mod),
+    )
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.0, 1.0, 0.0, 0.0],
+        q_lcb_by_bin=[0.0, 0.999, 0.0, 0.0],
+    )
+    payload = _payload(mu=19.0, sigma=1.0, members=[20.0, 23.3])
+    payload.update(
+        {
+            "_edli_spine_provider_weights_by_index": [0.922, 0.078],
+            "_edli_spine_served_center_authority": (
+                "replacement_current_provider_center"
+            ),
+        }
+    )
+
+    result = _drive(family, proofs, payload)
+
+    assert result.selected_proof is None
+    assert result.decision is not None
+    assert "REACTOR_SERVED_MU_OUTSIDE_MEMBER_ENVELOPE" in str(
+        result.decision.predictive.ineligibility_reason
+    )
+
+
 def test_unarmed_nonmodal_yes_tail_is_abstained_before_selection(monkeypatch):
     """Cheap nonmodal YES tails require selected-side evidence before live submit.
 

@@ -405,7 +405,11 @@ class PredictiveDistributionBuilder:
                 f"distribution (RAW law forbids a forward de-bias on the served center)"
             )
         _valid_center_methods = {
-            "WEIGHTED_HUBER_CONSENSUS", "SHRUNK_EMOS", "RAW_FALLBACK",
+            "WEIGHTED_HUBER_CONSENSUS",
+            "SHRUNK_EMOS",
+            "RAW_FALLBACK",
+            "CURRENT_PROVIDER_CENTER",
+            "PRE_DAY0_LOW_EMPIRICAL_CARRYOVER",
         }
         if live_eligible and center.center_method not in _valid_center_methods:
             live_eligible = False

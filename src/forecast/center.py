@@ -148,7 +148,13 @@ class CenterEstimate:
     debiased_consensus_native: float
     debiased_member_min_native: float
     debiased_member_max_native: float
-    center_method: Literal["WEIGHTED_HUBER_CONSENSUS", "SHRUNK_EMOS", "RAW_FALLBACK"]
+    center_method: Literal[
+        "WEIGHTED_HUBER_CONSENSUS",
+        "SHRUNK_EMOS",
+        "RAW_FALLBACK",
+        "CURRENT_PROVIDER_CENTER",
+        "PRE_DAY0_LOW_EMPIRICAL_CARRYOVER",
+    ]
     center_status: Literal["OK", "ENVELOPE_FALLBACK", "DAY0_CLAMPED", "REFUSED"]
     weights_by_model: Mapping[str, float]
     reason: str
