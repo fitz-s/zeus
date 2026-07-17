@@ -2,14 +2,28 @@
 
 The city one-scheme artifact is the operator-selected deployment surface for
 source-clock vNext: exactly one source basket per city, with fixed non-negative
-weights learned from the 2026-06-25 walk-forward run. This module is deliberately
-pure and file-backed so the forecast materializer can consume the same basket as
-the replay/download tools without inventing another registry.
+weights. This module is deliberately pure and file-backed so the forecast
+materializer can consume the same basket as the replay/download tools without
+inventing another registry.
+
+ARTIFACT-FIRST LOADING (2026-07-17): ``scheme_for_city`` now prefers the
+versioned, walk-forward-refit artifact written by
+``scripts/fit_source_clock_city_weights.py`` (``state/source_clock_weights/
+ACTIVE.json`` -> ``city_weights_<YYYYMMDD>.json``) over the frozen, never-refit
+2026-06-25 CSV. The artifact is per-(city, metric); the CSV is per-city only
+(metric-agnostic). Fallback order when no explicit ``path``/env override is
+given: artifact city+metric hit -> artifact absent or city/metric miss -> legacy
+CSV. An explicit ``path=`` argument or the ``ZEUS_SOURCE_CLOCK_CITY_WEIGHTS`` env
+override is a deliberate CSV-only request (tests and callers pinning the legacy
+scheme) and bypasses the artifact entirely, byte-identical to pre-2026-07-17
+behavior.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -37,6 +51,15 @@ GRID_AWARE_ARTIFACT_NAME = "grid_aware_retest_20260625"
 # fraction of the basket, i.e. when more than 75% of the fitted basket is
 # absent. Not configurable — no new knob for a threshold this is not tuned to.
 PRESENT_WEIGHT_FLOOR = 0.25
+
+# --- versioned walk-forward artifact (2026-07-17) --------------------------------
+DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR = PROJECT_ROOT / "state" / "source_clock_weights"
+ENV_SOURCE_CLOCK_ARTIFACT_DIR = "ZEUS_SOURCE_CLOCK_WEIGHTS_ARTIFACT_DIR"
+ACTIVE_POINTER_NAME = "ACTIVE.json"
+# No metric is threaded through every scheme_for_city call site yet (the legacy CSV was
+# metric-agnostic, so existing callers pass no metric). "high" is the documented default
+# bucket read when a caller does not supply one -- a named assumption, not a silent guess.
+DEFAULT_ARTIFACT_METRIC = "high"
 
 
 @dataclass(frozen=True)
@@ -175,8 +198,77 @@ def load_city_one_schemes(path_text: str | None = None) -> Mapping[str, CityOneS
     return out
 
 
-def scheme_for_city(city: str, *, path: str | Path | None = None) -> CityOneScheme | None:
-    schemes = load_city_one_schemes(None if path is None else str(path))
+def _source_clock_artifact_dir() -> Path:
+    override = os.environ.get(ENV_SOURCE_CLOCK_ARTIFACT_DIR)
+    if override and override.strip():
+        return Path(override).expanduser()
+    return DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR
+
+
+@lru_cache(maxsize=8)
+def _load_active_artifact(artifact_dir_text: str) -> Mapping[str, object] | None:
+    """Read+integrity-check the ACTIVE.json pointer -> the referenced artifact JSON.
+
+    Fail-soft: a missing pointer/artifact, a sha256 mismatch, or any parse error returns
+    ``None`` (the caller falls back to the legacy CSV) — this loader never raises.
+    """
+    artifact_dir = Path(artifact_dir_text)
+    pointer_path = artifact_dir / ACTIVE_POINTER_NAME
+    if not pointer_path.exists():
+        return None
+    try:
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        artifact_path = artifact_dir / str(pointer["artifact"])
+        raw = artifact_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != str(pointer.get("sha256", "")):
+            return None
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _artifact_scheme_for_city(city: str, metric: str) -> CityOneScheme | None:
+    artifact = _load_active_artifact(str(_source_clock_artifact_dir()))
+    if not artifact:
+        return None
+    cell = (artifact.get("cities") or {}).get(str(city), {}).get(metric)
+    if not cell:
+        return None
+    weights = {
+        str(m): float(w) for m, w in (cell.get("models") or {}).items() if float(w) > 0.0
+    }
+    if not weights:
+        return None
+    prov = cell.get("basket_provenance") or {}
+    return CityOneScheme(
+        city=str(city),
+        scheme_status="SOURCE_CLOCK_ARTIFACT",
+        final_sources=tuple(weights),
+        weights=weights,
+        sample_n=int(prov.get("n_paired_dates", 0) or 0),
+        walkforward_pass=True,
+        one_scheme_status="SOURCE_CLOCK_ARTIFACT_ACTIVE",
+    )
+
+
+def scheme_for_city(
+    city: str, *, path: str | Path | None = None, metric: str | None = None
+) -> CityOneScheme | None:
+    """The active per-city source-clock scheme.
+
+    An explicit ``path`` or the ``ZEUS_SOURCE_CLOCK_CITY_WEIGHTS`` env override is a
+    deliberate CSV-only request (byte-identical to pre-2026-07-17 behavior). Otherwise the
+    versioned walk-forward artifact (state/source_clock_weights/ACTIVE.json) is preferred
+    for ``metric`` (default ``DEFAULT_ARTIFACT_METRIC``); a city/metric miss or an absent
+    artifact falls back to the legacy CSV.
+    """
+    if path is not None or os.environ.get(ENV_CITY_ONE_SCHEME_PATH):
+        schemes = load_city_one_schemes(None if path is None else str(path))
+        return schemes.get(str(city))
+    hit = _artifact_scheme_for_city(city, metric or DEFAULT_ARTIFACT_METRIC)
+    if hit is not None:
+        return hit
+    schemes = load_city_one_schemes(None)
     return schemes.get(str(city))
 
 

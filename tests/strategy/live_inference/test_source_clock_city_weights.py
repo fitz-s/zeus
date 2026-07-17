@@ -1,6 +1,8 @@
 # Created: 2026-06-25
-# Last reused/audited: 2026-06-25
+# Last reused/audited: 2026-07-17
 
+import hashlib
+import json
 from pathlib import Path
 
 from src.strategy.live_inference.source_clock_city_weights import (
@@ -8,6 +10,7 @@ from src.strategy.live_inference.source_clock_city_weights import (
     affected_cities_for_source_updates,
     fixed_weight_center_from_values,
     load_city_one_schemes,
+    scheme_for_city,
 )
 
 
@@ -140,3 +143,104 @@ def test_affected_cities_follow_updated_sources(tmp_path: Path) -> None:
     )
 
     assert affected_cities_for_source_updates(["kma_ldps"], path=path) == ("Seoul",)
+
+
+def _write_frozen_csv(tmp_path: Path, *, city: str = "Seoul") -> Path:
+    path = tmp_path / "city_one_scheme_grid_aware.csv"
+    path.write_text(
+        "city,selection_status,grid_aware_sources,grid_aware_weighted_sources,"
+        "grid_aware_max_distance_km,old_weighted_sources,old_positive_sources,"
+        "changed_vs_old,candidate_count,eligible_live_grid_cap10_count,"
+        "eligible_grid_cap10_count,reason\n"
+        f"{city},GRID_CAP10_LIVE_READY,ecmwf_ifs+icon_eu,"
+        "ecmwf_ifs:0.5+icon_eu:0.5,4.0,,,\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_artifact(tmp_path: Path, *, city: str, weights: dict[str, float]) -> Path:
+    artifact_dir = tmp_path / "source_clock_weights"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact = {
+        "schema_version": 1,
+        "as_of": "2026-07-16",
+        "generated_at": "TEST",
+        "git_sha": "TEST",
+        "settlement_rows_used": 1,
+        "cities": {
+            city: {
+                "high": {
+                    "models": weights,
+                    "basket_provenance": {
+                        "n_paired_dates": 100,
+                        "mae_basket": 0.5,
+                        "mae_vs_frozen_delta": -0.1,
+                        "region_fallback": False,
+                        "tier": "CITY_SPECIFIC",
+                    },
+                }
+            }
+        },
+    }
+    payload = json.dumps(artifact, sort_keys=True) + "\n"
+    (artifact_dir / "city_weights_20260716.json").write_text(payload, encoding="utf-8")
+    sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    pointer = {"artifact": "city_weights_20260716.json", "sha256": sha}
+    (artifact_dir / "ACTIVE.json").write_text(json.dumps(pointer), encoding="utf-8")
+    return artifact_dir
+
+
+def test_scheme_for_city_prefers_artifact_over_frozen_csv(tmp_path, monkeypatch) -> None:
+    import src.strategy.live_inference.source_clock_city_weights as m
+
+    csv_path = _write_frozen_csv(tmp_path, city="Seoul")
+    artifact_dir = _write_artifact(tmp_path, city="Seoul", weights={"jma_seamless": 1.0})
+    monkeypatch.setattr(m, "DEFAULT_CITY_ONE_SCHEME_PATH", csv_path)
+    monkeypatch.setattr(m, "DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR", artifact_dir)
+    m._load_active_artifact.cache_clear()
+    m.load_city_one_schemes.cache_clear()
+    monkeypatch.delenv(m.ENV_CITY_ONE_SCHEME_PATH, raising=False)
+    monkeypatch.delenv(m.ENV_SOURCE_CLOCK_ARTIFACT_DIR, raising=False)
+
+    scheme = scheme_for_city("Seoul")
+
+    assert scheme is not None
+    assert scheme.scheme_status == "SOURCE_CLOCK_ARTIFACT"
+    assert scheme.weights == {"jma_seamless": 1.0}
+
+
+def test_scheme_for_city_falls_back_to_csv_when_city_absent_from_artifact(
+    tmp_path, monkeypatch
+) -> None:
+    import src.strategy.live_inference.source_clock_city_weights as m
+
+    csv_path = _write_frozen_csv(tmp_path, city="Tokyo")
+    artifact_dir = _write_artifact(tmp_path, city="Seoul", weights={"jma_seamless": 1.0})
+    monkeypatch.setattr(m, "DEFAULT_CITY_ONE_SCHEME_PATH", csv_path)
+    monkeypatch.setattr(m, "DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR", artifact_dir)
+    m._load_active_artifact.cache_clear()
+    m.load_city_one_schemes.cache_clear()
+    monkeypatch.delenv(m.ENV_CITY_ONE_SCHEME_PATH, raising=False)
+    monkeypatch.delenv(m.ENV_SOURCE_CLOCK_ARTIFACT_DIR, raising=False)
+
+    scheme = scheme_for_city("Tokyo")
+
+    assert scheme is not None
+    assert scheme.scheme_status == "GRID_CAP10_LIVE_READY"
+    assert scheme.weights == {"ecmwf_ifs": 0.5, "icon_eu": 0.5}
+
+
+def test_scheme_for_city_explicit_path_bypasses_artifact(tmp_path, monkeypatch) -> None:
+    import src.strategy.live_inference.source_clock_city_weights as m
+
+    csv_path = _write_frozen_csv(tmp_path, city="Seoul")
+    artifact_dir = _write_artifact(tmp_path, city="Seoul", weights={"jma_seamless": 1.0})
+    monkeypatch.setattr(m, "DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR", artifact_dir)
+    m._load_active_artifact.cache_clear()
+
+    scheme = scheme_for_city("Seoul", path=csv_path)
+
+    assert scheme is not None
+    assert scheme.scheme_status == "GRID_CAP10_LIVE_READY"
+    assert scheme.weights == {"ecmwf_ifs": 0.5, "icon_eu": 0.5}
