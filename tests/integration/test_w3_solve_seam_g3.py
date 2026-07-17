@@ -664,6 +664,158 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
     assert summary["book_native_side_non_executable_count"] == 2
 
 
+def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path):
+    db_path = tmp_path / "trade.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            env TEXT NOT NULL
+        )
+        """
+    )
+    decision = GlobalSingleOrderDecision(
+        candidate=None,
+        shares=Decimal("0"),
+        cost_usd=Decimal("0"),
+        robust_delta_log_wealth=0.0,
+        robust_ev_usd=0.0,
+        capital_efficiency=0.0,
+        no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        rejection_reasons={},
+        candidate_evaluations=(),
+        candidate_input_count=0,
+    )
+    selected = SimpleNamespace(decision=decision)
+    at = _dt.datetime(2026, 7, 17, 6, 0, tzinfo=_dt.timezone.utc)
+    book_states = (
+        (
+            "family-empty",
+            "20C",
+            "condition-empty",
+            "YES",
+            "yes-empty",
+            "NO_ASK",
+            "book-empty-yes",
+            "event-empty",
+            "gamma-empty",
+        ),
+        (
+            "family-empty",
+            "20C",
+            "condition-empty",
+            "NO",
+            "no-empty",
+            "VENUE_NOT_EXECUTABLE",
+            "metadata-empty-no",
+            "event-empty",
+            "gamma-empty",
+        ),
+    )
+
+    def store(
+        *,
+        suffix: str,
+        current_selected: object = selected,
+    ) -> int:
+        row_id = global_batch_runtime._store_global_auction_receipt(
+            conn,
+            selected=current_selected,
+            selection_epoch_identity=f"epoch-{suffix}",
+            selection_cut_at_utc=at,
+            decision_at_utc=at + _dt.timedelta(seconds=1),
+            probability_manifest=(("family-empty", f"q-{suffix}"),),
+            full_scope_identity="full-scope-empty-current",
+            full_scope_family_keys=("family-empty",),
+            probability_ineligible_by_family={},
+            book_epoch_identity=f"book-{suffix}",
+            book_asset_count=1,
+            book_asset_states=book_states,
+            wealth_witness=SimpleNamespace(
+                witness_identity=f"wealth-{suffix}",
+                economic_identity="wealth-economics-current",
+            ),
+            fractional_kelly_multiplier=Decimal("0.25"),
+            book_captured_at_utc=at,
+            book_max_age=_dt.timedelta(seconds=30),
+        )
+        assert row_id is not None
+        return row_id
+
+    full_row_id = store(suffix="first")
+    duplicate_row_id = store(suffix="second")
+    rows = conn.execute(
+        "SELECT id, mode, artifact_json FROM decision_log ORDER BY id"
+    ).fetchall()
+    assert [row["mode"] for row in rows] == [
+        "global_single_order_auction",
+        "global_single_order_auction_duplicate",
+    ]
+    full_summary = json.loads(rows[0]["artifact_json"])["summary"]
+    duplicate_summary = json.loads(rows[1]["artifact_json"])["summary"]
+    assert full_row_id == rows[0]["id"]
+    assert duplicate_row_id == rows[1]["id"]
+    assert duplicate_summary["payload_compacted"] is True
+    assert duplicate_summary["payload_reference_decision_log_id"] == full_row_id
+    assert duplicate_summary["payload_reference_receipt_hash"] == (
+        full_summary["receipt_hash"]
+    )
+    assert duplicate_summary["probability_manifest"] == [
+        ["family-empty", "q-second"]
+    ]
+    assert duplicate_summary["wealth_witness_identity"] == "wealth-second"
+    for field in global_batch_runtime._GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS:
+        assert field in full_summary
+        assert field not in duplicate_summary
+    assert len(rows[1]["artifact_json"]) < len(rows[0]["artifact_json"])
+
+    winner = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(candidate_id="winner"),
+            candidate_evaluations=(),
+            candidate_input_count=0,
+            no_trade_reason=None,
+        )
+    )
+    winner_row_id = store(suffix="winner", current_selected=winner)
+    winner_mode = conn.execute(
+        "SELECT mode FROM decision_log WHERE id = ?",
+        (winner_row_id,),
+    ).fetchone()["mode"]
+    assert winner_mode == "global_single_order_auction"
+    conn.close()
+
+
+def test_global_auction_no_trade_log_groups_dynamic_reason_details():
+    summary = global_batch_runtime._no_trade_rejection_log_summary(
+        SimpleNamespace(
+            rejection_reasons={
+                "a": "ENTRY_PRICE_BELOW_FLOOR:best_ask=0.31",
+                "b": "ENTRY_PRICE_BELOW_FLOOR:best_ask=0.32",
+                "c": "NON_POSITIVE_ROBUST_OBJECTIVE:q=0.41",
+                "d": "BOOK_STALE:age=3.1",
+            }
+        ),
+        limit=2,
+    )
+
+    assert summary == (
+        {
+            "ENTRY_PRICE_BELOW_FLOOR": 2,
+            "BOOK_STALE": 1,
+        },
+        4,
+        1,
+    )
+
+
 def test_global_candidate_correlation_key_is_weather_family_not_event_or_token():
     family_key = "edli_family_shared"
     first = SimpleNamespace(

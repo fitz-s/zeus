@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 import zlib
 from types import SimpleNamespace
@@ -41,6 +42,15 @@ from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 UTC = timezone.utc
 _LOG = logging.getLogger(__name__)
+_GLOBAL_AUCTION_PAYLOAD_REFS: dict[str, tuple[str, int, str]] = {}
+_GLOBAL_AUCTION_PAYLOAD_REFS_LOCK = threading.Lock()
+_GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS = frozenset(
+    {
+        "book_native_side_states_zlib_b64",
+        "buy_sizing_rejections_zlib_b64",
+        "candidate_evaluations_zlib_b64",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -363,6 +373,64 @@ def _book_native_side_receipt(
             zlib.compress(encoded, level=9)
         ).decode("ascii"),
     }
+
+
+def _decision_log_connection_key(conn: sqlite3.Connection) -> str:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return f"connection:{id(conn)}"
+    for row in rows:
+        if str(row[1]) == "main":
+            path = str(row[2] or "")
+            return path or f"memory:{id(conn)}"
+    return f"connection:{id(conn)}"
+
+
+def _global_auction_payload_identity(receipt: Mapping[str, object]) -> str:
+    payload = {
+        "book": (
+            receipt.get("book_native_side_encoding"),
+            receipt.get("book_native_side_states_sha256"),
+        ),
+        "candidate_evaluations": (
+            receipt.get("candidate_evaluation_encoding"),
+            receipt.get("candidate_evaluations_sha256"),
+        ),
+        "buy_sizing_rejections": (
+            receipt.get("buy_sizing_rejection_encoding"),
+            receipt.get("buy_sizing_rejections_sha256"),
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _stored_global_auction_payload_ref(
+    conn: sqlite3.Connection,
+    *,
+    connection_key: str,
+    payload_identity: str,
+) -> tuple[int, str] | None:
+    ref = _GLOBAL_AUCTION_PAYLOAD_REFS.get(connection_key)
+    if ref is None or ref[0] != payload_identity:
+        return None
+    row_id, receipt_hash = ref[1], ref[2]
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM decision_log
+         WHERE id = ?
+           AND mode = 'global_single_order_auction'
+        """,
+        (row_id,),
+    ).fetchone()
+    return (row_id, receipt_hash) if row is not None else None
 
 
 def _store_global_auction_receipt(
@@ -720,16 +788,80 @@ def _store_global_auction_receipt(
         separators=(",", ":"),
     ).encode("utf-8")
     receipt["receipt_hash"] = hashlib.sha256(encoded).hexdigest()
-    row_id = store_artifact(
-        conn,
-        CycleArtifact(
-            mode="global_single_order_auction",
-            started_at=selection_cut_at_utc.isoformat(),
-            completed_at=decision_at_utc.isoformat(),
-            skipped_reason=str(getattr(decision, "no_trade_reason", "") or ""),
-            summary=receipt,
-        ),
-    )
+    payload_identity = _global_auction_payload_identity(receipt)
+    connection_key = _decision_log_connection_key(conn)
+    with _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK:
+        payload_ref = (
+            _stored_global_auction_payload_ref(
+                conn,
+                connection_key=connection_key,
+                payload_identity=payload_identity,
+            )
+            if winner is None
+            else None
+        )
+        if payload_ref is not None:
+            reference_row_id, reference_receipt_hash = payload_ref
+            compact_receipt = {
+                key: value
+                for key, value in receipt.items()
+                if key not in _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
+            }
+            compact_receipt.update(
+                {
+                    "payload_compacted": True,
+                    "payload_identity": payload_identity,
+                    "payload_reference_decision_log_id": reference_row_id,
+                    "payload_reference_mode": "global_single_order_auction",
+                    "payload_reference_receipt_hash": reference_receipt_hash,
+                }
+            )
+            row_id = store_artifact(
+                conn,
+                CycleArtifact(
+                    mode="global_single_order_auction_duplicate",
+                    started_at=selection_cut_at_utc.isoformat(),
+                    completed_at=decision_at_utc.isoformat(),
+                    skipped_reason=str(
+                        getattr(decision, "no_trade_reason", "") or ""
+                    ),
+                    summary=compact_receipt,
+                ),
+            )
+            if row_id is None:
+                raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")
+            saved_bytes = sum(
+                len(str(receipt.get(field) or ""))
+                for field in _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
+            )
+            _LOG.info(
+                "global auction receipt payload reused: row_id=%s reference_row_id=%s "
+                "payload_identity=%s saved_json_bytes=%d",
+                row_id,
+                reference_row_id,
+                payload_identity,
+                saved_bytes,
+            )
+            return row_id
+
+        row_id = store_artifact(
+            conn,
+            CycleArtifact(
+                mode="global_single_order_auction",
+                started_at=selection_cut_at_utc.isoformat(),
+                completed_at=decision_at_utc.isoformat(),
+                skipped_reason=str(
+                    getattr(decision, "no_trade_reason", "") or ""
+                ),
+                summary=receipt,
+            ),
+        )
+        if row_id is not None:
+            _GLOBAL_AUCTION_PAYLOAD_REFS[connection_key] = (
+                payload_identity,
+                row_id,
+                str(receipt["receipt_hash"]),
+            )
     if row_id is None:
         raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")
     _LOG.info(
@@ -1204,6 +1336,25 @@ def _current_held_weather_families(
     return tuple(sorted(families))
 
 
+def _no_trade_rejection_log_summary(
+    decision: object,
+    *,
+    limit: int = 16,
+) -> tuple[dict[str, int], int, int]:
+    if limit <= 0:
+        raise ValueError("GLOBAL_AUCTION_REJECTION_LOG_LIMIT_INVALID")
+    exact_reasons: set[str] = set()
+    counts: dict[str, int] = {}
+    for reason in getattr(decision, "rejection_reasons", {}).values():
+        exact = str(reason or "unknown")
+        exact_reasons.add(exact)
+        code = exact.partition(":")[0] or "unknown"
+        counts[code] = counts.get(code, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    visible = dict(ranked[:limit])
+    return visible, len(exact_reasons), max(0, len(ranked) - len(visible))
+
+
 def process_current_global_batch(
     events: Sequence[OpportunityEvent],
     *,
@@ -1268,15 +1419,17 @@ def process_current_global_batch(
         stage_started = now
 
     def log_no_trade(stage: str, decision: object) -> None:
-        counts: dict[str, int] = {}
-        for reason in getattr(decision, "rejection_reasons", {}).values():
-            key = str(reason or "unknown")
-            counts[key] = counts.get(key, 0) + 1
+        counts, distinct_reasons, omitted_codes = _no_trade_rejection_log_summary(
+            decision
+        )
         _LOG.info(
-            "global batch no-trade detail: stage=%s reason=%s rejections=%s",
+            "global batch no-trade detail: stage=%s reason=%s "
+            "rejection_codes=%s distinct_reasons=%d omitted_codes=%d",
             stage,
             str(getattr(decision, "no_trade_reason", "") or "unknown"),
-            dict(sorted(counts.items())),
+            counts,
+            distinct_reasons,
+            omitted_codes,
         )
 
     def log_winner(
