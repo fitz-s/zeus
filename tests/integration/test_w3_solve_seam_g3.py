@@ -5731,6 +5731,41 @@ def test_global_scope_pushes_family_restriction_to_carrier_readers(monkeypatch):
     )
 
 
+def test_day0_only_global_scope_never_builds_a_forecast_carrier(monkeypatch):
+    event = _global_day0_scope_event(city="Alpha", source_run_id="run-alpha")
+    day0_calls = []
+
+    class ForbiddenForecastTrigger:
+        def __init__(self, *_args, **_kwargs):
+            pytest.fail("urgent Day0 scope must not build a forecast carrier")
+
+    def current_day0(*_args, **kwargs):
+        day0_calls.append(kwargs)
+        return (event,)
+
+    monkeypatch.setattr(
+        universe,
+        "ForecastSnapshotReadyTrigger",
+        ForbiddenForecastTrigger,
+    )
+    monkeypatch.setattr(universe, "_current_day0_events", current_day0)
+
+    scope = universe.scan_current_global_auction_scope(
+        world_conn=object(),
+        forecasts_conn=object(),
+        decision_at_utc=_dt.datetime(
+            2026, 7, 11, 17, 6, tzinfo=_dt.timezone.utc
+        ),
+        restrict_to_families=(("Alpha", "2026-07-11", "high"),),
+        day0_only=True,
+    )
+
+    assert scope.events == (event,)
+    assert day0_calls[0]["restrict_to_families"] == frozenset(
+        {("Alpha", "2026-07-11", "high")}
+    )
+
+
 @pytest.fixture(autouse=True)
 def _fast_band_draws(monkeypatch):
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
@@ -9022,6 +9057,67 @@ def test_global_batch_reduce_only_skips_nonheld_universe(monkeypatch):
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY"
     )
+
+
+def test_global_batch_routes_restricted_day0_epoch_to_day0_only_scope(monkeypatch):
+    from src.events.candidate_binding import weather_family_id
+
+    decision_at = _dt.datetime(2026, 7, 11, 17, 6, tzinfo=_dt.timezone.utc)
+    event = _global_day0_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,),
+        captured_at_utc=decision_at,
+    )
+    trade_conn = _wealth_test_conn(captured_at=decision_at)
+    scan_calls = []
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (),
+    )
+
+    def scan(**kwargs):
+        scan_calls.append(kwargs)
+        return scope
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        scan,
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=trade_conn,
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda *_: pytest.fail(
+            "reduce-only must not prepare a nonheld Day0 family"
+        ),
+        actuate_winner=lambda *_: pytest.fail(
+            "reduce-only must not actuate a nonheld Day0 family"
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        buy_candidates_enabled=False,
+        restrict_to_family_keys=frozenset(
+            {
+                weather_family_id(
+                    city="Alpha",
+                    target_date="2026-07-11",
+                    metric="high",
+                )
+            }
+        ),
+    )
+
+    assert result.venue_submit_count == 0
+    assert scan_calls[0]["day0_only"] is True
 
 
 def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):

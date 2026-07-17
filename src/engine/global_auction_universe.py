@@ -1885,36 +1885,75 @@ def _current_day0_events(
           INDEXED BY idx_opportunity_events_fsr_target_date
          WHERE event_type='DAY0_EXTREME_UPDATED'
     """
-    cur = world_conn.execute(
-        select
-        + " AND json_extract(payload_json, '$.target_date') BETWEEN ? AND ? "
-        + "AND available_at<=? AND received_at<=?",
-        (
-            target_floor,
-            target_ceiling,
-            decision_at_utc.isoformat(),
-            decision_at_utc.isoformat(),
-        ),
-    )
-    rows = list(cur.fetchall())
-    for target_date in sorted(
-        {
-            target_date
-            for _, target_date, _ in held
-            if not target_floor <= target_date <= target_ceiling
-        }
-    ):
-        held_cur = world_conn.execute(
+    if restricted is None:
+        cur = world_conn.execute(
             select
-            + " AND json_extract(payload_json, '$.target_date')=? "
+            + " AND json_extract(payload_json, '$.target_date') BETWEEN ? AND ? "
             + "AND available_at<=? AND received_at<=?",
             (
-                target_date,
+                target_floor,
+                target_ceiling,
                 decision_at_utc.isoformat(),
                 decision_at_utc.isoformat(),
             ),
         )
-        rows.extend(held_cur.fetchall())
+    else:
+        requested = tuple(sorted(restricted))
+        requested_values = ",".join("(?, ?, ?)" for _ in requested)
+        requested_params = tuple(value for family in requested for value in family)
+        cur = world_conn.execute(
+            f"""
+            WITH requested(city, target_date, metric) AS (
+                VALUES {requested_values}
+            )
+            SELECT e.*,
+                   json_extract(e.payload_json, '$.city') AS _day0_city,
+                   json_extract(e.payload_json, '$.target_date') AS _day0_target_date,
+                   json_extract(e.payload_json, '$.metric') AS _day0_metric,
+                   json_extract(e.payload_json, '$.source_match_status') AS _day0_source_match,
+                   json_extract(e.payload_json, '$.local_date_status') AS _day0_local_date,
+                   json_extract(e.payload_json, '$.station_match_status') AS _day0_station_match,
+                   json_extract(e.payload_json, '$.dst_status') AS _day0_dst,
+                   json_extract(e.payload_json, '$.metric_match_status') AS _day0_metric_match,
+                   json_extract(e.payload_json, '$.rounding_status') AS _day0_rounding,
+                   json_extract(e.payload_json, '$.source_authorized_status') AS _day0_source_authorized,
+                   json_extract(e.payload_json, '$.live_authority_status') AS _day0_live_authority
+              FROM requested AS r
+              JOIN opportunity_events AS e
+                   INDEXED BY idx_opportunity_events_fsr_target_date
+                ON json_extract(e.payload_json, '$.city') = r.city
+               AND json_extract(e.payload_json, '$.target_date') = r.target_date
+               AND json_extract(e.payload_json, '$.metric') = r.metric
+             WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND e.available_at <= ?
+               AND e.received_at <= ?
+            """,
+            (
+                *requested_params,
+                decision_at_utc.isoformat(),
+                decision_at_utc.isoformat(),
+            ),
+        )
+    rows = list(cur.fetchall())
+    if restricted is None:
+        for target_date in sorted(
+            {
+                target_date
+                for _, target_date, _ in held
+                if not target_floor <= target_date <= target_ceiling
+            }
+        ):
+            held_cur = world_conn.execute(
+                select
+                + " AND json_extract(payload_json, '$.target_date')=? "
+                + "AND available_at<=? AND received_at<=?",
+                (
+                    target_date,
+                    decision_at_utc.isoformat(),
+                    decision_at_utc.isoformat(),
+                ),
+            )
+            rows.extend(held_cur.fetchall())
     names = tuple(description[0] for description in cur.description or ())
     indexes = {name: index for index, name in enumerate(names)}
 
@@ -2010,6 +2049,7 @@ def scan_current_global_auction_scope(
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
     restrict_to_families: Sequence[tuple[str, str, str]] | None = None,
+    day0_only: bool = False,
 ) -> CurrentGlobalAuctionScope:
     """Read the current decision scope and its held-family obligations."""
 
@@ -2047,28 +2087,32 @@ def scan_current_global_auction_scope(
         )
     ):
         raise ValueError("GLOBAL_AUCTION_RESTRICTED_FAMILY_INVALID")
+    if day0_only and restricted is None:
+        raise ValueError("GLOBAL_DAY0_ONLY_SCOPE_REQUIRES_FAMILY_RESTRICTION")
     scope_held = (
         held
         if restricted is None
         else tuple(family for family in held if family in restricted)
     )
-    trigger = ForecastSnapshotReadyTrigger(
-        EventWriter(world_conn),
-        live_eligibility_reader=executable_forecast_live_eligible_reader(
-            forecasts_conn
-        ),
-    )
-    forecast_events = trigger.build_committed_snapshot_events(
-        forecasts_conn=forecasts_conn,
-        decision_time=decision_at_utc,
-        received_at=decision_at_utc.isoformat(),
-        limit=None,
-        source="global-auction-current-scope",
-        phase_filter_exempt_families=set(scope_held),
-        restrict_to_families=(
-            set(restricted) if restricted is not None else None
-        ),
-    )
+    forecast_events = ()
+    if not day0_only:
+        trigger = ForecastSnapshotReadyTrigger(
+            EventWriter(world_conn),
+            live_eligibility_reader=executable_forecast_live_eligible_reader(
+                forecasts_conn
+            ),
+        )
+        forecast_events = trigger.build_committed_snapshot_events(
+            forecasts_conn=forecasts_conn,
+            decision_time=decision_at_utc,
+            received_at=decision_at_utc.isoformat(),
+            limit=None,
+            source="global-auction-current-scope",
+            phase_filter_exempt_families=set(scope_held),
+            restrict_to_families=(
+                set(restricted) if restricted is not None else None
+            ),
+        )
     events = current_global_scope_events_with_day0(
         forecast_events,
         _current_day0_events(

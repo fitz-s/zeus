@@ -1750,12 +1750,21 @@ def process_current_global_batch(
                 != restrict_to_family_keys
             ):
                 return reject("GLOBAL_AUCTION_RESTRICTED_CARRIER_MISSING")
+        day0_only_scope = bool(
+            restricted_families
+            and event_tuple
+            and all(
+                event.event_type == "DAY0_EXTREME_UPDATED"
+                for event in event_tuple
+            )
+        )
         full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
             held_families=held_families,
             restrict_to_families=restricted_families,
+            day0_only=day0_only_scope,
         )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         if cancelled("scope_scan"):
