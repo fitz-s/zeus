@@ -34,6 +34,8 @@ in_scope:
 - src/state/portfolio.py
 - src/state/fill_dedup.py
 - src/state/venue_command_repo.py
+- src/ops/monitor_cadence.py
+- src/events/price_channel_redecision_router.py
 - src/engine/global_auction_universe.py
 - src/engine/global_batch_runtime.py
 - src/engine/qkernel_spine_bridge.py
@@ -54,6 +56,9 @@ in_scope:
 - tests/test_command_recovery.py
 - tests/test_exchange_reconcile.py
 - tests/state/test_fill_dedup.py
+- tests/test_healthcheck.py
+- tests/test_ops_scripts_smoke.py
+- tests/test_p3_price_channel_ingest_lift.py
 - tests/test_executor_command_split.py
 - tests/test_exit_safety.py
 - tests/test_gate_runtime.py

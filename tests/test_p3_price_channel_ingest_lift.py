@@ -31,6 +31,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import inspect
+import json
 import sqlite3
 import time
 import types
@@ -811,6 +812,32 @@ def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
     assert src.index("entry_families = _edli_screened_entry_family_keys_for_price_channel") < src.index(
         "resting_families = _edli_resting_family_keys_for_tokens"
     )
+
+
+def test_price_channel_redecision_carries_exact_changed_tokens():
+    from src.events import price_channel_redecision_router as router
+    from src.events.opportunity_event import make_opportunity_event
+
+    at = "2026-07-17T02:00:00+00:00"
+    event = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="weather:seoul:2026-07-17:high",
+        source="price_channel",
+        observed_at=at,
+        available_at=at,
+        received_at=at,
+        payload={"city": "Seoul", "target_date": "2026-07-17", "metric": "high"},
+    )
+
+    rebuilt = router._edli_redecision_event_with_origin(
+        event,
+        "market_price",
+        changed_token_ids=("token-b", "token-a", "token-b", "", None),
+    )
+    payload = json.loads(rebuilt.payload_json)
+
+    assert payload["redecision_origin"] == "market_price"
+    assert payload["price_changed_token_ids"] == ["token-a", "token-b"]
 
 
 def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypatch):

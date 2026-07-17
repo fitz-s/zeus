@@ -35,6 +35,12 @@ CLOSED_MARKET_PENDING_SETTLEMENT_VALIDATIONS = frozenset(
         "market_closed_non_accepting_orders",
     }
 )
+REVIEW_MANAGED_REASONS = frozenset(
+    {
+        "entry_authority_chain_absence_conflict",
+        "confirmed_entry_fill_token_absent_market_not_resolved",
+    }
+)
 
 
 def collect_monitor_cadence_evidence(
@@ -66,6 +72,7 @@ def collect_monitor_cadence_evidence(
     stale_or_missing: list[dict[str, Any]] = []
     future_events: list[dict[str, Any]] = []
     settlement_recoverable: list[dict[str, Any]] = []
+    review_managed: list[dict[str, Any]] = []
     fresh_count = 0
     for position in monitored_rows:
         monitor_event = _latest_monitor_refreshed_event(
@@ -84,7 +91,23 @@ def collect_monitor_cadence_evidence(
             str(position["position_id"]),
             event_columns,
         )
+        review_event = _latest_review_required_event(
+            conn,
+            str(position["position_id"]),
+            event_columns,
+        )
         if not occurred_at:
+            if _review_required_event_is_fresh(
+                review_event,
+                now_utc=now_utc,
+                max_age_seconds=max_age_seconds,
+                min_occurred_utc=min_occurred_utc,
+                position_evidence=position_evidence,
+                future_events=future_events,
+            ):
+                fresh_count += 1
+                review_managed.append(position_evidence.copy())
+                continue
             if _exit_redecision_event_is_fresh(
                 position,
                 exit_event,
@@ -114,7 +137,17 @@ def collect_monitor_cadence_evidence(
         elif age_seconds < 0.0:
             fresh_count += 1
         elif min_occurred_utc is not None and occurred_dt < min_occurred_utc:
-            if _exit_redecision_event_is_fresh(
+            if _review_required_event_is_fresh(
+                review_event,
+                now_utc=now_utc,
+                max_age_seconds=max_age_seconds,
+                min_occurred_utc=min_occurred_utc,
+                position_evidence=position_evidence,
+                future_events=future_events,
+            ):
+                fresh_count += 1
+                review_managed.append(position_evidence.copy())
+            elif _exit_redecision_event_is_fresh(
                 position,
                 exit_event,
                 now_utc=now_utc,
@@ -133,7 +166,17 @@ def collect_monitor_cadence_evidence(
                 else:
                     stale_or_missing.append(position_evidence)
         elif max_age_seconds is not None and age_seconds > float(max_age_seconds):
-            if _exit_redecision_event_is_fresh(
+            if _review_required_event_is_fresh(
+                review_event,
+                now_utc=now_utc,
+                max_age_seconds=max_age_seconds,
+                min_occurred_utc=min_occurred_utc,
+                position_evidence=position_evidence,
+                future_events=future_events,
+            ):
+                fresh_count += 1
+                review_managed.append(position_evidence.copy())
+            elif _exit_redecision_event_is_fresh(
                 position,
                 exit_event,
                 now_utc=now_utc,
@@ -162,6 +205,8 @@ def collect_monitor_cadence_evidence(
         "stale_or_missing_positions": stale_or_missing[:sample_limit],
         "settlement_recoverable_position_count": len(settlement_recoverable),
         "settlement_recoverable_positions": settlement_recoverable[:sample_limit],
+        "review_managed_position_count": len(review_managed),
+        "review_managed_positions": review_managed[:sample_limit],
         "future_monitor_event_count": len(future_events),
         "future_monitor_events": future_events[:sample_limit],
         "non_monitor_chain_risk_position_count": len(non_monitor_chain_risk_rows),
@@ -390,6 +435,90 @@ def _latest_exit_redecision_event(
     if row is None:
         return None
     return str(row["event_type"] or ""), str(row["occurred_at"] or "")
+
+
+def _latest_review_required_event(
+    conn: sqlite3.Connection,
+    position_id: str,
+    event_columns: set[str],
+) -> dict[str, str] | None:
+    if not {"event_type", "occurred_at", "payload_json"}.issubset(event_columns):
+        return None
+    order_by = "datetime(occurred_at) DESC"
+    if "sequence_no" in event_columns:
+        order_by += ", sequence_no DESC"
+    row = conn.execute(
+        f"""
+        SELECT occurred_at, payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'REVIEW_REQUIRED'
+         ORDER BY {order_by}
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "occurred_at": str(row["occurred_at"] or ""),
+        "payload_json": str(row["payload_json"] or ""),
+    }
+
+
+def _review_required_event_is_fresh(
+    review_event: dict[str, str] | None,
+    *,
+    now_utc: datetime,
+    max_age_seconds: float | None,
+    min_occurred_utc: datetime | None,
+    position_evidence: dict[str, Any],
+    future_events: list[dict[str, Any]],
+) -> bool:
+    if review_event is None:
+        return False
+    try:
+        payload = json.loads(review_event.get("payload_json") or "{}")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    reason = str(payload.get("reason") or "")
+    if reason not in REVIEW_MANAGED_REASONS:
+        return False
+    exact_conflict = (
+        reason == "entry_authority_chain_absence_conflict"
+        and payload.get("review_state") == "unresolved"
+        and payload.get("source") == "chain_reconciliation"
+    )
+    exact_mirror = (
+        reason == "confirmed_entry_fill_token_absent_market_not_resolved"
+        and payload.get("chain_mirror_classification") == "review_open_absent"
+        and payload.get("reconciler") == "chain_mirror"
+    )
+    if not exact_conflict and not exact_mirror:
+        return False
+    occurred_at = str(review_event.get("occurred_at") or "")
+    occurred_dt = _parse_iso_utc(occurred_at)
+    if occurred_dt is None:
+        return False
+    age_seconds = (now_utc - occurred_dt).total_seconds()
+    enriched = {
+        **position_evidence,
+        "cadence_source": "REVIEW_REQUIRED",
+        "latest_review_required_at": occurred_at,
+        "review_reason": reason,
+        "review_age_seconds": round(age_seconds, 1),
+    }
+    if age_seconds < 0.0:
+        future_events.append(enriched)
+        return False
+    if min_occurred_utc is not None and occurred_dt < min_occurred_utc:
+        return False
+    if max_age_seconds is not None and age_seconds > float(max_age_seconds):
+        return False
+    position_evidence.update(enriched)
+    return True
 
 
 def _exit_redecision_event_is_fresh(

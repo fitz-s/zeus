@@ -410,7 +410,12 @@ def _edli_pending_redecision_entity_keys(world_conn) -> set[str]:
     return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
 
 
-def _edli_redecision_event_with_origin(event, origin: str):
+def _edli_redecision_event_with_origin(
+    event,
+    origin: str,
+    *,
+    changed_token_ids=(),
+):
     from src.events.opportunity_event import make_opportunity_event
 
     try:
@@ -418,6 +423,16 @@ def _edli_redecision_event_with_origin(event, origin: str):
         if not isinstance(payload, dict):
             return event
         payload["redecision_origin"] = str(origin)
+        tokens = sorted(
+            {
+                str(token or "").strip()
+                for token in changed_token_ids
+                if str(token or "").strip()
+                and str(token or "").strip() != "None"
+            }
+        )
+        if origin == "market_price" and tokens:
+            payload["price_changed_token_ids"] = tokens
         return make_opportunity_event(
             event_type=event.event_type,
             entity_key=event.entity_key,
@@ -522,7 +537,14 @@ def _edli_price_channel_redecision_events_for_events(
         event_type="EDLI_REDECISION_PENDING",
         restrict_to_families=families,
     )
-    return [_edli_redecision_event_with_origin(event, "market_price") for event in events_to_emit]
+    return [
+        _edli_redecision_event_with_origin(
+            event,
+            "market_price",
+            changed_token_ids=tokens,
+        )
+        for event in events_to_emit
+    ]
 
 
 def _edli_emit_price_channel_redecisions_for_events(

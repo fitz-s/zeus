@@ -2497,6 +2497,65 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
     assert "post-start monitor cadence verified" in detail
 
 
+def test_deploy_live_accepts_post_start_typed_review_management(monkeypatch, tmp_path):
+    dl = _load("deploy_live_monitor_review_wait", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    conn.execute("INSERT INTO position_current VALUES ('pos-1', 'day0_window', 3.0, 3.0)")
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-1', 'REVIEW_REQUIRED', ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "reason": "confirmed_entry_fill_token_absent_market_not_resolved",
+                    "chain_mirror_classification": "review_open_absent",
+                    "reconciler": "chain_mirror",
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "post-start monitor cadence verified" in detail
+
+
 def test_deploy_live_post_start_monitor_wait_rejects_stale_chain_only_projection(
     monkeypatch, tmp_path
 ):

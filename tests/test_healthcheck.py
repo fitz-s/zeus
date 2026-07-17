@@ -1689,6 +1689,47 @@ def test_monitor_cadence_status_accepts_fresh_monitor_refresh(monkeypatch, tmp_p
     assert result["open_position_count"] == 1
 
 
+def test_monitor_cadence_status_accepts_fresh_typed_review_management(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "zeus_trades.db"
+    stale_monitor = datetime.now(timezone.utc) - timedelta(minutes=20)
+    _init_monitor_cadence_db(db_path, monitor_at=stale_monitor)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE position_events ADD COLUMN payload_json TEXT")
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            payload_json
+        ) VALUES ('evt-review', 'pos-1', 3, 'REVIEW_REQUIRED', ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "reason": "entry_authority_chain_absence_conflict",
+                    "review_state": "unresolved",
+                    "source": "chain_reconciliation",
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_MONITOR_CADENCE_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["review_managed_position_count"] == 1
+    assert result["review_managed_positions"][0]["cadence_source"] == (
+        "REVIEW_REQUIRED"
+    )
+
+
 def test_monitor_cadence_status_rejects_one_stale_position_when_another_is_fresh(
     monkeypatch, tmp_path
 ):
