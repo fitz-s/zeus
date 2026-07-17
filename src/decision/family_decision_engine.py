@@ -1393,16 +1393,25 @@ class FamilyDecisionEngine:
             if sizing is None or not sizing.is_tradeable:
                 return _blocked_economics(d.economics, q_safe=q_safe)
 
-            economics = compute_candidate_economics(
-                d.route,
-                joint_q=joint_q,
-                band=band,
-                sizing_candidate=sizing,
-                matrix=matrix,
-                exposure=exposure,
-                max_stake_usd=max_stake_usd,
-                guarded_payoff_q_lcb=float(q_safe),
-            )
+            existing_q = d.economics.payoff_q_lcb
+            if existing_q is not None and math.isclose(
+                float(existing_q),
+                float(q_safe),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                economics = d.economics
+            else:
+                economics = compute_candidate_economics(
+                    d.route,
+                    joint_q=joint_q,
+                    band=band,
+                    sizing_candidate=sizing,
+                    matrix=matrix,
+                    exposure=exposure,
+                    max_stake_usd=max_stake_usd,
+                    guarded_payoff_q_lcb=float(q_safe),
+                )
             cost = float(economics.cost.value)
             chosen_cost = (
                 float(economics.chosen_stake_cost.value)

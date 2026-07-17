@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-07-16
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871; the decide() algorithm 876-901 — the candidate
@@ -1602,6 +1602,87 @@ def test_day0_hard_fact_certain_candidate_still_skips_qlcb_reliability_guard(mon
     assert result.selection_guard_basis == fde_mod.DAY0_REMAINING_DAY_GUARD_BASIS
     assert result.selection_guard_abstained is False
     assert result.selection_guard_q_safe == pytest.approx(1.0)
+
+
+def test_day0_hard_fact_reuses_already_certain_economics(monkeypatch):
+    case = _case()
+    space = _outcome_space(case)
+    obs = Day0ObservationState(
+        observed=True,
+        station_id=STATION,
+        source="wu_icao",
+        samples_count=8,
+        latest_observed_at_utc=_CAPTURED,
+        observed_high_native=25.0,
+        observed_low_native=None,
+        observed_extreme_native=25.0,
+        raw_observation_hash="day0-observed-already-passed",
+    )
+    model_set = _model_set([24.9, 25.0, 25.1], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, obs, has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    band = build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05)
+    route = _hand_route(space, side="NO", bin_id="b24", cost=0.40)
+    certain = CandidateDecision(
+        route=route,
+        economics=CandidateEconomics(
+            candidate_id=route.candidate_id,
+            point_ev=0.60,
+            edge_lcb=0.60,
+            delta_u_at_min=0.01,
+            optimal_stake_usd=Decimal("50"),
+            optimal_delta_u=0.05,
+            q_dot_payoff=1.0,
+            cost=route.route_cost.avg_cost,
+            route_id=route.route_cost.route_id,
+            payoff_q_lcb=1.0,
+        ),
+        direction_law_ok=True,
+        coherence_allows=True,
+        robust_trade_score=0.60,
+    )
+
+    monkeypatch.setattr(
+        fde_mod,
+        "compute_candidate_economics",
+        lambda *_args, **_kwargs: pytest.fail(
+            "already-certain hard-fact economics must not be sized twice"
+        ),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(model_set),
+        day0_reader=_Day0Reader(obs),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    matrix = _matrix(space)
+    result = engine._apply_day0_observed_boundary_guard(
+        scored=(certain,),
+        case=case,
+        predictive=pd,
+        omega=space,
+        joint_q=jq,
+        band=band,
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b24", "NO"): _no_sizing(
+                space,
+                "b24",
+                q_point=0.999,
+                q_lcb=0.999,
+                price="0.40",
+            ),
+        },
+        max_stake_usd=Decimal("1000"),
+    )[0]
+
+    assert result.economics.optimal_stake_usd == Decimal("50")
+    assert result.economics.optimal_delta_u == pytest.approx(0.05)
+    assert result.economics.payoff_q_lcb == pytest.approx(1.0)
+    assert result.q_lcb_guard_cell_key == "day0_monotone_hard_fact_q_lcb"
 
 
 def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():
