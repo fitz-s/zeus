@@ -2735,6 +2735,136 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert bind_calls == [True, True]
 
 
+def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
+    monkeypatch,
+):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    callbacks = []
+    prepare_calls = []
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+
+    family_key = era.weather_family_id(
+        city="Dallas",
+        target_date="2026-07-11",
+        metric="high",
+    )
+    bindings = (
+        OutcomeTokenBinding("low", "condition-low", None, None),
+        OutcomeTokenBinding("high", "condition-high", None, None),
+    )
+    samples = np.tile(np.asarray(((0.4, 0.6),)), (400, 1))
+
+    def fake_prepare(_event, *, decision_time, max_age, **_):
+        prepare_calls.append(decision_time)
+        version = f"q-{len(prepare_calls)}"
+        identity = joint_probability_witness_identity(
+            family_key=family_key,
+            bindings=bindings,
+            q_version=version,
+            resolution_identity="resolution",
+            topology_identity="topology",
+            posterior_identity_hash="run-dallas",
+            source_truth_identity=f"source-{version}",
+            authority_certificate_hash=f"certificate-{version}",
+            band_alpha=0.05,
+            band_basis="test-band",
+            yes_q_samples=samples,
+            captured_at_utc=decision_time,
+        )
+        witness = JointOutcomeProbabilityWitness(
+            family_key=family_key,
+            bindings=bindings,
+            yes_q_samples=samples,
+            q_version=version,
+            resolution_identity="resolution",
+            topology_identity="topology",
+            posterior_identity_hash="run-dallas",
+            source_truth_identity=f"source-{version}",
+            authority_certificate_hash=f"certificate-{version}",
+            band_alpha=0.05,
+            band_basis="test-band",
+            captured_at_utc=decision_time,
+            max_age=max_age,
+            witness_identity=identity,
+        )
+        return bridge.PreparedGlobalFamily(
+            decision_id=f"decision-{version}",
+            probability_witness=witness,
+            candidate_seeds=(),
+        )
+
+    def fake_process(events, **kwargs):
+        callbacks.append(kwargs["prepare_event"])
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        fake_prepare,
+    )
+
+    def adapter():
+        return era.event_bound_live_adapter_from_trade_conn(
+            trade,
+            get_current_level=lambda: era.RiskLevel.GREEN,
+            forecast_conn=forecast,
+            topology_conn=topology,
+            calibration_conn=world,
+        )
+
+    scope_event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    book_event = replace(scope_event, event_type="BOOK_SNAPSHOT")
+    at_0 = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
+    at_1 = at_0 + _dt.timedelta(seconds=1)
+    at_2 = at_1 + _dt.timedelta(seconds=1)
+    at_3 = at_2 + _dt.timedelta(seconds=1)
+    at_expired = at_2 + _dt.timedelta(seconds=181)
+
+    adapter().process_global_batch((book_event,), at_0)
+    first = callbacks[-1](scope_event, at_0).prepared_global_family
+    reused = callbacks[-1](scope_event, at_1).prepared_global_family
+
+    assert len(prepare_calls) == 1
+    assert reused.probability_witness.captured_at_utc == at_1
+    assert (
+        reused.probability_witness.witness_identity
+        != first.probability_witness.witness_identity
+    )
+    assert (
+        reused.probability_witness.sample_matrix_identity
+        == first.probability_witness.sample_matrix_identity
+    )
+
+    adapter().process_global_batch((scope_event,), at_2)
+    refreshed = callbacks[-1](scope_event, at_2).prepared_global_family
+    assert len(prepare_calls) == 2
+    assert refreshed.probability_witness.q_version == "q-2"
+
+    adapter().process_global_batch((book_event,), at_3)
+    reused_refresh = callbacks[-1](scope_event, at_3).prepared_global_family
+    assert len(prepare_calls) == 2
+    assert reused_refresh.probability_witness.q_version == "q-2"
+    assert reused_refresh.probability_witness.captured_at_utc == at_3
+
+    adapter().process_global_batch((book_event,), at_expired)
+    expired_refresh = callbacks[-1](
+        scope_event,
+        at_expired,
+    ).prepared_global_family
+    assert len(prepare_calls) == 3
+    assert expired_refresh.probability_witness.q_version == "q-3"
+    assert expired_refresh.probability_witness.captured_at_utc == at_expired
+
+
 def test_live_adapter_reuses_book_cache_after_probability_rebind(
     monkeypatch,
 ):

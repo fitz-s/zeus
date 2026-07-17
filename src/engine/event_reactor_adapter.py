@@ -329,6 +329,145 @@ _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
 _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
 
 
+_GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK = threading.Lock()
+_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE: str | None = None
+_GLOBAL_PROBABILITY_FAMILY_CACHE: dict[str, tuple[str, object]] = {}
+
+
+def _global_probability_family_cache_namespace(
+    connections: Iterable[sqlite3.Connection],
+    *,
+    decision_time: datetime,
+) -> str | None:
+    if decision_time.tzinfo is None:
+        return None
+    identities = []
+    for conn in connections:
+        try:
+            rows = conn.execute("PRAGMA database_list").fetchall()
+        except (AttributeError, sqlite3.Error):
+            return None
+        databases = []
+        for row in rows:
+            name = str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+            path = str(row[2] if not isinstance(row, sqlite3.Row) else row["file"])
+            databases.append(
+                (name, os.path.realpath(path) if path else f"memory:{id(conn)}")
+            )
+        if not databases:
+            return None
+        identities.append(tuple(databases))
+    if not identities:
+        return None
+    return hashlib.sha256(
+        repr(
+            (
+                decision_time.astimezone(UTC).date().isoformat(),
+                tuple(identities),
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _reissue_cached_global_probability_family(
+    prepared: object,
+    *,
+    captured_at_utc: datetime,
+) -> object:
+    from src.solve.solver import joint_probability_witness_identity
+
+    witness = getattr(prepared, "probability_witness", None)
+    previous_at = getattr(witness, "captured_at_utc", None)
+    if (
+        witness is None
+        or captured_at_utc.tzinfo is None
+        or previous_at is None
+        or previous_at.tzinfo is None
+    ):
+        raise ValueError("GLOBAL_PROBABILITY_CACHE_TIME_INVALID")
+    captured_at_utc = captured_at_utc.astimezone(UTC)
+    age = captured_at_utc - previous_at.astimezone(UTC)
+    if age.total_seconds() < 0.0 or age > witness.max_age:
+        raise ValueError("GLOBAL_PROBABILITY_CACHE_EXPIRED")
+    identity = joint_probability_witness_identity(
+        family_key=witness.family_key,
+        bindings=witness.bindings,
+        q_version=witness.q_version,
+        resolution_identity=witness.resolution_identity,
+        topology_identity=witness.topology_identity,
+        posterior_identity_hash=witness.posterior_identity_hash,
+        source_truth_identity=witness.source_truth_identity,
+        authority_certificate_hash=witness.authority_certificate_hash,
+        band_alpha=witness.band_alpha,
+        band_basis=witness.band_basis,
+        yes_q_samples=witness.yes_q_samples,
+        captured_at_utc=captured_at_utc,
+    )
+    return dataclass_replace(
+        prepared,
+        probability_witness=dataclass_replace(
+            witness,
+            captured_at_utc=captured_at_utc,
+            witness_identity=identity,
+        ),
+    )
+
+
+def _probe_global_probability_family_cache(
+    namespace: str | None,
+    *,
+    family_key: str,
+    event_id: str,
+    captured_at_utc: datetime,
+) -> object | None:
+    if not namespace or not family_key or not event_id:
+        return None
+    with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
+        if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
+            return None
+        cached = _GLOBAL_PROBABILITY_FAMILY_CACHE.get(family_key)
+    if cached is None or cached[0] != event_id:
+        return None
+    try:
+        return _reissue_cached_global_probability_family(
+            cached[1],
+            captured_at_utc=captured_at_utc,
+        )
+    except (AttributeError, TypeError, ValueError):
+        _evict_global_probability_family_cache(namespace, family_key=family_key)
+        return None
+
+
+def _store_global_probability_family_cache(
+    namespace: str | None,
+    *,
+    family_key: str,
+    event_id: str,
+    prepared: object,
+) -> None:
+    global _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE
+
+    if not namespace or not family_key or not event_id:
+        return
+    with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
+        if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
+            _GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+            _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE = namespace
+        _GLOBAL_PROBABILITY_FAMILY_CACHE[family_key] = (event_id, prepared)
+
+
+def _evict_global_probability_family_cache(
+    namespace: str | None,
+    *,
+    family_key: str,
+) -> None:
+    if not namespace or not family_key:
+        return
+    with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
+        if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE == namespace:
+            _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(family_key, None)
+
+
 def _cached_global_book_probabilities(epoch: object) -> dict[str, object] | None:
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         entry = _GLOBAL_BOOK_EPOCH_CACHE
@@ -5017,6 +5156,38 @@ def event_bound_live_adapter_from_trade_conn(
                 _live_ack_count[0] += 1
         return receipt
 
+    def _prepared_global_event_receipt(
+        event: OpportunityEvent,
+        prepared: object,
+    ) -> EventSubmissionReceipt:
+        payload = _payload(event)
+        family_key = str(prepared.probability_witness.family_key)
+        _global_entry_policy_by_family[family_key] = (
+            str(
+                payload.get("event_type")
+                or getattr(event, "event_type", "")
+                or ""
+            ).strip(),
+            str(
+                payload.get("metric")
+                or payload.get("temperature_metric")
+                or ""
+            ).strip(),
+        )
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            city=str(payload.get("city") or "") or None,
+            target_date=str(payload.get("target_date") or "") or None,
+            metric=str(payload.get("metric") or "") or None,
+            family_id=prepared.probability_witness.family_key,
+            side_effect_status="NO_SUBMIT",
+            reason="GLOBAL_CURRENT_PROBABILITY_PREPARED",
+            proof_accepted=True,
+            prepared_global_family=prepared,
+        )
+
     def _prepare_global_event(
         event: OpportunityEvent,
         decision_time: datetime,
@@ -5045,33 +5216,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
                 proof_accepted=False,
             )
-        payload = _payload(event)
-        family_key = str(prepared.probability_witness.family_key)
-        _global_entry_policy_by_family[family_key] = (
-            str(
-                payload.get("event_type")
-                or getattr(event, "event_type", "")
-                or ""
-            ).strip(),
-            str(
-                payload.get("metric")
-                or payload.get("temperature_metric")
-                or ""
-            ).strip(),
-        )
-        return EventSubmissionReceipt(
-            False,
-            event.event_id,
-            event.causal_snapshot_id,
-            city=str(payload.get("city") or "") or None,
-            target_date=str(payload.get("target_date") or "") or None,
-            metric=str(payload.get("metric") or "") or None,
-            family_id=prepared.probability_witness.family_key,
-            side_effect_status="NO_SUBMIT",
-            reason="GLOBAL_CURRENT_PROBABILITY_PREPARED",
-            proof_accepted=True,
-            prepared_global_family=prepared,
-        )
+        return _prepared_global_event_receipt(event, prepared)
 
     def _submit_inner(
         event: OpportunityEvent,
@@ -5770,6 +5915,54 @@ def event_bound_live_adapter_from_trade_conn(
                 winner_event_id=None,
                 venue_submit_count=0,
             )
+
+        probability_cache_namespace = _global_probability_family_cache_namespace(
+            (forecast_conn, topology_conn, calibration_conn),
+            decision_time=decision_time,
+        )
+        probability_cache_stats = {"hit": 0, "miss": 0, "refresh": 0}
+
+        def _prepare_current_scope_event(event, at):
+            payload = _payload(event)
+            try:
+                family_key = weather_family_id(
+                    city=str(payload.get("city") or ""),
+                    target_date=str(payload.get("target_date") or ""),
+                    metric=str(payload.get("metric") or "").lower(),
+                )
+            except (TypeError, ValueError):
+                family_key = ""
+            force_refresh = (
+                refresh_family_keys is None
+                or family_key in refresh_family_keys
+            )
+            if force_refresh:
+                probability_cache_stats["refresh"] += 1
+                _evict_global_probability_family_cache(
+                    probability_cache_namespace,
+                    family_key=family_key,
+                )
+            else:
+                cached = _probe_global_probability_family_cache(
+                    probability_cache_namespace,
+                    family_key=family_key,
+                    event_id=event.event_id,
+                    captured_at_utc=at,
+                )
+                if cached is not None:
+                    probability_cache_stats["hit"] += 1
+                    return _prepared_global_event_receipt(event, cached)
+                probability_cache_stats["miss"] += 1
+            receipt = _prepare_global_event(event, at)
+            prepared = receipt.prepared_global_family
+            if prepared is not None:
+                _store_global_probability_family_cache(
+                    probability_cache_namespace,
+                    family_key=family_key,
+                    event_id=event.event_id,
+                    prepared=prepared,
+                )
+            return receipt
 
         def _actuate(event, actuation, at):
             return _stamp_live_adapter_lane(
@@ -6503,7 +6696,7 @@ def event_bound_live_adapter_from_trade_conn(
             )
 
         try:
-            return process_current_global_batch(
+            result = process_current_global_batch(
                 events,
                 decision_time=decision_time,
                 # The live constructor passes the world DB (with forecasts attached)
@@ -6514,7 +6707,7 @@ def event_bound_live_adapter_from_trade_conn(
                 forecast_conn=forecast_conn,
                 trade_conn=trade_conn,
                 payload_reader=_payload,
-                prepare_event=_prepare_global_event,
+                prepare_event=_prepare_current_scope_event,
                 actuate_winner=_actuate,
                 preflight_winner=_preflight,
                 actuate_preflighted_winner=GlobalOneShotActuator(
@@ -6558,6 +6751,13 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
                 epoch_superseded=_epoch_superseded,
             )
+            logging.getLogger(__name__).info(
+                "global probability family cache: hits=%d misses=%d refreshed=%d",
+                probability_cache_stats["hit"],
+                probability_cache_stats["miss"],
+                probability_cache_stats["refresh"],
+            )
+            return result
         finally:
             with contextlib.suppress(Exception):
                 trade_conn.commit()
