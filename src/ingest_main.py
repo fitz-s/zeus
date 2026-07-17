@@ -52,9 +52,12 @@ REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV = "ZEUS_REPLACEMENT_SOURCE_
 REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS"
 DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
 DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
+DAY0_METAR_COMMIT_RETRY_SECONDS = 0.25
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 _DAY0_METAR_EMITTER: Any | None = None
+_DAY0_METAR_COMMIT_LOCK = threading.Lock()
+_DAY0_METAR_PENDING_COMMITS: list[tuple[Any, str, bool]] = []
 _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
@@ -119,6 +122,133 @@ def _day0_metar_emitter():
         # into skipped polls, stretching the effective source clock to 10s.
         _DAY0_METAR_EMITTER = Day0FastObsEmitter(min_fetch_interval_s=0.0)
     return _DAY0_METAR_EMITTER
+
+
+def _stage_day0_metar_commit(
+    prefetch: Any,
+    *,
+    received_at: str,
+    day0_is_tradeable: bool,
+) -> None:
+    with _DAY0_METAR_COMMIT_LOCK:
+        staged = (
+            prefetch,
+            received_at,
+            day0_is_tradeable,
+        )
+        if len(_DAY0_METAR_PENDING_COMMITS) < 2:
+            _DAY0_METAR_PENDING_COMMITS.append(staged)
+        else:
+            _DAY0_METAR_PENDING_COMMITS[-1] = staged
+
+
+def _commit_pending_day0_metar(*, origin: str) -> dict:
+    """Commit an already-fetched METAR delta without repeating network I/O."""
+
+    if not _DAY0_METAR_COMMIT_LOCK.acquire(blocking=False):
+        return {"status": "COMMIT_ACTIVE"}
+
+    conn = None
+    mutex = None
+    acquired = False
+    emitted = 0
+    inserted_event_ids: list[str] = []
+    pending_reports = 0
+    try:
+        if not _DAY0_METAR_PENDING_COMMITS:
+            return {"status": "SOURCE_CURRENT"}
+        staged = _DAY0_METAR_PENDING_COMMITS[0]
+        prefetch, received_at, day0_is_tradeable = staged
+        pending_reports = len(tuple(prefetch.ledger_reports or ()))
+        if pending_reports == 0:
+            del _DAY0_METAR_PENDING_COMMITS[0]
+            return {"status": "SOURCE_CURRENT"}
+
+        import sqlite3
+
+        from src.runtime.reactor_wake import publish_reactor_wake
+        from src.state.db import get_world_connection, world_write_mutex
+
+        conn = get_world_connection(write_class="live")
+        write_budget_s = _day0_metar_write_budget_seconds()
+        conn.execute(f"PRAGMA busy_timeout = {max(1, int(write_budget_s * 1000.0))}")
+        mutex = world_write_mutex()
+        acquired = mutex.acquire(timeout=write_budget_s)
+        if not acquired:
+            logger.info(
+                "DAY0_METAR_COMMIT_DEFERRED origin=%s reason=world_writer_busy "
+                "pending_reports=%d budget_ms=%d",
+                origin,
+                pending_reports,
+                int(write_budget_s * 1000.0),
+            )
+            return {
+                "status": "WRITE_CONTENDED",
+                "pending_reports": pending_reports,
+            }
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            emitted = _day0_metar_emitter().emit_prefetched(
+                world_conn=conn,
+                prefetch=prefetch,
+                received_at=received_at,
+                limit=max(50, len(prefetch.eligible) * 2),
+                day0_is_tradeable=day0_is_tradeable,
+                inserted_event_ids=inserted_event_ids,
+            )
+            conn.commit()
+            del _DAY0_METAR_PENDING_COMMITS[0]
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                logger.info(
+                    "DAY0_METAR_COMMIT_DEFERRED origin=%s reason=sqlite_busy "
+                    "pending_reports=%d exc=%r",
+                    origin,
+                    pending_reports,
+                    exc,
+                )
+                return {
+                    "status": "WRITE_CONTENDED",
+                    "pending_reports": pending_reports,
+                }
+            raise
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        if acquired and mutex is not None:
+            mutex.release()
+        if conn is not None:
+            conn.close()
+        _DAY0_METAR_COMMIT_LOCK.release()
+
+    if emitted:
+        try:
+            publish_reactor_wake(
+                source="day0_metar_source_clock",
+                reason="day0_extreme_event_committed",
+                event_ids=tuple(inserted_event_ids),
+            )
+        except Exception:
+            logger.warning(
+                "DAY0_METAR_REACTOR_WAKE_FAILED events_emitted=%d; "
+                "periodic reactor scan remains authoritative",
+                emitted,
+                exc_info=True,
+            )
+    logger.info(
+        "DAY0_METAR_COMMIT_COMPLETED origin=%s pending_reports=%d emitted=%d",
+        origin,
+        pending_reports,
+        emitted,
+    )
+    return {
+        "status": "COMMITTED",
+        "pending_reports": pending_reports,
+        "events_emitted": emitted,
+    }
 
 
 def _replacement_availability_poll_seconds() -> int:
@@ -818,19 +948,14 @@ def _day0_metar_source_clock_tick():
     The HTTP batch runs before any DB lock. Cold start loads the full observation
     window; steady-state polls request and merge only the recent publication
     delta. Unchanged reports perform no SQLite work. A new publication gets one
-    short live-writer attempt; lock contention is bounded and retried on the next
-    source-clock tick because the emitter does not acknowledge its publication
-    identity until the ledger write succeeds.
+    short live-writer attempt; lock contention is bounded and retried every
+    250ms without another HTTP fetch. The emitter does not acknowledge its
+    publication identity until the ledger write succeeds.
     """
-    import sqlite3
-
     from src.config import runtime_cities, settings
     from src.events.event_priority import day0_is_tradeable_for_scope
-    from src.runtime.reactor_wake import publish_reactor_wake
     from src.state.db import (
-        get_world_connection,
         get_world_connection_read_only,
-        world_write_mutex,
     )
 
     edli_cfg = settings["edli"]
@@ -876,85 +1001,21 @@ def _day0_metar_source_clock_tick():
             "freshness_status": prefetch.freshness_status,
             "reports": len(prefetch.reports),
         }
-
-    conn = get_world_connection(write_class="live")
-    write_budget_s = _day0_metar_write_budget_seconds()
-    conn.execute(f"PRAGMA busy_timeout = {max(1, int(write_budget_s * 1000.0))}")
-    mutex = world_write_mutex()
-    acquired = mutex.acquire(timeout=write_budget_s)
-    if not acquired:
-        conn.close()
-        logger.info(
-            "DAY0_METAR_SOURCE_CLOCK_DEFERRED reason=world_writer_busy "
-            "pending_reports=%d budget_ms=%d",
-            len(pending_reports),
-            int(write_budget_s * 1000.0),
-        )
-        return {
-            "status": "WRITE_CONTENDED",
-            "pending_reports": len(pending_reports),
-        }
-
-    emitted = 0
-    inserted_event_ids: list[str] = []
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        emitted = emitter.emit_prefetched(
-            world_conn=conn,
-            prefetch=prefetch,
-            received_at=decision_time.isoformat(),
-            limit=max(50, len(prefetch.eligible) * 2),
-            day0_is_tradeable=day0_is_tradeable_for_scope(
-                str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-            ),
-            inserted_event_ids=inserted_event_ids,
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        conn.rollback()
-        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
-            logger.info(
-                "DAY0_METAR_SOURCE_CLOCK_DEFERRED reason=sqlite_busy "
-                "pending_reports=%d exc=%r",
-                len(pending_reports),
-                exc,
-            )
-            return {
-                "status": "WRITE_CONTENDED",
-                "pending_reports": len(pending_reports),
-            }
-        raise
-    except BaseException:
-        conn.rollback()
-        raise
-    finally:
-        mutex.release()
-        conn.close()
-
-    if emitted:
-        try:
-            publish_reactor_wake(
-                source="day0_metar_source_clock",
-                reason="day0_extreme_event_committed",
-                event_ids=tuple(inserted_event_ids),
-            )
-        except Exception:
-            logger.warning(
-                "DAY0_METAR_REACTOR_WAKE_FAILED events_emitted=%d; "
-                "periodic reactor scan remains authoritative",
-                emitted,
-                exc_info=True,
-            )
-    logger.info(
-        "DAY0_METAR_SOURCE_CLOCK_COMMITTED pending_reports=%d emitted=%d",
-        len(pending_reports),
-        emitted,
+    _stage_day0_metar_commit(
+        prefetch,
+        received_at=decision_time.isoformat(),
+        day0_is_tradeable=day0_is_tradeable_for_scope(
+            str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
+        ),
     )
-    return {
-        "status": "COMMITTED",
-        "pending_reports": len(pending_reports),
-        "events_emitted": emitted,
-    }
+    return _commit_pending_day0_metar(origin="source_clock")
+
+
+@_scheduler_job("ingest_day0_metar_commit_retry")
+def _day0_metar_commit_retry_tick():
+    """Retry only the pending canonical write on a sub-second clock."""
+
+    return _commit_pending_day0_metar(origin="commit_retry")
 
 
 @_scheduler_job("ingest_day0_oracle_anomaly")
@@ -2417,6 +2478,10 @@ def _ingest_main_job_specs() -> list[tuple]:
             id="ingest_day0_metar_source_clock", max_instances=1, coalesce=True,
             misfire_grace_time=max(5, int(day0_metar_poll_seconds * 2)),
             next_run_time=now)),
+        (_day0_metar_commit_retry_tick, "interval", dict(seconds=DAY0_METAR_COMMIT_RETRY_SECONDS,
+            id="ingest_day0_metar_commit_retry", max_instances=1, coalesce=True,
+            misfire_grace_time=1,
+            next_run_time=now + timedelta(seconds=DAY0_METAR_COMMIT_RETRY_SECONDS))),
         (_day0_oracle_anomaly_tick, "interval", dict(seconds=10,
             id="ingest_day0_oracle_anomaly", max_instances=1, coalesce=True,
             misfire_grace_time=30, next_run_time=now + timedelta(seconds=2.5))),

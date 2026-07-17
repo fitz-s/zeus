@@ -30,6 +30,7 @@ Relationship contracts tested:
 """
 from __future__ import annotations
 
+import threading
 import time
 from datetime import date, datetime, timezone, timedelta
 from types import SimpleNamespace
@@ -666,6 +667,16 @@ class TestObsFastTickSchedulerRegistration:
         )
         assert kwargs["seconds"] == 1.0
 
+        retry_kwargs = next(
+            spec[2]
+            for spec in specs
+            if spec[2].get("id") == "ingest_day0_metar_commit_retry"
+        )
+        assert retry_kwargs["seconds"] == im.DAY0_METAR_COMMIT_RETRY_SECONDS
+        assert retry_kwargs["max_instances"] == 1
+        assert retry_kwargs["coalesce"] is True
+        assert retry_kwargs["next_run_time"] is not None
+
     def test_day0_metar_source_clock_has_one_cadence_authority(self, monkeypatch):
         import src.ingest_main as im
 
@@ -707,6 +718,10 @@ class TestObsFastTickSchedulerRegistration:
 class TestDay0MetarSourceClockTick:
     @staticmethod
     def _enable(monkeypatch):
+        import src.ingest_main as im
+
+        monkeypatch.setattr(im, "_DAY0_METAR_PENDING_COMMITS", [])
+        monkeypatch.setattr(im, "_DAY0_METAR_COMMIT_LOCK", threading.Lock())
         monkeypatch.setattr(
             "src.config.settings",
             {
@@ -984,6 +999,121 @@ class TestDay0MetarSourceClockTick:
         assert result == {"status": "WRITE_CONTENDED", "pending_reports": 1}
         conn.close.assert_called_once_with()
         mutex.release.assert_not_called()
+
+    def test_commit_retry_reuses_prefetch_after_writer_contention(
+        self,
+        monkeypatch,
+    ):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        order: list[str] = []
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+            eligible=((_wu_icao_city(), object(), "2026-06-12"),),
+        )
+
+        class _Emitter:
+            def ledger_report_keys_loaded(self):
+                return True
+
+            def prefetch(self, **_kw):
+                order.append("fetch")
+                return prefetch
+
+            def emit_prefetched(self, **kwargs):
+                order.append("emit")
+                kwargs["inserted_event_ids"].append("event-day0")
+                return 1
+
+        class _Conn:
+            def execute(self, sql, _params=()):
+                if sql == "BEGIN IMMEDIATE":
+                    order.append("begin")
+                return self
+
+            def commit(self):
+                order.append("commit")
+
+            def rollback(self):
+                order.append("rollback")
+
+            def close(self):
+                order.append("close")
+
+        class _Mutex:
+            def __init__(self):
+                self.attempts = iter((False, True))
+
+            def acquire(self, *, timeout):
+                order.append(f"acquire:{timeout}")
+                return next(self.attempts)
+
+            def release(self):
+                order.append("release")
+
+        emitter = _Emitter()
+        mutex = _Mutex()
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: mutex)
+        monkeypatch.setattr(
+            "src.runtime.reactor_wake.publish_reactor_wake",
+            lambda **kwargs: order.append(f"wake:{','.join(kwargs['event_ids'])}"),
+        )
+
+        first = im._day0_metar_source_clock_tick.__wrapped__()
+        retried = im._day0_metar_commit_retry_tick.__wrapped__()
+
+        assert first == {"status": "WRITE_CONTENDED", "pending_reports": 1}
+        assert retried == {
+            "status": "COMMITTED",
+            "pending_reports": 1,
+            "events_emitted": 1,
+        }
+        assert order.count("fetch") == 1
+        assert order.count("emit") == 1
+        assert order.index("commit") < order.index("wake:event-day0")
+        assert not im._DAY0_METAR_PENDING_COMMITS
+
+    def test_commit_retry_without_pending_fact_does_no_db_work(
+        self,
+        monkeypatch,
+    ):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection",
+            lambda **_kw: (_ for _ in ()).throw(
+                AssertionError("empty commit retry must not open the DB")
+            ),
+        )
+
+        assert im._day0_metar_commit_retry_tick.__wrapped__() == {
+            "status": "SOURCE_CURRENT"
+        }
+
+    def test_commit_staging_preserves_oldest_and_coalesces_latest(
+        self,
+        monkeypatch,
+    ):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        prefetched = [SimpleNamespace(name=name) for name in ("old", "middle", "new")]
+        for prefetch in prefetched:
+            im._stage_day0_metar_commit(
+                prefetch,
+                received_at=prefetch.name,
+                day0_is_tradeable=True,
+            )
+
+        assert len(im._DAY0_METAR_PENDING_COMMITS) == 2
+        assert im._DAY0_METAR_PENDING_COMMITS[0][0] is prefetched[0]
+        assert im._DAY0_METAR_PENDING_COMMITS[1][0] is prefetched[2]
 
 
 class TestDay0OracleAnomalyTick:
