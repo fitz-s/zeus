@@ -611,16 +611,23 @@ def test_redecision_screen_skips_forecast_scan_when_pending_covers_admission():
     )
 
 
-def test_redecision_screen_full_refresh_still_requires_scoped_freshness():
-    """Refresh summary is not live authority; scoped condition freshness is."""
+def test_redecision_screen_async_refresh_still_requires_scoped_freshness():
+    """An async refresh request is not authority; scoped freshness is."""
 
     screen_src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
     assert "fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate" in screen_src
-    assert "confirmation_refresh_verified" in screen_src
-    assert screen_src.index("_edli_confirmation_refresh_unavailable") < screen_src.index(
+    assert "missing_confirm_families =" in screen_src
+    assert screen_src.index(
         "fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate"
+    ) < screen_src.index(
+        "missing_confirm_families ="
     )
+    assert "confirmed_entry_scope &= fresh_entry_scope" in screen_src
+    assert "confirmed_rest_scope &= fresh_rest_scope" in screen_src
+    assert "confirmed_held_scope &= fresh_held_scope" in screen_src
+    assert "async_confirmation_requested" in screen_src
+    assert "current_substrate_verified" in screen_src
     no_fresh_idx = screen_src.index("confirmation refresh produced no fresh")
     assert screen_src.rindex(
         "_edli_apply_unadmitted_redecision_expiry",
