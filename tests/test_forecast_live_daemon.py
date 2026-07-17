@@ -1162,6 +1162,38 @@ def test_reactor_wake_retry_floor_skips_full_cycle_until_due(monkeypatch) -> Non
     assert main._reactor_wake_events_ready(("event-retry",), decision_time=now) is True
 
 
+def test_reactor_wake_acknowledges_event_durably_deferred_after_service(
+    monkeypatch,
+) -> None:
+    import src.main as main
+
+    class _Conn:
+        def __init__(self, status: str, claimed_at: str | None) -> None:
+            self.status = status
+            self.claimed_at = claimed_at
+
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchall(self):
+            return [("event-retry", self.status, self.claimed_at)]
+
+        def close(self) -> None:
+            pass
+
+    conn = _Conn("pending", "2999-07-16T12:00:05+00:00")
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda: conn)
+
+    assert main._reactor_wake_events_finished(("event-retry",)) is True
+
+    conn.claimed_at = None
+    assert main._reactor_wake_events_finished(("event-retry",)) is False
+
+    conn.status = "processing"
+    conn.claimed_at = "2999-07-16T12:00:05+00:00"
+    assert main._reactor_wake_events_finished(("event-retry",)) is False
+
+
 def test_reactor_wake_poll_does_not_spin_on_future_retry_floor(monkeypatch) -> None:
     import src.main as main
     from src.runtime import reactor_wake

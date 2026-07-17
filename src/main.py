@@ -3782,7 +3782,7 @@ def _day0_wake_requires_exit_monitor(
 
 
 def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
-    """Return whether every event-backed wake has left the active queue."""
+    """Return whether every wake event is complete or durably deferred."""
 
     clean_event_ids = tuple(
         dict.fromkeys(
@@ -3799,7 +3799,7 @@ def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
         placeholders = ",".join("?" for _ in clean_event_ids)
         rows = conn.execute(
             f"""
-            SELECT event_id, processing_status
+            SELECT event_id, processing_status, claimed_at
               FROM opportunity_event_processing
              WHERE consumer_name = 'edli_reactor_v1'
                AND event_id IN ({placeholders})
@@ -3817,7 +3817,24 @@ def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
             conn.close()
     if len(rows) != len(clean_event_ids):
         return False
-    return all(str(row[1]) not in {"pending", "processing"} for row in rows)
+    now = datetime.now(timezone.utc)
+    for _event_id, status, claimed_at in rows:
+        status = str(status)
+        if status == "processing":
+            return False
+        if status != "pending":
+            continue
+        if claimed_at in {None, ""}:
+            return False
+        try:
+            floor = datetime.fromisoformat(str(claimed_at).replace("Z", "+00:00"))
+            if floor.tzinfo is None:
+                floor = floor.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return False
+        if floor.astimezone(timezone.utc) <= now:
+            return False
+    return True
 
 
 def _reactor_wake_events_ready(
