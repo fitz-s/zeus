@@ -480,6 +480,7 @@ def _global_book_curve(
         min_tick=tick,
         min_order_size=min_order,
         quote_ttl=max_age,
+        fee_details=fee_details,
     )
 
 

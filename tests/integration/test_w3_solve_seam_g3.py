@@ -4471,6 +4471,16 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
         min_tick=Decimal("0.01"),
         min_order_size=Decimal("1"),
         quote_ttl=_dt.timedelta(seconds=30),
+        fee_details=canonicalize_fee_details(
+            {
+                "fee_rate_fraction": 0.05,
+                "feeSchedule_taker_only": True,
+                "maker_rebate_rate": 0.25,
+                "fee_type": "weather_fees",
+            },
+            source="global_current_gamma_fee_schedule",
+            token_id="token-no-a",
+        ),
     )
     raw_book = {
         "asset_id": "token-no-a",
@@ -4517,6 +4527,9 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
     assert snapshot.min_tick_size == curve.min_tick
     assert snapshot.min_order_size == curve.min_order_size
     assert snapshot.selected_outcome_token_id == curve.token_id
+    assert snapshot.fee_details["fee_rate_fraction"] == 0.05
+    assert snapshot.fee_details["feeSchedule_taker_only"] is True
+    assert snapshot.fee_details["source"] == "global_current_gamma_fee_schedule"
     assert snapshot.orderbook_depth_jsonb == json.dumps(
         {
             "asks": [
@@ -4549,6 +4562,11 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
     changed_curve = replace(
         curve,
         fee_model=FeeModel(fee_rate=Decimal("0.10")),
+        fee_details=canonicalize_fee_details(
+            {"fee_rate_fraction": 0.10},
+            source="global_current_gamma_fee_schedule",
+            token_id="token-no-a",
+        ),
     )
     changed_candidate = replace(
         candidate,

@@ -58,7 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Mapping
 
 from src.contracts.execution_price import ExecutionPrice
 
@@ -173,6 +173,7 @@ class ExecutableCostCurve:
     min_tick: Decimal
     min_order_size: Decimal
     quote_ttl: timedelta
+    fee_details: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.side not in ("YES", "NO"):

@@ -973,8 +973,7 @@ def _market_dict_from_snapshot(snapshot) -> dict:
     # coefficient (Gamma feeSchedule.rate=0.05). Losing this field makes the
     # recapture compare two different fee semantics and reject every valid FAK.
     fee_details = dict(getattr(snapshot, "fee_details", None) or {})
-    fee_source = str(fee_details.get("source") or "")
-    if fee_source.startswith("gamma_fee_schedule"):
+    if "feeSchedule_taker_only" in fee_details:
         from src.contracts.executable_market_snapshot import (
             fee_rate_fraction_from_details,
         )

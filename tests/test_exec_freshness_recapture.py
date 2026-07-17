@@ -228,6 +228,67 @@ def test_market_reconstruction_preserves_gamma_v2_fee_schedule():
     }
 
 
+def test_market_reconstruction_preserves_global_current_gamma_v2_fee_schedule():
+    """Global auction provenance must not fall back to legacy /fee-rate."""
+    from src.engine.cycle_runtime import _market_dict_from_snapshot
+
+    snapshot = replace(
+        _stale_snapshot(captured_at=NOW),
+        fee_details={
+            "fee_rate_fraction": 0.05,
+            "fee_rate_bps": 500,
+            "fee_rate_source_field": "fee_rate_fraction",
+            "feeSchedule_taker_only": True,
+            "source": "global_current_gamma_fee_schedule",
+            "token_id": "yes-token",
+        },
+    )
+
+    raw = _market_dict_from_snapshot(snapshot)["outcomes"][0]["gamma_market_raw"]
+
+    assert raw["feeSchedule"] == {
+        "exponent": 1,
+        "rate": 0.05,
+        "takerOnly": True,
+    }
+
+
+def test_global_current_gamma_recapture_does_not_call_legacy_fee_endpoint(conn):
+    """A submit recapture keeps the V2 schedule and removes one HTTP request."""
+    from src.data.market_scanner import capture_executable_market_snapshot
+    from src.engine.cycle_runtime import _market_dict_from_snapshot
+
+    snapshot = replace(
+        _stale_snapshot(captured_at=NOW),
+        fee_details={
+            "fee_rate_fraction": 0.05,
+            "fee_rate_bps": 500,
+            "fee_rate_source_field": "fee_rate_fraction",
+            "feeSchedule_taker_only": True,
+            "source": "global_current_gamma_fee_schedule",
+            "token_id": "yes-token",
+        },
+    )
+
+    class _NoLegacyFeeClob(_FakeClob):
+        def get_fee_rate(self, token_id: str) -> float:
+            raise AssertionError(f"legacy fee endpoint called for {token_id}")
+
+    result = capture_executable_market_snapshot(
+        conn,
+        market=_market_dict_from_snapshot(snapshot),
+        decision=_decision(),
+        clob=_NoLegacyFeeClob(),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+    captured = get_snapshot(conn, str(result["executable_snapshot_id"]))
+
+    assert captured is not None
+    assert captured.fee_details["fee_rate_fraction"] == pytest.approx(0.05)
+    assert captured.fee_details["source"] == "gamma_fee_schedule"
+
+
 def test_stale_snapshot_with_clob_recaptures_fresh(conn):
     """RED→GREEN: stale persisted snapshot + a client must re-capture, not raise stale."""
     stale_at = NOW - (FRESHNESS_WINDOW_DEFAULT + timedelta(seconds=30))

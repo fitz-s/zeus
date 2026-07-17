@@ -7606,6 +7606,7 @@ def _global_buy_candidate_from_raw_book(
         min_tick=min_tick,
         min_order_size=min_order_size,
         quote_ttl=selected_curve.quote_ttl,
+        fee_details=selected_curve.fee_details,
     )
     from src.solve.solver import executable_curve_identity
 
@@ -7636,7 +7637,10 @@ def _persist_global_candidate_executable_snapshot(
     one book.
     """
 
-    from src.contracts.executable_market_snapshot import canonicalize_fee_details
+    from src.contracts.executable_market_snapshot import (
+        canonicalize_fee_details,
+        fee_rate_fraction_from_details,
+    )
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     curve = getattr(candidate, "executable_cost_curve", None)
@@ -7684,11 +7688,26 @@ def _persist_global_candidate_executable_snapshot(
         sort_keys=True,
         separators=(",", ":"),
     )
-    fee_details = canonicalize_fee_details(
-        {"fee_rate_fraction": float(curve.fee_model.fee_rate)},
-        source="global_current_book_curve",
-        token_id=candidate_token,
-    )
+    curve_fee_details = getattr(curve, "fee_details", None)
+    if isinstance(curve_fee_details, Mapping):
+        fee_details = canonicalize_fee_details(
+            curve_fee_details,
+            source=str(
+                curve_fee_details.get("source")
+                or "global_current_book_curve"
+            ),
+            token_id=candidate_token,
+        )
+        if Decimal(str(fee_rate_fraction_from_details(fee_details))) != Decimal(
+            curve.fee_model.fee_rate
+        ):
+            raise ValueError("GLOBAL_JIT_SNAPSHOT_FEE_PROVENANCE_MISMATCH")
+    else:
+        fee_details = canonicalize_fee_details(
+            {"fee_rate_fraction": float(curve.fee_model.fee_rate)},
+            source="global_current_book_curve",
+            token_id=candidate_token,
+        )
     snapshot_id = str(curve.snapshot_id)
     existing = get_snapshot(trade_conn, snapshot_id)
     if existing is not None:
