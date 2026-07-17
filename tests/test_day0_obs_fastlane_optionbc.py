@@ -717,7 +717,6 @@ class TestDay0MetarSourceClockTick:
 
         monkeypatch.setattr(im, "_DAY0_METAR_PENDING_COMMITS", [])
         monkeypatch.setattr(im, "_DAY0_METAR_COMMIT_LOCK", threading.Lock())
-        monkeypatch.setattr(im, "_day0_metar_admitted_families", lambda _prefetch: None)
         monkeypatch.setattr(
             "src.config.settings",
             {
@@ -731,67 +730,6 @@ class TestDay0MetarSourceClockTick:
             },
         )
         monkeypatch.setattr("src.config.runtime_cities", lambda: [_wu_icao_city()])
-
-    def test_family_admission_is_market_or_open_exposure_union(self, monkeypatch):
-        import src.ingest_main as im
-
-        paris = _wu_icao_city(name="Paris")
-        london = _wu_icao_city(name="London")
-        prefetch = SimpleNamespace(
-            eligible=(
-                (paris, object(), "2026-06-12"),
-                (london, object(), "2026-06-12"),
-            )
-        )
-
-        class _Rows:
-            def __init__(self, rows):
-                self._rows = rows
-
-            def fetchall(self):
-                return self._rows
-
-        class _Conn:
-            def __init__(self, rows):
-                self.rows = rows
-                self.closed = False
-                self.sql = ""
-                self.params = ()
-
-            def execute(self, sql, params=()):
-                self.sql = sql
-                self.params = params
-                return _Rows(self.rows)
-
-            def close(self):
-                self.closed = True
-
-        forecast_conn = _Conn((("Paris", "2026-06-12", "high"),))
-        trade_conn = _Conn(
-            (
-                ("London", "2026-06-12", "low"),
-                ("Tokyo", "2026-06-12", "high"),
-            )
-        )
-        monkeypatch.setattr(
-            "src.state.db.get_forecasts_connection_read_only",
-            lambda: forecast_conn,
-        )
-        monkeypatch.setattr(
-            "src.state.db.get_trade_connection_read_only",
-            lambda: trade_conn,
-        )
-
-        assert im._day0_metar_admitted_families(prefetch) == frozenset(
-            {
-                ("Paris", "2026-06-12", "high"),
-                ("London", "2026-06-12", "low"),
-            }
-        )
-        assert "idx_market_events_city_date_metric" in forecast_conn.sql
-        assert len(forecast_conn.params) == 12
-        assert forecast_conn.closed
-        assert trade_conn.closed
 
     @staticmethod
     def _primed(emitter):
@@ -917,24 +855,9 @@ class TestDay0MetarSourceClockTick:
 
             def emit_prefetched(self, **_kw):
                 order.append("emit")
-                admission = _kw["family_admission"]
-                assert admission(
-                    {
-                        "city": "Denver",
-                        "target_date": "2026-06-12",
-                        "metric": "high",
-                    }
-                )
-                assert not admission(
-                    {
-                        "city": "Denver",
-                        "target_date": "2026-06-12",
-                        "metric": "low",
-                    }
-                )
                 _kw["inserted_event_ids"].extend(("event-b", "event-a"))
                 _kw["inserted_families"].extend(
-                    (("Denver", "2026-06-12", "high"),)
+                    (("Paris", "2026-06-12", "high"),)
                 )
                 return 2
 
@@ -965,11 +888,6 @@ class TestDay0MetarSourceClockTick:
 
         emitter = self._primed(_Emitter())
         monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
-        monkeypatch.setattr(
-            im,
-            "_day0_metar_admitted_families",
-            lambda _prefetch: frozenset({("Denver", "2026-06-12", "high")}),
-        )
         monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
         monkeypatch.setattr(
@@ -990,7 +908,7 @@ class TestDay0MetarSourceClockTick:
         wake_entry = next(item for item in order if item.startswith("wake:"))
         assert order.index("commit") < order.index(wake_entry)
         assert "wake:event-b,event-a" in wake_entry
-        assert "(('Denver', '2026-06-12', 'high'),)" in wake_entry
+        assert "(('Paris', '2026-06-12', 'high'),)" in wake_entry
 
     def test_committed_event_survives_reactor_wake_failure(
         self, monkeypatch, caplog
@@ -1219,7 +1137,6 @@ class TestDay0MetarSourceClockTick:
                 prefetch,
                 received_at=prefetch.name,
                 day0_is_tradeable=True,
-                admitted_families=None,
             )
 
         assert len(im._DAY0_METAR_PENDING_COMMITS) == 2
