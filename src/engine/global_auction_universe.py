@@ -401,6 +401,17 @@ def _global_book_latest_token_rows(
     return rows
 
 
+def _canonical_raw_book_hash(raw_book: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            dict(raw_book),
+            default=str,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _global_book_curve(
     *,
     family_key: str,
@@ -444,11 +455,7 @@ def _global_book_curve(
         fee_rate = Decimal(str(fee_rate))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError(f"GLOBAL_BOOK_FEE_INVALID:{token_id}") from exc
-    raw_hash = str(raw_book.get("hash") or "").strip()
-    if not raw_hash:
-        raw_hash = hashlib.sha256(
-            json.dumps(raw_book, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+    raw_hash = _canonical_raw_book_hash(raw_book)
     snapshot_id = hashlib.sha256(
         "|".join(
             (
@@ -518,11 +525,7 @@ def _global_sell_curve(
         fee_rate, _fee_source = resolve_taker_fee_fraction(schedule_fee)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError(f"GLOBAL_BOOK_FEE_INVALID:{token_id}") from exc
-    raw_hash = str(raw_book.get("hash") or "").strip()
-    if not raw_hash:
-        raw_hash = hashlib.sha256(
-            json.dumps(raw_book, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+    raw_hash = _canonical_raw_book_hash(raw_book)
     snapshot_id = hashlib.sha256(
         "|".join(
             (
@@ -767,13 +770,7 @@ def capture_current_global_book_epoch(
             ).strip()
             if raw_asset_id != token_id:
                 raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
-            book_hash = str(raw_book.get("hash") or "").strip() or hashlib.sha256(
-                json.dumps(
-                    raw_book,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
+            book_hash = _canonical_raw_book_hash(raw_book)
             curve = _global_book_curve(
                 family_key=family_key,
                 bin_id=bin_id,

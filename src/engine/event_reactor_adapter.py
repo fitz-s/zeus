@@ -847,6 +847,75 @@ def _get_cached_global_book_epoch(
     return cached
 
 
+def _fresh_projected_global_books(
+    trade_conn: sqlite3.Connection,
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> tuple[dict[str, Mapping[str, object]], datetime] | None:
+    """Read one complete fresh book cut from the price-channel projection."""
+
+    if checked_at.tzinfo is None or max_age <= timedelta(0):
+        return None
+    checked_at = checked_at.astimezone(timezone.utc)
+    token_ids = tuple(dict.fromkeys(str(token).strip() for token in tokens))
+    if not token_ids or any(not token for token in token_ids):
+        return None
+    books: dict[str, Mapping[str, object]] = {}
+    captured: list[datetime] = []
+    try:
+        for start in range(0, len(token_ids), 400):
+            chunk = token_ids[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = trade_conn.execute(
+                f"""
+                SELECT latest.selected_outcome_token_id,
+                       snapshot.orderbook_depth_json,
+                       snapshot.captured_at,
+                       latest.freshness_deadline
+                  FROM executable_market_snapshot_latest AS latest
+                       INDEXED BY idx_snapshot_latest_selected_token_captured
+                  JOIN executable_market_snapshots AS snapshot
+                    ON snapshot.snapshot_id = latest.snapshot_id
+                 WHERE latest.selected_outcome_token_id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                token_id = str(row[0] or "").strip()
+                captured_at = datetime.fromisoformat(str(row[2]))
+                freshness_deadline = datetime.fromisoformat(str(row[3]))
+                if (
+                    captured_at.tzinfo is None
+                    or freshness_deadline.tzinfo is None
+                ):
+                    return None
+                captured_at = captured_at.astimezone(timezone.utc)
+                freshness_deadline = freshness_deadline.astimezone(timezone.utc)
+                if (
+                    token_id not in chunk
+                    or token_id in books
+                    or captured_at > checked_at
+                    or checked_at - captured_at > max_age
+                    or freshness_deadline < checked_at
+                ):
+                    return None
+                book = json.loads(str(row[1] or ""))
+                if (
+                    not isinstance(book, Mapping)
+                    or str(book.get("asset_id") or "").strip() != token_id
+                ):
+                    return None
+                books[token_id] = dict(book)
+                captured.append(captured_at)
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if len(books) != len(token_ids) or not captured:
+        return None
+    return books, min(captured)
+
+
 def _probe_global_book_epoch_cache(
     trade_conn: sqlite3.Connection,
     probabilities: Mapping[str, object],
@@ -5971,6 +6040,31 @@ def event_bound_live_adapter_from_trade_conn(
                     return None
                 captured_at = datetime.now(UTC)
                 fetch_started = _time.monotonic()
+                projected = _fresh_projected_global_books(
+                    trade_conn,
+                    tokens,
+                    checked_at=captured_at,
+                    max_age=FRESHNESS_WINDOW_DEFAULT,
+                )
+                if projected is not None:
+                    books, projected_at = projected
+                    logging.getLogger(__name__).info(
+                        "global book epoch stage completed: mode=%s "
+                        "book_projection elapsed_s=%.3f tokens=%d books=%d "
+                        "age_ms=%d",
+                        mode,
+                        _time.monotonic() - fetch_started,
+                        len(tokens),
+                        len(books),
+                        max(
+                            0,
+                            int(
+                                (captured_at - projected_at).total_seconds()
+                                * 1000
+                            ),
+                        ),
+                    )
+                    return tokens, books, projected_at
                 with PolymarketClient(public_http_timeout=timeout) as clob:
                     books = fetch_current_global_books(
                         tokens,
@@ -7865,9 +7959,7 @@ def _global_sell_candidate_from_raw_book(
             selected_value
         ):
             raise ValueError(f"GLOBAL_SELL_JIT_{raw_name.upper()}_SUPERSEDED")
-    book_hash = str(raw_book.get("hash") or "").strip() or stable_hash(
-        dict(raw_book)
-    )
+    book_hash = stable_hash(dict(raw_book))
     snapshot_id = stable_hash(
         (
             "global-sell-jit",

@@ -5287,18 +5287,19 @@ def test_global_book_curve_uses_same_realized_fee_authority_as_jit(monkeypatch):
         return 0.0, "realized_test"
 
     monkeypatch.setattr(universe, "resolve_taker_fee_fraction", realized_fee)
+    raw_book = {
+        "hash": "opaque-book-1",
+        "tick_size": "0.01",
+        "min_order_size": "5",
+        "asks": [{"price": "0.30", "size": "100"}],
+    }
     curve = universe._global_book_curve(
         family_key="City|2026-07-11|high",
         bin_id="bin-1",
         condition_id="condition-1",
         side="NO",
         token_id="no-1",
-        raw_book={
-            "hash": "book-1",
-            "tick_size": "0.01",
-            "min_order_size": "5",
-            "asks": [{"price": "0.30", "size": "100"}],
-        },
+        raw_book=raw_book,
         metadata={"fee_details_json": '{"fee_rate_fraction":0.05}'},
         captured_at_utc=_dt.datetime(
             2026, 7, 11, 3, 0, tzinfo=_dt.timezone.utc
@@ -5309,6 +5310,8 @@ def test_global_book_curve_uses_same_realized_fee_authority_as_jit(monkeypatch):
     assert observed == pytest.approx([0.05])
     assert curve is not None
     assert curve.fee_model.fee_rate == Decimal("0.0")
+    assert curve.book_hash == universe._canonical_raw_book_hash(raw_book)
+    assert len(curve.book_hash) == 64
 
 
 def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
@@ -5516,6 +5519,140 @@ def test_current_global_book_epoch_consumes_prefetched_books_at_original_cut():
     assert epoch.captured_at_utc == captured_at
     assert len(epoch.assets) == len(tokens)
     assert {asset.token_id for asset in epoch.assets} == set(tokens)
+
+
+def test_global_book_prefetch_reads_complete_fresh_price_channel_projection():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            selected_outcome_token_id TEXT NOT NULL,
+            orderbook_depth_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        CREATE INDEX idx_snapshot_latest_selected_token_captured
+            ON executable_market_snapshot_latest (
+                selected_outcome_token_id,
+                freshness_deadline DESC
+            );
+        """
+    )
+    checked_at = _dt.datetime(2026, 7, 17, 0, 12, 12, tzinfo=_dt.timezone.utc)
+    rows = (
+        ("condition-a", "yes-a", "snapshot-yes", "2026-07-17T00:12:11+00:00"),
+        ("condition-a", "no-a", "snapshot-no", "2026-07-17T00:12:11.500000+00:00"),
+    )
+    for condition_id, token_id, snapshot_id, captured_at in rows:
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshots
+                (snapshot_id, selected_outcome_token_id, orderbook_depth_json, captured_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                token_id,
+                json.dumps(
+                    {
+                        "asset_id": token_id,
+                        "hash": f"book-{token_id}",
+                        "bids": [{"price": "0.20", "size": "100"}],
+                        "asks": [{"price": "0.30", "size": "100"}],
+                    }
+                ),
+                captured_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshot_latest
+                (condition_id, selected_outcome_token_id, snapshot_id, freshness_deadline)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                condition_id,
+                token_id,
+                snapshot_id,
+                "2026-07-17T00:15:11+00:00",
+            ),
+        )
+
+    projected = era._fresh_projected_global_books(
+        conn,
+        ("yes-a", "no-a"),
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    )
+
+    assert projected is not None
+    books, captured_at = projected
+    assert set(books) == {"yes-a", "no-a"}
+    assert captured_at == _dt.datetime(
+        2026, 7, 17, 0, 12, 11, tzinfo=_dt.timezone.utc
+    )
+
+
+def test_global_book_prefetch_rejects_incomplete_or_expired_projection():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            selected_outcome_token_id TEXT NOT NULL,
+            orderbook_depth_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        CREATE INDEX idx_snapshot_latest_selected_token_captured
+            ON executable_market_snapshot_latest (
+                selected_outcome_token_id,
+                freshness_deadline DESC
+            );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots
+            (snapshot_id, selected_outcome_token_id, orderbook_depth_json, captured_at)
+        VALUES ('snapshot-yes', 'yes-a', ?, '2026-07-17T00:08:00+00:00')
+        """,
+        (json.dumps({"asset_id": "yes-a", "bids": [], "asks": []}),),
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_latest
+            (condition_id, selected_outcome_token_id, snapshot_id, freshness_deadline)
+        VALUES (
+            'condition-a',
+            'yes-a',
+            'snapshot-yes',
+            '2026-07-17T00:11:00+00:00'
+        )
+        """
+    )
+
+    assert era._fresh_projected_global_books(
+        conn,
+        ("yes-a", "no-a"),
+        checked_at=_dt.datetime(
+            2026, 7, 17, 0, 12, 12, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
 
 
 def test_current_global_book_epoch_excludes_stale_tradeability_symmetrically():
