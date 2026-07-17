@@ -1773,6 +1773,7 @@ def _run_replacement_forecast_live_materialization_queue_once(
     )
 
     revision_before = _forecast_posterior_revision(cfg)
+    batch_limit = int(cfg["limit"] if limit is None else limit)
     report = process_replacement_forecast_live_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
@@ -1782,9 +1783,9 @@ def _run_replacement_forecast_live_materialization_queue_once(
         seed_failed_dir=cfg["seed_failed_dir"],
         forecast_db=cfg["forecast_db"],
         raw_manifest_dir=cfg["raw_manifest_dir"],
-        seed_discovery_limit=int(cfg["seed_discovery_limit"]),
-        seed_limit=int(cfg["seed_limit"]),
-        limit=int(cfg["limit"] if limit is None else limit),
+        seed_discovery_limit=min(int(cfg["seed_discovery_limit"]), batch_limit),
+        seed_limit=min(int(cfg["seed_limit"]), batch_limit),
+        limit=batch_limit,
         discover=discover,
     )
     revision_after = _forecast_posterior_revision(cfg)

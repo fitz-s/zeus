@@ -409,6 +409,57 @@ def test_materialization_queue_publishes_wake_after_posterior_advance(
     ]
 
 
+def test_materialization_poll_limit_bounds_seed_work(monkeypatch, tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue
+    import src.data.replacement_forecast_production as production
+
+    cfg = _materialization_queue_cfg(tmp_path)
+    cfg.update(
+        {
+            "seed_discovery_limit": 80,
+            "seed_limit": 80,
+            "limit": 80,
+        }
+    )
+    queue_calls: list[dict[str, object]] = []
+    report = SimpleNamespace(
+        committed_posterior_count=0,
+        reactor_wake_published_count=0,
+    )
+    monkeypatch.setattr(
+        queue,
+        "process_replacement_forecast_live_materialization_queue",
+        lambda **kwargs: queue_calls.append(kwargs) or report,
+    )
+    monkeypatch.setattr(
+        production,
+        "_forecast_posterior_revision",
+        lambda cfg: None,
+    )
+
+    result = production._run_replacement_forecast_live_materialization_queue_once(
+        cfg, discover=True, limit=8
+    )
+
+    assert result is report
+    assert queue_calls == [
+        {
+            "request_dir": cfg["request_dir"],
+            "processed_dir": cfg["processed_dir"],
+            "failed_dir": cfg["failed_dir"],
+            "seed_dir": cfg["seed_dir"],
+            "seed_processed_dir": cfg["seed_processed_dir"],
+            "seed_failed_dir": cfg["seed_failed_dir"],
+            "forecast_db": cfg["forecast_db"],
+            "raw_manifest_dir": cfg["raw_manifest_dir"],
+            "seed_discovery_limit": 8,
+            "seed_limit": 8,
+            "limit": 8,
+            "discover": True,
+        }
+    ]
+
+
 def test_materialization_queue_skips_aggregate_wake_when_commit_wakes_are_complete(
     monkeypatch, tmp_path
 ) -> None:
