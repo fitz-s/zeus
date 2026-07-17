@@ -902,6 +902,66 @@ class TestRestingOrderCancel:
         assert clob.cancelled == []
         assert clob.open_order_calls == 0
 
+    def test_target_scope_filters_unrelated_command_by_position_family(self):
+        from src.execution.day0_hard_fact_exit import _target_family_entry_orders
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE venue_commands (
+                position_id TEXT,
+                intent_kind TEXT,
+                side TEXT,
+                state TEXT,
+                token_id TEXT,
+                venue_order_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES (?,?,?,?)",
+            ("position-paris", "Paris", "2026-07-18", "low"),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?)",
+            (
+                "position-paris",
+                "ENTRY",
+                "BUY",
+                "REVIEW_REQUIRED",
+                "token-without-local-topology",
+                "order-paris",
+            ),
+        )
+
+        assert (
+            _target_family_entry_orders(
+                conn,
+                {("singapore", "2026-07-17", "low")},
+            )
+            == []
+        )
+        assert _target_family_entry_orders(
+            conn,
+            {("paris", "2026-07-18", "low")},
+        ) == [
+            {
+                "orderID": "order-paris",
+                "asset_id": "token-without-local-topology",
+                "side": "BUY",
+            }
+        ]
+
     def test_target_scope_unknown_order_id_falls_back_to_wallet_scan(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
         conn = _add_venue_commands(

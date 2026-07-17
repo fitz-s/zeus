@@ -3724,6 +3724,52 @@ def _day0_wake_target_families(
     return frozenset(families) or None
 
 
+def _day0_wake_requires_exit_monitor(
+    target_families: frozenset[tuple[str, str, str]] | None,
+) -> bool:
+    """Fail closed unless the target families have no position or resting entry."""
+
+    if not target_families:
+        return True
+    family_keys = {
+        (
+            str(city or "").strip().casefold(),
+            str(target_date or "").strip()[:10],
+            str(metric or "").strip().lower(),
+        )
+        for city, target_date, metric in target_families
+    }
+    conn = None
+    try:
+        from src.execution.day0_hard_fact_exit import _target_family_entry_orders
+        from src.state.db import get_trade_connection_read_only
+        from src.state.portfolio import load_runtime_open_portfolio
+
+        conn = get_trade_connection_read_only()
+        portfolio = load_runtime_open_portfolio(conn)
+        if any(
+            (
+                str(position.city or "").strip().casefold(),
+                str(position.target_date or "").strip()[:10],
+                str(position.temperature_metric or "").strip().lower(),
+            )
+            in family_keys
+            for position in portfolio.positions
+        ):
+            return True
+        open_entries = _target_family_entry_orders(conn, family_keys)
+        return open_entries is None or bool(open_entries)
+    except Exception:
+        logger.warning(
+            "Day0 wake exit-work probe unavailable; using full exit monitor",
+            exc_info=True,
+        )
+        return True
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -3758,18 +3804,25 @@ def _edli_reactor_wake_poll_once() -> bool:
     ):
         return False
     if day0_wake and not substrate_refresh_wake:
-        try:
-            monitor_ran = _exit_monitor_cycle(
-                target_families=_day0_wake_target_families(wake.event_ids)
+        target_families = _day0_wake_target_families(wake.event_ids)
+        if _day0_wake_requires_exit_monitor(target_families):
+            try:
+                monitor_ran = _exit_monitor_cycle(
+                    target_families=target_families
+                )
+            except Exception:
+                logger.exception(
+                    "Day0 reactor wake held-position monitor failed; "
+                    "wake remains queued for retry"
+                )
+                return False
+            if monitor_ran is not True:
+                return False
+        else:
+            logger.info(
+                "Day0 reactor wake bypassed exit monitor: "
+                "target families have no runtime exposure or resting entry"
             )
-        except Exception:
-            logger.exception(
-                "Day0 reactor wake held-position monitor failed; "
-                "wake remains queued for retry"
-            )
-            return False
-        if monitor_ran is not True:
-            return False
     if not substrate_refresh_wake:
         ran = _edli_event_reactor_cycle(
             producer_wake_reason=wake.reason,

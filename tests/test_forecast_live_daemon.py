@@ -1018,6 +1018,11 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     )
     monkeypatch.setattr(
         main,
+        "_day0_wake_requires_exit_monitor",
+        lambda _target_families: True,
+    )
+    monkeypatch.setattr(
+        main,
         "_exit_monitor_cycle",
         lambda *, target_families=None: (
             calls.append(f"monitor:{sorted(target_families or ())}") or True
@@ -1071,6 +1076,11 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
     )
     monkeypatch.setattr(
         main,
+        "_day0_wake_requires_exit_monitor",
+        lambda _target_families: True,
+    )
+    monkeypatch.setattr(
+        main,
         "_exit_monitor_cycle",
         lambda *, target_families=None: (
             calls.append(f"monitor:{sorted(target_families or ())}") or True
@@ -1088,6 +1098,119 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
         "monitor:[('Paris', '2026-07-16', 'high')]",
         "reactor",
     ]
+
+
+def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-day0-no-risk",
+        "2026-07-16T12:00:00+00:00",
+        "ingest_main",
+        "day0_extreme_event_committed",
+        ("event-day0",),
+    )
+
+    class _Lock:
+        def locked(self) -> bool:
+            return True
+
+    class _Held:
+        def is_set(self) -> bool:
+            return False
+
+    calls: list[str] = []
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: True,
+    )
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_target_families",
+        lambda _event_ids: frozenset({("Paris", "2026-07-16", "high")}),
+    )
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_requires_exit_monitor",
+        lambda _target_families: False,
+    )
+    monkeypatch.setattr(
+        main,
+        "_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("no-risk wake must not run exit monitor"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.append("reactor") or True,
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert calls == ["reactor"]
+
+
+@pytest.mark.parametrize(
+    ("positions", "open_entries", "expected"),
+    (
+        ((), [], False),
+        ((), [{"orderID": "order-1"}], True),
+        ((), None, True),
+        (
+            (
+                SimpleNamespace(
+                    city="Paris",
+                    target_date="2026-07-16",
+                    temperature_metric="high",
+                ),
+            ),
+            [],
+            True,
+        ),
+    ),
+)
+def test_day0_wake_exit_work_probe_is_fail_closed(
+    monkeypatch,
+    positions,
+    open_entries,
+    expected,
+) -> None:
+    import src.execution.day0_hard_fact_exit as hard_fact
+    import src.main as main
+    import src.state.db as db
+    import src.state.portfolio as portfolio
+
+    class _Conn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _Conn()
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: conn)
+    monkeypatch.setattr(
+        portfolio,
+        "load_runtime_open_portfolio",
+        lambda _conn: SimpleNamespace(positions=list(positions)),
+    )
+    monkeypatch.setattr(
+        hard_fact,
+        "_target_family_entry_orders",
+        lambda _conn, _families: open_entries,
+    )
+
+    assert (
+        main._day0_wake_requires_exit_monitor(
+            frozenset({("Paris", "2026-07-16", "high")})
+        )
+        is expected
+    )
+    assert conn.closed is True
 
 
 def test_day0_wake_family_scope_is_canonical_and_fails_full_on_partial(

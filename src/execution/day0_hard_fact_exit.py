@@ -907,17 +907,38 @@ def _target_family_entry_orders(
         return None
 
     placeholders = ",".join("?" for _ in _TARGET_CANCEL_COMMAND_STATES)
+    family_joined = "position_id" in columns
     try:
-        rows = conn.execute(
-            f"""
-            SELECT venue_order_id, token_id, side, state
-              FROM venue_commands
-             WHERE intent_kind = 'ENTRY'
-               AND upper(side) = 'BUY'
-               AND state IN ({placeholders})
-            """,
-            _TARGET_CANCEL_COMMAND_STATES,
-        ).fetchall()
+        if family_joined:
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT vc.venue_order_id, vc.token_id, vc.side, vc.state,
+                           vc.position_id, pc.city AS local_city,
+                           pc.target_date AS local_target_date,
+                           pc.temperature_metric AS local_metric
+                      FROM venue_commands AS vc
+                 LEFT JOIN position_current AS pc
+                        ON pc.position_id = vc.position_id
+                     WHERE vc.intent_kind = 'ENTRY'
+                       AND upper(vc.side) = 'BUY'
+                       AND vc.state IN ({placeholders})
+                    """,
+                    _TARGET_CANCEL_COMMAND_STATES,
+                ).fetchall()
+            except Exception:  # noqa: BLE001 - legacy schemas keep token fallback
+                family_joined = False
+        if not family_joined:
+            rows = conn.execute(
+                f"""
+                SELECT venue_order_id, token_id, side, state
+                  FROM venue_commands
+                 WHERE intent_kind = 'ENTRY'
+                   AND upper(side) = 'BUY'
+                   AND state IN ({placeholders})
+                """,
+                _TARGET_CANCEL_COMMAND_STATES,
+            ).fetchall()
     except Exception:  # noqa: BLE001 - preserve the prior authoritative venue fallback
         return None
 
@@ -926,14 +947,26 @@ def _target_family_entry_orders(
         token_id = str(_row_get(row, "token_id", 1) or "").strip()
         if not token_id:
             return None
-        identity = _resolve_order_bin_identity(conn, token_id)
-        if identity is None:
-            return None
-        family_key = (
-            str(identity.get("city") or "").strip().casefold(),
-            str(identity.get("target_date") or "").strip()[:10],
-            str(identity.get("metric") or "").strip().lower(),
+        local_family = (
+            (
+                str(_row_get(row, "local_city", 5) or "").strip().casefold(),
+                str(_row_get(row, "local_target_date", 6) or "").strip()[:10],
+                str(_row_get(row, "local_metric", 7) or "").strip().lower(),
+            )
+            if family_joined
+            else ("", "", "")
         )
+        if all(local_family):
+            family_key = local_family
+        else:
+            identity = _resolve_order_bin_identity(conn, token_id)
+            if identity is None:
+                return None
+            family_key = (
+                str(identity.get("city") or "").strip().casefold(),
+                str(identity.get("target_date") or "").strip()[:10],
+                str(identity.get("metric") or "").strip().lower(),
+            )
         if family_key not in target_family_keys:
             continue
 
