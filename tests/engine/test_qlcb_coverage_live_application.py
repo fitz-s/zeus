@@ -164,6 +164,12 @@ def test_claim_history_scope_index_keeps_latest_claim(tmp_path, monkeypatch):
         "src.state.db.get_world_connection_read_only",
         lambda: sqlite3.connect(db),
     )
+    monkeypatch.setattr(adapter, "_CLAIMED_QLCB_INDEX_CONN", None)
+    monkeypatch.setattr(adapter, "_CLAIMED_QLCB_INDEX_PID", 0)
+    monkeypatch.setattr(adapter, "_CLAIMED_QLCB_INDEX_SOURCE", None)
+    monkeypatch.setattr(adapter, "_CLAIMED_QLCB_INDEX_MAX_ROWID", 0)
+    monkeypatch.setattr(adapter, "_CLAIMED_QLCB_INDEX", {})
+    monkeypatch.setattr(adapter, "_CLAIMED_QLCB_INDEX_LATEST", {})
 
     index = adapter._claimed_qlcb_scope_index()
 
@@ -184,6 +190,8 @@ def test_claim_history_scope_index_keeps_latest_claim(tmp_path, monkeypatch):
     assert updated[("Singapore", "high", "buy_yes")][
         "Will the highest temperature in Singapore be 31C"
     ] == {"2026-07-15": 0.71}
+    adapter._CLAIMED_QLCB_INDEX_CONN.close()
+    adapter._CLAIMED_QLCB_INDEX_CONN = None
 
 
 def test_observations_built_through_grade_receipt(tmp_path, monkeypatch):

@@ -29468,6 +29468,8 @@ def _per_day_claimed_qlcb_by_date(
 
 
 _CLAIMED_QLCB_INDEX_LOCK = threading.Lock()
+_CLAIMED_QLCB_INDEX_CONN: sqlite3.Connection | None = None
+_CLAIMED_QLCB_INDEX_PID = 0
 _CLAIMED_QLCB_INDEX_SOURCE: tuple[str, int, int] | None = None
 _CLAIMED_QLCB_INDEX_MAX_ROWID = 0
 _CLAIMED_QLCB_INDEX: dict[tuple[str, str, str], dict[str, dict[str, float]]] = {}
@@ -29479,6 +29481,8 @@ _CLAIMED_QLCB_INDEX_LATEST: dict[
 def _claimed_qlcb_scope_index(
 ) -> dict[tuple[str, str, str], dict[str, dict[str, float]]]:
     """Increment the process-local claimed-qLCB projection from append-only receipts."""
+    global _CLAIMED_QLCB_INDEX_CONN
+    global _CLAIMED_QLCB_INDEX_PID
     global _CLAIMED_QLCB_INDEX_SOURCE
     global _CLAIMED_QLCB_INDEX_MAX_ROWID
     global _CLAIMED_QLCB_INDEX
@@ -29488,7 +29492,15 @@ def _claimed_qlcb_scope_index(
         try:
             from src.state.db import get_world_connection_read_only
 
-            conn = get_world_connection_read_only()
+            pid = os.getpid()
+            if _CLAIMED_QLCB_INDEX_PID != pid:
+                if _CLAIMED_QLCB_INDEX_CONN is not None:
+                    _CLAIMED_QLCB_INDEX_CONN.close()
+                _CLAIMED_QLCB_INDEX_CONN = None
+            if _CLAIMED_QLCB_INDEX_CONN is None:
+                _CLAIMED_QLCB_INDEX_CONN = get_world_connection_read_only()
+                _CLAIMED_QLCB_INDEX_PID = pid
+            conn = _CLAIMED_QLCB_INDEX_CONN
         except Exception:
             return {}
         try:
@@ -29499,6 +29511,24 @@ def _claimed_qlcb_scope_index(
             )
             stat = os.stat(db_path)
             source = (os.path.realpath(db_path), int(stat.st_dev), int(stat.st_ino))
+            if (
+                _CLAIMED_QLCB_INDEX_SOURCE is not None
+                and source != _CLAIMED_QLCB_INDEX_SOURCE
+            ):
+                conn.close()
+                conn = get_world_connection_read_only()
+                _CLAIMED_QLCB_INDEX_CONN = conn
+                db_path = next(
+                    str(row[2] or "")
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                    if str(row[1]) == "main"
+                )
+                stat = os.stat(db_path)
+                source = (
+                    os.path.realpath(db_path),
+                    int(stat.st_dev),
+                    int(stat.st_ino),
+                )
             max_rowid = int(
                 conn.execute(
                     "SELECT COALESCE(MAX(rowid), 0) FROM edli_no_submit_receipts "
@@ -29524,12 +29554,13 @@ def _claimed_qlcb_scope_index(
                 (watermark, max_rowid),
             ).fetchall()
         except Exception:
-            return {}
-        finally:
             try:
                 conn.close()
             except Exception:
                 pass
+            _CLAIMED_QLCB_INDEX_CONN = None
+            _CLAIMED_QLCB_INDEX_PID = 0
+            return {}
 
         index = {} if reset else dict(_CLAIMED_QLCB_INDEX)
         latest = {} if reset else dict(_CLAIMED_QLCB_INDEX_LATEST)
