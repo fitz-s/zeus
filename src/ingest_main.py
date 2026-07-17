@@ -57,7 +57,9 @@ _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 _DAY0_METAR_EMITTER: Any | None = None
 _DAY0_METAR_COMMIT_LOCK = threading.Lock()
-_DAY0_METAR_PENDING_COMMITS: list[tuple[Any, str, bool]] = []
+_DAY0_METAR_PENDING_COMMITS: list[
+    tuple[Any, str, bool, frozenset[tuple[str, str, str]] | None]
+] = []
 _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
@@ -124,17 +126,110 @@ def _day0_metar_emitter():
     return _DAY0_METAR_EMITTER
 
 
+def _day0_metar_admitted_families(
+    prefetch: Any,
+) -> frozenset[tuple[str, str, str]] | None:
+    """Return market-backed or exposed Day0 families, or None when truth is unavailable."""
+
+    requested = tuple(
+        dict.fromkeys(
+            (
+                str(getattr(city, "name", "") or "").strip(),
+                str(target_date or "").strip(),
+                metric,
+            )
+            for city, _source, target_date in (prefetch.eligible or ())
+            for metric in ("high", "low")
+            if str(getattr(city, "name", "") or "").strip()
+            and str(target_date or "").strip()
+        )
+    )
+    if not requested:
+        return frozenset()
+
+    forecasts_conn = None
+    trade_conn = None
+    try:
+        from src.state.db import (
+            OPEN_EXPOSURE_PHASES,
+            get_forecasts_connection_read_only,
+            get_trade_connection_read_only,
+        )
+
+        forecasts_conn = get_forecasts_connection_read_only()
+        values = ",".join("(?, ?, ?)" for _ in requested)
+        params = tuple(value for family in requested for value in family)
+        market_rows = forecasts_conn.execute(
+            f"""
+            WITH requested(city, target_date, metric) AS (
+                VALUES {values}
+            )
+            SELECT requested.city, requested.target_date, requested.metric
+              FROM requested
+              JOIN market_events AS market
+                   INDEXED BY idx_market_events_city_date_metric
+                ON market.city = requested.city
+               AND market.target_date = requested.target_date
+               AND market.temperature_metric = requested.metric
+             GROUP BY requested.city, requested.target_date, requested.metric
+            """,
+            params,
+        ).fetchall()
+        admitted = {
+            (str(city), str(target_date), str(metric))
+            for city, target_date, metric in market_rows
+        }
+
+        trade_conn = get_trade_connection_read_only()
+        phase_marks = ",".join("?" for _ in OPEN_EXPOSURE_PHASES)
+        exposure_rows = trade_conn.execute(
+            f"""
+            SELECT city, target_date, temperature_metric
+              FROM position_current
+             WHERE phase IN ({phase_marks})
+            """,
+            tuple(OPEN_EXPOSURE_PHASES),
+        ).fetchall()
+        requested_set = set(requested)
+        admitted.update(
+            family
+            for city, target_date, metric in exposure_rows
+            if (
+                family := (
+                    str(city or "").strip(),
+                    str(target_date or "").strip(),
+                    str(metric or "").strip().lower(),
+                )
+            )
+            in requested_set
+        )
+        return frozenset(admitted)
+    except Exception:
+        logger.warning(
+            "DAY0_METAR_FAMILY_ADMISSION_UNAVAILABLE; preserving fail-open event emission",
+            exc_info=True,
+        )
+        return None
+    finally:
+        if trade_conn is not None:
+            trade_conn.close()
+        if forecasts_conn is not None:
+            forecasts_conn.close()
+
+
 def _stage_day0_metar_commit(
     prefetch: Any,
     *,
     received_at: str,
     day0_is_tradeable: bool,
+    admitted_families: frozenset[tuple[str, str, str]] | None,
 ) -> None:
     with _DAY0_METAR_COMMIT_LOCK:
         staged = (
             prefetch,
             received_at,
             day0_is_tradeable,
+            admitted_families,
         )
         if len(_DAY0_METAR_PENDING_COMMITS) < 2:
             _DAY0_METAR_PENDING_COMMITS.append(staged)
@@ -159,7 +254,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
         if not _DAY0_METAR_PENDING_COMMITS:
             return {"status": "SOURCE_CURRENT"}
         staged = _DAY0_METAR_PENDING_COMMITS[0]
-        prefetch, received_at, day0_is_tradeable = staged
+        prefetch, received_at, day0_is_tradeable, admitted_families = staged
         pending_reports = len(tuple(prefetch.ledger_reports or ()))
         if pending_reports == 0:
             del _DAY0_METAR_PENDING_COMMITS[0]
@@ -198,6 +293,16 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 day0_is_tradeable=day0_is_tradeable,
                 inserted_event_ids=inserted_event_ids,
                 inserted_families=inserted_families,
+                family_admission=(
+                    None
+                    if admitted_families is None
+                    else lambda observation: (
+                        str(observation.get("city") or "").strip(),
+                        str(observation.get("target_date") or "").strip(),
+                        str(observation.get("metric") or "").strip().lower(),
+                    )
+                    in admitted_families
+                ),
             )
             conn.commit()
             del _DAY0_METAR_PENDING_COMMITS[0]
@@ -1038,6 +1143,7 @@ def _day0_metar_source_clock_tick():
         day0_is_tradeable=day0_is_tradeable_for_scope(
             str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
         ),
+        admitted_families=_day0_metar_admitted_families(prefetch),
     )
     return _commit_or_schedule_day0_metar(origin="source_clock")
 
