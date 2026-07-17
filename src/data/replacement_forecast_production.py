@@ -1653,6 +1653,24 @@ def _run_replacement_forecast_live_materialization_queue_once(
         and revision_after is not None
         and revision_after > revision_before
     ):
+        committed_posterior_count = int(
+            getattr(report, "committed_posterior_count", 0) or 0
+        )
+        reactor_wake_published_count = int(
+            getattr(report, "reactor_wake_published_count", 0) or 0
+        )
+        if (
+            committed_posterior_count > 0
+            and reactor_wake_published_count == committed_posterior_count
+        ):
+            logger.info(
+                "forecast posterior advanced rowid=%d->%d; %d per-family reactor "
+                "wakes already published at commit",
+                revision_before,
+                revision_after,
+                reactor_wake_published_count,
+            )
+            return report
         from src.runtime.reactor_wake import publish_reactor_wake
 
         forecast_families = _forecast_posterior_families_between(

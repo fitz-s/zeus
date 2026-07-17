@@ -15,6 +15,7 @@ import os
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -396,6 +397,46 @@ def test_materialization_queue_publishes_wake_after_posterior_advance(
             (("Shanghai", "2026-07-18", "high"),),
         )
     ]
+
+
+def test_materialization_queue_skips_aggregate_wake_when_commit_wakes_are_complete(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue
+    import src.data.replacement_forecast_production as production
+    from src.runtime import reactor_wake
+
+    report = SimpleNamespace(
+        committed_posterior_count=2,
+        reactor_wake_published_count=2,
+    )
+    monkeypatch.setattr(
+        queue,
+        "process_replacement_forecast_live_materialization_queue",
+        lambda **kwargs: report,
+    )
+    revisions = iter((41, 43))
+    monkeypatch.setattr(
+        production,
+        "_forecast_posterior_revision",
+        lambda cfg: next(revisions),
+    )
+    monkeypatch.setattr(
+        production,
+        "_forecast_posterior_families_between",
+        lambda *args, **kwargs: pytest.fail("aggregate family query must be skipped"),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: pytest.fail("aggregate wake must be skipped"),
+    )
+
+    result = production._run_replacement_forecast_live_materialization_queue_once(
+        _materialization_queue_cfg(tmp_path), discover=False
+    )
+
+    assert result is report
 
 
 def test_materialization_wake_families_use_only_changed_live_rows(tmp_path) -> None:

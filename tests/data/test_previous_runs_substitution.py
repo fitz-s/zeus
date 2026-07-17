@@ -642,7 +642,10 @@ def test_materialization_queue_batches_default_runner_once_per_cycle(
                 {
                     "input_json": input_path,
                     "returncode": 0,
-                    "stdout": '{"status":"READY","reason_codes":[]}\n',
+                    "stdout": (
+                        '{"status":"READY","reason_codes":[],"committed":true,'
+                        '"posterior_id":42,"reactor_wake_published":true}\n'
+                    ),
                     "stderr": "",
                 }
             )
@@ -663,6 +666,8 @@ def test_materialization_queue_batches_default_runner_once_per_cycle(
     assert report.status == "PROCESSED"
     assert report.processed_count == 2
     assert report.failed_count == 0
+    assert report.committed_posterior_count == 2
+    assert report.reactor_wake_published_count == 2
     assert len(calls) == 1
     assert "--batch-input-json" in calls[0]
     assert "--init-schema" not in calls[0]

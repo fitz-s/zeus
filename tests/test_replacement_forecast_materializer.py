@@ -15,6 +15,7 @@ import sys
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -954,6 +955,35 @@ def test_materialize_script_batch_reuses_connection_and_reports_each_request(
     ]
     assert [Path(envelope["input_json"]) for envelope in envelopes] == inputs
     assert [envelope["returncode"] for envelope in envelopes] == [0, 0]
+
+
+def test_materialize_script_publishes_family_wake_after_commit(monkeypatch) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+    from src.runtime import reactor_wake
+
+    published = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: published.append(kwargs)
+        or SimpleNamespace(wake_id="wake-1"),
+    )
+    request = _request()
+
+    assert cli._publish_materialization_wake(request) is True
+    assert published == [
+        {
+            "source": "replacement_forecast_materializer",
+            "reason": "forecast_posterior_advanced",
+            "forecast_families": (
+                (
+                    request.city,
+                    request.target_date.isoformat(),
+                    request.temperature_metric,
+                ),
+            ),
+        }
+    ]
 
 
 def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) -> None:

@@ -124,6 +124,40 @@ def _template() -> dict[str, object]:
     }
 
 
+def _publish_materialization_wake(
+    request: ReplacementForecastMaterializeRequest,
+) -> bool:
+    """Wake the reactor immediately after this family's durable commit."""
+    try:
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        wake = publish_reactor_wake(
+            source="replacement_forecast_materializer",
+            reason="forecast_posterior_advanced",
+            forecast_families=(
+                (
+                    request.city,
+                    request.target_date.isoformat(),
+                    request.temperature_metric,
+                ),
+            ),
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "forecast posterior committed but per-family reactor wake failed",
+            exc_info=True,
+        )
+        return False
+    logging.getLogger(__name__).info(
+        "forecast posterior family wake published city=%s date=%s metric=%s id=%s",
+        request.city,
+        request.target_date,
+        request.temperature_metric,
+        wake.wake_id,
+    )
+    return True
+
+
 def _materialize(
     input_json: Path,
     *,
@@ -238,6 +272,7 @@ def _materialize(
         ),
     )
     own_conn = conn is None
+    wake_published = False
     if own_conn:
         from src.state.db import get_forecasts_connection
 
@@ -273,6 +308,8 @@ def _materialize(
         result = materialize_replacement_forecast_live(conn, request)
         if commit:
             conn.commit()
+            if result.ok:
+                wake_published = _publish_materialization_wake(request)
         else:
             conn.rollback()
     except Exception:
@@ -290,6 +327,7 @@ def _materialize(
         "readiness_id": result.readiness_id,
         "openmeteo_anchor_artifact_id": anchor_artifact_id,
         "committed": commit,
+        "reactor_wake_published": wake_published,
     }
     return (0 if result.ok else 1), response
 

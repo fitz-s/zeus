@@ -47,6 +47,8 @@ class ReplacementForecastLiveMaterializationQueueReport:
     skipped_count: int
     seed_processed_count: int = 0
     seed_failed_count: int = 0
+    committed_posterior_count: int = 0
+    reactor_wake_published_count: int = 0
     seed_discovery_report: ReplacementForecastSeedDiscoveryReport | None = None
     processed_files: tuple[str, ...] = ()
     failed_files: tuple[str, ...] = ()
@@ -69,6 +71,8 @@ class ReplacementForecastLiveMaterializationQueueReport:
             "skipped_count": self.skipped_count,
             "seed_processed_count": self.seed_processed_count,
             "seed_failed_count": self.seed_failed_count,
+            "committed_posterior_count": self.committed_posterior_count,
+            "reactor_wake_published_count": self.reactor_wake_published_count,
             "seed_discovery_report": None if self.seed_discovery_report is None else self.seed_discovery_report.as_dict(),
             "processed_files": list(self.processed_files),
             "failed_files": list(self.failed_files),
@@ -249,6 +253,28 @@ def _surface_subprocess_warnings(input_name: str, completed: "subprocess.Complet
                     _LOG.warning("materialize[%s] %s", input_name, line.strip()[:500])
     except Exception:
         pass
+
+
+def _committed_posterior_wake_status(
+    completed: subprocess.CompletedProcess[str],
+) -> tuple[bool, bool]:
+    """Return (posterior committed, per-family wake published)."""
+    if completed.returncode != 0:
+        return False, False
+    stdout = completed.stdout
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(errors="replace")
+    for line in reversed((stdout or "").splitlines()):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        committed = bool(payload.get("committed")) and payload.get("posterior_id") is not None
+        if committed:
+            return True, bool(payload.get("reactor_wake_published"))
+    return False, False
 
 
 def _receipt_name(path: Path) -> str:
@@ -1435,11 +1461,16 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             except subprocess.TimeoutExpired as exc:
                 completed_by_path[item.input_json] = _timeout_result(item.command, exc)
 
+    committed_posterior_count = 0
+    reactor_wake_published_count = 0
     for item in pending:
         input_json = item.input_json
         completed = completed_by_path[input_json]
         timed_out = completed.returncode == 124
         _surface_subprocess_warnings(input_json.name, completed)
+        committed, wake_published = _committed_posterior_wake_status(completed)
+        committed_posterior_count += int(committed)
+        reactor_wake_published_count += int(wake_published)
         payload = {
             "command": list(item.command),
             "returncode": int(completed.returncode),
@@ -1491,6 +1522,8 @@ def _process_replacement_forecast_live_materialization_queue_locked(
         reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
+    if committed_posterior_count > reactor_wake_published_count:
+        reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REACTOR_WAKE_FALLBACK_REQUIRED")
     skipped = max(len(requests) - limit, 0)
     if skipped:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LIMIT_REACHED")
@@ -1504,6 +1537,8 @@ def _process_replacement_forecast_live_materialization_queue_locked(
         skipped_count=skipped,
         seed_processed_count=len(seed_processed),
         seed_failed_count=len(seed_failed),
+        committed_posterior_count=committed_posterior_count,
+        reactor_wake_published_count=reactor_wake_published_count,
         seed_discovery_report=discovery_report,
         processed_files=tuple(processed),
         failed_files=tuple(failed),
