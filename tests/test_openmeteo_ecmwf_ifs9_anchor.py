@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
+# Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Protect run-pinned Open-Meteo ECMWF IFS 9km deterministic anchor requests.
 # Reuse: Run before changing Open-Meteo ECMWF IFS 9km anchor capture or manifest wiring.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked-candidate integration.
@@ -24,6 +24,7 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
     build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
     extract_openmeteo_ecmwf_ifs9_localday_anchor,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload,
+    fetch_openmeteo_ecmwf_ifs9_anchor_payloads,
 )
 
 
@@ -117,6 +118,50 @@ def test_anchor_fetch_uses_shared_openmeteo_client(monkeypatch) -> None:
     assert calls[0][3] == 2
     assert calls[0][4] == "openmeteo_ecmwf_ifs9_single_runs_anchor"
     assert calls[0][5] is False
+
+
+def test_anchor_fetch_batches_locations_for_one_run(monkeypatch) -> None:
+    requests = (
+        build_anchor_request(
+            latitude=31.2304,
+            longitude=121.4737,
+            run="2026-06-06T00:00:00+00:00",
+            timezone_name="Asia/Shanghai",
+        ),
+        build_anchor_request(
+            latitude=48.8566,
+            longitude=2.3522,
+            run="2026-06-06T00:00:00+00:00",
+            timezone_name="Europe/Paris",
+        ),
+    )
+    calls = []
+
+    def fake_fetch(url, params, **kwargs):
+        calls.append((url, params, kwargs))
+        return [
+            {"latitude": 31.2304, "hourly": {"time": [], "temperature_2m": []}},
+            {"latitude": 48.8566, "hourly": {"time": [], "temperature_2m": []}},
+        ]
+
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", fake_fetch)
+
+    payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
+        requests,
+        timeout=7.0,
+        max_retries=2,
+    )
+
+    assert tuple(payload["latitude"] for payload in payloads) == (31.2304, 48.8566)
+    assert len(calls) == 1
+    assert calls[0][0] == SINGLE_RUNS_FORECAST_URL
+    assert calls[0][1]["latitude"] == "31.2304,48.8566"
+    assert calls[0][1]["longitude"] == "121.4737,2.3522"
+    assert calls[0][1]["timezone"] == "Asia/Shanghai,Europe/Paris"
+    assert calls[0][1]["run"] == "2026-06-06T00:00"
+    assert calls[0][2]["endpoint_label"] == (
+        "openmeteo_ecmwf_ifs9_single_runs_anchor_locations"
+    )
 
 
 def test_anchor_artifact_manifest_preserves_run_pinned_request_and_metric_identity(tmp_path) -> None:

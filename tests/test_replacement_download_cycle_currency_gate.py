@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-07-16
+# Last reused or audited: 2026-07-17
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
 #   src/data/replacement_forecast_production.py + replacement_forecast_current_target_plan.py):
 #   the ALREADY_COVERED / HAVE_RAW_MANIFESTS short-circuits contained NO cycle comparison, so once
@@ -679,6 +679,149 @@ def test_direct_downloader_reuses_plan_and_city_date_payload_across_metrics(
     assert report["manifest_count"] == 2
     assert report["downloaded"]["openmeteo_transport_fetch_count"] == 1
     assert len(calls) == 1
+
+
+def test_direct_downloader_batches_run_pinned_anchor_locations(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = tuple(
+        _TargetRow(
+            city=city,
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        )
+        for city in ("London", "Paris")
+    )
+    plan = _PlanStub(ready=False, rows=rows)
+    wave_calls: list[tuple[tuple[str, str], ...]] = []
+
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+
+    def _wave(requests, **_kwargs):
+        wave_calls.append(tuple(requests))
+        captured_at = datetime.now(timezone.utc)
+        return {
+            key: (
+                {"hourly": {"time": [], "temperature_2m": []}},
+                {
+                    "openmeteo_endpoint": "single_runs_api",
+                    "run_authority": "run_pinned_single_runs",
+                    "location_batch_size": len(requests),
+                },
+                captured_at,
+            )
+            for key in requests
+        }
+
+    monkeypatch.setattr(dl, "_fetch_run_pinned_anchor_wave", _wave)
+    monkeypatch.setattr(
+        dl,
+        "_resolve_anchor_payload",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("batched payloads must bypass per-city transport")
+        ),
+    )
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=plan,
+        max_wall_clock_seconds=5.0,
+    )
+
+    assert wave_calls == [
+        (("London", "2026-06-10"), ("Paris", "2026-06-10"))
+    ]
+    assert report["manifest_count"] == 2
+    assert report["downloaded"]["openmeteo_transport_fetch_count"] == 2
+    assert report["downloaded"]["openmeteo_single_runs_location_batch_count"] == 1
+
+
+def test_anchor_location_batch_failure_falls_back_as_one_meta_wave(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = tuple(
+        _TargetRow(
+            city=city,
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        )
+        for city in ("London", "Paris")
+    )
+    plan = _PlanStub(ready=False, rows=rows)
+    meta_calls: list[tuple[tuple[str, str], ...]] = []
+
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+    monkeypatch.setattr(
+        dl,
+        "_fetch_run_pinned_anchor_wave",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("429 Too Many Requests")
+        ),
+    )
+
+    def _meta_wave(requests, **_kwargs):
+        meta_calls.append(tuple(requests))
+        captured_at = datetime.now(timezone.utc)
+        return (
+            {
+                key: (
+                    {"hourly": {"time": [], "temperature_2m": []}},
+                    {
+                        "openmeteo_endpoint": "standard_forecast_api",
+                        "run_authority": "provider_meta_declared",
+                    },
+                    captured_at,
+                )
+                for key in requests
+            },
+            {},
+        )
+
+    monkeypatch.setattr(dl, "_fetch_meta_stamped_anchor_wave", _meta_wave)
+    monkeypatch.setattr(
+        dl,
+        "_resolve_anchor_payload",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("meta wave payloads must bypass per-city transport")
+        ),
+    )
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=plan,
+        max_wall_clock_seconds=5.0,
+    )
+
+    assert meta_calls == [
+        (("London", "2026-06-10"), ("Paris", "2026-06-10"))
+    ]
+    assert report["manifest_count"] == 2
+    assert report["downloaded"]["openmeteo_model_meta_fetch_count"] == 2
+    assert report["downloaded"]["openmeteo_single_runs_location_batch_count"] == 1
 
 
 def test_direct_downloader_reuses_bucket_manifest_across_targets(

@@ -261,6 +261,75 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload(
     return payload
 
 
+def fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
+    requests: Sequence[OpenMeteoEcmwfIfs9AnchorRequest],
+    *,
+    timeout: float = 30.0,
+    max_retries: int = 3,
+    fast_fail_429: bool = False,
+    client: Any = None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Fetch one run-pinned anchor payload for multiple locations."""
+
+    batch = tuple(requests)
+    if not batch:
+        return ()
+    if any(not isinstance(request, OpenMeteoEcmwfIfs9AnchorRequest) for request in batch):
+        raise TypeError("requests must contain OpenMeteoEcmwfIfs9AnchorRequest values")
+    first = batch[0]
+    request_shape = (
+        first.run,
+        first.forecast_hours,
+        first.temperature_unit,
+        first.model,
+        first.hourly,
+    )
+    if any(
+        (
+            request.run,
+            request.forecast_hours,
+            request.temperature_unit,
+            request.model,
+            request.hourly,
+        )
+        != request_shape
+        for request in batch[1:]
+    ):
+        raise ValueError("multi-location anchor requests must share one run and request shape")
+
+    from src.data.openmeteo_client import fetch
+
+    params = first.params()
+    params.update(
+        latitude=",".join(str(request.latitude) for request in batch),
+        longitude=",".join(str(request.longitude) for request in batch),
+        timezone=",".join(request.timezone_name for request in batch),
+    )
+    fetch_kwargs: dict[str, Any] = {}
+    if client is not None:
+        fetch_kwargs["client"] = client
+    payload = fetch(
+        SINGLE_RUNS_FORECAST_URL,
+        params,
+        timeout=timeout,
+        max_retries=max_retries,
+        endpoint_label="openmeteo_ecmwf_ifs9_single_runs_anchor_locations",
+        fast_fail_429=fast_fail_429,
+        **fetch_kwargs,
+    )
+    payloads = (payload,) if len(batch) == 1 and isinstance(payload, Mapping) else payload
+    if not isinstance(payloads, Sequence) or isinstance(payloads, (str, bytes)):
+        raise ValueError("Open-Meteo multi-location anchor response must be a JSON array")
+    if len(payloads) != len(batch):
+        raise ValueError(
+            "Open-Meteo multi-location anchor response count mismatch: "
+            f"expected={len(batch)} got={len(payloads)}"
+        )
+    if any(not isinstance(item, Mapping) for item in payloads):
+        raise ValueError("Open-Meteo multi-location anchor payloads must be JSON objects")
+    return tuple(payloads)
+
+
 def fetch_openmeteo_ifs9_model_meta(
     *,
     timeout: float = 20.0,

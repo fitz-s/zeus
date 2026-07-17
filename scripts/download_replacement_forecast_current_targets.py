@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-07-16
-# Lifecycle: created=2026-06-07; last_reviewed=2026-07-16
+# Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-06-07; last_reviewed=2026-07-17
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -35,6 +35,7 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     build_anchor_request,
     build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload,
+    fetch_openmeteo_ecmwf_ifs9_anchor_payloads,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped,
     fetch_openmeteo_ifs9_model_meta,
     validate_openmeteo_ecmwf_ifs9_meta_window,
@@ -335,6 +336,19 @@ def _try_bucket_rung_three(
     return result.payload, provenance
 
 
+def _is_transient_provider_failure(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "429" in text
+        or "too many requests" in text
+        or "quota exhausted" in text
+        or "temporarily blocked" in text
+        or "cooldown" in text
+        or "exhausted retries" in text
+        or "rate limit" in text
+    )
+
+
 def _resolve_anchor_payload(
     *,
     request,
@@ -363,18 +377,6 @@ def _resolve_anchor_payload(
     from src.data.openmeteo_ecmwf_ifs9_anchor import (
         fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped,
     )
-
-    def _is_transient_provider_failure(exc: Exception) -> bool:
-        text = str(exc).lower()
-        return (
-            "429" in text
-            or "too many requests" in text
-            or "quota exhausted" in text
-            or "temporarily blocked" in text
-            or "cooldown" in text
-            or "exhausted retries" in text
-            or "rate limit" in text
-        )
 
     def _exception_summary(exc: Exception) -> str:
         return f"{type(exc).__name__}: {str(exc)[:160]}"
@@ -536,6 +538,39 @@ def _fetch_meta_stamped_anchor_wave(
     return resolved, failures
 
 
+def _fetch_run_pinned_anchor_wave(
+    requests: dict[tuple[str, str], object],
+    *,
+    deadline_monotonic: float | None,
+    client: httpx.Client,
+) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
+    """Fetch every city/date anchor in one run-pinned multi-location call."""
+
+    items = tuple(requests.items())
+    if not items:
+        return {}
+    payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
+        tuple(request for _, request in items),
+        timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+        max_retries=1,
+        fast_fail_429=True,
+        client=client,
+    )
+    captured_at = datetime.now(tz=UTC)
+    return {
+        key: (
+            dict(payload),
+            {
+                "openmeteo_endpoint": "single_runs_api",
+                "run_authority": "run_pinned_single_runs",
+                "location_batch_size": len(items),
+            },
+            captured_at,
+        )
+        for (key, _request), payload in zip(items, payloads, strict=True)
+    }
+
+
 def download_current_target_raw_inputs(
     *,
     forecast_db: Path,
@@ -619,6 +654,7 @@ def download_current_target_raw_inputs(
         "openmeteo_transport_fetch_count": 0,
         "openmeteo_model_meta_fetch_count": 0,
         "openmeteo_wave_payload_count": 0,
+        "openmeteo_single_runs_location_batch_count": 0,
     }
     deadline_monotonic = (
         time.monotonic() + max(0.0, float(max_wall_clock_seconds))
@@ -669,7 +705,35 @@ def download_current_target_raw_inputs(
         )
 
     openmeteo_client = httpx.Client()
-    if pending_requests and not _single_runs_public_for_request(next(iter(pending_requests.values()))):
+    first_request = next(iter(pending_requests.values()), None)
+    single_runs_public = (
+        first_request is not None
+        and _single_runs_public_for_request(first_request)
+    )
+    single_runs_wave_failure: Exception | None = None
+    if single_runs_public and len(pending_requests) > 1:
+        try:
+            wave_resolved = _fetch_run_pinned_anchor_wave(
+                pending_requests,
+                deadline_monotonic=deadline_monotonic,
+                client=openmeteo_client,
+            )
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code != 400 and status_code != 429 and status_code < 500:
+                raise
+            single_runs_wave_failure = exc
+        except RuntimeError as exc:
+            if not _is_transient_provider_failure(exc):
+                raise
+            single_runs_wave_failure = exc
+        else:
+            resolved_payloads.update(wave_resolved)
+            downloaded["openmeteo_transport_fetch_count"] = len(wave_resolved)
+            downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
+        downloaded["openmeteo_single_runs_location_batch_count"] = 1
+
+    if pending_requests and (not single_runs_public or single_runs_wave_failure is not None):
         try:
             wave_resolved, meta_wave_failures = _fetch_meta_stamped_anchor_wave(
                 pending_requests,
@@ -682,6 +746,19 @@ def download_current_target_raw_inputs(
             meta_wave_failures = {key: exc for key in pending_requests}
             wave_resolved = {}
             downloaded["openmeteo_model_meta_fetch_count"] = 1
+        if single_runs_wave_failure is not None:
+            reason = (
+                f"{type(single_runs_wave_failure).__name__}: "
+                f"{str(single_runs_wave_failure)[:160]}"
+            )
+            wave_resolved = {
+                key: (
+                    payload,
+                    {**provenance, "single_runs_fallback_reason": reason},
+                    captured_at,
+                )
+                for key, (payload, provenance, captured_at) in wave_resolved.items()
+            }
         resolved_payloads.update(wave_resolved)
         downloaded["openmeteo_transport_fetch_count"] = len(wave_resolved)
         downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
