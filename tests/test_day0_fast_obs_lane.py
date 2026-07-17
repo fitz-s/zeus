@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-17
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -1972,6 +1972,51 @@ class TestAnomalyFreshnessGates:
         assert extremes is not None
         assert extremes.high_so_far == pytest.approx(22.0)
         assert extremes.sample_count == 2
+
+    def test_ledger_identity_seed_removes_cold_fetch_history_from_write_delta(self):
+        from src.data.day0_fast_obs import FAST_OBS_SOURCE_ID, Day0FastObsEmitter
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        conn = sqlite3.connect(":memory:")
+        ensure_table(conn)
+        observed = datetime(2026, 6, 9, 15, 0, tzinfo=UTC)
+        report = _report("RJTT", observed, 21.0)
+        append_print(
+            conn,
+            city="Tokyo",
+            station_id="RJTT",
+            source_channel=FAST_OBS_SOURCE_ID,
+            publish_ts_utc=report.receipt_time.isoformat(),
+            value_native=21.0,
+            unit="C",
+            fetched_at_utc=report.receipt_time.isoformat(),
+            raw_report=report.raw,
+        )
+        conn.commit()
+        emitter = Day0FastObsEmitter(
+            fetcher=lambda *_args, **_kwargs: [report],
+            min_fetch_interval_s=0.0,
+        )
+
+        assert emitter.sync_ledger_report_keys(
+            conn,
+            [_tokyo()],
+            as_of=report.receipt_time + timedelta(minutes=1),
+        ) == 1
+        assert emitter.ledger_report_keys_loaded()
+        prefetch = emitter.prefetch(
+            cities=[_tokyo()],
+            decision_time=report.receipt_time + timedelta(minutes=1),
+        )
+
+        assert prefetch.reports == (report,)
+        assert prefetch.ledger_reports == ()
+
+        traced: list[str] = []
+        conn.set_trace_callback(traced.append)
+        assert emitter.sync_ledger_report_keys(conn, [_tokyo()]) == 0
+        conn.set_trace_callback(None)
+        assert not traced
 
     def test_detector_refuses_conclusion_when_metar_window_lags_wu(self):
         """Operator scenario: METAR outage since 10:00, WU moved at 12:00 —

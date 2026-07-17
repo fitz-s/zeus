@@ -827,7 +827,11 @@ def _day0_metar_source_clock_tick():
     from src.config import runtime_cities, settings
     from src.events.event_priority import day0_is_tradeable_for_scope
     from src.runtime.reactor_wake import publish_reactor_wake
-    from src.state.db import get_world_connection, world_write_mutex
+    from src.state.db import (
+        get_world_connection,
+        get_world_connection_read_only,
+        world_write_mutex,
+    )
 
     edli_cfg = settings["edli"]
     if not (
@@ -840,8 +844,28 @@ def _day0_metar_source_clock_tick():
 
     decision_time = datetime.now(timezone.utc)
     emitter = _day0_metar_emitter()
+    cities = runtime_cities()
+    if not emitter.ledger_report_keys_loaded():
+        read_conn = get_world_connection_read_only()
+        try:
+            seeded_keys = emitter.sync_ledger_report_keys(
+                read_conn,
+                cities,
+                as_of=decision_time,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "DAY0_METAR_SOURCE_CLOCK_DEFERRED reason=ledger_identity_sync_failed "
+                "exc=%s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return {"status": "LEDGER_SYNC_FAILED"}
+        finally:
+            read_conn.close()
+        logger.info("DAY0_METAR_LEDGER_IDENTITIES_SYNCED count=%d", seeded_keys)
     prefetch = emitter.prefetch(
-        cities=runtime_cities(),
+        cities=cities,
         decision_time=decision_time,
         anomaly_check=None,
     )

@@ -885,9 +885,77 @@ class Day0FastObsEmitter:
         default_factory=dict,
         init=False,
     )
+    _ledger_report_keys_loaded: bool = field(default=False, init=False)
     _ledger_cursor_id: int = field(default=0, init=False)
     _anomaly_cursor: int = field(default=0, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
+    def ledger_report_keys_loaded(self) -> bool:
+        with self._lock:
+            return self._ledger_report_keys_loaded
+
+    def sync_ledger_report_keys(
+        self,
+        world_conn: Any,
+        cities: list[Any],
+        *,
+        as_of: datetime | None = None,
+    ) -> int:
+        """Seed publication identities without replacing the live report cache.
+
+        The source-clock uses this once on process start before its first HTTP
+        fetch. It prevents the fetched 36-hour history from being mistaken for
+        an unpersisted delta while preserving the source's observation-time
+        semantics for extreme calculation.
+        """
+        with self._lock:
+            if self._ledger_report_keys_loaded:
+                return 0
+        city_names = tuple(
+            dict.fromkeys(
+                str(getattr(city, "name", "") or "")
+                for city in cities
+                if fast_obs_source_for_city(city) is not None
+                and str(getattr(city, "name", "") or "")
+            )
+        )
+        if not city_names:
+            with self._lock:
+                self._ledger_report_keys_loaded = True
+            return 0
+        placeholders = ",".join("?" for _ in city_names)
+        cutoff = (
+            (as_of or datetime.now(UTC)).astimezone(UTC)
+            - timedelta(hours=METAR_FULL_FETCH_HOURS)
+        ).isoformat()
+        rows = world_conn.execute(
+            f"""
+            SELECT station_id, publish_ts_utc, value_native
+              FROM observation_prints INDEXED BY idx_observation_prints_city_publish
+             WHERE city IN ({placeholders})
+               AND publish_ts_utc >= ?
+               AND source_channel = ?
+            """,
+            (*city_names, cutoff, FAST_OBS_SOURCE_ID),
+        ).fetchall()
+        keys: set[tuple[str, str, float]] = set()
+        for station_id, publish_ts, value_native in rows:
+            try:
+                keys.add(
+                    (
+                        str(station_id).strip().upper(),
+                        str(publish_ts),
+                        float(value_native),
+                    )
+                )
+            except (TypeError, ValueError, OSError, OverflowError):
+                continue
+        with self._lock:
+            self._ledgered_report_keys.update(keys)
+            for key in keys:
+                self._pending_ledger_reports.pop(key, None)
+            self._ledger_report_keys_loaded = True
+        return len(keys)
 
     def hydrate_from_ledger(self, world_conn: Any, eligible: tuple) -> int:
         """Restart-proofing (day0 defect-ledger, 2026-07-16): seed the

@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-17
 # Authority basis: day0_obs_fastlane_plan.md §4.2 (Option B) and §4.3 (Option C);
 #   operator task brief /tmp/day0_obs_fastlane_plan.md.
 """Antibody tests for Day0 observation fast-lane Options B and C.
@@ -721,6 +721,11 @@ class TestDay0MetarSourceClockTick:
         )
         monkeypatch.setattr("src.config.runtime_cities", lambda: [_wu_icao_city()])
 
+    @staticmethod
+    def _primed(emitter):
+        emitter.ledger_report_keys_loaded = lambda: True
+        return emitter
+
     def test_source_current_does_not_open_world_db(self, monkeypatch):
         import src.ingest_main as im
 
@@ -730,7 +735,7 @@ class TestDay0MetarSourceClockTick:
             freshness_status="fresh_fetch",
             reports=(object(),),
         )
-        emitter = SimpleNamespace(prefetch=lambda **_kw: prefetch)
+        emitter = self._primed(SimpleNamespace(prefetch=lambda **_kw: prefetch))
         monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
         monkeypatch.setattr(
             "src.state.db.get_world_connection",
@@ -742,6 +747,51 @@ class TestDay0MetarSourceClockTick:
         result = im._day0_metar_source_clock_tick.__wrapped__()
 
         assert result["status"] == "SOURCE_CURRENT"
+
+    def test_cold_start_seeds_ledger_identities_before_fetch(self, monkeypatch):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        order: list[str] = []
+        prefetch = SimpleNamespace(
+            ledger_reports=(),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+        )
+
+        class _Emitter:
+            def ledger_report_keys_loaded(self):
+                return False
+
+            def sync_ledger_report_keys(self, conn, cities, *, as_of):
+                assert conn is read_conn
+                assert len(cities) == 1
+                assert as_of.tzinfo is not None
+                order.append("sync")
+                return 400
+
+            def prefetch(self, **_kw):
+                order.append("fetch")
+                return prefetch
+
+        read_conn = MagicMock()
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: _Emitter())
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: read_conn,
+        )
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection",
+            lambda **_kw: (_ for _ in ()).throw(
+                AssertionError("writer DB opened for unchanged payload")
+            ),
+        )
+
+        result = im._day0_metar_source_clock_tick.__wrapped__()
+
+        assert result["status"] == "SOURCE_CURRENT"
+        assert order == ["sync", "fetch"]
+        read_conn.close.assert_called_once_with()
 
     def test_strict_settings_shape_enables_source_clock(self, monkeypatch):
         import src.ingest_main as im
@@ -762,7 +812,7 @@ class TestDay0MetarSourceClockTick:
             freshness_status="fresh_fetch",
             reports=(object(),),
         )
-        emitter = SimpleNamespace(prefetch=lambda **_kw: prefetch)
+        emitter = self._primed(SimpleNamespace(prefetch=lambda **_kw: prefetch))
         monkeypatch.setattr("src.config.settings", StrictSettings())
         monkeypatch.setattr("src.config.runtime_cities", lambda: [_wu_icao_city()])
         monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
@@ -823,7 +873,8 @@ class TestDay0MetarSourceClockTick:
             def release(self):
                 order.append("release")
 
-        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: _Emitter())
+        emitter = self._primed(_Emitter())
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
         monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
         monkeypatch.setattr(
@@ -885,7 +936,8 @@ class TestDay0MetarSourceClockTick:
             def release(self):
                 return None
 
-        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: _Emitter())
+        emitter = self._primed(_Emitter())
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
         monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
         monkeypatch.setattr(
@@ -912,11 +964,13 @@ class TestDay0MetarSourceClockTick:
             reports=(object(),),
             eligible=((_wu_icao_city(), object(), "2026-06-12"),),
         )
-        emitter = SimpleNamespace(
-            prefetch=lambda **_kw: prefetch,
-            emit_prefetched=lambda **_kw: (_ for _ in ()).throw(
-                AssertionError("emit called while writer lock was contended")
-            ),
+        emitter = self._primed(
+            SimpleNamespace(
+                prefetch=lambda **_kw: prefetch,
+                emit_prefetched=lambda **_kw: (_ for _ in ()).throw(
+                    AssertionError("emit called while writer lock was contended")
+                ),
+            )
         )
         conn = MagicMock()
         mutex = MagicMock()
