@@ -7089,6 +7089,7 @@ def event_bound_live_adapter_from_trade_conn(
             )
             from src.data.polymarket_client import PolymarketClient
             from src.engine.global_auction_universe import (
+                _global_book_metadata_is_current,
                 bind_current_global_probability_tokens,
                 capture_current_global_book_epoch,
                 fetch_current_global_books,
@@ -7113,7 +7114,13 @@ def event_bound_live_adapter_from_trade_conn(
                 float(os.environ.get("ZEUS_GLOBAL_AUCTION_GAMMA_TIMEOUT_SECONDS", "6.0")),
             )
 
-            def _bind(probability_slice, *, mode, metadata_sink=None):
+            def _bind(
+                probability_slice,
+                *,
+                mode,
+                metadata_sink=None,
+                force_current_gamma=False,
+            ):
                 gamma_batch_requests = 0
                 gamma_event_requests = 0
                 refresh_started_at = datetime.now(UTC)
@@ -7158,7 +7165,7 @@ def event_bound_live_adapter_from_trade_conn(
                     probability_witnesses=probability_slice,
                     get_gamma_event=_gamma_event,
                     get_gamma_markets=_gamma_markets,
-                    trade_conn=trade_conn,
+                    trade_conn=None if force_current_gamma else trade_conn,
                     checked_at_utc=_at,
                     max_workers=16,
                     metadata_sink=metadata_sink,
@@ -7200,6 +7207,49 @@ def event_bound_live_adapter_from_trade_conn(
                         refreshed_at=refresh_started_at,
                     )
                 return bound_probabilities
+
+            def _refresh_capture_metadata(probability_slice):
+                checked_at = datetime.now(UTC) + timedelta(seconds=1)
+                stale_family_keys = {
+                    family_key
+                    for family_key, witness in probability_slice.items()
+                    if any(
+                        not isinstance(
+                            book_metadata_by_key.get(
+                                (binding.condition_id, token_id)
+                            ),
+                            Mapping,
+                        )
+                        or not _global_book_metadata_is_current(
+                            book_metadata_by_key[
+                                (binding.condition_id, token_id)
+                            ],
+                            checked_at_utc=checked_at,
+                        )
+                        for binding in tuple(
+                            getattr(witness, "bindings", ()) or ()
+                        )
+                        for token_id in (
+                            str(getattr(binding, "yes_token_id", "") or ""),
+                            str(getattr(binding, "no_token_id", "") or ""),
+                        )
+                    )
+                }
+                if not stale_family_keys:
+                    return dict(probability_slice)
+                current_metadata = {}
+                rebound = _bind(
+                    {
+                        family_key: probability_slice[family_key]
+                        for family_key in stale_family_keys
+                    },
+                    mode="capture_current_metadata",
+                    metadata_sink=current_metadata,
+                    force_current_gamma=True,
+                )
+                refreshed = dict(probability_slice)
+                refreshed.update(rebound)
+                return refreshed
 
             def _prefetch_books(
                 probability_slice,
@@ -7853,6 +7903,10 @@ def event_bound_live_adapter_from_trade_conn(
                     family_key: bound_probabilities[family_key]
                     for family_key in eligible_refresh_family_keys
                 }
+                probability_delta = _refresh_capture_metadata(
+                    probability_delta
+                )
+                bound_probabilities.update(probability_delta)
                 delta_epoch = _capture_bound(
                     probability_delta,
                     mode="family_delta_books",
@@ -7918,6 +7972,9 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_sink=full_metadata,
                     )
 
+            bound_probabilities = _refresh_capture_metadata(
+                bound_probabilities
+            )
             epoch = _capture_bound(
                 bound_probabilities,
                 mode="full_books",

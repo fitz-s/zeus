@@ -3297,10 +3297,22 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
     )
 
     metadata = {
-        ("condition-a", "yes-token-a"): {"condition_id": "condition-a"},
-        ("condition-a", "no-token-a"): {"condition_id": "condition-a"},
-        ("condition-b", "yes-token-b"): {"condition_id": "condition-b"},
-        ("condition-b", "no-token-b"): {"condition_id": "condition-b"},
+        ("condition-a", "yes-token-a"): {
+            "condition_id": "condition-a",
+            "_global_current_gamma": True,
+        },
+        ("condition-a", "no-token-a"): {
+            "condition_id": "condition-a",
+            "_global_current_gamma": True,
+        },
+        ("condition-b", "yes-token-b"): {
+            "condition_id": "condition-b",
+            "_global_current_gamma": True,
+        },
+        ("condition-b", "no-token-b"): {
+            "condition_id": "condition-b",
+            "_global_current_gamma": True,
+        },
     }
     def probability(identity):
         return {
@@ -4367,6 +4379,8 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         miami: witness(miami, "miami"),
     }
     bind_calls = []
+    forced_gamma_calls = []
+    expire_next_full_metadata = {"value": False}
     capture_calls = []
     book_calls = []
 
@@ -4375,24 +4389,40 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         *,
         probability_witnesses,
         metadata_sink=None,
+        trade_conn=None,
         **_,
     ):
+        family_keys = tuple(sorted(probability_witnesses))
         bind_calls.append(
             (
                 "metadata" if metadata_sink is not None else "token",
-                tuple(sorted(probability_witnesses)),
+                family_keys,
             )
         )
+        if trade_conn is None:
+            forced_gamma_calls.append(family_keys)
+        expire_miami = (
+            expire_next_full_metadata["value"]
+            and trade_conn is not None
+            and len(probability_witnesses) > 1
+        )
         if metadata_sink is not None:
-            for probability in probability_witnesses.values():
+            for family_key, probability in probability_witnesses.items():
                 for binding in probability.bindings:
                     for token_id in (
                         binding.yes_token_id,
                         binding.no_token_id,
                     ):
-                        metadata_sink[(binding.condition_id, token_id)] = {
-                            "_global_current_gamma": True,
-                        }
+                        metadata_sink[(binding.condition_id, token_id)] = (
+                            {
+                                "captured_at": "2020-01-01T00:00:00+00:00",
+                                "freshness_deadline": "2020-01-01T00:01:00+00:00",
+                            }
+                            if expire_miami and family_key == miami
+                            else {"_global_current_gamma": True}
+                        )
+        if expire_miami:
+            expire_next_full_metadata["value"] = False
         return dict(probability_witnesses)
 
     def fake_capture(_trade_conn, **kwargs):
@@ -4405,6 +4435,10 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
                     binding.no_token_id,
                 ):
                     assert (binding.condition_id, token_id) in metadata_overrides
+                    assert universe._global_book_metadata_is_current(
+                        metadata_overrides[(binding.condition_id, token_id)],
+                        checked_at_utc=_dt.datetime.now(_dt.timezone.utc),
+                    )
         capture_calls.append(tuple(sorted(probability_witnesses)))
         states = []
         for family_key, probability in probability_witnesses.items():
@@ -4540,6 +4574,7 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         "_global_book_metadata_refresh_family_keys",
         lambda *_args, **_kwargs: frozenset({dallas}),
     )
+    expire_next_full_metadata["value"] = True
     rebuilt_adapter = make_adapter()
     rebuilt_adapter.process_global_batch(
         (event, ineligible_event),
@@ -4567,7 +4602,9 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         ("metadata", (miami,)),
         ("metadata", (dallas,)),
         ("metadata", (dallas, miami)),
+        ("metadata", (miami,)),
     ]
+    assert forced_gamma_calls == [(miami,)]
     assert cache_after_removal is not None
     assert {family_key for family_key, _ in cache_after_removal.bound_probabilities} == {
         dallas,
