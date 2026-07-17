@@ -2547,10 +2547,16 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     prepared_with = []
     capacity_calls = []
     urgent_revision = {"value": (1, 2, 3)}
+    urgent_reason = {"value": "day0_extreme_event_committed"}
     monkeypatch.setattr(
         reactor_wake,
         "reactor_urgent_wake_revision",
         lambda: urgent_revision["value"],
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_reason",
+        lambda: urgent_reason["value"],
     )
 
     class CapacityAuthority:
@@ -2732,6 +2738,24 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         {metadata_key: metadata},
     ]
     assert bind_calls == [True, True]
+
+    urgent_revision["value"] = (7, 8, 9)
+    urgent_reason["value"] = "market_price_advanced"
+    day0_event = _global_day0_scope_event(
+        city="Dallas",
+        source_run_id="run-day0",
+    )
+    result = adapter.process_global_batch(
+        (day0_event,),
+        _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
+    )
+
+    assert result.events == (day0_event,)
+    assert captured["epoch_superseded"]() is False
+
+    urgent_revision["value"] = (10, 11, 12)
+    urgent_reason["value"] = "day0_extreme_event_committed"
+    assert captured["epoch_superseded"]() is True
 
 
 def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(

@@ -5484,12 +5484,15 @@ def event_bound_live_adapter_from_trade_conn(
     _live_ack_count: list[int] = [0]
     _consumed_global_preflight_tokens: dict[str, datetime] = {}
     _global_entry_policy_by_family: dict[str, tuple[str, str]] = {}
-    from src.runtime.reactor_wake import reactor_urgent_wake_revision
+    from src.runtime.reactor_wake import (
+        reactor_urgent_wake_reason,
+        reactor_urgent_wake_revision,
+    )
 
     # Seal before process_pending fetches its page. A Day0 fact committed after
     # this point must supersede that page even if it arrives before the global
     # batch begins; sampling inside _process_global_batch loses exactly that race.
-    _global_batch_urgent_wake_revision = reactor_urgent_wake_revision()
+    _global_batch_urgent_wake_revision = [reactor_urgent_wake_revision()]
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
@@ -6281,6 +6284,11 @@ def event_bound_live_adapter_from_trade_conn(
             events
         )
         entry_submit_suppression_reason = _entry_global_submit_suppression_reason()
+        day0_urgent_batch = any(
+            str(getattr(event, "event_type", "") or "")
+            == "DAY0_EXTREME_UPDATED"
+            for event in events
+        )
         if entry_submit_suppression_reason is not None:
             logging.getLogger(__name__).info(
                 "global batch suppressing BUY candidates before selection: reason=%s",
@@ -6289,10 +6297,21 @@ def event_bound_live_adapter_from_trade_conn(
 
         def _epoch_superseded() -> bool:
             current = reactor_urgent_wake_revision()
-            return (
-                current is not None
-                and current != _global_batch_urgent_wake_revision
-            )
+            if (
+                current is None
+                or current == _global_batch_urgent_wake_revision[0]
+            ):
+                return False
+            if (
+                day0_urgent_batch
+                and reactor_urgent_wake_reason() == "market_price_advanced"
+            ):
+                # The affected Day0 q has a shorter alpha clock than an
+                # unrelated quote tick. The selected leg still crosses the
+                # exact JIT book/probability/wealth preflight before submit.
+                _global_batch_urgent_wake_revision[0] = current
+                return False
+            return True
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
