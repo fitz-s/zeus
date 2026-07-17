@@ -1018,14 +1018,14 @@ def _get_cached_global_book_epoch(
     return cached
 
 
-def _fresh_projected_global_books(
+def _projected_global_books(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
     *,
     checked_at: datetime,
     max_age: timedelta,
 ) -> tuple[dict[str, Mapping[str, object]], datetime] | None:
-    """Read one complete fresh book cut from the price-channel projection."""
+    """Read every usable fresh book already projected by the price channel."""
 
     if checked_at.tzinfo is None or max_age <= timedelta(0):
         return None
@@ -1061,7 +1061,7 @@ def _fresh_projected_global_books(
                     captured_at.tzinfo is None
                     or freshness_deadline.tzinfo is None
                 ):
-                    return None
+                    continue
                 captured_at = captured_at.astimezone(timezone.utc)
                 freshness_deadline = freshness_deadline.astimezone(timezone.utc)
                 if (
@@ -1071,20 +1071,41 @@ def _fresh_projected_global_books(
                     or checked_at - captured_at > max_age
                     or freshness_deadline < checked_at
                 ):
-                    return None
+                    continue
                 book = json.loads(str(row[1] or ""))
                 if (
                     not isinstance(book, Mapping)
                     or str(book.get("asset_id") or "").strip() != token_id
                 ):
-                    return None
+                    continue
                 books[token_id] = dict(book)
                 captured.append(captured_at)
     except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
         return None
-    if len(books) != len(token_ids) or not captured:
+    if not books or not captured:
         return None
     return books, min(captured)
+
+
+def _fresh_projected_global_books(
+    trade_conn: sqlite3.Connection,
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> tuple[dict[str, Mapping[str, object]], datetime] | None:
+    """Read one complete fresh book cut from the price-channel projection."""
+
+    token_ids = tuple(dict.fromkeys(str(token).strip() for token in tokens))
+    projected = _projected_global_books(
+        trade_conn,
+        token_ids,
+        checked_at=checked_at,
+        max_age=max_age,
+    )
+    if projected is None or len(projected[0]) != len(token_ids):
+        return None
+    return projected
 
 
 def _probe_global_book_epoch_cache(
@@ -6277,14 +6298,19 @@ def event_bound_live_adapter_from_trade_conn(
                     return None
                 captured_at = datetime.now(UTC)
                 fetch_started = _time.monotonic()
-                projected = _fresh_projected_global_books(
+                projected = _projected_global_books(
                     trade_conn,
                     tokens,
                     checked_at=captured_at,
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                 )
-                if projected is not None:
-                    books, projected_at = projected
+                projected_books, projected_at = (
+                    projected if projected is not None else ({}, None)
+                )
+                missing_tokens = tuple(
+                    token for token in tokens if token not in projected_books
+                )
+                if not missing_tokens:
                     logging.getLogger(__name__).info(
                         "global book epoch stage completed: mode=%s "
                         "book_projection elapsed_s=%.3f tokens=%d books=%d "
@@ -6301,10 +6327,10 @@ def event_bound_live_adapter_from_trade_conn(
                             ),
                         ),
                     )
-                    return tokens, books, projected_at
+                    return tokens, projected_books, projected_at
                 with PolymarketClient(public_http_timeout=timeout) as clob:
-                    books = fetch_current_global_books(
-                        tokens,
+                    fetched_books = fetch_current_global_books(
+                        missing_tokens,
                         get_books=lambda chunk: (
                             clob.get_orderbook_snapshots(
                                 chunk,
@@ -6314,15 +6340,25 @@ def event_bound_live_adapter_from_trade_conn(
                         batch_size=batch_size,
                         book_fetch_workers=4,
                     )
+                books = dict(projected_books)
+                books.update(fetched_books)
+                epoch_at = (
+                    min(projected_at, captured_at)
+                    if projected_at is not None
+                    else captured_at
+                )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
-                    "book_prefetch elapsed_s=%.3f tokens=%d books=%d",
+                    "book_prefetch elapsed_s=%.3f tokens=%d books=%d "
+                    "projected=%d fetched=%d",
                     mode,
                     _time.monotonic() - fetch_started,
                     len(tokens),
                     len(books),
+                    len(projected_books),
+                    len(fetched_books),
                 )
-                return tokens, books, captured_at
+                return tokens, books, epoch_at
 
             def _capture_bound(
                 bound_probabilities,

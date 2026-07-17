@@ -3080,6 +3080,7 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
             min_order_size TEXT NOT NULL,
             fee_details_json TEXT NOT NULL,
             tradeability_status_json TEXT NOT NULL,
+            orderbook_depth_json TEXT NOT NULL,
             captured_at TEXT NOT NULL,
             freshness_deadline TEXT NOT NULL
         );
@@ -3089,8 +3090,14 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
             snapshot_id TEXT NOT NULL,
             yes_token_id TEXT NOT NULL,
             no_token_id TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL,
             PRIMARY KEY (condition_id, selected_outcome_token_id)
         );
+        CREATE INDEX idx_snapshot_latest_selected_token_captured
+            ON executable_market_snapshot_latest (
+                selected_outcome_token_id,
+                freshness_deadline DESC
+            );
         INSERT INTO executable_market_snapshots VALUES (
             'snapshot-a',
             'market-a',
@@ -3107,8 +3114,9 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
             '5',
             '{}',
             '{}',
+            '{"asset_id":"yes-token-a","hash":"hash-yes-token-a"}',
             '2026-07-10T07:00:00+00:00',
-            '2026-07-10T07:03:00+00:00'
+            '2026-07-10T08:13:00+00:00'
         );
         INSERT INTO executable_market_snapshot_latest VALUES
             (
@@ -3116,14 +3124,16 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
                 'yes-token-a',
                 'snapshot-a',
                 'yes-token-a',
-                'no-token-a'
+                'no-token-a',
+                '2026-07-10T08:13:00+00:00'
             ),
             (
                 'condition-a',
                 'no-token-a',
                 'snapshot-a',
                 'yes-token-a',
-                'no-token-a'
+                'no-token-a',
+                '2026-07-10T08:13:00+00:00'
             );
         """
     )
@@ -5812,6 +5822,25 @@ def test_global_book_prefetch_reads_complete_fresh_price_channel_projection():
     assert captured_at == _dt.datetime(
         2026, 7, 17, 0, 12, 11, tzinfo=_dt.timezone.utc
     )
+
+    conn.execute(
+        "DELETE FROM executable_market_snapshot_latest "
+        "WHERE selected_outcome_token_id = 'no-a'"
+    )
+    partial = era._projected_global_books(
+        conn,
+        ("yes-a", "no-a"),
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    )
+    assert partial is not None
+    assert set(partial[0]) == {"yes-a"}
+    assert era._fresh_projected_global_books(
+        conn,
+        ("yes-a", "no-a"),
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
 
 
 def test_global_book_prefetch_rejects_incomplete_or_expired_projection():
