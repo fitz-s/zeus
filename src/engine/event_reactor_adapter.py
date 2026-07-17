@@ -895,6 +895,77 @@ def _global_book_speculative_topology(
     return tuple(sorted(topology)) or None
 
 
+def _global_book_metadata_refresh_family_keys(
+    trade_conn: sqlite3.Connection,
+    probabilities: Mapping[str, object],
+    *,
+    checked_at: datetime,
+) -> frozenset[str]:
+    """Return families whose last local metadata was explicitly invalidated."""
+
+    if checked_at.tzinfo is None:
+        raise ValueError("GLOBAL_BOOK_INVALIDATION_CHECK_TIME_NAIVE")
+    from src.engine.global_auction_universe import (
+        _global_book_snapshot_rows,
+        _table_exists,
+    )
+
+    if not _table_exists(trade_conn, "executable_market_snapshot_invalidations"):
+        return frozenset()
+    families_by_condition: dict[str, set[str]] = {}
+    families_by_token: dict[str, set[str]] = {}
+    for raw_family_key, witness in probabilities.items():
+        family_key = str(raw_family_key or "").strip()
+        if not family_key or str(getattr(witness, "family_key", "") or "") != family_key:
+            raise ValueError("GLOBAL_BOOK_PROBABILITY_FAMILY_MISMATCH")
+        for binding in tuple(getattr(witness, "bindings", ()) or ()):
+            condition_id = str(getattr(binding, "condition_id", "") or "").strip()
+            if not condition_id:
+                raise ValueError("GLOBAL_BOOK_CONDITION_IDENTITY_INCOMPLETE")
+            families_by_condition.setdefault(condition_id, set()).add(family_key)
+            for raw_token in (
+                getattr(binding, "yes_token_id", ""),
+                getattr(binding, "no_token_id", ""),
+            ):
+                token_id = str(raw_token or "").strip()
+                if token_id:
+                    families_by_token.setdefault(token_id, set()).add(family_key)
+
+    candidates: set[str] = set()
+    for raw_condition, raw_token in trade_conn.execute(
+        """
+        SELECT condition_id, token_id
+          FROM executable_market_snapshot_invalidations
+         WHERE invalidated_at <= ?
+        """,
+        (checked_at.astimezone(timezone.utc).isoformat(),),
+    ):
+        candidates.update(families_by_condition.get(str(raw_condition or "").strip(), ()))
+        candidates.update(families_by_token.get(str(raw_token or "").strip(), ()))
+    if not candidates:
+        return frozenset()
+
+    candidate_conditions = {
+        condition_id
+        for condition_id, family_keys in families_by_condition.items()
+        if family_keys.intersection(candidates)
+    }
+    invalidated: set[str] = set()
+    seen_conditions: set[str] = set()
+    for row in _global_book_snapshot_rows(
+        trade_conn,
+        condition_ids=tuple(candidate_conditions),
+        checked_at_utc=checked_at,
+    ):
+        condition_id = str(row.get("condition_id") or "").strip()
+        seen_conditions.add(condition_id)
+        if bool(row.get("snapshot_invalidated")):
+            invalidated.update(families_by_condition.get(condition_id, ()))
+    for condition_id in candidate_conditions.difference(seen_conditions):
+        invalidated.update(families_by_condition.get(condition_id, ()))
+    return frozenset(invalidated)
+
+
 def _global_book_receipt_token_pairs(
     trade_conn: sqlite3.Connection,
     *,
@@ -7207,6 +7278,23 @@ def event_bound_live_adapter_from_trade_conn(
             # that can change this decision. Untouched families keep fresh q while
             # reusing the token identity already validated by the current epoch.
             cache_checked_at = datetime.now(UTC)
+            metadata_refresh_family_keys = (
+                _global_book_metadata_refresh_family_keys(
+                    trade_conn,
+                    probabilities,
+                    checked_at=cache_checked_at,
+                )
+            )
+            effective_book_refresh_family_keys = (
+                None
+                if book_refresh_family_keys is None
+                else book_refresh_family_keys.union(metadata_refresh_family_keys)
+            )
+            if metadata_refresh_family_keys:
+                logging.getLogger(__name__).info(
+                    "global book metadata refresh required before book I/O: families=%d",
+                    len(metadata_refresh_family_keys),
+                )
             speculative_topology = _global_book_speculative_topology(
                 trade_conn,
                 probabilities,
@@ -7217,7 +7305,7 @@ def event_bound_live_adapter_from_trade_conn(
                 checked_at=cache_checked_at,
                 allowed=True,
                 topology_hint=speculative_topology,
-                mutable_family_keys=book_refresh_family_keys,
+                mutable_family_keys=effective_book_refresh_family_keys,
             )
             if cached_before_bind is None:
                 logging.getLogger(__name__).info(
@@ -7257,7 +7345,7 @@ def event_bound_live_adapter_from_trade_conn(
                         probabilities,
                         allowed=True,
                         topology_hint=speculative_topology,
-                        mutable_family_keys=book_refresh_family_keys,
+                        mutable_family_keys=effective_book_refresh_family_keys,
                     )
                 )
                 if reusable_topology_entry is None:
@@ -7268,9 +7356,9 @@ def event_bound_live_adapter_from_trade_conn(
                     )
             eligible_refresh_family_keys = (
                 None
-                if book_refresh_family_keys is None
+                if effective_book_refresh_family_keys is None
                 else frozenset(
-                    book_refresh_family_keys.intersection(probabilities)
+                    effective_book_refresh_family_keys.intersection(probabilities)
                 )
             )
             if (
@@ -7412,7 +7500,7 @@ def event_bound_live_adapter_from_trade_conn(
             prefetch_token_hint = None
             if (
                 cached_before_bind is None
-                or book_refresh_family_keys is None
+                or effective_book_refresh_family_keys is None
             ):
                 prefetch_slice = probabilities
                 prefetch_mode = "full_books"
@@ -7526,6 +7614,20 @@ def event_bound_live_adapter_from_trade_conn(
                                 "universe: reason=%s",
                                 delta_exc,
                             )
+            if metadata_refresh_family_keys:
+                for family_key in metadata_refresh_family_keys:
+                    rebound_probabilities.pop(family_key, None)
+                    retained_bound_probabilities.pop(family_key, None)
+                bind_slice = {
+                    **dict(bind_slice),
+                    **{
+                        family_key: probabilities[family_key]
+                        for family_key in metadata_refresh_family_keys
+                    },
+                }
+                # Invalidated local metadata is not authority for speculative
+                # book I/O. Current Gamma must replace it first.
+                prefetch_slice = None
             prefetched = None
             if not bind_slice:
                 if prefetch_slice is not None and not day0_urgent_batch:
