@@ -478,6 +478,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
             BayesPrecisionFusionDownloadTarget,
             bayes_precision_fusion_quota_cooldown_seconds,
+            bayes_precision_fusion_source_clock_quota_priority,
             download_bayes_precision_fusion_extra_raw_inputs,
         )
         from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
@@ -730,19 +731,20 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 if deadline is not None
                 else None
             )
-            report = download_bayes_precision_fusion_extra_raw_inputs(
-                forecast_db=Path(str(forecast_db)),
-                cycle=cycle,
-                targets=chunk,
-                models=(source,),
-                include_previous_runs=False,
-                prune_after=False,
-                allow_single_runs_fallback=False,
-                release_lag_hours=float(
-                    cfg.get("download_release_lag_hours") or 14.0
-                ),
-                max_wall_clock_seconds=remaining,
-            )
+            with bayes_precision_fusion_source_clock_quota_priority():
+                report = download_bayes_precision_fusion_extra_raw_inputs(
+                    forecast_db=Path(str(forecast_db)),
+                    cycle=cycle,
+                    targets=chunk,
+                    models=(source,),
+                    include_previous_runs=False,
+                    prune_after=False,
+                    allow_single_runs_fallback=False,
+                    release_lag_hours=float(
+                        cfg.get("download_release_lag_hours") or 14.0
+                    ),
+                    max_wall_clock_seconds=remaining,
+                )
             if bool(report.get("transport_aborted_remaining_targets")):
                 quota_abort.set()
             return source, report

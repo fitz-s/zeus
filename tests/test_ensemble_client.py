@@ -1,5 +1,5 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-07-17
 # Authority basis: Phase 1D forecast source policy + first-principles safety implementation 2026-04-30
 """Tests for ensemble client caching and request behavior."""
 
@@ -50,8 +50,7 @@ def test_fetch_ensemble_uses_cache(monkeypatch):
     ensemble_client._ENSEMBLE_CACHE.clear()
     calls = {"n": 0}
 
-    monkeypatch.setattr(ensemble_client.quota_tracker, "can_call", lambda: True)
-    monkeypatch.setattr(ensemble_client.quota_tracker, "record_call", lambda endpoint="": None)
+    monkeypatch.setattr(ensemble_client.quota_tracker, "acquire_call", lambda endpoint="": True)
 
     def _get(*args, **kwargs):
         calls["n"] += 1
@@ -90,8 +89,7 @@ def test_fetch_ensemble_cache_key_includes_model(monkeypatch):
     ensemble_client._ENSEMBLE_CACHE.clear()
     calls = {"n": 0}
 
-    monkeypatch.setattr(ensemble_client.quota_tracker, "can_call", lambda: True)
-    monkeypatch.setattr(ensemble_client.quota_tracker, "record_call", lambda endpoint="": None)
+    monkeypatch.setattr(ensemble_client.quota_tracker, "acquire_call", lambda endpoint="": True)
 
     def _get(*args, **kwargs):
         calls["n"] += 1
@@ -179,8 +177,7 @@ def test_fetch_ensemble_cache_key_includes_role(monkeypatch):
     ensemble_client._ENSEMBLE_CACHE.clear()
     calls = {"n": 0}
 
-    monkeypatch.setattr(ensemble_client.quota_tracker, "can_call", lambda: True)
-    monkeypatch.setattr(ensemble_client.quota_tracker, "record_call", lambda endpoint="": None)
+    monkeypatch.setattr(ensemble_client.quota_tracker, "acquire_call", lambda endpoint="": True)
 
     def _get(*args, **kwargs):
         calls["n"] += 1

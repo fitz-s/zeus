@@ -1226,18 +1226,28 @@ files:
     authority_role: observation_reader
     why: Reads current observations for day0/monitor logic.
     downstream:
+    - src/data/day0_coverage_proof.py
+    - src/data/day0_observation_reader.py
+    - src/data/day0_oracle_anomaly.py
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py
     - src/engine/monitor_refresh.py
+    - src/execution/day0_hard_fact_exit.py
   src/data/openmeteo_client.py:
     zone: K2_runtime
     authority_role: openmeteo_http_boundary
     why: Shared Open-Meteo HTTP client with retry/429 handling and quota tracking so rate-limit behavior stays explicit across
       fetchers.
     downstream:
+    - src/data/bayes_precision_fusion_capture.py
+    - src/data/bayes_precision_fusion_download.py
+    - src/data/day0_hourly_vectors.py
     - src/data/forecasts_append.py
     - src/data/hourly_instants_append.py
+    - src/data/mainstream_forecast_source.py
+    - src/data/openmeteo_ecmwf_ifs9_anchor.py
     - src/data/solar_append.py
+    - src/data/source_health_probe.py
   src/data/latency_metrics.py:
     zone: K2_runtime
     authority_role: input_to_posterior_latency_metric
@@ -1255,11 +1265,40 @@ files:
   src/data/openmeteo_quota.py:
     zone: K2_runtime
     authority_role: quota_guard
-    why: Tracks Open-Meteo rate limits so data gaps are explicit.
+    why: Atomically reserves Open-Meteo request attempts across live processes and restarts, with a source-clock tranche protected from maintenance traffic so quota exhaustion cannot silently erase time-sensitive forecast capture.
     downstream:
     - src/data/ensemble_client.py
     - src/data/observation_client.py
     - src/data/openmeteo_client.py
+  src/data/bayes_precision_fusion_download.py:
+    zone: K2_runtime
+    authority_role: replacement_raw_forecast_capture
+    why: Captures exact current and previous Open-Meteo model runs into raw forecast evidence; it does not derive probabilities or place orders.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - scripts/backfill_bayes_precision_fusion_history_from_b0.py
+    - scripts/backfill_bayes_precision_fusion_promoted_model_history.py
+    - src/data/bayes_precision_fusion_capture.py
+    - src/data/openmeteo_ecmwf_ifs9_anchor.py
+    - src/data/replacement_forecast_production.py
+    - src/data/source_clock_update_probe.py
+    - src/data/station_forecast_adapter.py
+  src/data/replacement_forecast_production.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_runtime_orchestrator
+    why: Orchestrates source-clock capture, current-target materialization, and commit notifications while leaving probability math, market truth, and order authority to their owning modules.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - scripts/check_live_restart_preflight.py
+    - scripts/download_replacement_forecast_current_targets.py
+    - scripts/source_clock_live_replacement_cycle.py
+    - src/engine/monitor_refresh.py
+    - src/events/reactor.py
+    - src/ingest/forecast_live_daemon.py
+    - src/ingest_main.py
+    - src/main.py
   src/data/source_clock_update_probe.py:
     zone: K2_runtime
     authority_role: replacement_forecast_source_clock_trigger

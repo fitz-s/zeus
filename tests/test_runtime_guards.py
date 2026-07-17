@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-17
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -44,7 +44,12 @@ from src.data.calibration_transfer_policy import (
     CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
     _rebuild_complete_sentinel_key_for_transfer_evidence,
 )
-from src.data.openmeteo_quota import DAILY_LIMIT, HARD_THRESHOLD, OpenMeteoQuotaTracker
+from src.data.openmeteo_quota import (
+    DAILY_LIMIT,
+    HARD_THRESHOLD,
+    MAINTENANCE_DAILY_LIMIT,
+    OpenMeteoQuotaTracker,
+)
 from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
 from src.contracts.decision_evidence import DecisionEvidence
 from src.engine.discovery_mode import DiscoveryMode
@@ -11368,7 +11373,7 @@ def test_openmeteo_quota_warns_blocks_and_resets(caplog):
     tracker._count = int(DAILY_LIMIT * 0.80) - 1
 
     with caplog.at_level("WARNING"):
-        tracker.record_call("ensemble")
+        assert tracker.acquire_call("ensemble") is True
     assert tracker.calls_today() == int(DAILY_LIMIT * 0.80)
     assert "WARNING" in caplog.text
 
@@ -11384,8 +11389,31 @@ def test_openmeteo_quota_cooldown_blocks_after_429():
     tracker = OpenMeteoQuotaTracker()
     tracker.note_rate_limited(30)
 
-    assert tracker.cooldown_remaining_seconds() >= 299
+    assert tracker.cooldown_remaining_seconds() >= 59
     assert tracker.can_call() is False
+
+
+def test_openmeteo_quota_is_shared_across_process_trackers(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    first = OpenMeteoQuotaTracker(state_path=path)
+    second = OpenMeteoQuotaTracker(state_path=path)
+
+    assert first.acquire_call("first") is True
+    assert second.calls_today() == 1
+    second.note_rate_limited(1)
+    assert first.cooldown_remaining_seconds() >= 59
+    assert first.acquire_call("blocked") is False
+
+
+def test_openmeteo_quota_reserves_capacity_for_source_clock():
+    tracker = OpenMeteoQuotaTracker()
+    tracker._count = MAINTENANCE_DAILY_LIMIT
+
+    assert tracker.acquire_call("maintenance") is False
+    with tracker.priority_lane():
+        assert tracker.acquire_call("source_clock") is True
+    assert tracker.acquire_call("maintenance") is False
 
 
 def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch, caplog):
@@ -11398,7 +11426,7 @@ def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch,
             raise httpx.HTTPStatusError("429", request=req, response=httpx.Response(429, request=req))
 
     slept: list[float] = []
-    monkeypatch.setattr(openmeteo_client.quota_tracker, "can_call", lambda: True)
+    monkeypatch.setattr(openmeteo_client.quota_tracker, "acquire_call", lambda _label="": True)
     monkeypatch.setattr(openmeteo_client.quota_tracker, "note_rate_limited", lambda wait: None)
     monkeypatch.setattr(openmeteo_client.httpx, "get", lambda *a, **k: _Resp())
     monkeypatch.setattr(openmeteo_client.time, "sleep", lambda seconds: slept.append(float(seconds)))
@@ -11436,8 +11464,11 @@ def test_fetch_ensemble_caches_identical_request(monkeypatch):
                 }
             }
 
-    monkeypatch.setattr(ensemble_client.quota_tracker, "can_call", lambda: True)
-    monkeypatch.setattr(ensemble_client.quota_tracker, "record_call", lambda endpoint="": None)
+    monkeypatch.setattr(
+        ensemble_client.quota_tracker,
+        "acquire_call",
+        lambda endpoint="": True,
+    )
 
     def _fake_get(*args, **kwargs):
         calls["n"] += 1
@@ -11481,8 +11512,11 @@ def test_fetch_ensemble_reuses_longer_horizon_for_shorter_request(monkeypatch):
                 }
             }
 
-    monkeypatch.setattr(ensemble_client.quota_tracker, "can_call", lambda: True)
-    monkeypatch.setattr(ensemble_client.quota_tracker, "record_call", lambda endpoint="": None)
+    monkeypatch.setattr(
+        ensemble_client.quota_tracker,
+        "acquire_call",
+        lambda endpoint="": True,
+    )
 
     def _fake_get(*args, **kwargs):
         calls["n"] += 1

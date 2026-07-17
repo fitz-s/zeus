@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-29
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Protect R3 F1 forecast-source registry gates and provenance stamping.
 # Reuse: Run before forecast source, schema, ensemble fetch, or TIGGE gate changes.
 # Authority basis: R3 F1 plus Phase 1D forecast source policy / Open-Meteo fallback gate.
@@ -358,8 +358,11 @@ def test_forecasts_daily_tick_aborts_city_loop_on_openmeteo_quota(monkeypatch) -
 def test_ensemble_fetch_result_carries_registry_provenance(monkeypatch) -> None:
     city = _city()
     ensemble_client._clear_cache()
-    monkeypatch.setattr(ensemble_client.quota_tracker, "can_call", lambda: True)
-    monkeypatch.setattr(ensemble_client.quota_tracker, "record_call", lambda _label: None)
+    monkeypatch.setattr(
+        ensemble_client.quota_tracker,
+        "acquire_call",
+        lambda _label="": True,
+    )
 
     hourly = {
         "time": ["2026-04-27T00:00", "2026-04-27T01:00"],

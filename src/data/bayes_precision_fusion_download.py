@@ -53,7 +53,7 @@ from src.data.bayes_precision_fusion_capture import (
     OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
     _default_live_fetch,
 )
-from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+from src.data.openmeteo_quota import runtime_openmeteo_quota_tracker
 from src.forecast.model_selection import (
     ANCHOR_MODEL,
     GLOBAL_LIKELIHOOD_MODELS,
@@ -65,7 +65,7 @@ from src.strategy.live_inference.source_clock_vnext import source_publicly_usabl
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_download")
 
-_BPF_OPENMETEO_QUOTA_TRACKER = OpenMeteoQuotaTracker()
+_BPF_OPENMETEO_QUOTA_TRACKER = runtime_openmeteo_quota_tracker()
 
 # SPEC §5: ~6 months retention on the raw input capture table.
 RETENTION_DAYS = 180
@@ -496,6 +496,12 @@ def bayes_precision_fusion_quota_cooldown_seconds() -> int:
     """Return process-local Open-Meteo cooldown seconds for the BPF capture lane."""
 
     return int(_BPF_OPENMETEO_QUOTA_TRACKER.cooldown_remaining_seconds())
+
+
+def bayes_precision_fusion_source_clock_quota_priority():
+    """Reserve Open-Meteo capacity for newly published source runs."""
+
+    return _BPF_OPENMETEO_QUOTA_TRACKER.priority_lane()
 
 
 @dataclass(frozen=True)

@@ -979,8 +979,7 @@ def test_batched_single_runs_uses_source_clock_public_run(tmp_path, monkeypatch)
     assert row["source_available_at"] == available_at
 
 
-def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(monkeypatch) -> None:
-    """A cooldown in another Open-Meteo lane must not suppress the BPF raw-input lane."""
+def test_bpf_batched_fetch_uses_injected_quota_tracker(monkeypatch) -> None:
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as om
     from src.data.openmeteo_quota import OpenMeteoQuotaTracker
@@ -999,8 +998,8 @@ def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(
                 }
             }
 
-    monkeypatch.setattr(om.quota_tracker, "can_call", lambda: False)
-    monkeypatch.setattr(dl, "_BPF_OPENMETEO_QUOTA_TRACKER", OpenMeteoQuotaTracker())
+    tracker = OpenMeteoQuotaTracker()
+    monkeypatch.setattr(dl, "_BPF_OPENMETEO_QUOTA_TRACKER", tracker)
     monkeypatch.setattr(om.httpx, "get", lambda *_args, **_kwargs: _Resp())
 
     got = dl._default_previous_runs_fetch_batched(
@@ -1013,6 +1012,7 @@ def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(
     )
 
     assert got == {"icon_global": (19.5, 17.25)}
+    assert tracker.calls_today() == 1
 
 
 def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> None:

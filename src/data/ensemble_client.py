@@ -195,13 +195,12 @@ def fetch_ensemble(
 
     for attempt in range(MAX_RETRIES):
         try:
-            if not quota_tracker.can_call():
+            if not quota_tracker.acquire_call("ensemble"):
                 print("  WARN Open-Meteo quota blocked ensemble request")
                 return None
             resp = httpx.get(API_URL, params=params, timeout=30.0)
             resp.raise_for_status()
             data = resp.json()
-            quota_tracker.record_call("ensemble")
             parsed = _parse_response(
                 data,
                 model,

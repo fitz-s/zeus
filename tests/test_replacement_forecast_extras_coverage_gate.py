@@ -537,6 +537,14 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-16", "high"),
     )
     seen: list[tuple[str, str, str]] = []
+    priority_active = [False]
+
+    class _PriorityLane:
+        def __enter__(self):
+            priority_active[0] = True
+
+        def __exit__(self, *_exc):
+            priority_active[0] = False
 
     monkeypatch.setitem(
         prod.settings["edli"],
@@ -544,6 +552,11 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         True,
     )
     monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        dl,
+        "bayes_precision_fusion_source_clock_quota_priority",
+        _PriorityLane,
+    )
     monkeypatch.setattr(
         updates,
         "read_model_updates_jsonl",
@@ -566,6 +579,7 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         lambda: {("Seoul", "2026-07-17", "high"): 0},
     )
     def _download(**kwargs):
+        assert priority_active[0] is True
         seen.extend(
             (target.city, target.target_date, target.metric)
             for target in kwargs["targets"]

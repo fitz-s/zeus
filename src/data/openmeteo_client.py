@@ -57,24 +57,24 @@ def fetch(
     shared client and blocking the fallback ladder.
     """
     tracker = quota or quota_tracker
-    if not tracker.can_call():
-        raise RuntimeError(
-            f"Open-Meteo quota exhausted ({tracker.calls_today()} calls today)"
-        )
-
     last_exc: Exception | None = None
     for attempt in range(max_retries):
+        if not tracker.acquire_call(endpoint_label):
+            raise RuntimeError(
+                f"Open-Meteo quota exhausted ({tracker.calls_today()} calls today)"
+            )
         try:
             get = client.get if client is not None else httpx.get
             resp = get(url, params=params, timeout=timeout)
 
             if resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")
-                wait = (
-                    float(retry_after)
-                    if retry_after
-                    else DEFAULT_429_FALLBACK_WAIT * (attempt + 1)
-                )
+                try:
+                    wait = float(retry_after) if retry_after else 0.0
+                except (TypeError, ValueError):
+                    wait = 0.0
+                if wait <= 0.0:
+                    wait = DEFAULT_429_FALLBACK_WAIT * (attempt + 1)
                 tracker.note_rate_limited(int(wait))
                 if fast_fail_429:
                     logger.warning(
@@ -93,7 +93,6 @@ def fetch(
                 continue
 
             resp.raise_for_status()
-            tracker.record_call(endpoint_label)
             return resp.json()
 
         except httpx.HTTPError as e:

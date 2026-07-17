@@ -859,7 +859,7 @@ def _fetch_openmeteo_hourly(
     tz: ZoneInfo,
 ) -> Optional[dict]:
     try:
-        if not quota_tracker.can_call():
+        if not quota_tracker.acquire_call("observation"):
             logger.warning("Open-Meteo quota blocked non-settlement observation for %s", city.name)
             return None
 
@@ -878,7 +878,6 @@ def _fetch_openmeteo_hourly(
             timeout=15.0,
         )
         resp.raise_for_status()
-        quota_tracker.record_call("observation")
         data = resp.json()
 
         hourly = data["hourly"]
