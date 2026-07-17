@@ -93,7 +93,6 @@ _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "market_discovery",
         "EDLI mainstream warm",
-        "edli_event_reactor",
     }
 )
 _market_discovery_last_completed_monotonic: float | None = None
@@ -221,10 +220,8 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     """Return True when the held-position monitor should pre-empt discretionary jobs.
 
     The monitor itself is non-reentrant, but it must not globally stop the live
-    money path. The entry reactor yields because both jobs traverse the same
-    large SQLite state and the monitor has already claimed priority; the other
-    targeted EDLI jobs remain on the continuous decision line. Broad scans also
-    yield to the monitor bootstrap.
+    money path. Targeted EDLI jobs stay on the continuous decision line while
+    broad scans yield to the monitor bootstrap.
     """
 
     if job_name not in _HELD_POSITION_MONITOR_DEFER_JOBS:
@@ -3742,7 +3739,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
     day0_wake = wake.reason == "day0_extreme_event_committed"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
-    if _held_position_monitor_active.is_set():
+    if day0_wake and _held_position_monitor_active.is_set():
         return False
     if substrate_refresh_wake:
         if (

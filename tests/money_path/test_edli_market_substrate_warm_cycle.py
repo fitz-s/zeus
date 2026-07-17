@@ -1523,6 +1523,79 @@ def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
     assert calls == ["screen", "ack"]
 
 
+def test_forecast_wake_is_not_blocked_by_held_position_monitor(monkeypatch):
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-forecast",
+        "2026-07-17T01:00:00+00:00",
+        "forecast_live",
+        "forecast_snapshot_event_committed",
+    )
+
+    class _Lock:
+        def locked(self) -> bool:
+            return False
+
+    class _Held:
+        def is_set(self) -> bool:
+            return True
+
+    calls: list[str] = []
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: calls.append("ack") or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.append("reactor") or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert calls == ["reactor", "ack"]
+
+
+def test_day0_wake_waits_for_active_held_position_monitor(monkeypatch):
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-day0",
+        "2026-07-17T01:00:00+00:00",
+        "day0_observation",
+        "day0_extreme_event_committed",
+    )
+
+    class _Held:
+        def is_set(self) -> bool:
+            return True
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("active monitor must remain non-reentrant")
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Day0 entry must follow held-position exit")
+        ),
+    )
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+
+
 def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypatch):
     monkeypatch.setenv("ZEUS_REDECISION_PRIORITY_CONDITION_LIMIT", "4")
     family_a = ("Paris", "2026-06-20", "low")
