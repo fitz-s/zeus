@@ -346,7 +346,7 @@ class SpineDecisionResult:
 
 @dataclass(frozen=True)
 class PreparedGlobalFamily:
-    """One complete family belief, entry seeds, and the current-state action plan."""
+    """One family payoff authority, entry seeds, and current-state action plan."""
 
     decision_id: str
     probability_witness: Any

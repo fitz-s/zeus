@@ -174,6 +174,7 @@ GlobalEligibilityReason = Literal[
     "PROBABILITY_AUTHORITY_MISSING",
     "PROBABILITY_AUTHORITY_SUPERSEDED",
     "PROBABILITY_AUTHORITY_EXPIRED",
+    "DETERMINISTIC_PAYOFF_NOT_PROVED",
     "JOINT_Q_MEMBERSHIP_MISMATCH",
     "Q_IDENTITY_SUPERSEDED",
     "Q_SAMPLE_CERTIFICATE_MISMATCH",
@@ -519,6 +520,260 @@ class JointOutcomeProbabilityWitness:
         object.__setattr__(self, "yes_q_samples", np.ascontiguousarray(samples))
 
 
+def deterministic_bin_payoff_witness_identity(
+    *,
+    family_key: str,
+    bindings: Sequence[OutcomeTokenBinding],
+    exact_yes_payoffs: Sequence[tuple[str, int]],
+    q_version: str,
+    resolution_identity: str,
+    topology_identity: str,
+    posterior_identity_hash: str,
+    source_truth_identity: str,
+    authority_certificate_hash: str,
+    band_alpha: float,
+    band_basis: str,
+    captured_at_utc: datetime,
+) -> str:
+    """Bind candidate-local exact payoffs without inventing sibling probabilities."""
+
+    if captured_at_utc.tzinfo is None:
+        raise ValueError("captured_at_utc must be timezone-aware")
+    exact = tuple(
+        sorted((str(bin_id), int(value)) for bin_id, value in exact_yes_payoffs)
+    )
+    values = (
+        "deterministic_bin_payoff_v1",
+        family_key,
+        tuple(
+            (binding.bin_id, binding.condition_id, binding.yes_token_id, binding.no_token_id)
+            for binding in bindings
+        ),
+        exact,
+        q_version,
+        resolution_identity,
+        topology_identity,
+        posterior_identity_hash,
+        source_truth_identity,
+        authority_certificate_hash,
+        repr(float(band_alpha)),
+        band_basis,
+        captured_at_utc.isoformat(),
+    )
+    return _hash(*(str(value) for value in values))
+
+
+@dataclass(frozen=True)
+class DeterministicBinPayoffWitness:
+    """Exact Day0 payoffs for proved bins over one complete family topology.
+
+    ``exact_yes_payoffs`` is deliberately partial. A missing bin is unknown, not zero,
+    and cannot become a candidate in the deterministic fast lane.
+    """
+
+    family_key: str
+    bindings: tuple[OutcomeTokenBinding, ...]
+    exact_yes_payoffs: tuple[tuple[str, int], ...]
+    q_version: str
+    resolution_identity: str
+    topology_identity: str
+    posterior_identity_hash: str
+    source_truth_identity: str
+    authority_certificate_hash: str
+    band_alpha: float
+    band_basis: str
+    captured_at_utc: datetime
+    max_age: timedelta
+    witness_identity: str
+
+    @property
+    def bin_ids(self) -> tuple[str, ...]:
+        return tuple(binding.bin_id for binding in self.bindings)
+
+    @property
+    def family_binding_identity(self) -> str:
+        return outcome_token_binding_identity(
+            family_key=self.family_key,
+            bindings=self.bindings,
+            resolution_identity=self.resolution_identity,
+            topology_identity=self.topology_identity,
+        )
+
+    @property
+    def sample_matrix_identity(self) -> str:
+        return _hash(
+            "deterministic_bin_payoff_samples_v1",
+            *(str(value) for value in self.exact_yes_payoffs),
+        )
+
+    def exact_yes_payoff(self, bin_id: str) -> int | None:
+        return dict(self.exact_yes_payoffs).get(str(bin_id))
+
+    def __post_init__(self) -> None:
+        exact = tuple(sorted((str(bin_id), int(value)) for bin_id, value in self.exact_yes_payoffs))
+        bins = self.bin_ids
+        if (
+            not self.bindings
+            or len(set(bins)) != len(bins)
+            or not exact
+            or len({bin_id for bin_id, _ in exact}) != len(exact)
+            or any(bin_id not in bins or value not in {0, 1} for bin_id, value in exact)
+        ):
+            raise ValueError("deterministic payoff witness must bind unique exact family bins")
+        if len(exact) == len(bins) and sum(value for _, value in exact) != 1:
+            raise ValueError("complete deterministic family payoffs must be MECE")
+        if not (0.0 < self.band_alpha < 0.5):
+            raise ValueError("deterministic payoff alpha must lie in (0, 0.5)")
+        if self.captured_at_utc.tzinfo is None or self.max_age <= timedelta(0):
+            raise ValueError("deterministic payoff freshness contract is invalid")
+        if not all(
+            str(value).strip()
+            for value in (
+                self.family_key,
+                self.q_version,
+                self.resolution_identity,
+                self.topology_identity,
+                self.posterior_identity_hash,
+                self.source_truth_identity,
+                self.authority_certificate_hash,
+                self.band_basis,
+            )
+        ):
+            raise ValueError("deterministic payoff authority identities must be non-empty")
+        expected = deterministic_bin_payoff_witness_identity(
+            family_key=self.family_key,
+            bindings=self.bindings,
+            exact_yes_payoffs=exact,
+            q_version=self.q_version,
+            resolution_identity=self.resolution_identity,
+            topology_identity=self.topology_identity,
+            posterior_identity_hash=self.posterior_identity_hash,
+            source_truth_identity=self.source_truth_identity,
+            authority_certificate_hash=self.authority_certificate_hash,
+            band_alpha=self.band_alpha,
+            band_basis=self.band_basis,
+            captured_at_utc=self.captured_at_utc,
+        )
+        if self.witness_identity != expected:
+            raise ValueError("deterministic payoff witness identity mismatch")
+        object.__setattr__(self, "exact_yes_payoffs", exact)
+
+
+FamilyPayoffWitness = JointOutcomeProbabilityWitness | DeterministicBinPayoffWitness
+
+
+def family_payoff_q_samples(
+    witness: FamilyPayoffWitness,
+    *,
+    bin_id: str,
+    side: Literal["YES", "NO"],
+) -> np.ndarray | None:
+    """Project one proved native payoff; return None for an unknown deterministic sibling."""
+
+    if side not in {"YES", "NO"}:
+        raise ValueError("unsupported native side")
+    if isinstance(witness, DeterministicBinPayoffWitness):
+        yes = witness.exact_yes_payoff(bin_id)
+        if yes is None:
+            return None
+        value = float(yes if side == "YES" else 1 - yes)
+        draws = max(2, math.ceil(_MIN_TAIL_DRAWS / witness.band_alpha))
+        return np.full(draws, value, dtype=np.float64)
+    try:
+        column = witness.bin_ids.index(str(bin_id))
+    except ValueError:
+        return None
+    yes = witness.yes_q_samples[:, column]
+    return np.ascontiguousarray(yes if side == "YES" else 1.0 - yes)
+
+
+def rebind_family_payoff_witness(
+    witness: FamilyPayoffWitness,
+    *,
+    bindings: Sequence[OutcomeTokenBinding],
+) -> FamilyPayoffWitness:
+    """Rebind current native tokens while preserving the exact authority content."""
+
+    rebound = tuple(bindings)
+    if isinstance(witness, DeterministicBinPayoffWitness):
+        identity = deterministic_bin_payoff_witness_identity(
+            family_key=witness.family_key,
+            bindings=rebound,
+            exact_yes_payoffs=witness.exact_yes_payoffs,
+            q_version=witness.q_version,
+            resolution_identity=witness.resolution_identity,
+            topology_identity=witness.topology_identity,
+            posterior_identity_hash=witness.posterior_identity_hash,
+            source_truth_identity=witness.source_truth_identity,
+            authority_certificate_hash=witness.authority_certificate_hash,
+            band_alpha=witness.band_alpha,
+            band_basis=witness.band_basis,
+            captured_at_utc=witness.captured_at_utc,
+        )
+        return replace(witness, bindings=rebound, witness_identity=identity)
+    identity = joint_probability_witness_identity(
+        family_key=witness.family_key,
+        bindings=rebound,
+        q_version=witness.q_version,
+        resolution_identity=witness.resolution_identity,
+        topology_identity=witness.topology_identity,
+        posterior_identity_hash=witness.posterior_identity_hash,
+        source_truth_identity=witness.source_truth_identity,
+        authority_certificate_hash=witness.authority_certificate_hash,
+        band_alpha=witness.band_alpha,
+        band_basis=witness.band_basis,
+        yes_q_samples=witness.yes_q_samples,
+        captured_at_utc=witness.captured_at_utc,
+    )
+    return replace(witness, bindings=rebound, witness_identity=identity)
+
+
+def reissue_family_payoff_witness(
+    witness: FamilyPayoffWitness,
+    *,
+    authority_certificate_hash: str,
+    captured_at_utc: datetime,
+) -> FamilyPayoffWitness:
+    """Reissue one unchanged authority at a newer event cut without changing its facts."""
+
+    if isinstance(witness, DeterministicBinPayoffWitness):
+        identity = deterministic_bin_payoff_witness_identity(
+            family_key=witness.family_key,
+            bindings=witness.bindings,
+            exact_yes_payoffs=witness.exact_yes_payoffs,
+            q_version=witness.q_version,
+            resolution_identity=witness.resolution_identity,
+            topology_identity=witness.topology_identity,
+            posterior_identity_hash=witness.posterior_identity_hash,
+            source_truth_identity=witness.source_truth_identity,
+            authority_certificate_hash=authority_certificate_hash,
+            band_alpha=witness.band_alpha,
+            band_basis=witness.band_basis,
+            captured_at_utc=captured_at_utc,
+        )
+    else:
+        identity = joint_probability_witness_identity(
+            family_key=witness.family_key,
+            bindings=witness.bindings,
+            q_version=witness.q_version,
+            resolution_identity=witness.resolution_identity,
+            topology_identity=witness.topology_identity,
+            posterior_identity_hash=witness.posterior_identity_hash,
+            source_truth_identity=witness.source_truth_identity,
+            authority_certificate_hash=authority_certificate_hash,
+            band_alpha=witness.band_alpha,
+            band_basis=witness.band_basis,
+            yes_q_samples=witness.yes_q_samples,
+            captured_at_utc=captured_at_utc,
+        )
+    return replace(
+        witness,
+        authority_certificate_hash=authority_certificate_hash,
+        captured_at_utc=captured_at_utc,
+        witness_identity=identity,
+    )
+
+
 @dataclass(frozen=True)
 class CurrentFamilyProbabilityAuthority:
     """Independent resolver output for the family authority current at selection."""
@@ -536,7 +791,7 @@ class CurrentFamilyProbabilityAuthority:
 
     @classmethod
     def from_witness(
-        cls, witness: JointOutcomeProbabilityWitness
+        cls, witness: FamilyPayoffWitness
     ) -> "CurrentFamilyProbabilityAuthority":
         return cls(
             family_key=witness.family_key,
@@ -839,9 +1094,10 @@ class CandidatePortfolioEndowment:
 class GlobalSingleOrderCandidate:
     """One current, native-side order hypothesis in the cross-family auction.
 
-    It carries no probability scalar.  The selector derives q from the verified full
-    family simplex after proving this exact condition/token membership.  The executable
-    curve is the candidate's own side-native ask ladder, including fees.
+    It carries no probability scalar. The selector derives q from either a verified
+    family simplex or a candidate-local deterministic payoff after proving this exact
+    condition/token membership. The executable curve is the candidate's own side-native
+    ask ladder, including fees.
     """
 
     candidate_id: str
@@ -894,12 +1150,12 @@ class GlobalSingleOrderCandidate:
 def global_candidate_from_native(
     native: Any,
     *,
-    probability_witness: JointOutcomeProbabilityWitness,
+    probability_witness: FamilyPayoffWitness,
     ledger_snapshot_id: str,
     book_captured_at_utc: datetime,
     eligibility_reason: GlobalEligibilityReason | None = None,
 ) -> GlobalSingleOrderCandidate:
-    """Materialize one order only after proving q-column/token membership."""
+    """Materialize one order only after proving payoff/token membership."""
 
     if getattr(native, "no_trade_reason", None) is not None:
         raise ValueError("native no-trade candidate is not globally executable")
@@ -923,6 +1179,12 @@ def global_candidate_from_native(
         or curve.side != native.side
     ):
         raise ValueError("native condition/token does not own the selected q column")
+    if (
+        isinstance(probability_witness, DeterministicBinPayoffWitness)
+        and probability_witness.exact_yes_payoff(binding.bin_id) is None
+        and eligibility_reason is None
+    ):
+        eligibility_reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
     return GlobalSingleOrderCandidate(
         candidate_id=_hash(
             probability_witness.family_key,
@@ -1009,7 +1271,7 @@ class GlobalSingleOrderSellCandidate:
 def global_sell_candidate_from_holding(
     holding: Any,
     *,
-    probability_witness: JointOutcomeProbabilityWitness,
+    probability_witness: FamilyPayoffWitness,
     ledger_snapshot_id: str,
     executable_sell_curve: ExecutableSellCurve,
     book_captured_at_utc: datetime,
@@ -1036,6 +1298,12 @@ def global_sell_candidate_from_holding(
     sellable_shares = ledger_shares.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
     if sellable_shares <= 0:
         return None
+    eligibility_reason: GlobalEligibilityReason | None = None
+    if (
+        isinstance(probability_witness, DeterministicBinPayoffWitness)
+        and probability_witness.exact_yes_payoff(binding.bin_id) is None
+    ):
+        eligibility_reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
     return GlobalSingleOrderSellCandidate(
         candidate_id=_hash(
             "SELL",
@@ -1062,6 +1330,7 @@ def global_sell_candidate_from_holding(
         ledger_snapshot_id=str(ledger_snapshot_id),
         executable_sell_curve=executable_sell_curve,
         resolution_identity=probability_witness.resolution_identity,
+        eligibility_reason=eligibility_reason,
     )
 
 
@@ -2994,12 +3263,12 @@ def _score_global_single_order_sell(
 
 def _probability_witness_rejection_reason(
     candidate: GlobalSingleOrderAnyCandidate,
-    witness: JointOutcomeProbabilityWitness | None,
+    witness: FamilyPayoffWitness | None,
     current: CurrentFamilyProbabilityAuthority | None,
     *,
     decision_at_utc: datetime,
 ) -> tuple[GlobalEligibilityReason | None, np.ndarray | None]:
-    """Verify that candidate q is one projection of a current complete simplex."""
+    """Verify one current simplex projection or exact deterministic payoff."""
 
     if witness is None or witness.family_key != candidate.family_key:
         return "PROBABILITY_AUTHORITY_MISSING", None
@@ -3036,15 +3305,20 @@ def _probability_witness_rejection_reason(
         or candidate.resolution_identity != witness.resolution_identity
     ):
         return "JOINT_Q_MEMBERSHIP_MISMATCH", None
-    yes_q = witness.yes_q_samples[:, column]
-    payoff_q = yes_q if candidate.side == "YES" else 1.0 - yes_q
-    return None, np.ascontiguousarray(payoff_q)
+    payoff_q = family_payoff_q_samples(
+        witness,
+        bin_id=candidate.bin_id,
+        side=candidate.side,
+    )
+    if payoff_q is None:
+        return "DETERMINISTIC_PAYOFF_NOT_PROVED", None
+    return None, payoff_q
 
 
 def select_global_single_order(
     candidates: Sequence[GlobalSingleOrderAnyCandidate],
     *,
-    probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
+    probability_witnesses: Mapping[str, FamilyPayoffWitness],
     universe_witness: GlobalAuctionUniverseWitness,
     current_universe_identity_resolver: Callable[[], str | None],
     current_probability_resolver: Callable[
@@ -3078,10 +3352,10 @@ def select_global_single_order(
 ) -> GlobalSingleOrderDecision:
     """Select one current executable order across every family and native side.
 
-    Eligibility is lexically prior to economics.  A cheap stale/unsupported tail never
-    receives a score.  Candidate q is not self-authenticating: it must be the exact YES
-    column (or pointwise NO complement) of a current complete family-simplex witness.
-    Because exactly one new order may win, cross-family coupling is not fabricated.
+    Eligibility is lexically prior to economics. A cheap stale/unsupported tail never
+    receives a score. Candidate q is not self-authenticating: it must be an exact YES
+    column (or NO complement) of a current family simplex, or a bin payoff proved as
+    0/1 by current Day0 facts. Unknown deterministic siblings are never imputed.
     """
 
     if decision_at_utc.tzinfo is None:

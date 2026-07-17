@@ -1129,6 +1129,116 @@ def _global_select(
     )
 
 
+def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling():
+    family = "day0-deterministic-family"
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    bindings = (
+        S.OutcomeTokenBinding(
+            bin_id="dead-bin",
+            condition_id="dead-condition",
+            yes_token_id="dead-yes",
+            no_token_id="dead-no",
+        ),
+        S.OutcomeTokenBinding(
+            bin_id="unknown-bin",
+            condition_id="unknown-condition",
+            yes_token_id="unknown-yes",
+            no_token_id="unknown-no",
+        ),
+    )
+    fields = {
+        "family_key": family,
+        "bindings": bindings,
+        "exact_yes_payoffs": (("dead-bin", 0),),
+        "q_version": "day0-exact-q-v1",
+        "resolution_identity": "day0-resolution",
+        "topology_identity": "day0-topology",
+        "posterior_identity_hash": "day0-payoff-state",
+        "source_truth_identity": "day0-observation-fact",
+        "authority_certificate_hash": "day0-certificate",
+        "band_alpha": ALPHA,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": captured_at,
+    }
+    identity = S.deterministic_bin_payoff_witness_identity(**fields)
+    witness = S.DeterministicBinPayoffWitness(
+        **fields,
+        max_age=timedelta(seconds=1),
+        witness_identity=identity,
+    )
+    rebound_bindings = (
+        replace(bindings[0], no_token_id="dead-no-current"),
+        bindings[1],
+    )
+    rebound = S.rebind_family_payoff_witness(
+        witness,
+        bindings=rebound_bindings,
+    )
+    reissued = S.reissue_family_payoff_witness(
+        rebound,
+        authority_certificate_hash="day0-certificate-current",
+        captured_at_utc=captured_at + timedelta(milliseconds=10),
+    )
+    assert isinstance(rebound, S.DeterministicBinPayoffWitness)
+    assert rebound.exact_yes_payoffs == witness.exact_yes_payoffs
+    assert rebound.witness_identity != witness.witness_identity
+    assert reissued.exact_yes_payoffs == witness.exact_yes_payoffs
+    assert reissued.witness_identity != rebound.witness_identity
+    exact = S.global_candidate_from_native(
+        SimpleNamespace(
+            no_trade_reason=None,
+            executable_cost_curve=_global_curve(
+                side="NO",
+                token="dead-no",
+                levels=(("0.20", "100"),),
+                min_order="1",
+            ),
+            family_key=family,
+            bin_id="dead-bin",
+            condition_id="dead-condition",
+            side="NO",
+            token_id="dead-no",
+            hypothesis_id="buy-dead-no",
+        ),
+        probability_witness=witness,
+        ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=captured_at,
+    )
+    unknown = S.global_candidate_from_native(
+        SimpleNamespace(
+            no_trade_reason=None,
+            executable_cost_curve=_global_curve(
+                side="YES",
+                token="unknown-yes",
+                levels=(("0.01", "100"),),
+                min_order="1",
+            ),
+            family_key=family,
+            bin_id="unknown-bin",
+            condition_id="unknown-condition",
+            side="YES",
+            token_id="unknown-yes",
+            hypothesis_id="buy-unknown-yes",
+        ),
+        probability_witness=witness,
+        ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=captured_at,
+    )
+
+    decision = _global_select(
+        (exact, unknown),
+        probability_witnesses={family: witness},
+    )
+
+    assert decision.candidate == exact
+    assert decision.terminal_wealth is not None
+    assert decision.terminal_wealth.win_probability_lcb == pytest.approx(1.0)
+    assert unknown.eligibility_reason == "DETERMINISTIC_PAYOFF_NOT_PROVED"
+    assert decision.rejection_reasons[unknown.candidate_id] == (
+        "DETERMINISTIC_PAYOFF_NOT_PROVED"
+    )
+
+
 def test_global_single_order_stops_before_scoring_when_cancelled(monkeypatch):
     candidate = _global_candidate(
         candidate_id="cancelled-before-score",

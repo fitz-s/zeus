@@ -35,14 +35,14 @@ from src.events.triggers.forecast_snapshot_ready import (
 from src.solve.solver import (
     CurrentExecutionAuthority,
     ExecutableSellCurve,
+    FamilyPayoffWitness,
     GlobalAuctionUniverseWitness,
-    JointOutcomeProbabilityWitness,
     OutcomeTokenBinding,
     PortfolioWealthWitness,
     executable_curve_identity,
     global_auction_universe_identity,
-    joint_probability_witness_identity,
     portfolio_wealth_identity,
+    rebind_family_payoff_witness,
 )
 @dataclass(frozen=True, init=False)
 class CurrentGlobalAuctionScope:
@@ -758,7 +758,7 @@ def _current_global_book_asset_state(
 def capture_current_global_book_epoch(
     trade_conn: sqlite3.Connection,
     *,
-    probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
+    probability_witnesses: Mapping[str, FamilyPayoffWitness],
     get_books: Callable[[list[str]], Mapping[str, Mapping[str, object]]],
     clock: Callable[[], datetime],
     max_age: timedelta,
@@ -1121,10 +1121,10 @@ def fetch_current_global_books(
 
 
 def _rebind_probability_witness_tokens(
-    witness: JointOutcomeProbabilityWitness,
+    witness: FamilyPayoffWitness,
     *,
     token_map_by_condition: Mapping[str, tuple[str, str]],
-) -> JointOutcomeProbabilityWitness:
+) -> FamilyPayoffWitness:
     bindings: list[OutcomeTokenBinding] = []
     for binding in witness.bindings:
         current = token_map_by_condition.get(binding.condition_id)
@@ -1151,36 +1151,7 @@ def _rebind_probability_witness_tokens(
             )
         )
     rebound = tuple(bindings)
-    identity = joint_probability_witness_identity(
-        family_key=witness.family_key,
-        bindings=rebound,
-        q_version=witness.q_version,
-        resolution_identity=witness.resolution_identity,
-        topology_identity=witness.topology_identity,
-        posterior_identity_hash=witness.posterior_identity_hash,
-        source_truth_identity=witness.source_truth_identity,
-        authority_certificate_hash=witness.authority_certificate_hash,
-        band_alpha=witness.band_alpha,
-        band_basis=witness.band_basis,
-        yes_q_samples=witness.yes_q_samples,
-        captured_at_utc=witness.captured_at_utc,
-    )
-    return JointOutcomeProbabilityWitness(
-        family_key=witness.family_key,
-        bindings=rebound,
-        yes_q_samples=witness.yes_q_samples,
-        q_version=witness.q_version,
-        resolution_identity=witness.resolution_identity,
-        topology_identity=witness.topology_identity,
-        posterior_identity_hash=witness.posterior_identity_hash,
-        source_truth_identity=witness.source_truth_identity,
-        authority_certificate_hash=witness.authority_certificate_hash,
-        band_alpha=witness.band_alpha,
-        band_basis=witness.band_basis,
-        captured_at_utc=witness.captured_at_utc,
-        max_age=witness.max_age,
-        witness_identity=identity,
-    )
+    return rebind_family_payoff_witness(witness, bindings=rebound)
 
 
 def fetch_current_gamma_markets(
@@ -1280,7 +1251,7 @@ def fetch_current_gamma_markets(
 def bind_current_global_probability_tokens(
     forecasts_conn: sqlite3.Connection,
     *,
-    probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
+    probability_witnesses: Mapping[str, FamilyPayoffWitness],
     get_gamma_event: Callable[[str], Mapping[str, object] | None] | None = None,
     get_gamma_markets: Callable[
         [Sequence[str]], Sequence[Mapping[str, object]]
@@ -1290,7 +1261,7 @@ def bind_current_global_probability_tokens(
     checked_at_utc: datetime | None = None,
     max_workers: int = 8,
     metadata_sink: dict[tuple[str, str], Mapping[str, object]] | None = None,
-) -> Mapping[str, JointOutcomeProbabilityWitness]:
+) -> Mapping[str, FamilyPayoffWitness]:
     """Bind tokens and, when requested, current Gamma tradeability metadata."""
 
     missing_by_family = {
@@ -1372,7 +1343,7 @@ def bind_current_global_probability_tokens(
     from concurrent.futures import ThreadPoolExecutor
     from src.data.market_scanner import _boolish_market_field, _extract_outcomes
 
-    def _family_slug(witness: JointOutcomeProbabilityWitness) -> str:
+    def _family_slug(witness: FamilyPayoffWitness) -> str:
         condition_ids = tuple(binding.condition_id for binding in witness.bindings)
         placeholders = ",".join("?" for _ in condition_ids)
         row = forecasts_conn.execute(
@@ -1551,7 +1522,7 @@ def bind_current_global_probability_tokens(
                 for family_key, future in futures.items():
                     events[family_key] = future.result()
 
-    rebound: dict[str, JointOutcomeProbabilityWitness] = {}
+    rebound: dict[str, FamilyPayoffWitness] = {}
     for family_key, witness in probability_witnesses.items():
         if family_key not in work_by_family:
             rebound[family_key] = witness
@@ -2217,7 +2188,7 @@ def scan_current_global_auction_scope(
 def global_universe_witness_from_scope(
     scope: CurrentGlobalAuctionScope,
     *,
-    probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
+    probability_witnesses: Mapping[str, FamilyPayoffWitness],
     venue_universe_identity: str,
     max_age: timedelta,
 ) -> GlobalAuctionUniverseWitness:
@@ -2251,7 +2222,7 @@ def global_universe_witness_from_scope(
 def current_venue_auction_identity(
     trade_conn: sqlite3.Connection,
     *,
-    probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
+    probability_witnesses: Mapping[str, FamilyPayoffWitness],
 ) -> str:
     """Hash current executable/non-executable state for every bound native token."""
 

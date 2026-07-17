@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -1006,6 +1006,77 @@ def test_low_probability_current_band_taker_is_symmetric_positive_growth(
     assert current["payoff_q_lcb"] == pytest.approx(0.13)
     assert current["edge_lcb"] == pytest.approx(0.03)
     assert era._qkernel_current_state_solve_economics(current) is True
+
+
+def test_deterministic_day0_witness_rejects_certificate_probability_drift():
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        OutcomeTokenBinding,
+        deterministic_bin_payoff_witness_identity,
+    )
+
+    captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    fields = {
+        "family_key": "day0-family",
+        "bindings": (
+            OutcomeTokenBinding(
+                bin_id="dead-bin",
+                condition_id="condition",
+                yes_token_id="yes",
+                no_token_id="no",
+            ),
+            OutcomeTokenBinding(
+                bin_id="unknown-bin",
+                condition_id="other-condition",
+                yes_token_id="other-yes",
+                no_token_id="other-no",
+            ),
+        ),
+        "exact_yes_payoffs": (("dead-bin", 0),),
+        "q_version": "day0-q",
+        "resolution_identity": "resolution",
+        "topology_identity": "topology",
+        "posterior_identity_hash": "day0-state",
+        "source_truth_identity": "observation",
+        "authority_certificate_hash": "certificate",
+        "band_alpha": 0.05,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": captured_at,
+    }
+    witness = DeterministicBinPayoffWitness(
+        **fields,
+        max_age=timedelta(seconds=1),
+        witness_identity=deterministic_bin_payoff_witness_identity(**fields),
+    )
+    candidate = SimpleNamespace(side="NO", bin_id="dead-bin")
+    decision = _global_decision(
+        shares="10",
+        cost="2",
+        q="1",
+        candidate=candidate,
+    )
+    cert = _current_qkernel_cert(side="NO")
+    cert.update(
+        payoff_q_point=1.0,
+        payoff_q_lcb=1.0,
+        pre_qkernel_q_lcb_5pct=1.0,
+    )
+
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+    assert current["payoff_q_point"] == pytest.approx(1.0)
+    assert current["false_edge_rate"] == pytest.approx(0.0)
+
+    cert["payoff_q_point"] = 0.99
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_POINT_Q_INVALID"):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

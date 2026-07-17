@@ -37,6 +37,7 @@ from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
 from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
     executable_curve_identity,
+    family_payoff_q_samples,
 )
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
@@ -238,7 +239,7 @@ def _bind_selection_holdings(
 
 
 def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
-    """Freeze q plus token bindings while allowing only book and wealth to move."""
+    """Freeze payoff authority plus token bindings while book and wealth may move."""
 
     return tuple(
         sorted(
@@ -1587,11 +1588,12 @@ def process_current_global_batch(
         q_mean = None
         if witness is not None:
             try:
-                column = tuple(witness.bin_ids).index(bin_id)
-                yes = witness.yes_q_samples[:, column]
-                q_mean = float(yes.mean())
-                if side == "NO":
-                    q_mean = 1.0 - q_mean
+                payoff = family_payoff_q_samples(
+                    witness,
+                    bin_id=bin_id,
+                    side=side,
+                )
+                q_mean = None if payoff is None else float(payoff.mean())
             except (AttributeError, TypeError, ValueError):
                 q_mean = None
         _LOG.info(

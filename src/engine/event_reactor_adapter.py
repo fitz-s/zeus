@@ -454,7 +454,7 @@ def _reissue_cached_global_probability_family(
     family_binding_hash: str,
     captured_at_utc: datetime,
 ) -> object:
-    from src.solve.solver import joint_probability_witness_identity
+    from src.solve.solver import reissue_family_payoff_witness
 
     witness = getattr(prepared, "probability_witness", None)
     previous_at = getattr(witness, "captured_at_utc", None)
@@ -482,18 +482,9 @@ def _reissue_cached_global_probability_family(
             "captured_at_utc": captured_at_utc.isoformat(),
         }
     )
-    identity = joint_probability_witness_identity(
-        family_key=witness.family_key,
-        bindings=witness.bindings,
-        q_version=witness.q_version,
-        resolution_identity=witness.resolution_identity,
-        topology_identity=witness.topology_identity,
-        posterior_identity_hash=witness.posterior_identity_hash,
-        source_truth_identity=witness.source_truth_identity,
+    reissued = reissue_family_payoff_witness(
+        witness,
         authority_certificate_hash=authority_certificate_hash,
-        band_alpha=witness.band_alpha,
-        band_basis=witness.band_basis,
-        yes_q_samples=witness.yes_q_samples,
         captured_at_utc=captured_at_utc,
     )
     return dataclass_replace(
@@ -501,15 +492,10 @@ def _reissue_cached_global_probability_family(
         decision_id=stable_hash(
             {
                 "authority_certificate_hash": authority_certificate_hash,
-                "witness_identity": identity,
+                "witness_identity": reissued.witness_identity,
             }
         ),
-        probability_witness=dataclass_replace(
-            witness,
-            authority_certificate_hash=authority_certificate_hash,
-            captured_at_utc=captured_at_utc,
-            witness_identity=identity,
-        ),
+        probability_witness=reissued,
     )
 
 
@@ -9948,20 +9934,18 @@ def _global_sell_execution_economics_drift(
 def _global_sell_held_probability(candidate: object, witness: object) -> float:
     """Return current held-token q; SELL's favorable probability is its complement."""
 
-    bin_ids = tuple(getattr(witness, "bin_ids", ()) or ())
-    try:
-        column = bin_ids.index(str(getattr(candidate, "bin_id", "") or ""))
-    except ValueError as exc:
-        raise ValueError("GLOBAL_SELL_PROBABILITY_COLUMN_MISSING") from exc
-    samples = np.asarray(getattr(witness, "yes_q_samples", ()), dtype=np.float64)
-    if samples.ndim != 2 or samples.shape[1] != len(bin_ids) or samples.shape[0] == 0:
+    from src.solve.solver import family_payoff_q_samples
+
+    samples = family_payoff_q_samples(
+        witness,
+        bin_id=str(getattr(candidate, "bin_id", "") or ""),
+        side=str(getattr(candidate, "side", "") or ""),
+    )
+    if samples is None or samples.ndim != 1 or samples.size == 0:
         raise ValueError("GLOBAL_SELL_PROBABILITY_SAMPLES_INVALID")
-    held = samples[:, column]
-    if str(getattr(candidate, "side", "") or "") == "NO":
-        held = 1.0 - held
-    if not np.isfinite(held).all() or (held < 0).any() or (held > 1).any():
+    if not np.isfinite(samples).all() or (samples < 0).any() or (samples > 1).any():
         raise ValueError("GLOBAL_SELL_HELD_PROBABILITY_INVALID")
-    return float(held.mean())
+    return float(samples.mean())
 
 
 def _submit_current_global_sell(
@@ -10611,24 +10595,40 @@ def _global_current_state_execution_economics(
         or (candidate_side and cert_side and candidate_side != cert_side)
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_SIDE_INVALID")
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        family_payoff_q_samples,
+    )
+
     raw_point_q = cert.get("payoff_q_point")
+    payoff_samples = None
+    if raw_point_q in {None, ""} or isinstance(
+        witness, DeterministicBinPayoffWitness
+    ):
+        payoff_samples = family_payoff_q_samples(
+            witness,
+            bin_id=str(getattr(candidate, "bin_id", "") or ""),
+            side=side,
+        )
+        if payoff_samples is None:
+            raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
     try:
         if raw_point_q in {None, ""}:
-            bin_id = str(getattr(candidate, "bin_id", "") or "")
-            column = tuple(getattr(witness, "bin_ids", ()) or ()).index(bin_id)
-            point_q = Decimal(
-                str(float(getattr(witness, "yes_q_samples")[:, column].mean()))
-            )
-            if side == "NO":
-                point_q = Decimal("1") - point_q
-            elif side != "YES":
-                raise ValueError("GLOBAL_CURRENT_STATE_SIDE_INVALID")
+            assert payoff_samples is not None
+            point_q = Decimal(str(float(payoff_samples.mean())))
         else:
             point_q = Decimal(str(raw_point_q))
     except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
         if str(exc) == "GLOBAL_CURRENT_STATE_SIDE_INVALID":
             raise
         raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID") from exc
+    if payoff_samples is not None and not math.isclose(
+        float(point_q),
+        float(payoff_samples.mean()),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
     raw_served_lcb = cert.get("pre_qkernel_q_lcb_5pct")
     try:
         served_lcb = (
@@ -10735,9 +10735,12 @@ def _global_current_state_execution_economics(
     if edge_lcb <= 0:
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
     sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()
-    samples = getattr(witness, "yes_q_samples", None)
     try:
-        n_draws = int(samples.shape[0])
+        n_draws = int(
+            payoff_samples.shape[0]
+            if payoff_samples is not None
+            else getattr(witness, "yes_q_samples").shape[0]
+        )
         alpha = float(getattr(witness, "band_alpha"))
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_BAND_INVALID") from exc
@@ -10770,7 +10773,11 @@ def _global_current_state_execution_economics(
             "route_cost": float(unit_cost),
             "edge_lcb": float(edge_lcb),
             "route_edge_lcb": float(edge_lcb),
-            "false_edge_rate": alpha,
+            "false_edge_rate": (
+                0.0
+                if isinstance(witness, DeterministicBinPayoffWitness)
+                else alpha
+            ),
             "sample_hash": sample_hash,
             "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
             "q_lcb_guard_abstained": False,
@@ -26679,6 +26686,9 @@ def _global_day0_probability_authority_payload(
 _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_settlement_simplex_v1"
 )
+_GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS = (
+    "day0_deterministic_bin_payoff_v1"
+)
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_day0_remaining_finite_evidence_v2"
 )
@@ -26767,6 +26777,46 @@ def _day0_absorbing_exact_probability_components(
         np.ascontiguousarray(point_q, dtype=np.float64),
         _GLOBAL_DAY0_ABSORBING_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
     )
+
+
+def _day0_deterministic_bin_payoffs(
+    *,
+    omega: object,
+    family: object,
+    payload: Mapping[str, object],
+) -> tuple[tuple[str, int], ...]:
+    """Return only bin payoffs proved pathwise by the current running extreme."""
+
+    from src.execution.day0_hard_fact_exit import hard_fact_bin_verdict
+
+    rounded = _optional_float(payload.get("rounded_value"))
+    metric = str(getattr(family, "metric", "") or "").strip().lower()
+    candidates = tuple(getattr(family, "candidates", ()) or ())
+    outcomes = tuple(getattr(omega, "bins", ()) or ())
+    if (
+        rounded is None
+        or metric not in {"high", "low"}
+        or len(candidates) != len(outcomes)
+    ):
+        return ()
+    exact: list[tuple[str, int]] = []
+    for candidate, outcome in zip(candidates, outcomes, strict=True):
+        bin_value = getattr(candidate, "bin", None)
+        if bin_value is None:
+            continue
+        verdict = hard_fact_bin_verdict(
+            metric=metric,
+            direction="buy_yes",
+            bin_low=getattr(bin_value, "low", None),
+            bin_high=getattr(bin_value, "high", None),
+            effective_extreme=rounded,
+        )
+        action = str(getattr(verdict, "action", "") or "")
+        if action == "EXIT_DEAD_BIN":
+            exact.append((str(outcome.bin_id), 0))
+        elif action == "HOLD_STRUCTURAL_WIN":
+            exact.append((str(outcome.bin_id), 1))
+    return tuple(sorted(exact))
 
 
 def _global_final_daily_probability_payload(
@@ -27062,7 +27112,7 @@ def _prepare_current_global_probability_family(
     day0_payload_out: dict[str, object] | None = None,
     cache_metadata_out: dict[str, str] | None = None,
 ):
-    """Build a current joint-q witness without any executable-price dependency."""
+    """Build current simplex or exact-bin payoff authority without price dependency."""
 
     from src.data.replacement_forecast_bundle_reader import (
         market_bin_topology_hash_from_rows,
@@ -27078,8 +27128,10 @@ def _prepare_current_global_probability_family(
         _latest_replacement_readiness,
     )
     from src.solve.solver import (
+        DeterministicBinPayoffWitness,
         JointOutcomeProbabilityWitness,
         OutcomeTokenBinding,
+        deterministic_bin_payoff_witness_identity,
         joint_probability_witness_identity,
         probability_sample_matrix_identity,
     )
@@ -27297,6 +27349,7 @@ def _prepare_current_global_probability_family(
         )
         for outcome in omega.bins
     )
+    resolution_identity = _event_resolution_identity(omega.resolution)
     probability_authority = "replacement_current_global_probability_v1"
     components = None
     if final_daily_observation is not None:
@@ -27328,6 +27381,99 @@ def _prepare_current_global_probability_family(
                     }
                 )
         else:
+            exact_yes_payoffs = _day0_deterministic_bin_payoffs(
+                omega=omega,
+                family=family,
+                payload=payload,
+            )
+            if exact_yes_payoffs:
+                probability_authority = "day0_deterministic_bin_payoff_v1"
+                source_truth_identity = stable_hash(
+                    {
+                        "probability_base_identity": day0_base_identity,
+                        "source_cycle_time": source_cycle.astimezone(UTC).isoformat(),
+                        "source_available_at": source_available_at,
+                        "day0_binding": current_day0_payload.get(
+                            "_edli_global_day0_binding"
+                        ),
+                        "exact_yes_payoffs": exact_yes_payoffs,
+                    }
+                )
+                posterior_identity_hash = stable_hash(
+                    {
+                        "probability_authority": probability_authority,
+                        "source_truth_identity": source_truth_identity,
+                        "exact_yes_payoffs": exact_yes_payoffs,
+                    }
+                )
+                q_version = stable_hash(
+                    {
+                        "authority": probability_authority,
+                        "posterior_identity_hash": posterior_identity_hash,
+                        "topology_identity": omega.topology_hash,
+                        "exact_yes_payoffs": exact_yes_payoffs,
+                    }
+                )
+                authority_certificate_hash = stable_hash(
+                    {
+                        "event_id": event.event_id,
+                        "causal_snapshot_id": event.causal_snapshot_id,
+                        "family_binding_hash": family.binding_hash,
+                        "q_version": q_version,
+                        "source_truth_identity": source_truth_identity,
+                        "captured_at_utc": decision_time.isoformat(),
+                    }
+                )
+                alpha = _GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA
+                witness_identity = deterministic_bin_payoff_witness_identity(
+                    family_key=family.family_id,
+                    bindings=bindings,
+                    exact_yes_payoffs=exact_yes_payoffs,
+                    q_version=q_version,
+                    resolution_identity=resolution_identity,
+                    topology_identity=omega.topology_hash,
+                    posterior_identity_hash=posterior_identity_hash,
+                    source_truth_identity=source_truth_identity,
+                    authority_certificate_hash=authority_certificate_hash,
+                    band_alpha=alpha,
+                    band_basis=_GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+                    captured_at_utc=decision_time,
+                )
+                witness = DeterministicBinPayoffWitness(
+                    family_key=family.family_id,
+                    bindings=bindings,
+                    exact_yes_payoffs=exact_yes_payoffs,
+                    q_version=q_version,
+                    resolution_identity=resolution_identity,
+                    topology_identity=omega.topology_hash,
+                    posterior_identity_hash=posterior_identity_hash,
+                    source_truth_identity=source_truth_identity,
+                    authority_certificate_hash=authority_certificate_hash,
+                    band_alpha=alpha,
+                    band_basis=_GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
+                    captured_at_utc=decision_time,
+                    max_age=max_age,
+                    witness_identity=witness_identity,
+                )
+                deterministic_payload = {
+                    "probability_authority": probability_authority,
+                    "q_source": "day0_deterministic_bin_payoff",
+                    "_edli_day0_q_mode": "deterministic_bin_payoff",
+                    "_edli_day0_exact_yes_payoffs": dict(exact_yes_payoffs),
+                }
+                payload.update(deterministic_payload)
+                if day0_payload_out is not None:
+                    day0_payload_out.update(deterministic_payload)
+                return PreparedGlobalFamily(
+                    decision_id=stable_hash(
+                        {
+                            "authority_certificate_hash": authority_certificate_hash,
+                            "witness_identity": witness_identity,
+                        }
+                    ),
+                    probability_witness=witness,
+                    candidate_seeds=(),
+                )
             components = _day0_remaining_global_probability_components(
                 event,
                 forecast_conn=forecast_conn,
@@ -27363,7 +27509,6 @@ def _prepare_current_global_probability_family(
             if key in payload:
                 day0_payload_out[key] = payload[key]
     sample_identity = probability_sample_matrix_identity(samples)
-    resolution_identity = _event_resolution_identity(omega.resolution)
     if current_day0_payload is not None:
         source_truth = {
             "probability_base_identity": day0_base_identity,
@@ -27516,6 +27661,7 @@ def current_global_probability_authority(
     from src.events.candidate_binding import weather_family_id
     from src.solve.solver import (
         CurrentFamilyProbabilityAuthority,
+        DeterministicBinPayoffWitness,
         probability_sample_matrix_identity,
     )
 
@@ -27546,6 +27692,7 @@ def current_global_probability_authority(
             not in {
                 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
                 _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+                _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS,
             }
             or not isinstance(captured_at, datetime)
             or captured_at.tzinfo is None
@@ -27555,10 +27702,14 @@ def current_global_probability_authority(
             or decision_time - captured_at > max_age
         ):
             return None
-        try:
-            probability_sample_matrix_identity(witness.yes_q_samples)
-        except (AttributeError, ValueError):
-            return None
+        if isinstance(witness, DeterministicBinPayoffWitness):
+            if not witness.exact_yes_payoffs:
+                return None
+        else:
+            try:
+                probability_sample_matrix_identity(witness.yes_q_samples)
+            except (AttributeError, ValueError):
+                return None
         return CurrentFamilyProbabilityAuthority.from_witness(witness)
     readiness = _latest_replacement_readiness(
         forecast_conn,

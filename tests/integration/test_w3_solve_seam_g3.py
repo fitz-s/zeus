@@ -81,6 +81,7 @@ from src.solve.solver import (
     BinaryTerminalWealthCertificate,
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
+    DeterministicBinPayoffWitness,
     ExecutableSellCurve,
     GlobalBuySizingRejection,
     GlobalSingleOrderCandidate,
@@ -2558,7 +2559,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         },
     )
 
-    observed_extreme = {"value": 71.0}
+    observed_extreme = {"value": 69.0}
 
     def current_observation_payload(*_args, **kwargs):
         base_identity = kwargs["probability_base_identity"]
@@ -2657,6 +2658,51 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     assert binding["probability_base_identity"]
     assert "posterior_id" not in binding
     assert remaining_day_calls == 1
+
+    observed_extreme["value"] = 71.0
+    deterministic_payload: dict[str, object] = {}
+    deterministic_event = _global_day0_scope_event(
+        city="Dallas",
+        source_run_id="run-dallas",
+    )
+    deterministic_cut = _dt.datetime(
+        2026, 7, 11, 18, 0, 0, 500000, tzinfo=_dt.timezone.utc
+    )
+    deterministic = era._prepare_current_global_probability_family(
+        deterministic_event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=deterministic_cut,
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=deterministic_payload,
+    )
+
+    assert remaining_day_calls == 1
+    assert isinstance(
+        deterministic.probability_witness,
+        DeterministicBinPayoffWitness,
+    )
+    exact_payoffs = dict(deterministic.probability_witness.exact_yes_payoffs)
+    exact_conditions = [
+        binding.condition_id
+        for binding in deterministic.probability_witness.bindings
+        if binding.bin_id in exact_payoffs
+    ]
+    assert exact_conditions == ["c0"]
+    assert tuple(exact_payoffs.values()) == (0,)
+    assert deterministic_payload["_edli_day0_exact_yes_payoffs"] == exact_payoffs
+    assert deterministic_payload["q_source"] == "day0_deterministic_bin_payoff"
+    current_authority = era.current_global_probability_authority(
+        forecast,
+        deterministic_event,
+        deterministic.probability_witness,
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=1),
+    )
+    assert current_authority is not None
+    assert current_authority.witness_identity == (
+        deterministic.probability_witness.witness_identity
+    )
 
     observed_extreme["value"] = 72.0
     exact_payload: dict[str, object] = {}
