@@ -669,9 +669,9 @@ def _cycle_advance_seed_priority_map(
     if not db_path.exists():
         return {}
     try:
-        from src.state.db import _connect  # noqa: PLC0415
+        from src.state.db import _connect_read_only  # noqa: PLC0415
 
-        conn = _connect(db_path, write_class=None)
+        conn = _connect_read_only(db_path)
         try:
             conn.execute("PRAGMA query_only=ON")
             table = conn.execute(

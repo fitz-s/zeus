@@ -17,7 +17,7 @@ from src.data.replacement_input_hwm import (
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.engine.time_context import has_city_local_day_started
-from src.state.db import _connect
+from src.state.db import _connect_read_only
 
 
 SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
@@ -1512,7 +1512,7 @@ def replacement_forecast_current_target_keys(
         if isinstance(min_target_date, date)
         else str(min_target_date or datetime.now(tz=timezone.utc).date().isoformat())
     )
-    conn = _connect(db_path, write_class="live")
+    conn = _connect_read_only(db_path)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA query_only=ON")
@@ -1638,7 +1638,7 @@ def build_replacement_forecast_current_target_plan(
             day0_observed_extreme_required_count=0,
             rows=(),
         )
-    conn = _connect(db_path, write_class="live")
+    conn = _connect_read_only(db_path)
     conn.row_factory = sqlite3.Row
     release_input_hwm = None
     owned_observation_conn: sqlite3.Connection | None = None

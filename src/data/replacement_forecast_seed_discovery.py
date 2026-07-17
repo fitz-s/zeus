@@ -24,7 +24,7 @@ from src.data.replacement_forecast_materialization_seed_builder import (
     write_seed,
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
-from src.state.db import _connect, _zeus_trade_db_path, get_world_connection_read_only
+from src.state.db import _connect_read_only, _zeus_trade_db_path, get_world_connection_read_only
 
 
 UTC = timezone.utc
@@ -538,7 +538,7 @@ def held_position_family_priorities() -> dict[tuple[str, str, str], int]:
     if not path.exists():
         return {}
     try:
-        conn = _connect(path, write_class=None)
+        conn = _connect_read_only(path)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA query_only=ON")
@@ -600,7 +600,7 @@ def discover_replacement_forecast_materialization_seeds(
             failed_count=0,
         )
 
-    conn = _connect(Path(forecast_db), write_class="live")
+    conn = _connect_read_only(Path(forecast_db))
     conn.row_factory = sqlite3.Row
     try:
         if not _source_run_coverage_schema_ready(conn):
