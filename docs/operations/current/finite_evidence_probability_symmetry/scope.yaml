@@ -34,6 +34,7 @@ in_scope:
 - src/state/portfolio.py
 - src/state/fill_dedup.py
 - src/state/venue_command_repo.py
+- src/state/collateral_ledger.py
 - src/ops/monitor_cadence.py
 - src/events/price_channel_redecision_router.py
 - src/engine/global_auction_universe.py
@@ -56,6 +57,7 @@ in_scope:
 - tests/test_command_recovery.py
 - tests/test_exchange_reconcile.py
 - tests/state/test_fill_dedup.py
+- tests/test_collateral_ledger.py
 - tests/test_healthcheck.py
 - tests/test_ops_scripts_smoke.py
 - tests/test_p3_price_channel_ingest_lift.py

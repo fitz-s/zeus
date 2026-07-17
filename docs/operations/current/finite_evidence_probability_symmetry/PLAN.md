@@ -245,6 +245,23 @@ authority surface.
 
 ## Work record
 
+- 2026-07-17: the first post-fill Manila auction exposed a deterministic
+  projection-lag window: the authenticated fill was already canonical and the
+  wallet snapshot already bounded its cash effect, but `chain_shares` remained
+  zero until the next reconciliation pass.  Current wealth now uses an exact
+  CTF balance when the current chain snapshot carries the token; otherwise it
+  admits only canonical `venue_confirmed_*` shares as a non-spendable maximum
+  claim.  Unverified submitted shares remain invalid, so the repair removes a
+  throughput gap without turning uncertain inventory into cash.
+
+- 2026-07-17: the Milan authenticated fill had no `venue_order_facts` row, so
+  terminal reservation settlement released the whole PUSD reservation with
+  `converted_amount=0` even though canonical trade facts proved the fill.
+  Reservation conversion now takes the larger of cumulative order matched size
+  and the sum of exactly-once economic trade fills.  The shared alias reducer
+  excludes EDLI/tx-hash duplicates before summing; tests prove both no-order-fact
+  conversion and partial-fill alias deduplication.
+
 - 2026-07-17: the first post-deploy authenticated Tokyo fill exposed a
   command-recovery gap.  The command remained `REVIEW_REQUIRED` after its
   point-order read failed, while canonical `venue_trade_facts` proved the full

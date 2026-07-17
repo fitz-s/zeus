@@ -948,6 +948,41 @@ def _max_matched_size(conn: sqlite3.Connection, command_id: str) -> Decimal:
     return best
 
 
+def _proven_filled_size(conn: sqlite3.Connection, command_id: str) -> Decimal:
+    """Largest exactly-once fill proof available at terminalization.
+
+    Order facts carry a cumulative matched total, while trade facts carry
+    distinct economic fills.  The latter must be deduplicated before summing
+    because EDLI and venue observations can describe the same fill twice.
+    """
+    order_total = _max_matched_size(conn, command_id)
+    try:
+        from src.state.fill_dedup import economic_trade_facts_for_command
+
+        facts = economic_trade_facts_for_command(conn, command_id)
+    except sqlite3.OperationalError as exc:
+        if "no such table: venue_trade_facts" in str(exc):
+            facts = []
+        else:
+            raise
+
+    trade_total = Decimal("0")
+    for fact in facts:
+        if str(fact.get("state") or "").upper() not in {
+            "MATCHED",
+            "MINED",
+            "CONFIRMED",
+        }:
+            continue
+        try:
+            size = Decimal(str(fact.get("filled_size")))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        if size > 0:
+            trade_total += size
+    return max(order_total, trade_total)
+
+
 def convert_reservation_on_fill(
     conn: sqlite3.Connection,
     command_id: str,
@@ -959,9 +994,10 @@ def convert_reservation_on_fill(
     terminalization seam, per the terminalization-centrality invariant) for
     fill-class terminal states (_CONVERT_STATES). No notional crosses the
     append_event boundary (critic ruling 2) — the filled portion is derived
-    internally from the command's venue_order_facts fact stream at terminal
-    time. Single idempotent terminal write guarded by WHERE released_at IS
-    NULL, so a re-delivered terminal event is a safe no-op.
+    internally from the command's cumulative order facts or exactly-once
+    economic trade facts at terminal time. Single idempotent terminal write
+    guarded by WHERE released_at IS NULL, so a re-delivered terminal event is
+    a safe no-op.
 
     PUSD_BUY: the converted portion becomes an OUTGOING_DEDUCTION unsettled
     row (keeps reducing spendable until the balance snapshot catches up); the
@@ -999,11 +1035,11 @@ def convert_reservation_on_fill(
 
     order_size = Decimal(str(cmd_row[0])) if cmd_row and cmd_row[0] is not None else Decimal("0")
     price = Decimal(str(cmd_row[1])) if cmd_row and cmd_row[1] is not None else Decimal("0")
-    max_matched = _max_matched_size(conn, command_id)
+    proven_filled = _proven_filled_size(conn, command_id)
 
     converted = 0
-    if order_size > 0 and max_matched > 0:
-        ratio = min(Decimal("1"), max_matched / order_size)
+    if order_size > 0 and proven_filled > 0:
+        ratio = min(Decimal("1"), proven_filled / order_size)
         converted = int((Decimal(amount) * ratio).to_integral_value(rounding=ROUND_FLOOR))
         converted = max(0, min(amount, converted))
 

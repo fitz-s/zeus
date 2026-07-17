@@ -1,10 +1,11 @@
 # Created: 2026-04-27
 # Purpose: Lock R3 Z4 CollateralLedger pUSD/CTF reservation and fail-closed executor preflight behavior.
 # Reuse: Run when collateral snapshots, pUSD/CTF accounting, wrap/unwrap command state, or executor collateral gates change.
-# Last reused/audited: 2026-05-20
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  2026-05-20 live readiness repair: wrap confirmation refresh stays behind V2 adapter boundary.
+#                  current/finite_evidence_probability_symmetry authenticated-fill reservation repair.
 """R3 Z4 collateral-ledger antibodies."""
 
 from __future__ import annotations
@@ -1875,6 +1876,75 @@ def test_convert_reservation_on_fill_converts_filled_portion_and_releases_remain
     assert ledger.snapshot().reserved_pusd_for_buys_micro == 0
     spendable = 100_000_000 - 0 - 5_000_000
     assert spendable == 95_000_000
+
+
+def test_convert_reservation_on_fill_uses_authenticated_trade_fact_without_order_fact(conn):
+    from src.state.collateral_ledger import convert_reservation_on_fill
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_trade_fact
+
+    init_schema(conn)
+    command_id = "cmd-trade-fact-fill"
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    now = datetime.now(timezone.utc)
+    append_trade_fact(
+        conn,
+        trade_id="trade-exact",
+        venue_order_id="vo-trade-fact-fill",
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size="10",
+        fill_price="0.5",
+        source="WS_USER",
+        observed_at=now,
+        raw_payload_hash="1" * 64,
+    )
+
+    assert convert_reservation_on_fill(conn, command_id, "FILLED") is True
+    row = conn.execute(
+        "SELECT converted_amount, release_reason FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert tuple(row) == (5_000_000, "CONVERTED_ON_FILL")
+
+
+def test_convert_reservation_on_fill_deduplicates_trade_fact_alias(conn):
+    from src.state.collateral_ledger import convert_reservation_on_fill
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_trade_fact
+
+    init_schema(conn)
+    command_id = "cmd-trade-fact-alias"
+    tx_hash = "0x" + "2" * 64
+    _insert_test_command(conn, command_id, size=10.0, price=0.5)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    ledger.reserve_pusd_for_buy(command_id, 5_000_000)
+    now = datetime.now(timezone.utc)
+    for trade_id, payload_hash in (("trade-child", "2" * 64), (tx_hash, "3" * 64)):
+        append_trade_fact(
+            conn,
+            trade_id=trade_id,
+            venue_order_id="vo-trade-fact-alias",
+            command_id=command_id,
+            state="CONFIRMED",
+            filled_size="6",
+            fill_price="0.5",
+            source="WS_USER",
+            observed_at=now,
+            raw_payload_hash=payload_hash,
+            tx_hash=tx_hash,
+        )
+
+    assert convert_reservation_on_fill(conn, command_id, "CANCELLED") is True
+    converted = conn.execute(
+        "SELECT converted_amount FROM collateral_reservations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0]
+    assert converted == 3_000_000
 
 
 def test_convert_reservation_on_fill_idempotent_on_replayed_terminal_event(conn):
