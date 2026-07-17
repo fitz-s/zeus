@@ -12755,6 +12755,68 @@ class TestRecoveryResolutionTable:
         assert payload["terminal_no_fill"] is True
         assert payload["exposure_created"] is False
 
+    def test_unknown_side_effect_fak_no_match_400_terminalizes_without_lookup(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        error = (
+            "PolyApiException[status_code=400, error_message={'error': 'no orders "
+            "found to match with FAK order. FAK orders are partially filled or "
+            "killed if no match is found.', 'orderID': 'ord-fak-no-match'}]"
+        )
+        _insert(conn, price=0.73, size=6.0)
+        _advance_to_submitting(conn, venue_order_id="ord-fak-no-match")
+        envelope_id = _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-fak-no-match",
+            order_type="FAK",
+            price=0.73,
+            size=6.0,
+            order_id="ord-fak-no-match",
+            signed_order=b"signed-fak-no-match",
+            signed_order_hash="b" * 64,
+            error_code="V2_POST_SUBMIT_AMBIGUOUS",
+            error_message=error,
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_TIMEOUT_UNKNOWN",
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={
+                "reason": "post_submit_exception_possible_side_effect",
+                "exception_type": "AmbiguousSubmitError",
+                "exception_message": error,
+                "final_submission_envelope_id": envelope_id,
+                "final_submission_envelope_command_id": "cmd-001",
+                "venue_order_id": "ord-fak-no-match",
+                "idempotency_key": _DEFAULT_IDEM_KEY,
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert _get_state(conn, "cmd-001") == "SUBMIT_REJECTED"
+        mock_client.get_order.assert_not_called()
+        rejected = [
+            event
+            for event in _get_events(conn, "cmd-001")
+            if event["event_type"] == "SUBMIT_REJECTED"
+        ][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "venue_rejected_fak_no_match_400"
+        assert payload["proof_class"] == "deterministic_venue_fak_no_match_400"
+        assert payload["terminal_no_fill"] is True
+        assert payload["exposure_created"] is False
+
     def test_unknown_side_effect_marketable_buy_min_size_400_terminalizes_without_lookup(
         self,
         conn,
