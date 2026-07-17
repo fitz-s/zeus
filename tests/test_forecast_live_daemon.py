@@ -960,12 +960,13 @@ def test_reactor_wake_queue_prioritizes_day0_without_losing_forecasts(tmp_path) 
         wake_id="wake-first",
         published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
     )
-    second = publish_reactor_wake(
+    older_day0 = publish_reactor_wake(
         source="day0",
         reason="day0_extreme_event_committed",
         path=path,
-        wake_id="wake-second",
+        wake_id="wake-day0-older",
         published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
+        event_ids=("event-day0-older",),
     )
     latest = publish_reactor_wake(
         source="forecast",
@@ -974,9 +975,19 @@ def test_reactor_wake_queue_prioritizes_day0_without_losing_forecasts(tmp_path) 
         wake_id="wake-latest",
         published_at=datetime(2026, 7, 16, 12, 0, 2, tzinfo=timezone.utc),
     )
+    newest_day0 = publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="wake-day0-newest",
+        published_at=datetime(2026, 7, 16, 12, 0, 3, tzinfo=timezone.utc),
+        event_ids=("event-day0-newest",),
+    )
 
-    assert read_reactor_wake(path=path) == second
-    assert acknowledge_reactor_wake(second, path=path) is True
+    assert read_reactor_wake(path=path) == newest_day0
+    assert acknowledge_reactor_wake(newest_day0, path=path) is True
+    assert read_reactor_wake(path=path) == older_day0
+    assert acknowledge_reactor_wake(older_day0, path=path) is True
     assert read_reactor_wake(path=path) == latest
     assert acknowledge_reactor_wake(latest, path=path) is True
     assert read_reactor_wake(path=path) == first
@@ -1074,6 +1085,39 @@ def test_reactor_wake_coalesces_same_reason_until_ordering_barrier(tmp_path) -> 
     assert read_reactor_wake(path=path) == price_after_barrier
     assert acknowledge_reactor_wakes((price_after_barrier,), path=path) is True
     assert read_reactor_wake(path=path) == barrier
+
+
+def test_reactor_wake_does_not_coalesce_day0_commits(tmp_path) -> None:
+    from src.runtime.reactor_wake import (
+        acknowledge_reactor_wake,
+        coalescible_reactor_wakes,
+        publish_reactor_wake,
+        read_reactor_wake,
+    )
+
+    path = tmp_path / "wake.json"
+    older = publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="day0-older",
+        published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+        event_ids=("event-older",),
+    )
+    newest = publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="day0-newest",
+        published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
+        event_ids=("event-newest",),
+    )
+
+    selected = read_reactor_wake(path=path)
+    assert selected == newest
+    assert coalescible_reactor_wakes(selected, path=path) == (newest,)
+    assert acknowledge_reactor_wake(newest, path=path) is True
+    assert read_reactor_wake(path=path) == older
 
 
 def test_reactor_wake_ack_preserves_forecast_published_after_selected(tmp_path) -> None:

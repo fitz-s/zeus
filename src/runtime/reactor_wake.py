@@ -277,7 +277,8 @@ def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
         "market_price_advanced",
     )
     for reason in priority_reasons:
-        for _queue_file, wake in queued:
+        reason_wakes = reversed(queued) if reason == "day0_extreme_event_committed" else queued
+        for _queue_file, wake in reason_wakes:
             if wake.reason == reason:
                 return wake
     for _queue_file, wake in reversed(queued):
@@ -296,7 +297,16 @@ def coalescible_reactor_wakes(
     max_event_ids: int = 100,
     max_forecast_families: int = 100,
 ) -> tuple[ReactorWake, ...]:
-    """Collect same-reason wake hints that one targeted reactor drain can serve."""
+    """Collect same-reason wake hints that one targeted reactor drain can serve.
+
+    A Day0 commit is one preemptible alpha unit. Combining it with older
+    observation wakes can put the newest hard fact behind more event IDs than
+    one reactor cycle can process. The durable event queue remains the recovery
+    authority, so serve the newest Day0 wake alone and leave older hints queued.
+    """
+
+    if selected.reason == "day0_extreme_event_committed":
+        return (selected,)
 
     queued = [wake for _queue_file, wake in _queued_wakes(path)]
     selected_index = next(
@@ -311,10 +321,7 @@ def coalescible_reactor_wakes(
         return (selected,)
 
     candidates: list[ReactorWake] = []
-    if selected.reason in {
-        "day0_extreme_event_committed",
-        "forecast_posterior_advanced",
-    }:
+    if selected.reason == "forecast_posterior_advanced":
         candidates = [
             wake
             for wake in queued
