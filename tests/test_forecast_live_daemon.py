@@ -306,6 +306,12 @@ def test_replacement_discovery_runs_outside_materialization_queue(monkeypatch, t
         "_replacement_forecast_live_runtime_enabled",
         lambda: True,
     )
+    monkeypatch.setattr(daemon, "_replacement_forecast_last_discovery_revision", None)
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_discovery_revision",
+        lambda cfg: ("revision-1",),
+    )
     monkeypatch.setattr(
         discovery,
         "discover_replacement_forecast_materialization_seeds",
@@ -323,6 +329,48 @@ def test_replacement_discovery_runs_outside_materialization_queue(monkeypatch, t
             "limit": 1,
         }
     ]
+
+    daemon._replacement_forecast_discovery_job.__wrapped__()
+
+    assert len(calls) == 1
+
+
+def test_replacement_discovery_yields_to_committed_seed(monkeypatch, tmp_path) -> None:
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = _materialization_queue_cfg(tmp_path)
+    seed_dir = Path(cfg["seed_dir"])
+    seed_dir.mkdir(parents=True)
+    (seed_dir / "committed.json").write_text("{}\n", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_live_runtime_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(daemon, "_replacement_forecast_last_discovery_revision", None)
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_discovery_revision",
+        lambda cfg: ("revision-2",),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "discover_replacement_forecast_materialization_seeds",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    daemon._replacement_forecast_discovery_job.__wrapped__()
+
+    assert calls == []
+    assert daemon._replacement_forecast_last_discovery_revision == ("revision-2",)
 
 
 def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> None:

@@ -132,6 +132,7 @@ REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 # the materialize keeps its own worker and refreshes readiness every interval regardless of
 # download duration.
 REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE = "replacement_download"
+_replacement_forecast_last_discovery_revision: tuple[object, ...] | None = None
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
@@ -1104,8 +1105,62 @@ def _replacement_forecast_queue_pending(
     return path.exists() and next(path.glob("*.json"), None) is not None
 
 
+def _replacement_forecast_discovery_revision(
+    cfg: dict[str, object],
+) -> tuple[object, ...] | None:
+    """Return the cheap causal frontier for recovery discovery."""
+
+    from src.state.db import ZEUS_WORLD_DB_PATH, _connect_read_only
+
+    forecast_db = Path(str(cfg["forecast_db"]))
+    if not forecast_db.exists() or not ZEUS_WORLD_DB_PATH.exists():
+        return None
+    try:
+        forecast = _connect_read_only(forecast_db)
+        try:
+            forecast.execute("PRAGMA query_only=ON")
+            revision = tuple(
+                forecast.execute(
+                    """
+                    SELECT
+                      (SELECT COALESCE(MAX(event_id), 0) FROM market_events),
+                      (SELECT COALESCE(MAX(raw_model_forecast_id), 0)
+                         FROM raw_model_forecasts),
+                      (SELECT COALESCE(MAX(artifact_id), 0)
+                         FROM raw_forecast_artifacts),
+                      (SELECT COALESCE(MAX(rowid), 0) FROM source_run_coverage),
+                      (SELECT COALESCE(MAX(expires_at), '')
+                         FROM readiness_state
+                        WHERE datetime(expires_at) <= datetime('now'))
+                    """
+                ).fetchone()
+            )
+        finally:
+            forecast.close()
+        world = _connect_read_only(ZEUS_WORLD_DB_PATH)
+        try:
+            world.execute("PRAGMA query_only=ON")
+            observation_id = int(
+                world.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM observation_instants"
+                ).fetchone()[0]
+            )
+        finally:
+            world.close()
+    except Exception:  # noqa: BLE001 - unknown revision must run recovery discovery
+        return None
+    hour = datetime.now(tz=timezone.utc).replace(
+        minute=0,
+        second=0,
+        microsecond=0,
+    ).isoformat()
+    return (*revision, observation_id, hour)
+
+
 def _replacement_forecast_materialize_poll_job() -> None:
     """Drain only source-committed work; global discovery has its own lane."""
+
+    global _replacement_forecast_last_discovery_revision
 
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
@@ -1115,6 +1170,10 @@ def _replacement_forecast_materialize_poll_job() -> None:
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     batch_limit = int(cfg["poll_batch_limit"])
+    if requests_pending or seeds_pending:
+        revision = _replacement_forecast_discovery_revision(cfg)
+        if revision is not None:
+            _replacement_forecast_last_discovery_revision = revision
     if requests_pending:
         _replacement_forecast_materialize_job(
             discover=False,
@@ -1133,6 +1192,8 @@ def _replacement_forecast_materialize_poll_job() -> None:
 def _replacement_forecast_discovery_job() -> None:
     """Run global recovery discovery without occupying the hot materialization lane."""
 
+    global _replacement_forecast_last_discovery_revision
+
     if not _replacement_forecast_live_runtime_enabled():
         return
     from src.data.replacement_forecast_production import (
@@ -1143,12 +1204,24 @@ def _replacement_forecast_discovery_job() -> None:
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    revision = _replacement_forecast_discovery_revision(cfg)
+    if revision is not None and revision == _replacement_forecast_last_discovery_revision:
+        return
+    if any(
+        _replacement_forecast_queue_pending(cfg, key)
+        for key in ("request_dir", "seed_dir")
+    ):
+        if revision is not None:
+            _replacement_forecast_last_discovery_revision = revision
+        return
     report = discover_replacement_forecast_materialization_seeds(
         forecast_db=cfg["forecast_db"],
         raw_manifest_dir=cfg["raw_manifest_dir"],
         seed_dir=cfg["seed_dir"],
         limit=min(int(cfg["seed_discovery_limit"]), int(cfg["poll_batch_limit"])),
     )
+    if revision is not None:
+        _replacement_forecast_last_discovery_revision = revision
     if report.status != "NO_ELIGIBLE_TARGETS":
         logger.info("replacement forecast recovery discovery: %s", report.as_dict())
 
