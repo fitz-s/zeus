@@ -1016,6 +1016,107 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
     ]
 
 
+def test_price_channel_redecision_world_writer_is_bounded_and_preopened(monkeypatch):
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as pci
+    from src.state import db
+
+    order: list[str] = []
+
+    class Connection:
+        in_transaction = False
+
+        def execute(self, sql: str):
+            order.append(f"sql:{sql}")
+            if sql == "BEGIN IMMEDIATE":
+                self.in_transaction = True
+            return self
+
+        def rollback(self) -> None:
+            order.append("rollback")
+            self.in_transaction = False
+
+        def close(self) -> None:
+            order.append("close")
+
+    class Mutex:
+        def acquire(self, *, timeout: float) -> bool:
+            order.append(f"acquire:{timeout}")
+            return True
+
+        def release(self) -> None:
+            order.append("release")
+
+    conn = Connection()
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda **_kwargs: order.append("open") or conn,
+    )
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "_world_write_mutex",
+        lambda: Mutex(),
+    )
+    monkeypatch.setattr(
+        pci,
+        "_bound_price_channel_sqlite_wait",
+        lambda _conn, *, timeout_ms: order.append(f"busy:{timeout_ms}"),
+    )
+
+    with pci._edli_price_channel_world_write_connection(owner="price-redecision"):
+        order.append("write")
+        conn.in_transaction = False
+
+    timeout_ms = pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS
+    assert order == [
+        "open",
+        f"busy:{timeout_ms}",
+        f"acquire:{timeout_ms / 1000.0}",
+        "sql:BEGIN IMMEDIATE",
+        "write",
+        "release",
+        "close",
+    ]
+
+
+def test_price_channel_redecision_world_writer_defers_without_waiting(monkeypatch):
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as pci
+    from src.state import db
+
+    class Connection:
+        def close(self) -> None:
+            self.closed = True
+
+    class BusyMutex:
+        def acquire(self, *, timeout: float) -> bool:
+            self.timeout = timeout
+            return False
+
+    conn = Connection()
+    conn.closed = False
+    mutex = BusyMutex()
+    monkeypatch.setattr(db, "get_world_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "_world_write_mutex",
+        lambda: mutex,
+    )
+    monkeypatch.setattr(
+        pci,
+        "_bound_price_channel_sqlite_wait",
+        lambda _conn, *, timeout_ms: None,
+    )
+
+    with pytest.raises(TimeoutError, match="WORLD writer busy"):
+        with pci._edli_price_channel_world_write_connection(owner="price-redecision"):
+            raise AssertionError("busy producer must not enter the write unit")
+
+    assert mutex.timeout == pci.PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
+    assert conn.closed is True
+
+
 def test_price_channel_redecision_coalesced_sink_does_not_block_ingest(
     monkeypatch,
 ):

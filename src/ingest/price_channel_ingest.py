@@ -166,6 +166,7 @@ PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
 PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 25
 PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS = 100
+PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS = 25
 PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS = 25
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
 PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
@@ -320,29 +321,42 @@ def _edli_price_channel_trade_write_gate(*, owner: str) -> _PriceChannelWriteGat
 
 @contextlib.contextmanager
 def _edli_price_channel_world_write_connection(*, owner: str):
-    """Yield one WORLD writer after all decision reads have completed."""
+    """Yield one bounded WORLD transaction after all decision reads complete.
+
+    Price ticks are level-triggered and coalesced. If the decision reactor owns
+    the WORLD writer, retrying the latest tick is cheaper than queueing this
+    producer ahead of the consumer that turns an existing event into an order.
+    """
 
     from src.events.triggers.market_channel_ingestor import _world_write_mutex
     from src.state.db import get_world_connection
-    from src.state.write_coordinator import (
-        DBIdentity,
-        default_runtime_write_coordinator,
-    )
 
-    with _world_write_mutex():
-        with default_runtime_write_coordinator().lease(
-            (DBIdentity.WORLD,),
-            owner=owner,
-            write_class="live",
-            deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
-        ):
-            conn = get_world_connection(write_class=None)
-            _bound_price_channel_sqlite_wait(conn)
-            try:
-                yield conn
-            finally:
-                conn.close()
+    conn = get_world_connection(write_class=None)
+    _bound_price_channel_sqlite_wait(
+        conn,
+        timeout_ms=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS,
+    )
+    mutex = _world_write_mutex()
+    acquired = mutex.acquire(
+        timeout=PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS / 1000.0
+    )
+    if not acquired:
+        conn.close()
+        raise TimeoutError(
+            f"{owner} deferred: WORLD writer busy for "
+            f"{PRICE_CHANNEL_REDECISION_WORLD_WRITE_TIMEOUT_MS}ms"
+        )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        if conn.in_transaction:
+            conn.rollback()
+        mutex.release()
+        conn.close()
 
 
 def _edli_price_channel_trade_write_context_factory(*, owner: str):
