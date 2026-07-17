@@ -1225,6 +1225,14 @@ class _CurrentEvidenceShape:
     # distinguishes the shape).
     between_cohort_models: tuple[str, ...] | None = None
     between_cohort_excluded: tuple[str, ...] | None = None
+    # Shape-age sigma term (consult P2-B full form, 2026-07-17): the fitted variance
+    # gamma_g * shape_lag_hours/6 ADDED to the transported predictive variance — the
+    # remaining risk of pricing with an aged shape after transport removed the center
+    # error. None (payload-dropped) when the term is zero: transported branch with no
+    # fitted artifact and every same-cycle row stay byte-identical. Same shape_hash
+    # discipline as the cohort fields: never in the identity dict — the widened
+    # predictive_sigma_c inside `identity` already distinguishes the shape.
+    shape_age_sigma_term_c2: float | None = None
 
     def as_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -1232,6 +1240,8 @@ class _CurrentEvidenceShape:
         if payload.get("between_cohort_models") is None:
             payload.pop("between_cohort_models", None)
             payload.pop("between_cohort_excluded", None)
+        if payload.get("shape_age_sigma_term_c2") is None:
+            payload.pop("shape_age_sigma_term_c2", None)
         return payload
 
 
@@ -1252,6 +1262,7 @@ def _current_evidence_shape_from_values(
     center_c: float,
     carrier_cycle_time: str | datetime | None = None,
     provider_cycles: Mapping[str, str] | None = None,
+    shape_age_gamma_c2_per_6h: float = 0.0,
 ) -> _CurrentEvidenceShape:
     """Compose current ensemble and provider disagreement without a fitted floor.
 
@@ -1285,6 +1296,19 @@ def _current_evidence_shape_from_values(
     downweighted, never excluded). FAIL-OPEN: ``provider_cycles`` absent, a
     provider's cycle missing/unparseable, or a coherent cohort of fewer than 2
     providers -> between over ALL providers, byte-identical to today.
+
+    ``shape_age_gamma_c2_per_6h`` (consult P2-B full form, 2026-07-17): the fitted
+    excess-variance slope from ``src.forecast.shape_age_sigma.gamma_for`` (degC² per 6h
+    of shape lag; ``scripts/fit_shape_age_sigma.py``). On the TRANSPORTED branch only,
+    ``gamma * shape_lag_hours/6`` is added to the predictive VARIANCE:
+    sigma = sqrt(within² + between² + gamma*lag/6) — the remaining risk of pricing with
+    an aged shape after transport removed the center error (deterministic staleness
+    slopes measure center drift, not shape staleness, so this term has its own fit).
+    CENTER_SIGMA deliberately excludes the term: the fit's residual is settle − FRESH
+    fused center, so gamma prices excess settlement dispersion around a center whose
+    own estimation error is unchanged by shape age — it is predictive width, not
+    center uncertainty. gamma <= 0 / non-finite, or the same-cycle branch
+    (shape_lag_hours <= 0), are byte-identical to today.
     """
 
     raw_members = tuple(float(value) for value in members_c)
@@ -1390,6 +1414,18 @@ def _current_evidence_shape_from_values(
     # except when shape_lag>0, where translation already recentered them and
     # ensemble_center_delta is 0.0 (this hypot() term drops out naturally).
     sigma = math.hypot(within, between, ensemble_center_delta)
+    # Shape-age sigma term (consult P2-B): fitted remaining-risk variance of the aged,
+    # transported shape. TRANSPORTED branch only; a zero/absent gamma leaves the sqrt
+    # recomposition untaken so serving stays byte-identical (fail-open dormant).
+    shape_age_sigma_term: float | None = None
+    if translation_applied:
+        try:
+            gamma = float(shape_age_gamma_c2_per_6h)
+        except (TypeError, ValueError):
+            gamma = 0.0
+        if math.isfinite(gamma) and gamma > 0.0:
+            shape_age_sigma_term = gamma * shape_lag_hours / 6.0
+            sigma = math.sqrt(sigma * sigma + shape_age_sigma_term)
     effective_providers = 1.0 / sum(weight * weight for _, _, weight in normalized)
     center_sigma = math.hypot(
         within / math.sqrt(len(members)),
@@ -1457,6 +1493,10 @@ def _current_evidence_shape_from_values(
         # be redundant identity churn.
         between_cohort_models=between_cohort_models,
         between_cohort_excluded=between_cohort_excluded,
+        # Same discipline: outside `identity` — a positive term already widens the
+        # predictive_sigma_c inside `identity`, which changes the hash; a zero/absent
+        # term is None (payload-dropped), keeping every pre-existing row byte-identical.
+        shape_age_sigma_term_c2=shape_age_sigma_term,
     )
 
 
@@ -1541,6 +1581,15 @@ def _read_current_evidence_shape(
             values = tuple((value - 32.0) * 5.0 / 9.0 for value in values)
         elif members_unit not in {"degc", "c", "°c"}:
             return None
+        # Fitted shape-age variance slope (consult P2-B): only bites on the transported
+        # branch inside _current_evidence_shape_from_values. FAIL-OPEN: artifact absent
+        # / import failure -> 0.0 -> byte-identical serving.
+        try:
+            from src.forecast.shape_age_sigma import gamma_for as _shape_age_gamma_for  # noqa: PLC0415
+
+            shape_age_gamma = float(_shape_age_gamma_for(metric))
+        except Exception:
+            shape_age_gamma = 0.0
         return _current_evidence_shape_from_values(
             snapshot_id=int(row[0]),
             source_cycle_time=str(row[2]),
@@ -1551,6 +1600,7 @@ def _read_current_evidence_shape(
             center_c=center_c,
             carrier_cycle_time=carrier_cycle,
             provider_cycles=provider_cycles,
+            shape_age_gamma_c2_per_6h=shape_age_gamma,
         )
     except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
         return None
