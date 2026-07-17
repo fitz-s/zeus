@@ -587,6 +587,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             list[BayesPrecisionFusionDownloadTarget],
         ]
         tasks_by_source: dict[str, list[task_type]] = {}
+        priority_task: task_type | None = None
         source_order = tuple(
             sorted(
                 resolved_sources,
@@ -623,6 +624,15 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     grouped_targets.append([target])
                 else:
                     grouped_targets[index].append(target)
+            if priority_task is None:
+                priority_task = (
+                    source,
+                    source_cycles[source],
+                    grouped_targets.pop(0),
+                )
+            if not grouped_targets:
+                tasks_by_source[source] = []
+                continue
             source_workers = min(max_workers, len(grouped_targets))
             tasks_by_source[source] = [
                 (
@@ -727,11 +737,22 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             else:
                 source_commit_notifications += 1
 
-        if len(tasks) == 1:
+        assert priority_task is not None
+        priority_source, priority_report = _download_task(*priority_task)
+        reports_by_source[priority_source].append(priority_report)
+        _notify_source_commit(priority_source, priority_report)
+
+        if quota_abort.is_set():
+            # Preserve per-source retry accounting without admitting any more
+            # provider calls after the priority probe proves the transport is blocked.
+            for task in tasks:
+                source, task_report = _download_task(*task)
+                reports_by_source[source].append(task_report)
+        elif len(tasks) == 1:
             source, task_report = _download_task(*tasks[0])
             reports_by_source[source].append(task_report)
             _notify_source_commit(source, task_report)
-        else:
+        elif tasks:
             with ThreadPoolExecutor(
                 max_workers=worker_count,
                 thread_name_prefix="source-clock-bpf",
@@ -918,6 +939,16 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             "source_commit_notifications": source_commit_notifications,
             "source_commit_notification_errors": tuple(
                 source_commit_notification_errors
+            ),
+            "priority_probe_source": priority_task[0],
+            "priority_probe_families": tuple(
+                dict.fromkeys(
+                    (target.city, target.target_date)
+                    for target in priority_task[2]
+                )
+            ),
+            "priority_probe_transport_aborted": bool(
+                priority_report.get("transport_aborted_remaining_targets")
             ),
             "updated_sources": updated_sources,
             "affected_cities": affected_cities,

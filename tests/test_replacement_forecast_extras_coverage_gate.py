@@ -580,7 +580,7 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
     report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         {
             "forecast_db": str(tmp_path / "zeus-forecasts.db"),
-            "source_clock_fanout_workers": 1,
+            "source_clock_fanout_workers": 4,
         },
         source_clock_report=_Report(),
         max_wall_clock_seconds=5.0,
@@ -676,8 +676,10 @@ def test_source_clock_scoped_capture_fans_out_city_dates(
         max_wall_clock_seconds=1.0,
     )
 
-    assert max_active == 4
-    assert report["fanout_workers"] == 4
+    assert max_active == 3
+    assert report["fanout_workers"] == 3
+    assert report["priority_probe_source"] == "ecmwf_ifs"
+    assert report["priority_probe_families"] == (("Amsterdam", "2026-07-16"),)
     assert report["target_count"] == 8
     assert report["written_row_count"] == 8
     assert report["global_models_expected"] == 1
@@ -718,7 +720,6 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
     starts: list[str] = []
     notifications: list[str] = []
     lock = threading.Lock()
-    first_wave_started = threading.Event()
 
     monkeypatch.setitem(
         prod.settings["edli"],
@@ -754,9 +755,6 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
         source = tuple(kwargs["models"])[0]
         with lock:
             starts.append(source)
-            if len(starts) == 4:
-                first_wave_started.set()
-        assert first_wave_started.wait(timeout=1.0)
         return {
             "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
             "target_count": len(kwargs["targets"]),
@@ -777,10 +775,12 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
         on_source_commit=lambda source, _report: notifications.append(source),
     )
 
-    assert set(starts[:4]) == set(sources)
+    assert starts[0] == "ecmwf_ifs"
+    assert set(starts[1:]) == set(sources)
     assert set(notifications) == set(sources)
     assert report["source_commit_notifications"] == len(notifications)
     assert report["source_commit_notification_errors"] == ()
+    assert report["priority_probe_source"] == "ecmwf_ifs"
     assert report["status"] == (
         "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
@@ -1043,6 +1043,7 @@ def test_source_clock_scoped_capture_stops_queued_tasks_after_quota_abort(
 
     assert called == ["ecmwf_ifs"]
     assert report["transport_aborted_remaining_targets"] is True
+    assert report["priority_probe_transport_aborted"] is True
     assert report["source_results"]["icon_global"]["status"] == (
         "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
     )
