@@ -2189,6 +2189,11 @@ def process_current_global_batch(
                     else None
                 ),
             )
+            if isinstance(trade_conn, sqlite3.Connection):
+                # The selection receipt is the durable boundary before JIT
+                # preflight. End its implicit write transaction before any
+                # network work so quote ingestion can use the TRADE WAL writer.
+                trade_conn.commit()
             return selected
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
@@ -2294,6 +2299,11 @@ def process_current_global_batch(
                     venue_submit_count_before=before_preflight,
                     venue_submit_count_after=after_preflight,
                 )
+                if isinstance(trade_conn, sqlite3.Connection):
+                    # A stable preflight is immediately followed by venue I/O;
+                    # fallthrough may run another preflight. Neither may carry
+                    # this completed receipt's WAL writer lock.
+                    trade_conn.commit()
                 if preflight.status == "STABLE":
                     break
                 if preflight.status == "BATCH_BLOCKED":

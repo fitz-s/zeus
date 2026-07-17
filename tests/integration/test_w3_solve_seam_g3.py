@@ -12273,6 +12273,156 @@ def test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch):
     assert result.receipts[event.event_id].submitted is True
 
 
+def test_global_batch_commits_receipts_before_external_io(monkeypatch, tmp_path):
+    import src.state.portfolio as portfolio
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    witness = SimpleNamespace(
+        family_key=scope.family_keys[0],
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-a",
+    )
+    candidate = SimpleNamespace(
+        action="BUY",
+        family_key=scope.family_keys[0],
+        bin_id="bin-a",
+        condition_id="condition-a",
+        side="YES",
+        token_id="token-a",
+        candidate_id="candidate-a",
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-a",
+            wealth_witness_identity="wealth",
+        ),
+    )
+    path = tmp_path / "receipt-boundary.db"
+    trade_conn = sqlite3.connect(path)
+    observer = sqlite3.connect(path, timeout=0)
+    assert trade_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    trade_conn.execute("CREATE TABLE receipt_marks (stage TEXT NOT NULL)")
+    trade_conn.commit()
+    stages = []
+    venue_calls = [0]
+
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "probe_inflight_buy_ambiguity", lambda _conn: False
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_current_held_weather_families", lambda _conn: ()
+    )
+    monkeypatch.setattr(portfolio, "load_runtime_open_portfolio", lambda _conn: None)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected
+    )
+
+    def persist(stage):
+        def _persist(conn, **_kwargs):
+            conn.execute("INSERT INTO receipt_marks VALUES (?)", (stage,))
+            assert conn.in_transaction
+            return 1
+
+        return _persist
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        persist("selection"),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_preflight_receipt",
+        persist("preflight"),
+    )
+
+    def assert_writer_released(stage):
+        assert not trade_conn.in_transaction
+        observer.execute("BEGIN IMMEDIATE")
+        observer.rollback()
+        stages.append(stage)
+
+    def preflight(*_):
+        assert_writer_released("preflight")
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE",
+            binding_token="binding-a",
+        )
+
+    def actuate(current, _actuation, _at, token, _authority):
+        assert token == "binding-a"
+        assert_writer_released("actuation")
+        venue_calls[0] += 1
+        return EventSubmissionReceipt(
+            True,
+            current.event_id,
+            current.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=trade_conn,
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=SimpleNamespace(probability_witness=witness),
+        ),
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue_calls[0],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            _global_test_book("book", price="0.40", captured_at=decision_at),
+        ),
+    )
+
+    assert stages == ["preflight", "actuation"]
+    assert trade_conn.execute(
+        "SELECT stage FROM receipt_marks ORDER BY rowid"
+    ).fetchall() == [("selection",), ("preflight",)]
+    assert result.venue_submit_count == 1
+    assert result.receipts[event.event_id].submitted is True
+    observer.close()
+    trade_conn.close()
+
+
 def test_global_batch_freezes_cut_then_releases_before_winner_jit(
     monkeypatch, tmp_path
 ):
