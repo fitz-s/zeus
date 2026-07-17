@@ -1709,19 +1709,14 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
               FROM no_trade_regret_events
              WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
                AND created_at >= ?
-             ORDER BY rowid DESC
+             ORDER BY created_at DESC, rowid DESC
              LIMIT ?
             """,
             (cutoff, scan_rows),
         ).fetchall()
     except Exception:
         return []
-    ordered_rows = sorted(
-        enumerate(rows),
-        key=lambda item: (str(item[1][1] or ""), -int(item[0])),
-        reverse=True,
-    )
-    return list(dict.fromkeys(str(row[0]) for _, row in ordered_rows if row and row[0]))[:requested_limit]
+    return list(dict.fromkeys(str(row[0]) for row in rows if row and row[0]))[:requested_limit]
 
 
 def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:

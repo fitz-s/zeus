@@ -533,6 +533,12 @@ def test_candidate_priority_uses_bounded_recent_row_window():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX idx_no_trade_regret_created_at
+            ON no_trade_regret_events(created_at DESC)
+        """
+    )
     recent = datetime.now(timezone.utc).isoformat()
     rows = [(f"old-{idx}", f"stale-{idx}", "2026-01-01T00:00:00+00:00") for idx in range(250)]
     rows.extend(
@@ -557,7 +563,15 @@ def test_candidate_priority_uses_bounded_recent_row_window():
     ]
     assert regret_reads
     assert all("GROUP BY" not in sql.upper() for sql in regret_reads)
-    assert all("ORDER BY ROWID DESC" in sql.upper() for sql in regret_reads)
+    assert all(
+        "ORDER BY CREATED_AT DESC, ROWID DESC" in sql.upper()
+        for sql in regret_reads
+    )
+    plan = conn.execute(f"EXPLAIN QUERY PLAN {regret_reads[0]}").fetchall()
+    assert any(
+        "idx_no_trade_regret_created_at" in str(row[3])
+        for row in plan
+    )
 
 
 def test_market_channel_seed_first_includes_all_money_path_priority_tokens():
