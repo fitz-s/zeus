@@ -2259,6 +2259,7 @@ def current_portfolio_wealth_witness(
             raise ValueError("CURRENT_WEALTH_UNKNOWN_CHAIN_INVENTORY")
         from src.contracts.position_truth import has_current_money_risk_chain_state
         from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
+        from src.state.portfolio import has_verified_trade_fill
 
         position_max_age = timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS)
         represented_micro: dict[str, int] = {}
@@ -2266,6 +2267,8 @@ def current_portfolio_wealth_witness(
         position_rows = []
         for position in positions:
             token = _position_token(position)
+            if not token:
+                raise ValueError("CURRENT_WEALTH_OPEN_POSITION_INVALID")
             chain_state = str(
                 getattr(
                     getattr(position, "chain_state", ""),
@@ -2274,13 +2277,17 @@ def current_portfolio_wealth_witness(
                 )
                 or ""
             ).strip()
-            shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
-            if not token or shares <= 0:
-                raise ValueError("CURRENT_WEALTH_OPEN_POSITION_INVALID")
-            micro = int((shares * Decimal("1000000")).to_integral_value())
             if token in token_balances:
+                micro = token_balances[token]
+                shares = Decimal(micro) / Decimal("1000000")
                 evidence = "collateral_snapshot"
             else:
+                shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
+                if shares <= 0 and has_verified_trade_fill(position):
+                    shares = Decimal(str(getattr(position, "shares", 0) or 0))
+                if shares <= 0:
+                    raise ValueError("CURRENT_WEALTH_OPEN_POSITION_INVALID")
+                micro = int((shares * Decimal("1000000")).to_integral_value())
                 evidence = "uncertain_local_claim"
                 try:
                     chain_verified_at = datetime.fromisoformat(

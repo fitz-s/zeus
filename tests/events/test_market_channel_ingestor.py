@@ -3,7 +3,9 @@
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import threading
 from contextlib import nullcontext
 from datetime import datetime, timezone
 
@@ -407,6 +409,139 @@ def test_execution_feasibility_duplicate_quote_refreshes_observation_time():
     assert latest[3] == pytest.approx(0.76)
 
 
+def test_execution_feasibility_latest_never_regresses_event_time():
+    conn, _writer = _conn_writer()
+    base = {
+        "condition_id": "0xcondition",
+        "token_id": "token-1",
+        "outcome_label": "NO",
+        "direction": "buy_no",
+        "best_bid_before": 0.74,
+        "best_ask_before": 0.75,
+        "depth_before_json": '{"bids":[],"asks":[]}',
+        "order_intent_time": None,
+        "submit_time": None,
+        "accepted_or_rejected": None,
+        "venue_order_id": None,
+        "fok_full_fill": None,
+        "fak_partial_fill": None,
+        "filled_shares": None,
+        "fill_price": None,
+        "cancel_remainder_status": None,
+        "book_hash_after": None,
+        "latency_ms": None,
+        "maker_cancel_before_submit": None,
+        "would_have_edge_after_fee": None,
+        "fill_truth_source": "evidence_only",
+    }
+    insert_execution_feasibility_evidence(
+        conn,
+        {
+            **base,
+            "event_id": "newer",
+            "quote_seen_at": "2026-05-24T10:00:02+00:00",
+            "book_hash_before": "newer-hash",
+        },
+    )
+    insert_execution_feasibility_evidence(
+        conn,
+        {
+            **base,
+            "event_id": "older",
+            "quote_seen_at": "2026-05-24T10:00:01+00:00",
+            "book_hash_before": "older-hash",
+        },
+    )
+
+    latest = conn.execute(
+        "SELECT event_id, quote_seen_at, book_hash_before "
+        "FROM execution_feasibility_latest WHERE token_id='token-1' AND direction='buy_no'"
+    ).fetchone()
+    assert latest == (
+        "newer",
+        "2026-05-24T10:00:02+00:00",
+        "newer-hash",
+    )
+
+
+def test_execution_feasibility_latest_attached_schema_never_regresses_event_time():
+    from src.state.schema.execution_feasibility_evidence_schema import (
+        CREATE_LATEST_TABLE_SQL,
+        CREATE_TABLE_SQL,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("ATTACH DATABASE ':memory:' AS trades")
+    conn.execute(
+        CREATE_TABLE_SQL.replace(
+            "execution_feasibility_evidence",
+            "trades.execution_feasibility_evidence",
+            1,
+        )
+    )
+    conn.execute(
+        CREATE_LATEST_TABLE_SQL.replace(
+            "execution_feasibility_latest",
+            "trades.execution_feasibility_latest",
+            1,
+        )
+    )
+    base = {
+        "condition_id": "0xcondition",
+        "token_id": "token-1",
+        "outcome_label": "NO",
+        "direction": "buy_no",
+        "best_bid_before": 0.74,
+        "best_ask_before": 0.75,
+        "depth_before_json": '{"bids":[],"asks":[]}',
+        "order_intent_time": None,
+        "submit_time": None,
+        "accepted_or_rejected": None,
+        "venue_order_id": None,
+        "fok_full_fill": None,
+        "fak_partial_fill": None,
+        "filled_shares": None,
+        "fill_price": None,
+        "cancel_remainder_status": None,
+        "book_hash_after": None,
+        "latency_ms": None,
+        "maker_cancel_before_submit": None,
+        "would_have_edge_after_fee": None,
+        "fill_truth_source": "evidence_only",
+    }
+    insert_execution_feasibility_evidence(
+        conn,
+        {
+            **base,
+            "event_id": "newer",
+            "quote_seen_at": "2026-05-24T10:00:02+00:00",
+            "book_hash_before": "newer-hash",
+        },
+        schema="trades",
+    )
+    insert_execution_feasibility_evidence(
+        conn,
+        {
+            **base,
+            "event_id": "older",
+            "quote_seen_at": "2026-05-24T10:00:01+00:00",
+            "book_hash_before": "older-hash",
+        },
+        schema="trades",
+    )
+
+    latest = conn.execute(
+        "SELECT event_id, quote_seen_at, book_hash_before "
+        "FROM trades.execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_no'"
+    ).fetchone()
+    assert latest == (
+        "newer",
+        "2026-05-24T10:00:02+00:00",
+        "newer-hash",
+    )
+
+
 def test_quote_cache_seeded_from_rest_on_connect():
     conn, writer = _conn_writer()
     cache = QuoteCache()
@@ -454,6 +589,58 @@ def test_quote_cache_seeded_from_rest_on_connect():
     ).fetchall()
     assert latest_rows[0] == ("buy_yes", 0.48, 0.52, rows[0][1])
     assert latest_rows[1] == ("sell_yes", 0.48, 0.52, None)
+
+
+def test_buffered_older_delta_cannot_regress_seeded_quote():
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+    ingestor.seed_from_rest(
+        lambda _token: {},
+        received_at="2026-05-24T10:00:02+00:00",
+        pre_cached={
+            "token-1": {
+                "asset_id": "token-1",
+                "market": "0xcondition",
+                "timestamp": "2026-05-24T10:00:02+00:00",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": "seed-hash",
+            }
+        },
+    )
+    evidence_before = conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_evidence"
+    ).fetchone()[0]
+
+    result = ingestor.handle_message(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "timestamp": "2026-05-24T10:00:01+00:00",
+            "best_bid": "0.10",
+            "best_ask": "0.90",
+            "hash": "older-hash",
+        },
+        received_at="2026-05-24T10:00:03+00:00",
+    )
+
+    assert result is None
+    assert cache.get("token-1").book_hash == "seed-hash"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_evidence"
+    ).fetchone()[0] == evidence_before
+    latest = conn.execute(
+        "SELECT quote_seen_at, book_hash_before FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()
+    assert latest == ("2026-05-24T10:00:02+00:00", "seed-hash")
 
 
 def test_seed_from_rest_can_seed_priority_subset_before_full_universe():
@@ -544,6 +731,157 @@ def test_rest_seed_chunks_commit_progressively_before_full_universe_finishes():
     # Two evidence rows per token (buy/sell for the canonical side), committed
     # after each bounded batch rather than only after the full universe.
     assert commit_counts == [4, 8, 10]
+
+
+def test_subscribed_seed_fetches_off_event_loop_thread():
+    conn, writer = _conn_writer()
+    caller_thread = threading.get_ident()
+    fetch_threads: list[int] = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+        ),
+        fetch_orderbook=lambda token_id: (
+            fetch_threads.append(threading.get_ident())
+            or {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": "seed-hash",
+            }
+        ),
+    )
+
+    written = asyncio.run(
+        service.seed_rest_books_after_subscribe(
+            token_ids={"token-1"},
+            world_mutex=nullcontext(),
+            commit=conn.commit,
+        )
+    )
+
+    assert written == 1
+    assert fetch_threads and fetch_threads[0] != caller_thread
+
+
+def test_websocket_subscribes_before_rest_seed(monkeypatch):
+    import websockets
+
+    conn, writer = _conn_writer()
+    order: list[str] = []
+    stop = asyncio.Event()
+    connect_kwargs: dict[str, object] = {}
+
+    class FakeWebSocket:
+        async def send(self, _payload):  # noqa: ANN001
+            order.append("subscribe")
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            stop.set()
+            raise StopAsyncIteration
+
+    class FakeConnect:
+        async def __aenter__(self):
+            order.append("connect")
+            return FakeWebSocket()
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+    def connect(_endpoint, **kwargs):  # noqa: ANN001
+        connect_kwargs.update(kwargs)
+        return FakeConnect()
+
+    monkeypatch.setattr(websockets, "connect", connect)
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+        ),
+        fetch_orderbook=lambda token_id: (
+            order.append("seed")
+            or {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": "seed-hash",
+            }
+        ),
+    )
+
+    asyncio.run(
+        service.run_websocket_forever(
+            stop_event=stop,
+            reconnect_delay_seconds=0,
+            world_mutex=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    )
+
+    assert order == ["connect", "subscribe", "seed"]
+    assert connect_kwargs["max_queue"] == 1024
+    transitions = conn.execute(
+        "SELECT transition FROM market_channel_connectivity_events ORDER BY occurred_at"
+    ).fetchall()
+    assert transitions == [("connected",)]
+
+
+def test_disconnect_transition_commits_after_rollback(monkeypatch):
+    import websockets
+
+    conn, writer = _conn_writer()
+    stop = asyncio.Event()
+
+    class BrokenWebSocket:
+        async def send(self, _payload):  # noqa: ANN001
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            stop.set()
+            raise ConnectionError("socket closed")
+
+    class FakeConnect:
+        async def __aenter__(self):
+            return BrokenWebSocket()
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+    monkeypatch.setattr(websockets, "connect", lambda *_args, **_kwargs: FakeConnect())
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+        )
+    )
+
+    asyncio.run(
+        service.run_websocket_forever(
+            stop_event=stop,
+            reconnect_delay_seconds=0,
+            world_mutex=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    )
+
+    transitions = conn.execute(
+        "SELECT transition FROM market_channel_connectivity_events ORDER BY occurred_at"
+    ).fetchall()
+    assert transitions == [("connected",), ("disconnected",)]
 
 
 def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():

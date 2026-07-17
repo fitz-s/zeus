@@ -1679,7 +1679,7 @@ def process_current_global_batch(
         ):
             return reject("GLOBAL_PROBABILITY_EPOCH_MIXED_CUT")
         selection_epoch_identity = _selection_epoch_identity(
-            full_scope=full_scope,
+            full_scope=decision_scope,
             eligible_scope=scope,
             probability_witnesses=probabilities,
             ineligible_by_family=ineligible_by_family,
@@ -1858,8 +1858,8 @@ def process_current_global_batch(
                 probability_manifest=_probability_manifest(
                     attempt_probabilities
                 ),
-                full_scope_identity=full_scope.scope_identity,
-                full_scope_family_keys=full_scope.family_keys,
+                full_scope_identity=decision_scope.scope_identity,
+                full_scope_family_keys=decision_scope.family_keys,
                 probability_ineligible_by_family=ineligible_by_family,
                 book_epoch_identity=venue_identity,
                 book_asset_count=(

@@ -3,8 +3,8 @@
 # Authority basis: EDLI v1 §10 online MarketChannelIngestor contract.
 #   2026-06-04: 5th-instance WAL-bloat fix — pre-capture pattern for on_connect
 #   REST orderbook fetch; seed_from_rest gains pre_cached kwarg; on_connect gains
-#   pre_captured_books kwarg; run_websocket_forever pre-captures BEFORE
-#   with _world_mutex (fixes 488→601 MB zeus-world.db WAL lock starvation).
+#   pre_captured_books kwarg; REST fetches stay outside _world_mutex
+#   (fixes 488→601 MB zeus-world.db WAL lock starvation).
 """Online Polymarket market-channel ingestor for EDLI quote/book evidence."""
 
 from __future__ import annotations
@@ -92,8 +92,14 @@ class QuoteCache:
     by_token_id: dict[str, MarketBookEventPayload] = field(default_factory=dict)
     reconnect_gap_count: int = 0
 
-    def update(self, payload: MarketBookEventPayload) -> None:
+    def update(self, payload: MarketBookEventPayload) -> bool:
+        previous = self.by_token_id.get(payload.token_id)
+        if previous is not None and _quote_instant(payload.quote_seen_at) < _quote_instant(
+            previous.quote_seen_at
+        ):
+            return False
         self.by_token_id[payload.token_id] = payload
+        return True
 
     def get(self, token_id: str) -> MarketBookEventPayload | None:
         return self.by_token_id.get(token_id)
@@ -201,6 +207,8 @@ class MarketChannelIngestor:
         event = self.event_from_message(message, received_at=received_at)
         if event is None:
             return None
+        if self._market_quote_is_older(event):
+            return None
         if self._market_top_of_book_unchanged(event):
             self._cache_event_payload(event)
             return None
@@ -233,10 +241,11 @@ class MarketChannelIngestor:
 
     def reconnect_gap_snapshot(self, book_message: dict[str, Any], *, gap_start: str, received_at: str) -> OpportunityEvent | None:
         event = self._book_event(book_message, received_at=received_at, gap_marked=True, gap_start=gap_start)
-        if event is not None:
+        if event is not None and not self._market_quote_is_older(event):
             self.quote_cache.reconnect_gap_count += 1
             self._cache_event_payload(event)
-        return event
+            return event
+        return None
 
     def seed_from_rest(
         self,
@@ -292,7 +301,7 @@ class MarketChannelIngestor:
             message.setdefault("asset_id", token_id)
             message.setdefault("timestamp", received_at)
             event = self._book_event(message, received_at=received_at, gap_marked=False)
-            if event is None:
+            if event is None or self._market_quote_is_older(event):
                 continue
             self._cache_event_payload(event)
             result = self._commit_market_event(event)
@@ -416,6 +425,23 @@ class MarketChannelIngestor:
         return _same(payload.get("best_bid"), previous.best_bid) and _same(
             payload.get("best_ask"), previous.best_ask
         )
+
+    def _market_quote_is_older(self, event: OpportunityEvent) -> bool:
+        if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+            return False
+        try:
+            payload = json.loads(event.payload_json)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        token_id = str(payload.get("token_id") or "")
+        previous = self.quote_cache.get(token_id)
+        if previous is None:
+            return False
+        return _quote_instant(
+            str(payload.get("quote_seen_at") or event.available_at)
+        ) < _quote_instant(previous.quote_seen_at)
 
     def _write_feasibility_evidence(self, event: OpportunityEvent) -> None:
         if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
@@ -1087,6 +1113,7 @@ class MarketChannelOnlineService:
         logger: Any | None = None,
         chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
         deadline_monotonic: float | None = None,
+        pre_captured_books: dict[str, dict] | None = None,
     ) -> int:
         """Fetch REST books off-lock and commit evidence in bounded chunks.
 
@@ -1124,26 +1151,36 @@ class MarketChannelOnlineService:
                     )
                 break
             chunk = ordered[offset: offset + size]
-            try:
-                pre_captured_books = self._fetch_rest_seed_books(
-                    chunk,
-                    deadline_monotonic=deadline_monotonic,
-                    logger=logger,
-                    log_prefix="market_channel: REST seed",
-                )
-            except TimeoutError as exc:
-                self.rest_seed_backpressure_count += 1
-                self.rest_seed_backpressure_reason = str(exc)
-                if logger is not None:
-                    logger.warning(
-                        "EDLI market-channel REST seed fetch budget exhausted: "
-                        "written=%d remaining=%d reason=%s",
-                        written,
-                        max(0, len(ordered) - offset),
-                        exc,
+            captured = (
+                {
+                    token_id: dict(pre_captured_books[token_id])
+                    for token_id in chunk
+                    if token_id in pre_captured_books
+                }
+                if pre_captured_books is not None
+                else None
+            )
+            if captured is None:
+                try:
+                    captured = self._fetch_rest_seed_books(
+                        chunk,
+                        deadline_monotonic=deadline_monotonic,
+                        logger=logger,
+                        log_prefix="market_channel: REST seed",
                     )
-                break
-            if not pre_captured_books:
+                except TimeoutError as exc:
+                    self.rest_seed_backpressure_count += 1
+                    self.rest_seed_backpressure_reason = str(exc)
+                    if logger is not None:
+                        logger.warning(
+                            "EDLI market-channel REST seed fetch budget exhausted: "
+                            "written=%d remaining=%d reason=%s",
+                            written,
+                            max(0, len(ordered) - offset),
+                            exc,
+                        )
+                    break
+            if not captured:
                 continue
             with self.ingestor.defer_market_event_sink():
                 try:
@@ -1151,8 +1188,8 @@ class MarketChannelOnlineService:
                         results = self.ingestor.seed_from_rest(
                             self.fetch_orderbook,
                             received_at=received_at,
-                            pre_cached=pre_captured_books,
-                            token_ids=pre_captured_books.keys(),
+                            pre_cached=captured,
+                            token_ids=captured.keys(),
                         )
                         if not self.ingestor._market_event_sink_independently_coordinated:
                             self.ingestor.flush_deferred_market_event_sink()
@@ -1176,9 +1213,46 @@ class MarketChannelOnlineService:
             if logger is not None:
                 logger.debug(
                     "EDLI market-channel REST seed committed chunk: tokens=%d events=%d",
-                    len(pre_captured_books),
+                    len(captured),
                     len(results),
                 )
+        return written
+
+    async def seed_rest_books_after_subscribe(
+        self,
+        *,
+        token_ids: Iterable[str],
+        world_mutex: Any,
+        commit: Callable[[], None] | None,
+        logger: Any | None = None,
+        chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
+    ) -> int:
+        """Fetch seed books off-loop while the subscribed WS buffers deltas."""
+
+        if self.fetch_orderbook is None:
+            return 0
+        ordered = sorted(self.ingestor.active_token_ids_open_at(token_ids=token_ids))
+        size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
+        written = 0
+        for offset in range(0, len(ordered), size):
+            chunk = ordered[offset : offset + size]
+            captured = await asyncio.to_thread(
+                self._fetch_rest_seed_books,
+                chunk,
+                logger=logger,
+                log_prefix="market_channel: subscribed REST seed",
+            )
+            if not captured:
+                continue
+            written += self.seed_rest_books_in_chunks(
+                token_ids=chunk,
+                received_at=datetime.now(UTC).isoformat(),
+                world_mutex=world_mutex,
+                commit=commit,
+                logger=logger,
+                chunk_size=size,
+                pre_captured_books=captured,
+            )
         return written
 
     def _fetch_rest_seed_books(
@@ -1192,6 +1266,7 @@ class MarketChannelOnlineService:
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
             return {}
         if self.fetch_orderbooks is not None:
+            batch_request_started_at = datetime.now(UTC).isoformat()
             try:
                 books = self.fetch_orderbooks(token_ids)
             except TimeoutError:
@@ -1207,11 +1282,18 @@ class MarketChannelOnlineService:
                 books = {}
             if isinstance(books, dict) and books:
                 wanted = set(token_ids)
-                pre_captured_books = {
-                    str(token_id): dict(book)
-                    for token_id, book in books.items()
-                    if str(token_id) in wanted and isinstance(book, dict)
-                }
+                pre_captured_books = {}
+                for token_id, book in books.items():
+                    if str(token_id) not in wanted or not isinstance(book, dict):
+                        continue
+                    captured = dict(book)
+                    # A REST response without a venue clock is only known to be
+                    # at least as new as request start.  Using response/end-of-
+                    # chunk time would discard WS deltas that arrived while the
+                    # request was in flight even though they may be newer than
+                    # the REST snapshot.
+                    captured.setdefault("timestamp", batch_request_started_at)
+                    pre_captured_books[str(token_id)] = captured
                 if len(pre_captured_books) == len(wanted):
                     return pre_captured_books
                 if logger is not None and pre_captured_books:
@@ -1238,7 +1320,10 @@ class MarketChannelOnlineService:
                     )
                 break
             try:
-                pre_captured_books[token_id] = self.fetch_orderbook(token_id)
+                request_started_at = datetime.now(UTC).isoformat()
+                captured = dict(self.fetch_orderbook(token_id))
+                captured.setdefault("timestamp", request_started_at)
+                pre_captured_books[token_id] = captured
             except TimeoutError:
                 raise
             except Exception as exc:
@@ -1409,35 +1494,14 @@ class MarketChannelOnlineService:
         _world_mutex = world_mutex if world_mutex is not None else _world_write_mutex()
 
         while stop_event is None or not stop_event.is_set():
-            received_at = datetime.now(UTC).isoformat()
             try:
                 active_token_ids = self.ingestor.active_token_ids_open_at()
-                seed_first = sorted(
-                    str(token_id)
-                    for token_id in self.seed_first_token_ids
-                    if str(token_id) in active_token_ids
-                )
-                if self.fetch_orderbook is not None:
-                    if seed_first:
-                        self.seed_rest_books_in_chunks(
-                            token_ids=seed_first,
-                            received_at=received_at,
-                            world_mutex=_world_mutex,
-                            commit=commit,
-                            logger=logger,
-                            chunk_size=REST_SEED_COMMIT_CHUNK_SIZE,
-                        )
-                    remaining = sorted(active_token_ids - set(seed_first))
-                    self.seed_rest_books_in_chunks(
-                        token_ids=remaining,
-                        received_at=received_at,
-                        world_mutex=_world_mutex,
-                        commit=commit,
-                        logger=logger,
-                    )
-                self.connected = True
-                self.gap_start = None
-                async with websockets.connect(endpoint, ping_interval=20, ping_timeout=20) as ws:
+                async with websockets.connect(
+                    endpoint,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_queue=max(1024, len(active_token_ids) * 8),
+                ) as ws:
                     await ws.send(
                         json.dumps(
                             {
@@ -1448,6 +1512,38 @@ class MarketChannelOnlineService:
                             separators=(",", ":"),
                         )
                     )
+                    connected_at = datetime.now(UTC).isoformat()
+                    self.connected = True
+                    self.gap_start = None
+                    with _world_mutex:
+                        insert_market_channel_connectivity_event(
+                            self.ingestor._feasibility_conn,
+                            channel="market_channel",
+                            transition="connected",
+                            occurred_at=connected_at,
+                            schema=self.ingestor._feasibility_schema,
+                        )
+                        if commit is not None:
+                            commit()
+                    seed_first = sorted(
+                        str(token_id)
+                        for token_id in self.seed_first_token_ids
+                        if str(token_id) in active_token_ids
+                    )
+                    if self.fetch_orderbook is not None:
+                        if seed_first:
+                            await self.seed_rest_books_after_subscribe(
+                                token_ids=seed_first,
+                                world_mutex=_world_mutex,
+                                commit=commit,
+                                logger=logger,
+                            )
+                        await self.seed_rest_books_after_subscribe(
+                            token_ids=active_token_ids - set(seed_first),
+                            world_mutex=_world_mutex,
+                            commit=commit,
+                            logger=logger,
+                        )
                     if logger is not None:
                         logger.info(
                             "EDLI market-channel connected for %d active weather tokens",
@@ -1481,11 +1577,10 @@ class MarketChannelOnlineService:
                                 self.ingestor.flush_deferred_market_event_sink()
                         for _action in pending_actions:
                             self._handle_action(_action)
+                    if stop_event is None or not stop_event.is_set():
+                        raise ConnectionError("market channel stream ended")
             except Exception as exc:  # noqa: BLE001 - network loop must retry
                 gap_start = datetime.now(UTC).isoformat()
-                self.on_disconnect(gap_start=gap_start)
-                if logger is not None:
-                    logger.warning("EDLI market-channel disconnected: %s", exc, exc_info=True)
                 # ROLLBACK-ON-DISCONNECT (2026-05-31): if on_connect/seed_from_rest or
                 # the WS message loop raised mid-transaction (e.g. 404 on the first
                 # REST-seed token), Python's sqlite3 implicit-BEGIN may have left an
@@ -1494,7 +1589,16 @@ class MarketChannelOnlineService:
                 # claim(), CollateralLedger heartbeat) then blocks for the full 30s
                 # busy_timeout, crashing the reactor cycle. Rollback here releases the
                 # lock immediately so the sleep period is lock-free.
-                if commit is not None:
+                try:
+                    with _world_mutex:
+                        if rollback is not None:
+                            rollback()
+                        else:
+                            self.ingestor._writer.conn.rollback()
+                        self.on_disconnect(gap_start=gap_start)
+                        if commit is not None:
+                            commit()
+                except Exception as persist_exc:  # noqa: BLE001
                     try:
                         if rollback is not None:
                             rollback()
@@ -1502,36 +1606,15 @@ class MarketChannelOnlineService:
                             self.ingestor._writer.conn.rollback()
                     except Exception:  # noqa: BLE001
                         pass
-                await asyncio.sleep(reconnect_delay_seconds)
-                try:
-                    _reconnect_at = datetime.now(UTC).isoformat()
-                    if self.fetch_orderbook is not None:
-                        self.reconnect_rest_books_in_chunks(
-                            token_ids=self.ingestor.active_token_ids_open_at(),
-                            received_at=_reconnect_at,
-                            world_mutex=_world_mutex,
-                            commit=commit,
-                            logger=logger,
-                        )
-                    self.connected = True
-                    self.gap_start = None
-                except Exception as seed_exc:  # noqa: BLE001
-                    # Reconnect seed failed (e.g. REST 404). Rollback any partial
-                    # transaction from the seed attempt for the same reason above.
-                    if commit is not None:
-                        try:
-                            if rollback is not None:
-                                rollback()
-                            else:
-                                self.ingestor._writer.conn.rollback()
-                        except Exception:  # noqa: BLE001
-                            pass
                     if logger is not None:
-                        logger.warning(
-                            "EDLI market-channel reconnect seed failed: %s",
-                            seed_exc,
+                        logger.error(
+                            "EDLI market-channel disconnect transition failed: %s",
+                            persist_exc,
                             exc_info=True,
                         )
+                if logger is not None:
+                    logger.warning("EDLI market-channel disconnected: %s", exc, exc_info=True)
+                await asyncio.sleep(reconnect_delay_seconds)
 
     def _handle_action(self, action: MarketChannelAction) -> None:
         if not action.refresh_snapshot:
@@ -1632,6 +1715,7 @@ def insert_execution_feasibility_evidence(
         latest_table = owner_write_target(conn, "execution_feasibility_latest")
         if table is None or latest_table is None:
             return
+    latest_row_table = latest_table.rsplit(".", 1)[-1]
     values = dict(row)
     values.setdefault("schema_version", 1)
     values.setdefault("created_at", datetime.now(UTC).isoformat())
@@ -1697,6 +1781,7 @@ def insert_execution_feasibility_evidence(
                 depth_before_json = excluded.depth_before_json,
                 created_at = excluded.created_at,
                 schema_version = excluded.schema_version
+            WHERE excluded.quote_seen_at >= {latest_row_table}.quote_seen_at
             """,
             values,
         )
@@ -1826,6 +1911,13 @@ def _timestamp_ms_to_iso(value: object) -> str | None:
     if raw > 10_000_000_000:
         raw = raw // 1000
     return datetime.fromtimestamp(raw, tz=UTC).isoformat()
+
+
+def _quote_instant(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _message_token_id(message: dict[str, Any]) -> str:
