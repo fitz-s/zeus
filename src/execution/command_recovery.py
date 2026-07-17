@@ -71,6 +71,12 @@ from src.state.venue_command_repo import (
 logger = logging.getLogger(__name__)
 
 _RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
+_LIVE_TICK_DB_BUDGET_SECONDS = 0.1
+_LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
+
+
+class _LiveTickDBBudgetExhausted(RuntimeError):
+    pass
 
 # Venue status strings that indicate an order is no longer active
 # (cancelled / expired at the venue).
@@ -17238,16 +17244,30 @@ def _accumulate(
     summary["errors"] += pass_summary["errors"]
 
 
-def _recovery_apply_conn_factory(conn_factory, *, scope: str):
+def _recovery_apply_conn_factory(
+    conn_factory,
+    *,
+    scope: str,
+    deadline_monotonic: float | None = None,
+):
     if scope != "live_tick":
         return conn_factory
 
     def _nowait_conn():
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise _LiveTickDBBudgetExhausted
         if getattr(conn_factory, "supports_nonblocking_flocks", False):
-            return conn_factory(blocking=False, busy_timeout_ms=0)
-        conn = conn_factory()
+            conn = conn_factory(blocking=False, busy_timeout_ms=0)
+        else:
+            conn = conn_factory()
         try:
-            conn.execute("PRAGMA busy_timeout = 0")
+            if not getattr(conn_factory, "supports_nonblocking_flocks", False):
+                conn.execute("PRAGMA busy_timeout = 0")
+            if deadline_monotonic is not None:
+                conn.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline_monotonic),
+                    _LIVE_TICK_DB_PROGRESS_OPCODES,
+                )
         except BaseException:
             conn.close()
             raise
@@ -17262,15 +17282,45 @@ def _run_recovery_pass_with_lock_policy(
     *,
     scope: str,
     summary: dict,
+    deadline_monotonic: float | None = None,
 ):
-    if scope == "live_tick" and summary.get("db_lock_deferred"):
+    if scope == "live_tick" and (
+        summary.get("db_lock_deferred") or summary.get("db_budget_deferred")
+    ):
         return None
 
     for attempt in range(len(_RECOVERY_LOCK_RETRY_DELAYS) + 1):
         try:
             return fn()
+        except _LiveTickDBBudgetExhausted:
+            summary["db_budget_deferred"] = True
+            summary["db_budget_deferred_at"] = label
+            summary["db_budget_deferred_count"] = 1
+            logger.info(
+                "recovery: live_tick DB budget exhausted at pass %s; "
+                "remaining apply work will retry next tick",
+                label,
+            )
+            return None
         except (BlockingIOError, sqlite3.OperationalError) as exc:
             message = str(exc)
+            is_budget = (
+                scope == "live_tick"
+                and deadline_monotonic is not None
+                and time.monotonic() >= deadline_monotonic
+                and isinstance(exc, sqlite3.OperationalError)
+                and "interrupted" in message.lower()
+            )
+            if is_budget:
+                summary["db_budget_deferred"] = True
+                summary["db_budget_deferred_at"] = label
+                summary["db_budget_deferred_count"] = 1
+                logger.info(
+                    "recovery: live_tick DB budget interrupted pass %s; "
+                    "remaining apply work will retry next tick",
+                    label,
+                )
+                return None
             is_lock = (
                 isinstance(exc, BlockingIOError)
                 and "db_writer_lock(" in message
@@ -17733,7 +17783,28 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         if getattr(conn_factory, "requires_writer_flocks", False)
         else conn_factory
     )
-    apply_conn_factory = _recovery_apply_conn_factory(conn_factory, scope=scope)
+    live_tick_deadline = None
+    if scope == "live_tick":
+        raw_budget = os.environ.get(
+            "ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS",
+            str(_LIVE_TICK_DB_BUDGET_SECONDS),
+        )
+        try:
+            live_tick_budget = max(0.0, float(raw_budget))
+        except (TypeError, ValueError):
+            logger.warning(
+                "recovery: invalid ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS=%r; using %.3f",
+                raw_budget,
+                _LIVE_TICK_DB_BUDGET_SECONDS,
+            )
+            live_tick_budget = _LIVE_TICK_DB_BUDGET_SECONDS
+        summary["live_tick_db_budget_seconds"] = live_tick_budget
+        live_tick_deadline = time.monotonic() + live_tick_budget
+    apply_conn_factory = _recovery_apply_conn_factory(
+        conn_factory,
+        scope=scope,
+        deadline_monotonic=live_tick_deadline,
+    )
 
     def _run_pass_with_lock_retry(label: str, fn):
         return _run_recovery_pass_with_lock_policy(
@@ -17741,6 +17812,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             fn,
             scope=scope,
             summary=summary,
+            deadline_monotonic=live_tick_deadline,
         )
 
     def _client_pass(
@@ -18147,7 +18219,21 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             observed_at=started_at,
         )
 
-        if summary.get("db_lock_deferred"):
+        if (
+            summary.get("db_lock_deferred")
+            or summary.get("db_budget_deferred")
+            or (
+                live_tick_deadline is not None
+                and time.monotonic() >= live_tick_deadline
+            )
+        ):
+            if (
+                not summary.get("db_lock_deferred")
+                and not summary.get("db_budget_deferred")
+            ):
+                summary["db_budget_deferred"] = True
+                summary["db_budget_deferred_at"] = "venue_snapshot"
+                summary["db_budget_deferred_count"] = 1
             summary["scope"] = scope
             summary["deferred_full_sweep"] = True
             return

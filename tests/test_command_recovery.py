@@ -898,6 +898,84 @@ def test_live_tick_apply_factory_requests_two_layer_nowait():
     assert calls == [{"blocking": False, "busy_timeout_ms": 0}]
 
 
+def test_live_tick_apply_factory_interrupts_query_after_deadline(monkeypatch):
+    from src.execution import command_recovery
+
+    now = [0.0]
+
+    def _factory(**_kwargs):
+        return sqlite3.connect(":memory:")
+
+    _factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    live_tick_factory = command_recovery._recovery_apply_conn_factory(
+        _factory,
+        scope="live_tick",
+        deadline_monotonic=1.0,
+    )
+
+    conn = live_tick_factory()
+    try:
+        now[0] = 2.0
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            conn.execute(
+                """
+                WITH RECURSIVE seq(n) AS (
+                    VALUES(1) UNION ALL SELECT n + 1 FROM seq WHERE n < 100000
+                )
+                SELECT sum(n) FROM seq
+                """
+            ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_live_tick_db_budget_defers_remaining_passes(monkeypatch):
+    from src.execution import command_recovery
+
+    calls = []
+    summary = {}
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 2.0)
+
+    def _interrupted():
+        calls.append("first")
+        raise sqlite3.OperationalError("interrupted")
+
+    assert command_recovery._run_recovery_pass_with_lock_policy(
+        "slow_pass",
+        _interrupted,
+        scope="live_tick",
+        summary=summary,
+        deadline_monotonic=1.0,
+    ) is None
+    assert command_recovery._run_recovery_pass_with_lock_policy(
+        "later_pass",
+        lambda: calls.append("later"),
+        scope="live_tick",
+        summary=summary,
+        deadline_monotonic=1.0,
+    ) is None
+
+    assert calls == ["first"]
+    assert summary == {
+        "db_budget_deferred": True,
+        "db_budget_deferred_at": "slow_pass",
+        "db_budget_deferred_count": 1,
+    }
+
+
+def test_full_recovery_does_not_swallow_sqlite_interrupt():
+    from src.execution import command_recovery
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        command_recovery._run_recovery_pass_with_lock_policy(
+            "required_pass",
+            lambda: (_ for _ in ()).throw(sqlite3.OperationalError("interrupted")),
+            scope="full",
+            summary={},
+        )
+
+
 def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
