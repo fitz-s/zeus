@@ -850,7 +850,7 @@ def _conditions_buy_sides_fresh(
     condition_ids: Iterable[str],
     fresh_at_iso: str,
 ) -> set[str]:
-    """Return fresh conditions with bounded SQL independent of scope size."""
+    """Return fresh conditions with one SQL query per bounded ID chunk."""
 
     ordered = tuple(
         dict.fromkeys(
@@ -891,14 +891,15 @@ def _conditions_buy_sides_fresh(
         variable_limit = 500
     chunk_size = max(1, min(500, int(variable_limit) - 1))
 
-    def _from_table(table: str, scoped: tuple[str, ...]) -> set[str]:
+    def _from_table(table: str, scoped: tuple[str, ...]) -> tuple[set[str], set[str]]:
         if not scoped:
-            return set()
+            return set(), set()
         state: dict[str, tuple[str, str, set[str]]] = {}
-        invalidation_filter = ""
+        covered: set[str] = set()
+        valid_snapshot = "1"
         if invalidations_exist:
-            invalidation_filter = """
-              AND NOT EXISTS (
+            valid_snapshot = """
+              NOT EXISTS (
                     SELECT 1
                       FROM executable_market_snapshot_invalidations inv
                      WHERE inv.invalidated_at >= snapshot.captured_at
@@ -918,16 +919,19 @@ def _conditions_buy_sides_fresh(
                 SELECT snapshot.condition_id,
                        snapshot.yes_token_id,
                        snapshot.no_token_id,
-                       snapshot.selected_outcome_token_id
+                       snapshot.selected_outcome_token_id,
+                       CASE
+                         WHEN snapshot.freshness_deadline >= ?
+                          AND ({valid_snapshot})
+                         THEN 1 ELSE 0
+                       END AS snapshot_is_fresh
                   FROM {table} snapshot
                  WHERE snapshot.condition_id IN ({placeholders})
-                   AND snapshot.freshness_deadline >= ?
-                   {invalidation_filter}
                  ORDER BY snapshot.condition_id,
                           snapshot.captured_at DESC,
                           snapshot.snapshot_id DESC
                 """,
-                (*chunk, fresh_at_iso),
+                (fresh_at_iso, *chunk),
             ).fetchall()
             for row in rows:
                 condition_id = str(row[0] or "").strip()
@@ -936,26 +940,37 @@ def _conditions_buy_sides_fresh(
                 selected = str(row[3] or "").strip()
                 if not condition_id:
                     continue
+                covered.add(condition_id)
                 current = state.get(condition_id)
                 if current is None:
                     current = (yes, no, set())
                     state[condition_id] = current
-                if selected:
+                if selected and bool(row[4]):
                     current[2].add(selected)
-        return {
+        fresh = {
             condition_id
             for condition_id, (yes, no, selected) in state.items()
             if yes and no and yes in selected and no in selected
         }
+        return fresh, covered
 
     try:
-        fresh = _from_table(
-            "executable_market_snapshot_latest",
-            ordered,
-        ) if latest_exists else set()
-        unresolved = tuple(condition_id for condition_id in ordered if condition_id not in fresh)
-        if unresolved and append_exists:
-            fresh.update(_from_table("executable_market_snapshots", unresolved))
+        if latest_exists:
+            fresh, covered = _from_table(
+                "executable_market_snapshot_latest",
+                ordered,
+            )
+        else:
+            fresh, covered = set(), set()
+        projection_missing = tuple(
+            condition_id for condition_id in ordered if condition_id not in covered
+        )
+        if projection_missing and append_exists:
+            append_fresh, _append_covered = _from_table(
+                "executable_market_snapshots",
+                projection_missing,
+            )
+            fresh.update(append_fresh)
         return fresh
     except sqlite3.Error:
         # Read failure is not evidence of freshness. The caller will submit the

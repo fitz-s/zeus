@@ -4348,6 +4348,61 @@ def test_prune_fresh_market_outcomes_batches_invalidation_filter():
     assert [row["condition_id"] for row in pruned[0]["outcomes"]] == ["invalidated"]
 
 
+def test_prune_latest_projection_does_not_revive_older_append_snapshot():
+    conn = sqlite3.connect(":memory:")
+    for table in (
+        "executable_market_snapshot_latest",
+        "executable_market_snapshots",
+    ):
+        conn.execute(
+            f"""
+            CREATE TABLE {table} (
+                condition_id TEXT,
+                selected_outcome_token_id TEXT,
+                snapshot_id TEXT,
+                yes_token_id TEXT,
+                no_token_id TEXT,
+                captured_at TEXT,
+                freshness_deadline TEXT
+            )
+            """
+        )
+    for side in ("yes", "no"):
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshot_latest VALUES (
+                'cond-1', ?, ?, 'yes-1', 'no-1',
+                '2026-07-13T00:02:00+00:00',
+                '2026-07-13T00:02:30+00:00'
+            )
+            """,
+            (f"{side}-1", f"latest-{side}"),
+        )
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshots VALUES (
+                'cond-1', ?, ?, 'yes-1', 'no-1',
+                '2026-07-13T00:01:00+00:00',
+                '2026-07-13T00:05:00+00:00'
+            )
+            """,
+            (f"{side}-1", f"older-{side}"),
+        )
+    market = {"outcomes": [{"condition_id": "cond-1", "token_id": "yes-1"}]}
+
+    pruned, fresh_skipped, stale_submitted = (
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
+            conn,
+            [market],
+            fresh_at_iso="2026-07-13T00:03:00+00:00",
+        )
+    )
+
+    assert fresh_skipped == 0
+    assert stale_submitted == 1
+    assert [row["condition_id"] for row in pruned[0]["outcomes"]] == ["cond-1"]
+
+
 def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeypatch):
     world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
     forecasts_conn = _FakeConn()
