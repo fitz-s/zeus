@@ -1278,8 +1278,12 @@ def _latest_readiness_bound_posterior_id(
     ).fetchone()
     if row is None or ("status" in columns and str(row["status"] or "") != "READY"):
         return -1
+    return _readiness_bound_posterior_id(row["dependency_json"])
+
+
+def _readiness_bound_posterior_id(dependency_json: object) -> int:
     try:
-        payload = json.loads(str(row["dependency_json"] or "{}"))
+        payload = json.loads(str(dependency_json or "{}"))
     except (TypeError, ValueError):
         return -1
     dependencies = payload.get("dependencies") if isinstance(payload, Mapping) else None
@@ -1300,6 +1304,90 @@ def _latest_readiness_bound_posterior_id(
     return posterior_id if posterior_id > 0 else -1
 
 
+def _latest_readiness_bound_posterior_ids(
+    conn: sqlite3.Connection,
+    *,
+    requests: set[tuple[str, str, str]],
+    columns: set[str],
+    binding_supported: bool,
+) -> dict[tuple[str, str, str], int | None]:
+    out: dict[tuple[str, str, str], int | None] = {
+        request: None for request in requests
+    }
+    if "dependency_json" not in columns or not binding_supported or not requests:
+        return out
+    typed_scope = {"city", "target_local_date", "temperature_metric"}.issubset(
+        columns
+    )
+    scope_clause = (
+        """
+               AND r.city = requested.city
+               AND r.target_local_date = requested.target_date
+               AND r.temperature_metric = requested.temperature_metric
+        """
+        if typed_scope
+        else """
+               AND json_extract(r.provenance_json, '$.city') = requested.city
+               AND json_extract(r.provenance_json, '$.target_date') = requested.target_date
+               AND json_extract(
+                       r.provenance_json,
+                       '$.temperature_metric'
+                   ) = requested.temperature_metric
+        """
+    )
+    status_select = "r.status" if "status" in columns else "NULL AS status"
+    order = (
+        "datetime(r.computed_at) DESC, r.readiness_id DESC"
+        if "computed_at" in columns
+        else "r.rowid DESC"
+    )
+    ordered = sorted(requests)
+    variable_limit = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    chunk_size = max(1, variable_limit // 4)
+    for offset in range(0, len(ordered), chunk_size):
+        chunk = ordered[offset : offset + chunk_size]
+        values = ",".join("(?, ?, ?, ?)" for _ in chunk)
+        params = tuple(
+            value
+            for request_id, request in enumerate(chunk)
+            for value in (request_id, *request)
+        )
+        rows = conn.execute(
+            f"""
+            WITH requested(
+                request_id,
+                city,
+                target_date,
+                temperature_metric
+            ) AS (VALUES {values}),
+            ranked AS (
+                SELECT requested.request_id,
+                       r.dependency_json,
+                       {status_select},
+                       ROW_NUMBER() OVER (
+                           PARTITION BY requested.request_id
+                           ORDER BY {order}
+                       ) AS rn
+                  FROM requested
+                  LEFT JOIN readiness_state r
+                    ON r.strategy_key = ?
+                   {scope_clause}
+            )
+            SELECT request_id, dependency_json, status
+              FROM ranked
+             WHERE rn = 1
+            """,
+            (*params, SOURCE_ID),
+        ).fetchall()
+        for row in rows:
+            key = chunk[int(row["request_id"])]
+            if "status" in columns and str(row["status"] or "") != "READY":
+                out[key] = -1
+            else:
+                out[key] = _readiness_bound_posterior_id(row["dependency_json"])
+    return out
+
+
 def _covering_posterior_input_lag_reason(
     conn: sqlite3.Connection,
     *,
@@ -1315,6 +1403,8 @@ def _covering_posterior_input_lag_reason(
     posterior_columns: set[str] | None = None,
     readiness_columns: set[str] | None = None,
     readiness_binding_supported: bool | None = None,
+    readiness_posterior_id: int | None = None,
+    readiness_posterior_id_resolved: bool = False,
 ) -> str | None:
     """Use the live read gate's HWM rule to invalidate stale plan coverage."""
 
@@ -1343,14 +1433,15 @@ def _covering_posterior_input_lag_reason(
         "p.runtime_layer = 'live'",
     ]
     params: list[object] = [SOURCE_ID, city, target_date, temperature_metric]
-    readiness_posterior_id = _latest_readiness_bound_posterior_id(
-        conn,
-        city=city,
-        target_date=target_date,
-        temperature_metric=temperature_metric,
-        columns=readiness_columns,
-        binding_supported=readiness_binding_supported,
-    )
+    if not readiness_posterior_id_resolved:
+        readiness_posterior_id = _latest_readiness_bound_posterior_id(
+            conn,
+            city=city,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            columns=readiness_columns,
+            binding_supported=readiness_binding_supported,
+        )
     if readiness_posterior_id == -1:
         return "basis=readiness_posterior_identity_missing"
     if readiness_posterior_id is not None:
@@ -2059,6 +2150,19 @@ def build_replacement_forecast_current_target_plan(
             readiness_status_clause=readiness_status_clause,
             readiness_columns=readiness_columns,
         )
+        readiness_posterior_ids = _latest_readiness_bound_posterior_ids(
+            conn,
+            requests={
+                (
+                    str(row["city"]),
+                    str(row["target_date"]),
+                    str(row["temperature_metric"]),
+                )
+                for row in rows
+            },
+            columns=readiness_columns,
+            binding_supported=readiness_binding_supported,
+        )
         for row in rows:
             metric = str(row["temperature_metric"])
             city = str(row["city"])
@@ -2131,6 +2235,10 @@ def build_replacement_forecast_current_target_plan(
                     posterior_columns=posterior_columns,
                     readiness_columns=readiness_columns,
                     readiness_binding_supported=readiness_binding_supported,
+                    readiness_posterior_id=readiness_posterior_ids[
+                        (city, target_date, metric)
+                    ],
+                    readiness_posterior_id_resolved=True,
                 )
             out.append(
                 ReplacementForecastCurrentTargetPlanRow(

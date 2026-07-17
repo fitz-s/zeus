@@ -16,6 +16,7 @@ from pathlib import Path
 from src.data.replacement_forecast_current_target_plan import (
     _day0_observation_lag_reason,
     _latest_authorized_day0_fact,
+    _latest_readiness_bound_posterior_ids,
     build_replacement_forecast_current_target_plan,
     replacement_forecast_current_target_keys,
     replacement_forecast_download_plan_from_current_targets,
@@ -79,6 +80,103 @@ def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
     )
     assert reason is not None
     assert reason.startswith("basis=day0_observation_hwm_lag")
+
+
+def test_readiness_bound_posterior_ids_are_selected_in_one_batch() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE readiness_state (
+            readiness_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            city TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT,
+            status TEXT,
+            computed_at TEXT,
+            dependency_json TEXT,
+            provenance_json TEXT
+        )
+        """
+    )
+    rows = (
+        (
+            "paris-ready",
+            "Paris",
+            "READY",
+            "2026-07-17T10:00:00+00:00",
+            101,
+        ),
+        (
+            "london-old-ready",
+            "London",
+            "READY",
+            "2026-07-17T09:00:00+00:00",
+            202,
+        ),
+        (
+            "london-new-blocked",
+            "London",
+            "BLOCKED",
+            "2026-07-17T10:00:00+00:00",
+            203,
+        ),
+    )
+    for readiness_id, city, status, computed_at, posterior_id in rows:
+        conn.execute(
+            """
+            INSERT INTO readiness_state VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
+            """,
+            (
+                readiness_id,
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                city,
+                "2026-07-18",
+                "high",
+                status,
+                computed_at,
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {
+                                "role": "soft_anchor_posterior",
+                                "posterior_id": posterior_id,
+                            }
+                        ]
+                    }
+                ),
+            ),
+        )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    selected = _latest_readiness_bound_posterior_ids(
+        conn,
+        requests={
+            ("Paris", "2026-07-18", "high"),
+            ("London", "2026-07-18", "high"),
+        },
+        columns={
+            "readiness_id",
+            "strategy_key",
+            "city",
+            "target_local_date",
+            "temperature_metric",
+            "status",
+            "computed_at",
+            "dependency_json",
+            "provenance_json",
+        },
+        binding_supported=True,
+    )
+
+    assert selected == {
+        ("Paris", "2026-07-18", "high"): 101,
+        ("London", "2026-07-18", "high"): -1,
+    }
+    assert sum("WITH requested(" in statement for statement in statements) == 1
+    conn.close()
 
 
 def test_day0_observation_without_import_clock_is_not_live_visible() -> None:
