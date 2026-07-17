@@ -291,6 +291,53 @@ def test_queue_does_not_coverage_skip_an_upgrade_reseed(tmp_path, monkeypatch) -
     assert len(request_written) == 1
 
 
+def test_queue_suppresses_unchanged_blocked_seed_before_archive_growth(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    seed_path = seed_dir / "blocked.json"
+    seed_path.write_text(json.dumps(_minimal_seed(upgrade=False)), encoding="utf-8")
+    marker = tmp_path / "blocked_attempts" / "scope.json"
+    marker.parent.mkdir()
+    marker.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda _seed, *, base_dir: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("OK",),
+            request={"city": "Beijing"},
+        ),
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_state",
+        lambda **_kwargs: (marker, "same-fingerprint", True),
+    )
+
+    processed, failed, reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+    )
+
+    assert processed == [str(marker)]
+    assert failed == []
+    assert queue_mod._UNCHANGED_BLOCKED_SEED_SKIP_REASON in reasons
+    assert not seed_path.exists()
+    assert not (tmp_path / "requests" / seed_path.name).exists()
+    assert not (tmp_path / "seed_processed").exists()
+
+
 def test_queue_skips_seed_older_than_current_family_posterior(tmp_path, monkeypatch) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 

@@ -742,6 +742,9 @@ _UNCHANGED_BLOCKED_REASON = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 _UNCHANGED_BLOCKED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
 )
+_UNCHANGED_BLOCKED_SEED_SKIP_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_SEED_UNCHANGED_BLOCKED_INPUT"
+)
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 _ATTEMPT_INPUT_PATH_FIELDS = (
     "openmeteo_payload_json",
@@ -1217,6 +1220,17 @@ def _prepare_seed_requests(
                     },
                 )
                 failed.append(str(moved))
+                continue
+            marker_path, _fingerprint, unchanged = _blocked_attempt_state(
+                marker_dir=request_dir.parent / "blocked_attempts",
+                input_json=request_dir / seed_json.name,
+                payload=result.request,
+                forecast_db=forecast_db,
+            )
+            if unchanged and marker_path is not None:
+                seed_json.unlink()
+                processed.append(str(marker_path))
+                reasons.append(_UNCHANGED_BLOCKED_SEED_SKIP_REASON)
                 continue
             request_path = request_dir / seed_json.name
             _write_request(request_path, dict(result.request))
