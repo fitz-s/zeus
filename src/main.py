@@ -3781,8 +3781,18 @@ def _day0_wake_requires_exit_monitor(
             conn.close()
 
 
-def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
-    """Return whether every wake event is complete or durably deferred."""
+@dataclass(frozen=True)
+class _ReactorWakeEventState:
+    ready: bool
+    finished: bool
+
+
+def _reactor_wake_event_state(
+    event_ids: tuple[str, ...],
+    *,
+    decision_time: datetime | None = None,
+) -> _ReactorWakeEventState:
+    """Read one wake batch once and classify whether it needs reactor work."""
 
     clean_event_ids = tuple(
         dict.fromkeys(
@@ -3792,7 +3802,7 @@ def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
         )
     )
     if not clean_event_ids:
-        return True
+        return _ReactorWakeEventState(ready=False, finished=True)
     conn = None
     try:
         conn = get_world_connection_read_only()
@@ -3808,33 +3818,50 @@ def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
         ).fetchall()
     except Exception:
         logger.warning(
-            "EDLI wake completion probe unavailable; leaving wake queued",
+            "EDLI wake event-state probe unavailable; running reactor fail-open "
+            "and leaving wake queued",
             exc_info=True,
         )
-        return False
+        return _ReactorWakeEventState(ready=True, finished=False)
     finally:
         if conn is not None:
             conn.close()
     if len(rows) != len(clean_event_ids):
-        return False
-    now = datetime.now(timezone.utc)
+        return _ReactorWakeEventState(ready=True, finished=False)
+    now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    ready = False
+    deferred = False
     for _event_id, status, claimed_at in rows:
         status = str(status)
         if status == "processing":
-            return False
+            ready = True
+            continue
         if status != "pending":
             continue
         if claimed_at in {None, ""}:
-            return False
+            ready = True
+            continue
         try:
             floor = datetime.fromisoformat(str(claimed_at).replace("Z", "+00:00"))
             if floor.tzinfo is None:
                 floor = floor.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
-            return False
+            ready = True
+            continue
         if floor.astimezone(timezone.utc) <= now:
-            return False
-    return True
+            ready = True
+        else:
+            deferred = True
+    return _ReactorWakeEventState(
+        ready=ready,
+        finished=not ready and (deferred or bool(rows)),
+    )
+
+
+def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
+    """Return whether every wake event is complete or durably deferred."""
+
+    return _reactor_wake_event_state(event_ids).finished
 
 
 def _reactor_wake_events_ready(
@@ -3844,59 +3871,10 @@ def _reactor_wake_events_ready(
 ) -> bool:
     """Return False only when every active wake event has a future retry floor."""
 
-    clean_event_ids = tuple(
-        dict.fromkeys(
-            event_id
-            for value in event_ids
-            if (event_id := str(value).strip())
-        )
-    )
-    if not clean_event_ids:
-        return True
-    conn = None
-    try:
-        conn = get_world_connection_read_only()
-        placeholders = ",".join("?" for _ in clean_event_ids)
-        rows = conn.execute(
-            f"""
-            SELECT event_id, processing_status, claimed_at
-              FROM opportunity_event_processing
-             WHERE consumer_name = 'edli_reactor_v1'
-               AND event_id IN ({placeholders})
-            """,
-            clean_event_ids,
-        ).fetchall()
-    except Exception:
-        logger.warning(
-            "EDLI wake readiness probe unavailable; running reactor fail-open",
-            exc_info=True,
-        )
-        return True
-    finally:
-        if conn is not None:
-            conn.close()
-    if len(rows) != len(clean_event_ids):
-        return True
-
-    now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    deferred = False
-    for _event_id, status, claimed_at in rows:
-        if str(status) != "pending":
-            if str(status) == "processing":
-                return True
-            continue
-        if claimed_at in {None, ""}:
-            return True
-        try:
-            floor = datetime.fromisoformat(str(claimed_at).replace("Z", "+00:00"))
-            if floor.tzinfo is None:
-                floor = floor.replace(tzinfo=timezone.utc)
-        except (TypeError, ValueError):
-            return True
-        if floor.astimezone(timezone.utc) <= now:
-            return True
-        deferred = True
-    return not deferred
+    return _reactor_wake_event_state(
+        event_ids,
+        decision_time=decision_time,
+    ).ready
 
 
 def _acknowledge_edli_reactor_wake_batch(
@@ -3975,25 +3953,27 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
-    if wake_event_ids and not _reactor_wake_events_ready(wake_event_ids):
-        if not _reactor_wake_events_finished(wake_event_ids):
+    if wake_event_ids:
+        wake_event_state = _reactor_wake_event_state(wake_event_ids)
+        if wake_event_state.finished:
+            if not _acknowledge_edli_reactor_wake_batch(
+                wake,
+                wakes,
+                day0_wake=day0_wake,
+            ):
+                return False
+            logger.info(
+                "EDLI reactor retired completed or durably deferred wake id=%s "
+                "source=%s reason=%s batch=%d events=%d",
+                wake.wake_id,
+                wake.source,
+                wake.reason,
+                len(wakes),
+                len(wake_event_ids),
+            )
+            return True
+        if not wake_event_state.ready:
             return False
-        if not _acknowledge_edli_reactor_wake_batch(
-            wake,
-            wakes,
-            day0_wake=day0_wake,
-        ):
-            return False
-        logger.info(
-            "EDLI reactor retired durably deferred wake id=%s source=%s "
-            "reason=%s batch=%d events=%d",
-            wake.wake_id,
-            wake.source,
-            wake.reason,
-            len(wakes),
-            len(wake_event_ids),
-        )
-        return True
     day0_target_families = None
     day0_requires_exit_monitor = False
     if day0_wake:

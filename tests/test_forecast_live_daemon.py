@@ -1383,6 +1383,32 @@ def test_reactor_wake_acknowledges_event_durably_deferred_after_service(
     assert main._reactor_wake_events_finished(("event-retry",)) is False
 
 
+def test_reactor_wake_completed_event_needs_no_reactor_cycle(monkeypatch) -> None:
+    import src.main as main
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.execute_count = 0
+
+        def execute(self, _sql, _params):
+            self.execute_count += 1
+            return self
+
+        def fetchall(self):
+            return [("event-complete", "processed", "2026-07-16T12:00:00+00:00")]
+
+        def close(self) -> None:
+            pass
+
+    conn = _Conn()
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda: conn)
+
+    state = main._reactor_wake_event_state(("event-complete",))
+
+    assert state == main._ReactorWakeEventState(ready=False, finished=True)
+    assert conn.execute_count == 1
+
+
 def test_reactor_wake_poll_retires_durable_future_retry_hint(monkeypatch) -> None:
     import threading
 
@@ -1412,8 +1438,11 @@ def test_reactor_wake_poll_retires_durable_future_retry_hint(monkeypatch) -> Non
     acknowledgements: list[tuple[str, ...]] = []
     pending = threading.Event()
     pending.set()
-    monkeypatch.setattr(main, "_reactor_wake_events_ready", lambda _ids: False)
-    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _ids: main._ReactorWakeEventState(ready=False, finished=True),
+    )
     monkeypatch.setattr(
         main,
         "_edli_event_reactor_cycle",
@@ -1460,8 +1489,11 @@ def test_reactor_wake_poll_keeps_unsettled_not_ready_hint(monkeypatch) -> None:
         ("event-processing",),
     )
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
-    monkeypatch.setattr(main, "_reactor_wake_events_ready", lambda _ids: False)
-    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: False)
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _ids: main._ReactorWakeEventState(ready=False, finished=False),
+    )
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",

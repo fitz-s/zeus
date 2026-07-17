@@ -136,6 +136,7 @@ class EventStore:
         self.conn = conn
         self.consumer_name = consumer_name
         self.processing_lease_seconds = processing_lease_seconds
+        self._world_event_tables_ready = False
 
     def insert_or_ignore(self, event: OpportunityEvent) -> bool:
         """Insert immutable event row and initialize mutable processing state."""
@@ -503,7 +504,70 @@ class EventStore:
         )[:100]
         if targeted_only and not clean_targeted_event_ids:
             return []
-        if clean_targeted_event_ids:
+        rows: list[tuple[object, ...]] = []
+        attempt_by_event: dict[str, int] = {}
+        last_error_by_event: dict[str, str] = {}
+        stale_reclaim_by_event: dict[str, int] = {}
+        event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
+        if targeted_only:
+            placeholders = ",".join("?" for _ in clean_targeted_event_ids)
+            event_col_count = len(_EVENT_ROW_KEYS)
+            targeted_rows = self.conn.execute(
+                f"""
+                SELECT {event_cols},
+                       p.attempt_count,
+                       p.last_error,
+                       CASE WHEN p.processing_status = 'processing' THEN 1 ELSE 0 END
+                  FROM opportunity_event_processing p
+                  JOIN opportunity_events e ON e.event_id = p.event_id
+                 WHERE p.consumer_name = ?
+                   AND p.event_id IN ({placeholders})
+                   AND (
+                        (
+                            p.processing_status = 'pending'
+                            AND (
+                                p.claimed_at IS NULL
+                                OR p.claimed_at <= ?
+                            )
+                        )
+                        OR (
+                            p.processing_status = 'processing'
+                            AND p.claimed_at IS NOT NULL
+                            AND p.claimed_at <= ?
+                        )
+                   )
+                   AND e.available_at <= ?
+                   AND e.received_at <= ?
+                   AND (e.expires_at IS NULL OR e.expires_at > ?)
+                   AND e.event_type NOT IN (
+                         'BEST_BID_ASK_CHANGED',
+                         'BOOK_SNAPSHOT',
+                         'NEW_MARKET_DISCOVERED'
+                   )
+                """,
+                (
+                    self.consumer_name,
+                    *clean_targeted_event_ids,
+                    parsed_decision_time.isoformat(),
+                    stale_processing_before,
+                    parsed_decision_time.isoformat(),
+                    parsed_decision_time.isoformat(),
+                    parsed_decision_time.isoformat(),
+                ),
+            ).fetchall()
+            for row in targeted_rows:
+                event_tuple = tuple(row[:event_col_count])
+                event_id = str(event_tuple[0] or "")
+                attempt_by_event[event_id] = _safe_int(row[event_col_count])
+                last_error_by_event[event_id] = str(row[event_col_count + 1] or "")
+                stale_reclaim_by_event[event_id] = _safe_int(row[event_col_count + 2])
+                if _selection_deadline_past(
+                    last_error_by_event[event_id],
+                    parsed_decision_time,
+                ):
+                    continue
+                rows.append(event_tuple + (attempt_by_event[event_id],))
+        if clean_targeted_event_ids and not targeted_only:
             placeholders = ",".join("?" for _ in clean_targeted_event_ids)
             active_rows.extend(
                 (
@@ -550,111 +614,109 @@ class EventStore:
         # page the actual winner out by exactly one slot.  Read one extra targeted
         # row through the status/update index; after event rows are loaded we keep
         # only the carrier with the newest ``received_at`` as the global target.
-        active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
-            for row in self.conn.execute(
-                """
-                SELECT p.event_id, p.attempt_count, p.last_error
-                  FROM opportunity_event_processing p
-                       INDEXED BY idx_opportunity_event_processing_status
-                 WHERE p.consumer_name = ?
-                   AND p.processing_status = 'pending'
-                   AND p.claimed_at IS NULL
-                   AND p.last_error = ?
-                 ORDER BY p.updated_at DESC
-                 LIMIT ?
-                """,
-                (
-                    self.consumer_name,
-                    GLOBAL_WINNER_TARGETED_CLAIM,
-                    0 if targeted_only else max(1, limit + 1),
-                ),
-            ).fetchall()
-        )
-        # A global-auction winner that was outside the current claim page is
-        # materialized as a fresh pending row with
-        # last_error=GLOBAL_WINNER_TARGETED_CLAIM.  The debt/fairness probe below
-        # intentionally reads the OLDEST updated rows first, but on a backlog
-        # larger than active_limit that makes the freshly targeted winner
-        # invisible forever: every epoch selects it globally, cannot find it in
-        # the claimed page, and targets it again at the tail.  Probe one page from
-        # the indexed NEWEST end before the old-debt scan.  Python ranking still
-        # gives only explicitly targeted rows the priority tier, so ordinary new
-        # rows do not bypass fairness; this merely makes a targeted row visible.
-        active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
-            for row in self.conn.execute(
-                """
-                SELECT p.event_id, p.attempt_count, p.last_error
-                  FROM opportunity_event_processing p
-                       INDEXED BY idx_opportunity_event_processing_pending_retry_floor
-                 WHERE p.consumer_name = ?
-                   AND p.processing_status = 'pending'
-                   AND p.claimed_at IS NULL
-                 ORDER BY p.updated_at DESC
-                 LIMIT ?
-                """,
-                (self.consumer_name, 0 if targeted_only else max(1, limit)),
-            ).fetchall()
-        )
-        # Keep the immediate-ready and retry-floor-ready pending lanes as two
-        # indexed probes. A single OR predicate over claimed_at makes SQLite
-        # materialize a temp ORDER BY tree on large live processing tables.
-        active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
-            for row in self.conn.execute(
-                """
-                SELECT p.event_id, p.attempt_count, p.last_error
-                  FROM opportunity_event_processing p
-                       INDEXED BY idx_opportunity_event_processing_pending_retry_floor
-                 WHERE p.consumer_name = ?
-                   AND p.processing_status = 'pending'
-                   AND p.claimed_at IS NULL
-                 ORDER BY p.updated_at ASC
-                 LIMIT ?
-                """,
-                (self.consumer_name, active_limit),
-            ).fetchall()
-        )
-        active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
-            for row in self.conn.execute(
-                """
-                SELECT p.event_id, p.attempt_count, p.last_error
-                  FROM opportunity_event_processing p
-                       INDEXED BY idx_opportunity_event_processing_pending_retry_floor
-                 WHERE p.consumer_name = ?
-                   AND p.processing_status = 'pending'
-                   AND p.claimed_at IS NOT NULL
-                   AND p.claimed_at <= ?
-                 ORDER BY p.claimed_at ASC
-                 LIMIT ?
-                """,
-                (self.consumer_name, parsed_decision_time.isoformat(), active_limit),
-            ).fetchall()
-        )
-        active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 1)
-            for row in self.conn.execute(
-                """
-                SELECT p.event_id, p.attempt_count, p.last_error
-                  FROM opportunity_event_processing p
-                       INDEXED BY idx_opportunity_event_processing_stale_claim
-                 WHERE p.consumer_name = ?
-                   AND p.processing_status = 'processing'
-                   AND p.claimed_at IS NOT NULL
-                   AND p.claimed_at <= ?
-                 ORDER BY p.claimed_at ASC
-                 LIMIT ?
-                """,
-                (self.consumer_name, stale_processing_before, active_limit),
-            ).fetchall()
-        )
-        if not active_rows:
+        if not targeted_only:
+            active_rows.extend(
+                (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
+                for row in self.conn.execute(
+                    """
+                    SELECT p.event_id, p.attempt_count, p.last_error
+                      FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_status
+                     WHERE p.consumer_name = ?
+                       AND p.processing_status = 'pending'
+                       AND p.claimed_at IS NULL
+                       AND p.last_error = ?
+                     ORDER BY p.updated_at DESC
+                     LIMIT ?
+                    """,
+                    (
+                        self.consumer_name,
+                        GLOBAL_WINNER_TARGETED_CLAIM,
+                        max(1, limit + 1),
+                    ),
+                ).fetchall()
+            )
+            # A global-auction winner that was outside the current claim page is
+            # materialized as a fresh pending row with
+            # last_error=GLOBAL_WINNER_TARGETED_CLAIM. The debt/fairness probe below
+            # intentionally reads the OLDEST updated rows first, but on a backlog
+            # larger than active_limit that makes the freshly targeted winner
+            # invisible forever: every epoch selects it globally, cannot find it in
+            # the claimed page, and targets it again at the tail. Probe one page from
+            # the indexed NEWEST end before the old-debt scan. Python ranking still
+            # gives only explicitly targeted rows the priority tier, so ordinary new
+            # rows do not bypass fairness; this merely makes a targeted row visible.
+            active_rows.extend(
+                (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
+                for row in self.conn.execute(
+                    """
+                    SELECT p.event_id, p.attempt_count, p.last_error
+                      FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+                     WHERE p.consumer_name = ?
+                       AND p.processing_status = 'pending'
+                       AND p.claimed_at IS NULL
+                     ORDER BY p.updated_at DESC
+                     LIMIT ?
+                    """,
+                    (self.consumer_name, max(1, limit)),
+                ).fetchall()
+            )
+            # Keep the immediate-ready and retry-floor-ready pending lanes as two
+            # indexed probes. A single OR predicate over claimed_at makes SQLite
+            # materialize a temp ORDER BY tree on large live processing tables.
+            active_rows.extend(
+                (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
+                for row in self.conn.execute(
+                    """
+                    SELECT p.event_id, p.attempt_count, p.last_error
+                      FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+                     WHERE p.consumer_name = ?
+                       AND p.processing_status = 'pending'
+                       AND p.claimed_at IS NULL
+                     ORDER BY p.updated_at ASC
+                     LIMIT ?
+                    """,
+                    (self.consumer_name, active_limit),
+                ).fetchall()
+            )
+            active_rows.extend(
+                (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
+                for row in self.conn.execute(
+                    """
+                    SELECT p.event_id, p.attempt_count, p.last_error
+                      FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+                     WHERE p.consumer_name = ?
+                       AND p.processing_status = 'pending'
+                       AND p.claimed_at IS NOT NULL
+                       AND p.claimed_at <= ?
+                     ORDER BY p.claimed_at ASC
+                     LIMIT ?
+                    """,
+                    (self.consumer_name, parsed_decision_time.isoformat(), active_limit),
+                ).fetchall()
+            )
+            active_rows.extend(
+                (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 1)
+                for row in self.conn.execute(
+                    """
+                    SELECT p.event_id, p.attempt_count, p.last_error
+                      FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_stale_claim
+                     WHERE p.consumer_name = ?
+                       AND p.processing_status = 'processing'
+                       AND p.claimed_at IS NOT NULL
+                       AND p.claimed_at <= ?
+                     ORDER BY p.claimed_at ASC
+                     LIMIT ?
+                    """,
+                    (self.consumer_name, stale_processing_before, active_limit),
+                ).fetchall()
+            )
+        if not rows and not active_rows:
             return []
-        attempt_by_event: dict[str, int] = {}
-        last_error_by_event: dict[str, str] = {}
-        stale_reclaim_by_event: dict[str, int] = {}
         event_ids: list[str] = []
         for event_id, attempt_count, last_error, stale_reclaim in active_rows:
             if not event_id or event_id in attempt_by_event:
@@ -664,8 +726,6 @@ class EventStore:
             stale_reclaim_by_event[event_id] = stale_reclaim
             event_ids.append(event_id)
 
-        rows: list[tuple[object, ...]] = []
-        event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
         for start in range(0, len(event_ids), 250):
             chunk = event_ids[start : start + 250]
             placeholders = ",".join("?" for _ in chunk)
@@ -2725,6 +2785,8 @@ class EventStore:
         )
 
     def _require_world_event_tables(self) -> None:
+        if self._world_event_tables_ready:
+            return
         tables = {
             row[0]
             for row in self.conn.execute(
@@ -2736,6 +2798,7 @@ class EventStore:
             raise EventStoreSchemaError(
                 "EDLI event tables are missing from supplied connection; use init_schema/world DB"
             )
+        self._world_event_tables_ready = True
 
 
 # The canonical opportunity_events column order. A SELECTed row may carry EXTRA

@@ -196,6 +196,41 @@ def test_committed_wake_targeted_only_does_not_fill_from_queue_debt():
     assert [event.event_id for event in returned] == [committed.event_id]
 
 
+def test_committed_wake_targeted_only_uses_one_joined_queue_read():
+    conn = _world_conn()
+    store = EventStore(conn)
+    committed = _event(
+        "2026-06-06",
+        "snap-committed-one-read",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:01:00+00:00",
+    )
+    store.insert_or_ignore(committed)
+    store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
+
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        returned = store.fetch_pending(
+            decision_time=_DECISION_TIME,
+            limit=100,
+            targeted_event_ids=frozenset({committed.event_id}),
+            targeted_only=True,
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    queue_reads = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("SELECT")
+        and "FROM opportunity_event_processing" in statement
+    ]
+    assert [event.event_id for event in returned] == [committed.event_id]
+    assert len(queue_reads) == 1
+    assert "JOIN opportunity_events" in queue_reads[0]
+
+
 def test_committed_wake_target_bypasses_bounded_oldest_scan():
     conn = _world_conn()
     store = EventStore(conn)
