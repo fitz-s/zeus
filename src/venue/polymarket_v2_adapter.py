@@ -815,6 +815,24 @@ class PolymarketV2Adapter:
                     error_code=rejected.error_code,
                     error_message=rejected.error_message,
                 )
+            if (
+                post_started
+                and str(envelope.order_type).upper() == "FAK"
+                and _is_polymarket_fak_no_match_error(exc)
+            ):
+                rejected = envelope.with_updates(
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                    order_id=expected_order_id,
+                    error_code="venue_fak_no_match_400",
+                    error_message=str(exc),
+                )
+                return SubmitResult(
+                    status="rejected",
+                    envelope=rejected,
+                    error_code=rejected.error_code,
+                    error_message=rejected.error_message,
+                )
             if not post_started:
                 error_code = (
                     "SUBMIT_ABORTED_PRICE_MOVED"
@@ -2881,6 +2899,17 @@ def _is_polymarket_fok_killed_error(exc: BaseException) -> bool:
         "status_code=400" in text
         and "order couldn't be fully filled" in text
         and "fok orders are fully filled or killed" in text
+    )
+
+
+def _is_polymarket_fak_no_match_error(exc: BaseException) -> bool:
+    """Recognize the venue's definitive zero-fill FAK terminal response."""
+
+    text = " ".join(f"{type(exc).__name__}:{exc}".split()).lower()
+    return (
+        "status_code=400" in text
+        and "no orders found to match with fak order" in text
+        and "fak orders are partially filled or killed if no match is found" in text
     )
 
 

@@ -153,6 +153,16 @@ class FakeFokKilledClient(FakeTwoStepClient):
         )
 
 
+class FakeFakNoMatchClient(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        raise RuntimeError(
+            "PolyApiException[status_code=400, error_message={'error': 'no orders "
+            "found to match with FAK order. FAK orders are partially filled or "
+            "killed if no match is found.', 'orderID': '0xexpected-order-id'}]"
+        )
+
+
 class FakeInvalidSafeSignatureTwoStepClient(FakeTwoStepClient):
     def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
         self.calls.append(("post_order", order, order_type, post_only, defer_exec))
@@ -1424,6 +1434,32 @@ def test_fok_killed_400_is_definitive_rejection(tmp_path, monkeypatch):
     assert result.error_code == "venue_fok_not_fully_filled_400"
     assert result.envelope.order_id == "0xexpected-order-id"
     assert result.envelope.signed_order == fake.signed_order
+
+
+def test_fak_no_match_400_is_definitive_zero_fill_rejection(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeFakNoMatchClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FAK")
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_fak_no_match_400"
+    assert result.envelope.order_id == "0xexpected-order-id"
+    assert result.envelope.signed_order == fake.signed_order
+
+    from src.data.polymarket_client import _legacy_order_result_from_submit
+
+    payload = _legacy_order_result_from_submit(result)
+    assert payload["success"] is False
+    assert payload["errorCode"] == "venue_fak_no_match_400"
 
 
 def test_fok_rechecks_full_depth_after_signing_immediately_before_post(tmp_path, monkeypatch):
