@@ -1306,6 +1306,77 @@ def test_market_channel_forever_uses_coalesced_redecision_sink():
     assert "market_event_sink=_edli_price_channel_redecision_sink" not in source
 
 
+def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monkeypatch):
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest
+    from src.state import db
+
+    version = [10, 10, "2026-07-17T17:00:00+00:00"]
+    held = {"held-token"}
+    calls = {"active": 0, "held": 0, "closed": 0}
+
+    class Cursor:
+        def fetchone(self):
+            return tuple(version)
+
+    class Connection:
+        def execute(self, _sql):  # noqa: ANN001
+            return Cursor()
+
+        def close(self):
+            calls["closed"] += 1
+
+    def active_metadata(_conn):  # noqa: ANN001
+        calls["active"] += 1
+        return {"active-token": object()}
+
+    def held_metadata(_conn, *, token_ids, purpose):  # noqa: ANN001
+        calls["held"] += 1
+        assert set(token_ids) == held
+        assert purpose == "exit"
+        return {token_id: object() for token_id in token_ids}
+
+    monkeypatch.setattr(db, "get_trade_connection", lambda *, write_class=None: Connection())
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_from_snapshots",
+        active_metadata,
+    )
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        held_metadata,
+    )
+    monkeypatch.setattr(
+        price_channel_ingest,
+        "_edli_held_position_priority_token_ids",
+        lambda _conn: set(held),
+    )
+
+    reload_token_metadata = (
+        price_channel_ingest._edli_market_channel_token_metadata_reloader()
+    )
+    first = reload_token_metadata()
+    second = reload_token_metadata()
+    version[0] += 1
+    third = reload_token_metadata()
+
+    assert set(first) == {"active-token", "held-token"}
+    assert second is first
+    assert third is not first
+    assert calls == {"active": 2, "held": 2, "closed": 3}
+
+    cached = {"cached-token": object()}
+    cached_reload = price_channel_ingest._edli_market_channel_token_metadata_reloader(
+        initial_token_metadata=cached,
+        initial_fingerprint=((version[0], version[0]), tuple(sorted(held))),
+    )
+    cached_result = cached_reload()
+
+    assert cached_result is cached
+    assert calls == {"active": 2, "held": 2, "closed": 4}
+
+
 def test_price_channel_redecision_wake_is_targeted_urgent_fast_path():
     from src.events import reactor
     from src.runtime.reactor_wake import URGENT_WAKE_REASONS

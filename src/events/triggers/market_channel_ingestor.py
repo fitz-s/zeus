@@ -121,6 +121,7 @@ class QuoteCache:
 
 RestOrderbookFetch = Callable[[str], dict[str, Any]]
 RestOrderbookBatchFetch = Callable[[list[str]], dict[str, dict]]
+TokenMetadataReload = Callable[[], dict[str, MarketTokenMetadata]]
 
 
 class MarketChannelIngestor:
@@ -196,6 +197,20 @@ class MarketChannelIngestor:
             else {str(token_id) for token_id in token_ids if str(token_id) in self._active_token_ids}
         )
         return {token_id for token_id in base if self._token_is_open_at(token_id, now=now)}
+
+    def replace_token_metadata(
+        self,
+        token_metadata: dict[str, MarketTokenMetadata],
+    ) -> set[str]:
+        """Replace the live universe and return token IDs open now."""
+
+        self._token_metadata = dict(token_metadata)
+        self._active_token_ids = set(token_metadata)
+        self._deferred_market_event_sink_limit = max(
+            self._deferred_market_event_sink_limit,
+            len(self._active_token_ids) + 32,
+        )
+        return self.active_token_ids_open_at()
 
     def handle_message(
         self,
@@ -1185,6 +1200,8 @@ class MarketChannelOnlineService:
     fetch_orderbooks: RestOrderbookBatchFetch | None = None
     invalidate_snapshot: Callable[[MarketChannelAction], None] | None = None
     refresh_snapshot: Callable[[MarketChannelAction], None] | None = None
+    reload_token_metadata: TokenMetadataReload | None = None
+    universe_refresh_interval_seconds: float = 15.0
     continuity_sink: Callable[[dict[str, Any]], None] | None = None
     connected: bool = False
     gap_start: str | None = None
@@ -1221,6 +1238,9 @@ class MarketChannelOnlineService:
         repr=False,
     )
     refresh_action_coalesced_count: int = field(default=0, init=False)
+    subscription_add_count: int = field(default=0, init=False)
+    subscription_remove_count: int = field(default=0, init=False)
+    universe_refresh_error_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self._refresh_worker_idle.set()
@@ -1531,6 +1551,105 @@ class MarketChannelOnlineService:
         )
         return written
 
+    async def _sync_subscription_universe(
+        self,
+        ws: Any,
+        *,
+        subscribed_token_ids: set[str],
+        write_gate: Any,
+        commit: Callable[[], None] | None,
+        logger: Any | None,
+    ) -> None:
+        if self.reload_token_metadata is None:
+            return
+        try:
+            token_metadata = await asyncio.to_thread(self.reload_token_metadata)
+        except Exception as exc:  # noqa: BLE001 - retain the current proven subscription
+            self.universe_refresh_error_count += 1
+            if logger is not None:
+                logger.warning("EDLI market-channel universe refresh failed: %s", exc)
+            return
+        if not token_metadata and subscribed_token_ids:
+            self.universe_refresh_error_count += 1
+            if logger is not None:
+                logger.warning(
+                    "EDLI market-channel universe refresh returned empty; "
+                    "retaining %d subscriptions",
+                    len(subscribed_token_ids),
+                )
+            return
+
+        desired_token_ids = self.ingestor.replace_token_metadata(token_metadata)
+        added = desired_token_ids - subscribed_token_ids
+        removed = subscribed_token_ids - desired_token_ids
+        if not added and not removed:
+            return
+        if added:
+            await ws.send(
+                json.dumps(
+                    {"operation": "subscribe", "assets_ids": sorted(added)},
+                    separators=(",", ":"),
+                )
+            )
+        if removed:
+            await ws.send(
+                json.dumps(
+                    {"operation": "unsubscribe", "assets_ids": sorted(removed)},
+                    separators=(",", ":"),
+                )
+            )
+        subscribed_token_ids.clear()
+        subscribed_token_ids.update(desired_token_ids)
+        self.subscription_add_count += len(added)
+        self.subscription_remove_count += len(removed)
+        if logger is not None:
+            logger.info(
+                "EDLI market-channel subscription universe updated: active=%d added=%d removed=%d",
+                len(subscribed_token_ids),
+                len(added),
+                len(removed),
+            )
+        if added:
+            await self._seed_subscribed_books(
+                active_token_ids=added,
+                write_gate=write_gate,
+                commit=commit,
+                logger=logger,
+            )
+
+    async def _refresh_subscription_universe_forever(
+        self,
+        ws: Any,
+        *,
+        subscribed_token_ids: set[str],
+        connection_done: asyncio.Event,
+        stop_event: Any | None,
+        write_gate: Any,
+        commit: Callable[[], None] | None,
+        logger: Any | None,
+    ) -> None:
+        if self.reload_token_metadata is None:
+            return
+        interval = max(0.01, float(self.universe_refresh_interval_seconds))
+        while not connection_done.is_set() and (
+            stop_event is None or not stop_event.is_set()
+        ):
+            try:
+                await asyncio.wait_for(connection_done.wait(), timeout=interval)
+            except TimeoutError:
+                pass
+            if connection_done.is_set() or (
+                stop_event is not None and stop_event.is_set()
+            ):
+                return
+            await self._sync_subscription_universe(
+                ws,
+                subscribed_token_ids=subscribed_token_ids,
+                write_gate=write_gate,
+                commit=commit,
+                logger=logger,
+            )
+
     def _fetch_rest_seed_books(
         self,
         token_ids: list[str],
@@ -1828,10 +1947,22 @@ class MarketChannelOnlineService:
                             len(active_token_ids),
                         )
                     pending_world_messages: list[dict[str, Any]] = []
+                    connection_done = asyncio.Event()
                     async with asyncio.TaskGroup() as tasks:
                         tasks.create_task(
                             self._seed_subscribed_books(
                                 active_token_ids=active_token_ids,
+                                write_gate=_quote_write_gate,
+                                commit=commit,
+                                logger=logger,
+                            )
+                        )
+                        tasks.create_task(
+                            self._refresh_subscription_universe_forever(
+                                ws,
+                                subscribed_token_ids=active_token_ids,
+                                connection_done=connection_done,
+                                stop_event=stop_event,
                                 write_gate=_quote_write_gate,
                                 commit=commit,
                                 logger=logger,
@@ -1955,6 +2086,7 @@ class MarketChannelOnlineService:
                                 )
                             for _action in pending_actions:
                                 self._enqueue_refresh_action(_action)
+                        connection_done.set()
                     if stop_event is None or not stop_event.is_set():
                         raise ConnectionError("market channel stream ended")
             except Exception as exc:  # noqa: BLE001 - network loop must retry

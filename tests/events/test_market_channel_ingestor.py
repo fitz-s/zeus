@@ -1011,6 +1011,119 @@ def test_websocket_subscribes_before_rest_seed(monkeypatch):
     assert transitions == [("connected",)]
 
 
+def test_subscription_universe_sync_sends_only_delta_off_event_loop():
+    conn, writer = _conn_writer()
+    sent: list[dict] = []
+    loader_thread_ids: list[int] = []
+    loop_thread_id = threading.get_ident()
+
+    class FakeWebSocket:
+        async def send(self, payload):  # noqa: ANN001
+            sent.append(json.loads(payload))
+
+    next_metadata = _metadata("token-2", outcome_label="NO")
+
+    def reload_token_metadata():
+        loader_thread_ids.append(threading.get_ident())
+        return next_metadata
+
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        reload_token_metadata=reload_token_metadata,
+    )
+    subscribed = {"token-1"}
+
+    asyncio.run(
+        service._sync_subscription_universe(
+            FakeWebSocket(),
+            subscribed_token_ids=subscribed,
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            logger=None,
+        )
+    )
+
+    assert loader_thread_ids and loader_thread_ids[0] != loop_thread_id
+    assert sent == [
+        {"operation": "subscribe", "assets_ids": ["token-2"]},
+        {"operation": "unsubscribe", "assets_ids": ["token-1"]},
+    ]
+    assert subscribed == {"token-2"}
+    assert ingestor.active_token_ids_open_at() == {"token-2"}
+    assert service.subscription_add_count == 1
+    assert service.subscription_remove_count == 1
+
+
+def test_websocket_adds_new_token_without_reconnect(monkeypatch):
+    import websockets
+
+    conn, writer = _conn_writer()
+    stop = asyncio.Event()
+    sent: list[dict] = []
+    connect_count = 0
+
+    class FakeWebSocket:
+        async def send(self, payload):  # noqa: ANN001
+            sent.append(json.loads(payload))
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(0.05)
+            stop.set()
+            raise StopAsyncIteration
+
+    class FakeConnect:
+        async def __aenter__(self):
+            return FakeWebSocket()
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+    def connect(_endpoint, **_kwargs):  # noqa: ANN001
+        nonlocal connect_count
+        connect_count += 1
+        return FakeConnect()
+
+    monkeypatch.setattr(websockets, "connect", connect)
+    metadata = _metadata()
+    metadata.update(_metadata("token-2", outcome_label="NO"))
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+        ),
+        reload_token_metadata=lambda: metadata,
+        universe_refresh_interval_seconds=0.01,
+    )
+
+    asyncio.run(
+        service.run_websocket_forever(
+            stop_event=stop,
+            reconnect_delay_seconds=0,
+            quote_write_gate=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    )
+
+    assert connect_count == 1
+    assert sent[0] == {
+        "assets_ids": ["token-1"],
+        "type": "market",
+        "custom_feature_enabled": True,
+    }
+    assert {"operation": "subscribe", "assets_ids": ["token-2"]} in sent[1:]
+    assert not any(message.get("operation") == "unsubscribe" for message in sent)
+
+
 def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
     import websockets
 

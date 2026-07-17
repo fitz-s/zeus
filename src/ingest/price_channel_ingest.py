@@ -2909,6 +2909,67 @@ def _edli_held_quote_refresh_cycle() -> dict:
     return result
 
 
+def _edli_market_channel_token_metadata_fingerprint(trade_read, held_token_ids):
+    # Existing-row quote refreshes change captured_at/snapshot_id but cannot change
+    # the subscription identity. Count + last rowid detects inserts, deletes, and
+    # replace-style churn without turning every price refresh into a full reload.
+    row_count = trade_read.execute(
+        "SELECT COUNT(*) FROM executable_market_snapshot_latest"
+    ).fetchone()
+    last_rowid = trade_read.execute(
+        "SELECT MAX(rowid) FROM executable_market_snapshot_latest"
+    ).fetchone()
+    return (
+        (
+            int(row_count[0] or 0) if row_count is not None else 0,
+            int(last_rowid[0] or 0) if last_rowid is not None else 0,
+        ),
+        tuple(sorted(held_token_ids)),
+    )
+
+
+def _edli_market_channel_token_metadata_reloader(
+    *,
+    initial_token_metadata=None,
+    initial_fingerprint=None,
+):
+    fingerprint = initial_fingerprint
+    token_metadata = initial_token_metadata
+
+    def _reload():
+        nonlocal fingerprint, token_metadata
+        from src.events.triggers.market_channel_ingestor import (
+            active_weather_token_metadata_for_tokens,
+            active_weather_token_metadata_from_snapshots,
+        )
+        from src.state.db import get_trade_connection
+
+        trade_read = get_trade_connection(write_class=None)
+        try:
+            held_token_ids = _edli_held_position_priority_token_ids(trade_read)
+            current_fingerprint = _edli_market_channel_token_metadata_fingerprint(
+                trade_read,
+                held_token_ids,
+            )
+            if token_metadata is not None and current_fingerprint == fingerprint:
+                return token_metadata
+            refreshed = active_weather_token_metadata_from_snapshots(trade_read)
+            refreshed.update(
+                active_weather_token_metadata_for_tokens(
+                    trade_read,
+                    token_ids=held_token_ids,
+                    purpose="exit",
+                )
+            )
+            fingerprint = current_fingerprint
+            token_metadata = refreshed
+            return token_metadata
+        finally:
+            trade_read.close()
+
+    return _reload
+
+
 def _edli_market_channel_ingestor_cycle() -> dict | None:
     """EDLI market-channel online data-service bootstrap.
 
@@ -3047,6 +3108,10 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                 token_ids=held_priority_token_ids,
                 purpose="exit",
             )
+        )
+        token_metadata_fingerprint = _edli_market_channel_token_metadata_fingerprint(
+            trade_conn,
+            held_priority_token_ids,
         )
         token_ids = set(token_metadata)
     finally:
@@ -3220,6 +3285,10 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             )
 
             with PolymarketClient() as clob:
+                reload_token_metadata = _edli_market_channel_token_metadata_reloader(
+                    initial_token_metadata=token_metadata,
+                    initial_fingerprint=token_metadata_fingerprint,
+                )
                 service = MarketChannelOnlineService(
                     MarketChannelIngestor(
                         EventWriter(world_conn),
@@ -3237,6 +3306,13 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),
                     invalidate_snapshot=_invalidate_snapshot_action,
                     refresh_snapshot=_refresh_snapshot_action,
+                    reload_token_metadata=reload_token_metadata,
+                    universe_refresh_interval_seconds=_edli_bounded_positive_float(
+                        edli_cfg,
+                        "market_channel_universe_refresh_seconds",
+                        default=15.0,
+                        maximum=300.0,
+                    ),
                     max_refresh_actions_per_window=_edli_bounded_positive_int(
                         edli_cfg,
                         "market_channel_refresh_max_actions_per_window",
