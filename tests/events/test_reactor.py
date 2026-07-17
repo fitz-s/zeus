@@ -34,6 +34,7 @@ from src.events.reactor import (
     ReactorResult,
     TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
+    _edli_emit_day0_extreme_events,
     _process_pending_cancelled,
     _rank_forecast_wake_events,
     _is_transient_money_path_reason,
@@ -66,6 +67,37 @@ def test_global_family_ineligible_is_explicitly_transient(caplog):
         assert _is_transient_money_path_reason(reason) is True
 
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
+def test_day0_catchup_emitter_returns_exact_event_ids(monkeypatch):
+    from src.events import reactor as reactor_module
+
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_scan_day0_with_lock_retry",
+        lambda **_kwargs: (
+            [SimpleNamespace(event_id="day0-authority")],
+            [
+                SimpleNamespace(event_id="day0-observation"),
+                SimpleNamespace(event_id="day0-authority"),
+            ],
+        ),
+    )
+    world = sqlite3.connect(":memory:")
+    trade = sqlite3.connect(":memory:")
+    try:
+        event_ids = _edli_emit_day0_extreme_events(
+            world,
+            trade,
+            decision_time=datetime.now(timezone.utc),
+            received_at=datetime.now(timezone.utc).isoformat(),
+            limit=3,
+        )
+    finally:
+        trade.close()
+        world.close()
+
+    assert event_ids == ("day0-authority", "day0-observation")
 
 
 def test_global_not_selected_is_terminal_for_completed_epoch(caplog):

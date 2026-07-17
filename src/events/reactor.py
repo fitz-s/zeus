@@ -5500,6 +5500,7 @@ def run_edli_event_reactor_cycle(
         )
         store = EventStore(conn)
         targeted_event_ids = set(producer_wake_event_ids)
+        catchup_day0_event_ids: tuple[str, ...] = ()
         try:
             from src.config import runtime_cities as _runtime_cities
             from src.data.day0_fast_obs import get_fast_obs_emitter
@@ -5699,7 +5700,7 @@ def run_edli_event_reactor_cycle(
                     _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
                     try:
                         try:
-                            _edli_emit_day0_extreme_events(
+                            catchup_day0_event_ids = _edli_emit_day0_extreme_events(
                                 conn,
                                 _day0_trade_conn,
                                 decision_time=now,
@@ -5749,6 +5750,26 @@ def run_edli_event_reactor_cycle(
                 len(targeted_event_ids),
             )
             _log_stage("committed_event_fast_path")
+        if catchup_day0_event_ids:
+            try:
+                from src.runtime.reactor_wake import publish_reactor_wake
+
+                publish_reactor_wake(
+                    source="edli_reactor_day0_catchup",
+                    reason="day0_extreme_event_committed",
+                    event_ids=catchup_day0_event_ids,
+                )
+            except OSError:
+                _log.exception(
+                    "EDLI Day0 catch-up wake publish failed; retaining current-cycle "
+                    "processing as the durable fallback"
+                )
+            else:
+                _log.info(
+                    "EDLI reactor yielded periodic cycle to targeted Day0 wake: events=%d",
+                    len(catchup_day0_event_ids),
+                )
+                return False
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"
@@ -6152,7 +6173,7 @@ def _edli_expire_unready_forecast_snapshot_pending(
     forecasts_conn,
     *,
     decision_time: str,
-) -> int:
+) -> tuple[str, ...]:
     """Expire replacement FSR rows whose current latest posterior is not spine-ready.
 
     Pending FSR rows are admission work, not durable facts. Under the replacement lane an
@@ -7069,7 +7090,13 @@ def _edli_emit_day0_extreme_events(
             len(observation_results),
             0 if family_admission is None else len(family_admission.admitted_families),
         )
-        return len(authority_results) + len(observation_results)
+        return tuple(
+            dict.fromkeys(
+                str(result.event_id)
+                for result in (*authority_results, *observation_results)
+                if str(getattr(result, "event_id", "") or "").strip()
+            )
+        )
     except sqlite3.OperationalError as exc:
         if "interrupted" in str(exc).lower():
             if urgent_wake_pending is not None and urgent_wake_pending():
@@ -7080,7 +7107,7 @@ def _edli_emit_day0_extreme_events(
                     "Day0 catch-up this cycle and draining already-queued candidates.",
                     float(budget_seconds or 0.0),
                 )
-            return 0
+            return ()
         raise
     finally:
         _edli_clear_sqlite_progress_handler(trade_conn)
