@@ -8261,26 +8261,25 @@ def event_bound_live_adapter_from_trade_conn(
                 mode="full_books",
                 prefetched=prefetched,
             )
-            if topology_bindings_reused_from_superset:
+            cache_store_status = _store_global_book_epoch(
+                trade_conn,
+                bound_probabilities,
+                epoch,
+                checked_at=datetime.now(UTC),
+                metadata_by_key=book_metadata_by_key,
+            )
+            if cache_store_status != "stored":
+                logging.getLogger(__name__).warning(
+                    "global book epoch cache store rejected: mode=full reason=%s",
+                    cache_store_status,
+                )
+            elif topology_bindings_reused_from_superset:
                 logging.getLogger(__name__).info(
-                    "global book broad topology cache retained after scoped capture: "
+                    "global book expired broad cache replaced after scoped capture: "
                     "families=%d assets=%d",
                     len(bound_probabilities),
                     len(getattr(epoch, "assets", ())),
                 )
-            else:
-                cache_store_status = _store_global_book_epoch(
-                    trade_conn,
-                    bound_probabilities,
-                    epoch,
-                    checked_at=datetime.now(UTC),
-                    metadata_by_key=book_metadata_by_key,
-                )
-                if cache_store_status != "stored":
-                    logging.getLogger(__name__).warning(
-                        "global book epoch cache store rejected: mode=full reason=%s",
-                        cache_store_status,
-                    )
             return bound_probabilities, epoch
 
         def _current_entry_capital_limit(

@@ -4818,6 +4818,52 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         miami,
     }
     assert epoch_after_expiry.captured_at_utc > expired_epoch.captured_at_utc
+
+    second_expired_at = _dt.datetime.now(
+        _dt.timezone.utc
+    ) - _dt.timedelta(seconds=181)
+    second_expired_epoch = replace(
+        epoch_after_expiry,
+        captured_at_utc=second_expired_at,
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=epoch_after_expiry.asset_states,
+            captured_at_utc=second_expired_at,
+        ),
+    )
+    cache_entry = era._GLOBAL_BOOK_EPOCH_CACHE
+    assert cache_entry is not None
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_BOOK_EPOCH_CACHE",
+        replace(cache_entry, epoch=second_expired_epoch),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_book_metadata_refresh_family_keys",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    capture_count = len(capture_calls)
+    book_call_count = len(book_calls)
+    expired_subset = {miami: unrelated_drift[miami]}
+    bound_after_expired_subset, epoch_after_expired_subset = rebuilt_provider(
+        expired_subset,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    bound_after_cached_subset, epoch_after_cached_subset = rebuilt_provider(
+        expired_subset,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    cache_after_expired_subset = era._GLOBAL_BOOK_EPOCH_CACHE
+    assert bound_after_expired_subset == expired_subset
+    assert bound_after_cached_subset == expired_subset
+    assert len(capture_calls) == capture_count + 1
+    assert len(book_calls) == book_call_count + 1
+    assert epoch_after_cached_subset is epoch_after_expired_subset
+    assert cache_after_expired_subset is not None
+    assert {
+        family_key
+        for family_key, _ in cache_after_expired_subset.bound_probabilities
+    } == {miami}
     trade.close()
     forecast.close()
     topology.close()
