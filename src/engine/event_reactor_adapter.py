@@ -1154,6 +1154,117 @@ def _projected_global_book_rows(
     return books or None
 
 
+def _latest_market_channel_book_rows(
+    trade_conn: sqlite3.Connection,
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> dict[str, tuple[Mapping[str, object] | None, datetime, str]]:
+    """Read the latest full-depth market-channel event for each token.
+
+    A newer BBA-only event invalidates an older full book instead of reviving
+    stale depth. Callers use the ``None`` book marker to force a venue refresh.
+    """
+
+    token_ids = tuple(dict.fromkeys(str(token).strip() for token in tokens))
+    if not token_ids:
+        return {}
+    projected: dict[
+        str, tuple[Mapping[str, object] | None, datetime, str]
+    ] = {}
+    try:
+        for start in range(0, len(token_ids), 400):
+            chunk = token_ids[start : start + 400]
+            requested = ",".join("(?)" for _ in chunk)
+            rows = trade_conn.execute(
+                f"""
+                WITH requested(token_id) AS (VALUES {requested})
+                SELECT requested.token_id,
+                       latest_event.event_id,
+                       latest_event.quote_seen_at,
+                       depth_event.depth_before_json,
+                       latest_event.book_hash_before,
+                       snapshot.min_tick_size,
+                       snapshot.min_order_size,
+                       snapshot.neg_risk
+                  FROM requested
+                  JOIN execution_feasibility_evidence AS latest_event
+                    ON latest_event.rowid = (
+                        SELECT rowid
+                          FROM execution_feasibility_evidence AS candidate
+                               INDEXED BY idx_execution_feasibility_evidence_token_created
+                         WHERE candidate.token_id = requested.token_id
+                         ORDER BY candidate.created_at DESC
+                         LIMIT 1
+                    )
+             LEFT JOIN execution_feasibility_evidence AS depth_event
+                    ON depth_event.rowid = (
+                        SELECT rowid
+                          FROM execution_feasibility_evidence AS candidate
+                               INDEXED BY idx_execution_feasibility_evidence_token_created
+                         WHERE candidate.token_id = requested.token_id
+                           AND candidate.event_id = latest_event.event_id
+                           AND candidate.depth_before_json IS NOT NULL
+                           AND candidate.depth_before_json != ''
+                         ORDER BY candidate.created_at DESC
+                         LIMIT 1
+                    )
+                  JOIN executable_market_snapshot_latest AS latest
+                       INDEXED BY idx_snapshot_latest_selected_token_captured
+                    ON latest.selected_outcome_token_id = requested.token_id
+                   AND latest.condition_id = latest_event.condition_id
+                  JOIN executable_market_snapshots AS snapshot
+                    ON snapshot.snapshot_id = latest.snapshot_id
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                token_id = str(row[0] or "").strip()
+                event_id = str(row[1] or "").strip()
+                captured_at = datetime.fromisoformat(str(row[2]))
+                if captured_at.tzinfo is None:
+                    continue
+                captured_at = captured_at.astimezone(timezone.utc)
+                if (
+                    token_id not in chunk
+                    or not event_id
+                    or captured_at > checked_at
+                    or checked_at - captured_at > max_age
+                ):
+                    continue
+                raw_depth = row[3]
+                if raw_depth is None:
+                    projected[token_id] = (None, captured_at, event_id)
+                    continue
+                try:
+                    depth = json.loads(str(raw_depth))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    projected[token_id] = (None, captured_at, event_id)
+                    continue
+                if (
+                    not isinstance(depth, Mapping)
+                    or not isinstance(depth.get("bids"), list)
+                    or not isinstance(depth.get("asks"), list)
+                ):
+                    projected[token_id] = (None, captured_at, event_id)
+                    continue
+                book = dict(depth)
+                book.update(
+                    {
+                        "asset_id": token_id,
+                        "hash": str(row[4] or ""),
+                        "tick_size": str(row[5]),
+                        "min_order_size": str(row[6]),
+                        "neg_risk": bool(row[7]),
+                    }
+                )
+                projected[token_id] = (book, captured_at, event_id)
+    except sqlite3.Error:
+        return {}
+    return projected
+
+
 def _projected_global_books(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
@@ -1170,6 +1281,22 @@ def _projected_global_books(
         max_age=max_age,
     )
     if rows is None:
+        rows = {}
+    for token, channel_row in _latest_market_channel_book_rows(
+        trade_conn,
+        tokens,
+        checked_at=checked_at.astimezone(timezone.utc),
+        max_age=max_age,
+    ).items():
+        channel_book, channel_at, channel_id = channel_row
+        snapshot_row = rows.get(token)
+        if snapshot_row is not None and snapshot_row[1] > channel_at:
+            continue
+        if channel_book is None:
+            rows.pop(token, None)
+            continue
+        rows[token] = (channel_book, channel_at, channel_id)
+    if not rows:
         return None
     return (
         {token: raw_book for token, (raw_book, _, _) in rows.items()},
