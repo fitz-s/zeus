@@ -420,12 +420,12 @@ def _entry_reprice_cancel_reason(
     return None
 
 
-def _entry_fok_no_fill_rejection_is_redecidable(
+def _entry_terminal_no_fill_redecision_proof(
     conn: sqlite3.Connection,
     *,
     command_id: str,
-) -> bool:
-    """Prove the prior FOK was killed before creating venue exposure."""
+) -> str | None:
+    """Name the venue proof that the prior submit created no exposure."""
 
     if (
         not command_id
@@ -433,7 +433,7 @@ def _entry_fok_no_fill_rejection_is_redecidable(
         or not _table_exists(conn, "venue_commands")
         or "venue_order_id" not in _table_column_names(conn, "venue_commands")
     ):
-        return False
+        return None
     order_column = "rowid"
     if "sequence_no" in _table_column_names(conn, "venue_command_events"):
         order_column = "sequence_no"
@@ -452,28 +452,54 @@ def _entry_fok_no_fill_rejection_is_redecidable(
             (command_id,),
         ).fetchone()
     except sqlite3.Error:
-        return False
+        return None
     if row is None:
-        return False
+        return None
     raw_payload = row["payload_json"] if isinstance(row, sqlite3.Row) else row[0]
     venue_order_id = row["venue_order_id"] if isinstance(row, sqlite3.Row) else row[1]
-    if str(venue_order_id or "").strip():
-        return False
     try:
         payload = json.loads(str(raw_payload or "{}"))
     except (TypeError, ValueError):
-        return False
+        return None
     if not isinstance(payload, dict):
-        return False
-    if payload.get("proof_class") != "deterministic_venue_400":
-        return False
+        return None
+    proof_class = str(payload.get("proof_class") or "")
+    if proof_class == "deterministic_venue_fak_no_match_400":
+        payload_order_id = str(payload.get("venue_order_id") or "").strip()
+        command_order_id = str(venue_order_id or "").strip()
+        predicates = payload.get("required_predicates")
+        required = (
+            "exception_message_fak_no_match_400",
+            "final_envelope_command_matches",
+            "final_envelope_is_fak",
+            "deterministic_order_id_matches",
+            "no_order_facts",
+            "no_trade_facts",
+        )
+        if (
+            payload.get("reason") == "venue_rejected_fak_no_match_400"
+            and payload.get("terminal_no_fill") is True
+            and payload.get("exposure_created") is False
+            and payload_order_id
+            and payload_order_id == command_order_id
+            and isinstance(predicates, dict)
+            and all(predicates.get(key) is True for key in required)
+        ):
+            return "fak"
+        return None
+    if proof_class != "deterministic_venue_400":
+        return None
+    if str(venue_order_id or "").strip():
+        return None
     if payload.get("venue_order_created") is not False:
-        return False
+        return None
     message = " ".join(str(payload.get("exception_message") or "").lower().split())
-    return (
+    if (
         "order couldn't be fully filled" in message
         and "fok orders are fully filled or killed" in message
-    )
+    ):
+        return "fok"
+    return None
 
 
 def _pending_entry_terminal_no_fill_allows_entry(
@@ -1951,6 +1977,8 @@ def _entry_same_token_cooldown_component(
                     row_size,
                 )
             continue
+        if str(row_state or "").upper() == "FILLED":
+            continue
         command_id = row_command_id
         position_id = row_position_id
         state = row_state
@@ -2089,14 +2117,17 @@ def _entry_same_token_cooldown_component(
             "candidate_price": str(limit_price or ""),
             "candidate_shares": str(shares or ""),
         }
-    if terminal_no_fill and _entry_fok_no_fill_rejection_is_redecidable(
-        conn,
-        command_id=command_id,
-    ):
+    no_fill_redecision_proof = (
+        _entry_terminal_no_fill_redecision_proof(conn, command_id=command_id)
+        if terminal_no_fill
+        else None
+    )
+    if no_fill_redecision_proof:
         return {
             "component": "entry_same_token_cooldown",
             "allowed": True,
-            "reason": "allowed_terminal_fok_no_fill_redecision",
+            "reason": f"allowed_terminal_{no_fill_redecision_proof}_no_fill_redecision",
+            "terminal_no_fill_redecision_proof": no_fill_redecision_proof,
             "cooldown_seconds": cooldown_seconds,
             "age_seconds": int(age_seconds),
             "existing_command_id": command_id,

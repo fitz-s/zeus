@@ -12,6 +12,7 @@
 # phantom_not_on_chain is not in _TERMINAL_PHASES → DB query returns True regardless
 # of whether the rest of the system treats it as a formal lifecycle state.
 
+import json
 import math
 import sqlite3
 from datetime import datetime
@@ -1322,6 +1323,121 @@ def test_terminal_fok_no_fill_redecision_allows_same_price_after_cooldown(
     assert ready["candidate_price"] == "0.005"
     assert ready["existing_size"] == "1018.0"
     assert ready["candidate_shares"] == "1016"
+
+
+def test_terminal_fak_no_match_redecision_allows_same_price_after_cooldown(mem_db):
+    venue_order_id = "0x" + "8e" * 32
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-fak-no-match', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   6, 0.73, ?, 'SUBMIT_REJECTED',
+                   '2026-07-17T03:16:43+00:00', '2026-07-17T03:24:38+00:00')""",
+        (TOKEN_X, venue_order_id),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-fak-no-match', 'cmd-fak-no-match', 4, 'SUBMIT_REJECTED',
+                   '2026-07-17T03:24:38+00:00', ?, 'SUBMIT_REJECTED')""",
+        (
+            json.dumps(
+                {
+                    "reason": "venue_rejected_fak_no_match_400",
+                    "venue_order_id": venue_order_id,
+                    "proof_class": "deterministic_venue_fak_no_match_400",
+                    "terminal_no_fill": True,
+                    "exposure_created": False,
+                    "required_predicates": {
+                        "exception_message_fak_no_match_400": True,
+                        "final_envelope_command_matches": True,
+                        "final_envelope_is_fak": True,
+                        "deterministic_order_id_matches": True,
+                        "no_order_facts": True,
+                        "no_trade_facts": True,
+                    },
+                }
+            ),
+        ),
+    )
+    mem_db.commit()
+
+    cooling = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=10,
+        now=datetime.fromisoformat("2026-07-17T03:25:38+00:00"),
+    )
+    ready = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=10,
+        now=datetime.fromisoformat("2026-07-17T03:26:39+00:00"),
+    )
+
+    assert cooling["allowed"] is False
+    assert cooling["reason"] == "same_token_terminal_no_fill_cooling_down"
+    assert ready["allowed"] is True
+    assert ready["reason"] == "allowed_terminal_fak_no_fill_redecision"
+    assert ready["terminal_no_fill_redecision_proof"] == "fak"
+
+
+def test_terminal_fak_no_match_redecision_rejects_exposure_claim(mem_db):
+    venue_order_id = "0x" + "9a" * 32
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-fak-exposure', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   6, 0.73, ?, 'SUBMIT_REJECTED',
+                   '2026-07-17T03:16:43+00:00', '2026-07-17T03:24:38+00:00')""",
+        (TOKEN_X, venue_order_id),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-fak-exposure', 'cmd-fak-exposure', 4, 'SUBMIT_REJECTED',
+                   '2026-07-17T03:24:38+00:00', ?, 'SUBMIT_REJECTED')""",
+        (
+            json.dumps(
+                {
+                    "reason": "venue_rejected_fak_no_match_400",
+                    "venue_order_id": venue_order_id,
+                    "proof_class": "deterministic_venue_fak_no_match_400",
+                    "terminal_no_fill": True,
+                    "exposure_created": True,
+                    "required_predicates": {
+                        "exception_message_fak_no_match_400": True,
+                        "final_envelope_command_matches": True,
+                        "final_envelope_is_fak": True,
+                        "deterministic_order_id_matches": True,
+                        "no_order_facts": True,
+                        "no_trade_facts": True,
+                    },
+                }
+            ),
+        ),
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=10,
+        now=datetime.fromisoformat("2026-07-17T03:26:39+00:00"),
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
 
 
 def test_other_deterministic_rejection_still_requires_reprice(mem_db):
