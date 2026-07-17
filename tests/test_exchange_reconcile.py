@@ -3443,6 +3443,14 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
         "command_id": "cmd-recorded-exit-confirmed",
     }
 
+    from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+    changes_before_repeat = conn.total_changes
+    repeat = reconcile_recorded_exit_fill_projections(conn, observed_at=NOW)
+
+    assert repeat == {"scanned": 1, "projected": 0, "stayed": 1, "errors": 0}
+    assert conn.total_changes == changes_before_repeat
+
 
 def test_recorded_confirmed_exit_trade_economically_closes_disputed_chain_state_projection(conn):
     # BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md): this

@@ -2178,7 +2178,10 @@ def _reconcile_recorded_exit_fill_projections(
          ORDER BY tf.observed_at, tf.trade_fact_id
         """
     ).fetchall()
+    latest_by_command: dict[str, sqlite3.Row] = {}
     for row in rows:
+        latest_by_command[str(row["command_id"] or "")] = row
+    for row in latest_by_command.values():
         summary["scanned"] += 1
         fact = dict(row)
         try:
@@ -4963,6 +4966,17 @@ def _ensure_exit_fill_position_event(
         (position_id, venue_order_id),
     ).fetchone()
     if existing is not None:
+        if _exit_fill_materialization_is_current(
+            conn,
+            current=current,
+            position=position,
+            command=command,
+            observed_at=observed_at,
+            shares=shares_dec,
+            exit_price=exit_price_dec,
+            realized_pnl=realized_pnl,
+        ):
+            return
         from src.engine.lifecycle_events import build_position_current_projection
 
         projection = build_position_current_projection(position)
@@ -5008,6 +5022,62 @@ def _ensure_exit_fill_position_event(
         shares=shares_dec,
         exit_price=exit_price_dec,
         upsert_only=False,
+    )
+
+
+def _exit_fill_materialization_is_current(
+    conn: sqlite3.Connection,
+    *,
+    current: Mapping[str, Any],
+    position: SimpleNamespace,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+    shares: Decimal,
+    exit_price: Decimal,
+    realized_pnl: float,
+) -> bool:
+    """Return true when the durable close projection already equals fill truth."""
+
+    if str(current.get("phase") or "") != "economically_closed":
+        return False
+    if str(current.get("order_status") or "") != "sell_filled":
+        return False
+    for actual, expected in (
+        (current.get("exit_price"), exit_price),
+        (current.get("realized_pnl_usd"), realized_pnl),
+        (current.get("chain_shares"), 0),
+        (current.get("chain_avg_price"), 0),
+        (current.get("chain_cost_basis_usd"), 0),
+    ):
+        if not _same_decimal_value(actual, expected):
+            return False
+
+    position_id = str(getattr(position, "trade_id", "") or "")
+    fact = conn.execute(
+        """
+        SELECT position_id, command_id, order_role, filled_at, fill_price,
+               shares, venue_status, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = ?
+        """,
+        (f"{position_id}:exit",),
+    ).fetchone()
+    if fact is None:
+        return False
+    if str(fact["position_id"] or "") != position_id:
+        return False
+    if str(fact["command_id"] or "") != str(command.get("command_id") or ""):
+        return False
+    if str(fact["order_role"] or "") != "exit":
+        return False
+    if str(fact["filled_at"] or "") != observed_at.isoformat():
+        return False
+    if str(fact["venue_status"] or "") != "FILLED":
+        return False
+    if str(fact["terminal_exec_status"] or "") != "filled":
+        return False
+    return _same_decimal_value(fact["fill_price"], exit_price) and _same_decimal_value(
+        fact["shares"], shares
     )
 
 
