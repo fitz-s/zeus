@@ -3966,10 +3966,9 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # claim; the current claimed page must remain pending until that claim runs.
     "GLOBAL_WINNER_AWAITS_CLAIM",
     "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
-    # The complete current-epoch auction either found no positive BUY/SELL action
-    # (CASH/HOLD wins) or could not finish because a refreshable current-input
-    # authority changed underneath it.  Both require a fresh full-auction pass;
-    # neither may fall through the UNKNOWN fail-open classifier.
+    # The wrapper also covers incomplete auctions. Completed economic no-trades
+    # are terminalized by _global_auction_economic_no_trade_is_terminal below;
+    # cancelled/superseded/unknown outcomes remain transient through this base.
     "GLOBAL_AUCTION_NO_TRADE",
     "GLOBAL_AUCTION_FAILED",
     "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT",
@@ -4236,6 +4235,31 @@ def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
     return False
 
 
+_GLOBAL_AUCTION_TERMINAL_ECONOMIC_VERDICTS = frozenset(
+    {
+        "CASH_DOMINATES",
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        "ROBUST_MAJORITY_LOSS",
+    }
+)
+
+
+def _global_auction_economic_no_trade_is_terminal(reason: str) -> bool:
+    """True when a complete current epoch proved that cash dominates.
+
+    A fresh price, belief, observation, or topology change emits a fresh event.
+    Replaying the same event against the same completed epoch only burns auction
+    capacity; cancellation and authority races remain transient.
+    """
+
+    segments = [segment.strip() for segment in reason.split(":")]
+    return (
+        len(segments) >= 2
+        and segments[0] == "GLOBAL_AUCTION_NO_TRADE"
+        and segments[1] in _GLOBAL_AUCTION_TERMINAL_ECONOMIC_VERDICTS
+    )
+
+
 def _is_transient_money_path_reason(reason: str | None) -> bool:
     """Classify a money-path rejection reason as TRANSIENT (requeue) vs TERMINAL
     (consume), via an EXPLICIT reactor-owned table — never substring soup.
@@ -4260,6 +4284,8 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
          fail-open does not leak — it just refuses to BURN on a string typo.
     """
     if not reason:
+        return False
+    if _global_auction_economic_no_trade_is_terminal(reason):
         return False
     # (2) Any nested transient segment wins (explicit segment membership).
     segments = [seg.strip() for seg in reason.split(":")]

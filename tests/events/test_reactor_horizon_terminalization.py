@@ -555,12 +555,6 @@ def test_known_transient_reason_classifies_without_log(caplog):
         assert _is_transient_money_path_reason("SHIFT_BIN_EXIT_OLD_LEG_PENDING") is True
         assert (
             _is_transient_money_path_reason(
-                "GLOBAL_AUCTION_NO_TRADE:NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
-            )
-            is True
-        )
-        assert (
-            _is_transient_money_path_reason(
                 "GLOBAL_AUCTION_FAILED:ValueError:GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS"
             )
             is True
@@ -576,6 +570,35 @@ def test_known_transient_reason_classifies_without_log(caplog):
             _is_transient_money_path_reason("idempotency_collision: prior attempt REJECTED")
             is False
         )
+    assert not any("UNKNOWN money-path reason" in r.message for r in caplog.records)
+
+
+def test_completed_global_auction_no_trade_is_terminal_but_incomplete_is_transient(caplog):
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        for verdict in (
+            "CASH_DOMINATES",
+            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            "ROBUST_MAJORITY_LOSS",
+        ):
+            assert (
+                _is_transient_money_path_reason(
+                    f"GLOBAL_AUCTION_NO_TRADE:{verdict}"
+                )
+                is False
+            )
+        assert (
+            _is_transient_money_path_reason(
+                "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+            )
+            is True
+        )
+        assert (
+            _is_transient_money_path_reason(
+                "GLOBAL_AUCTION_NO_TRADE:GLOBAL_EPOCH_SUPERSEDED"
+            )
+            is True
+        )
+
     assert not any("UNKNOWN money-path reason" in r.message for r in caplog.records)
 
 

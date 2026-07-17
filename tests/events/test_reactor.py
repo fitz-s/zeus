@@ -467,6 +467,49 @@ def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
     } == {"SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"}
 
 
+@pytest.mark.parametrize(
+    "verdict",
+    (
+        "CASH_DOMINATES",
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        "ROBUST_MAJORITY_LOSS",
+    ),
+)
+def test_global_batch_completed_economic_no_trade_consumes_current_epoch(verdict):
+    conn, store = _store()
+    events = (
+        _forecast_event("global-no-trade-a", target_date="2026-05-25"),
+        _forecast_event("global-no-trade-b", target_date="2026-05-25"),
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+
+    def _batch(events, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        return GlobalBatchSubmitResult(
+            receipts={
+                event.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=event.event_id,
+                    causal_snapshot_id=event.causal_snapshot_id,
+                    reason=f"GLOBAL_AUCTION_NO_TRADE:{verdict}",
+                    proof_accepted=False,
+                )
+                for event in events
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+        )
+
+    reactor._submit.process_global_batch = _batch
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=2)
+
+    assert result.retried == 0
+    assert result.rejected == 2
+    assert all(_processing_status(conn, event.event_id) == "processed" for event in events)
+
+
 def test_global_batch_targeted_wake_claims_only_committed_event():
     conn, store = _store()
     ordinary = _forecast_event("global-ordinary", target_date="2026-05-25")
