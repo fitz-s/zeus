@@ -3820,6 +3820,68 @@ def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
     return all(str(row[1]) not in {"pending", "processing"} for row in rows)
 
 
+def _reactor_wake_events_ready(
+    event_ids: tuple[str, ...],
+    *,
+    decision_time: datetime | None = None,
+) -> bool:
+    """Return False only when every active wake event has a future retry floor."""
+
+    clean_event_ids = tuple(
+        dict.fromkeys(
+            event_id
+            for value in event_ids
+            if (event_id := str(value).strip())
+        )
+    )
+    if not clean_event_ids:
+        return True
+    conn = None
+    try:
+        conn = get_world_connection_read_only()
+        placeholders = ",".join("?" for _ in clean_event_ids)
+        rows = conn.execute(
+            f"""
+            SELECT event_id, processing_status, claimed_at
+              FROM opportunity_event_processing
+             WHERE consumer_name = 'edli_reactor_v1'
+               AND event_id IN ({placeholders})
+            """,
+            clean_event_ids,
+        ).fetchall()
+    except Exception:
+        logger.warning(
+            "EDLI wake readiness probe unavailable; running reactor fail-open",
+            exc_info=True,
+        )
+        return True
+    finally:
+        if conn is not None:
+            conn.close()
+    if len(rows) != len(clean_event_ids):
+        return True
+
+    now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    deferred = False
+    for _event_id, status, claimed_at in rows:
+        if str(status) != "pending":
+            if str(status) == "processing":
+                return True
+            continue
+        if claimed_at in {None, ""}:
+            return True
+        try:
+            floor = datetime.fromisoformat(str(claimed_at).replace("Z", "+00:00"))
+            if floor.tzinfo is None:
+                floor = floor.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return True
+        if floor.astimezone(timezone.utc) <= now:
+            return True
+        deferred = True
+    return not deferred
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -3847,6 +3909,8 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
+    if wake_event_ids and not _reactor_wake_events_ready(wake_event_ids):
+        return False
     day0_target_families = None
     day0_requires_exit_monitor = False
     if day0_wake:

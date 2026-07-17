@@ -1134,6 +1134,68 @@ def test_reactor_wake_poll_coalesces_targeted_events_into_one_cycle(monkeypatch)
     assert acknowledged == [("wake-price-first", "wake-price-second")]
 
 
+def test_reactor_wake_retry_floor_skips_full_cycle_until_due(monkeypatch) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main
+
+    class _Conn:
+        def __init__(self, claimed_at: str) -> None:
+            self.claimed_at = claimed_at
+
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchall(self):
+            return [("event-retry", "pending", self.claimed_at)]
+
+        def close(self) -> None:
+            pass
+
+    now = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    conn = _Conn("2026-07-16T12:00:05+00:00")
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda: conn)
+
+    assert main._reactor_wake_events_ready(("event-retry",), decision_time=now) is False
+
+    conn.claimed_at = "2026-07-16T12:00:00+00:00"
+    assert main._reactor_wake_events_ready(("event-retry",), decision_time=now) is True
+
+
+def test_reactor_wake_poll_does_not_spin_on_future_retry_floor(monkeypatch) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-deferred",
+        "2026-07-16T12:00:00+00:00",
+        "price_channel",
+        "market_price_advanced",
+        ("event-retry",),
+    )
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda _wake: (wake,),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_ready", lambda _ids: False)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: pytest.fail("future retry floor must skip the reactor"),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: pytest.fail("deferred wake must remain durable"),
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert main._edli_last_reactor_wake_id is None
+
+
 def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None:
     import threading
 
