@@ -42,7 +42,10 @@ from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 UTC = timezone.utc
 _LOG = logging.getLogger(__name__)
-_GLOBAL_AUCTION_PAYLOAD_REFS: dict[str, tuple[str, int, str]] = {}
+_GLOBAL_AUCTION_PAYLOAD_REFS: dict[
+    str,
+    tuple[str, int, str, str, tuple[tuple[str, ...], ...]],
+] = {}
 _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK = threading.Lock()
 _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS = frozenset(
     {
@@ -396,6 +399,42 @@ def _book_native_side_receipt(
     }
 
 
+def _book_native_side_delta_receipt(
+    *,
+    base_rows: Sequence[tuple[str, ...]],
+    current_rows: Sequence[tuple[str, ...]],
+) -> dict[str, object]:
+    """Encode one complete current side-state cut as a delta from a full receipt."""
+
+    key_size = 5
+    base = {tuple(row[:key_size]): tuple(row) for row in base_rows}
+    current = {tuple(row[:key_size]): tuple(row) for row in current_rows}
+    if len(base) != len(base_rows) or len(current) != len(current_rows):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_DELTA_KEY_DUPLICATE")
+    payload = {
+        "fields": list(_BOOK_NATIVE_SIDE_STATE_FIELDS),
+        "key_field_count": key_size,
+        "removed_keys": sorted(key for key in base if key not in current),
+        "upsert_rows": sorted(
+            row for key, row in current.items() if base.get(key) != row
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "book_native_side_delta_encoding": "zlib+base64+canonical-json-v1",
+        "book_native_side_delta_sha256": hashlib.sha256(encoded).hexdigest(),
+        "book_native_side_delta_zlib_b64": base64.b64encode(
+            zlib.compress(encoded, level=9)
+        ).decode("ascii"),
+        "book_native_side_delta_removed_count": len(payload["removed_keys"]),
+        "book_native_side_delta_upsert_count": len(payload["upsert_rows"]),
+    }
+
+
 def _decision_log_connection_key(conn: sqlite3.Connection) -> str:
     try:
         rows = conn.execute("PRAGMA database_list").fetchall()
@@ -432,16 +471,38 @@ def _global_auction_payload_identity(receipt: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _global_auction_decision_payload_identity(
+    receipt: Mapping[str, object],
+) -> str:
+    payload = {
+        "candidate_evaluations": (
+            receipt.get("candidate_evaluation_encoding"),
+            receipt.get("candidate_evaluations_sha256"),
+        ),
+        "buy_sizing_rejections": (
+            receipt.get("buy_sizing_rejection_encoding"),
+            receipt.get("buy_sizing_rejections_sha256"),
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _stored_global_auction_payload_ref(
     conn: sqlite3.Connection,
     *,
     connection_key: str,
-    payload_identity: str,
-) -> tuple[int, str] | None:
+    decision_payload_identity: str,
+) -> tuple[int, str, str, tuple[tuple[str, ...], ...]] | None:
     ref = _GLOBAL_AUCTION_PAYLOAD_REFS.get(connection_key)
-    if ref is None or ref[0] != payload_identity:
+    if ref is None or ref[0] != decision_payload_identity:
         return None
-    row_id, receipt_hash = ref[1], ref[2]
+    row_id, receipt_hash, book_hash, book_rows = ref[1:]
     row = conn.execute(
         """
         SELECT 1
@@ -451,7 +512,7 @@ def _stored_global_auction_payload_ref(
         """,
         (row_id,),
     ).fetchone()
-    return (row_id, receipt_hash) if row is not None else None
+    return (row_id, receipt_hash, book_hash, book_rows) if row is not None else None
 
 
 def _store_global_auction_receipt(
@@ -810,30 +871,75 @@ def _store_global_auction_receipt(
     ).encode("utf-8")
     receipt["receipt_hash"] = hashlib.sha256(encoded).hexdigest()
     payload_identity = _global_auction_payload_identity(receipt)
+    decision_payload_identity = _global_auction_decision_payload_identity(receipt)
+    current_book_rows = (
+        tuple(
+            sorted(
+                tuple(str(value) for value in row)
+                for row in book_asset_states
+            )
+        )
+        if book_capture_complete
+        else ()
+    )
     connection_key = _decision_log_connection_key(conn)
     with _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK:
         payload_ref = (
             _stored_global_auction_payload_ref(
                 conn,
                 connection_key=connection_key,
-                payload_identity=payload_identity,
+                decision_payload_identity=decision_payload_identity,
             )
             if winner is None
             else None
         )
         if payload_ref is not None:
-            reference_row_id, reference_receipt_hash = payload_ref
+            (
+                reference_row_id,
+                reference_receipt_hash,
+                reference_book_hash,
+                reference_book_rows,
+            ) = payload_ref
             compact_receipt = {
                 key: value
                 for key, value in receipt.items()
                 if key not in _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
             }
+            reference_fields = [
+                "buy_sizing_rejections_zlib_b64",
+                "candidate_evaluations_zlib_b64",
+            ]
+            book_delta_bytes = 0
+            if receipt["book_native_side_states_sha256"] == reference_book_hash:
+                reference_fields.append("book_native_side_states_zlib_b64")
+            else:
+                book_delta = _book_native_side_delta_receipt(
+                    base_rows=reference_book_rows,
+                    current_rows=current_book_rows,
+                )
+                delta_b64 = str(book_delta["book_native_side_delta_zlib_b64"])
+                full_book_b64 = str(receipt["book_native_side_states_zlib_b64"])
+                if len(delta_b64) < len(full_book_b64):
+                    compact_receipt.update(book_delta)
+                    compact_receipt.update(
+                        {
+                            "book_native_side_base_decision_log_id": reference_row_id,
+                            "book_native_side_base_receipt_hash": reference_receipt_hash,
+                            "book_native_side_base_states_sha256": reference_book_hash,
+                        }
+                    )
+                    book_delta_bytes = len(delta_b64)
+                else:
+                    compact_receipt["book_native_side_states_zlib_b64"] = full_book_b64
+                    book_delta_bytes = len(full_book_b64)
             compact_receipt.update(
                 {
                     "payload_compacted": True,
                     "payload_identity": payload_identity,
+                    "decision_payload_identity": decision_payload_identity,
                     "payload_reference_decision_log_id": reference_row_id,
                     "payload_reference_mode": "global_single_order_auction",
+                    "payload_reference_fields": sorted(reference_fields),
                     "payload_reference_receipt_hash": reference_receipt_hash,
                 }
             )
@@ -854,14 +960,15 @@ def _store_global_auction_receipt(
             saved_bytes = sum(
                 len(str(receipt.get(field) or ""))
                 for field in _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
-            )
+            ) - book_delta_bytes
             _LOG.info(
                 "global auction receipt payload reused: row_id=%s reference_row_id=%s "
-                "payload_identity=%s saved_json_bytes=%d",
+                "payload_identity=%s saved_json_bytes=%d book_delta=%s",
                 row_id,
                 reference_row_id,
                 payload_identity,
                 saved_bytes,
+                "book_native_side_delta_zlib_b64" in compact_receipt,
             )
             return row_id
 
@@ -879,9 +986,11 @@ def _store_global_auction_receipt(
         )
         if row_id is not None:
             _GLOBAL_AUCTION_PAYLOAD_REFS[connection_key] = (
-                payload_identity,
+                decision_payload_identity,
                 row_id,
                 str(receipt["receipt_hash"]),
+                str(receipt["book_native_side_states_sha256"]),
+                current_book_rows,
             )
     if row_id is None:
         raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")

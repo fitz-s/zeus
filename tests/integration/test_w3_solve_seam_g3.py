@@ -724,6 +724,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         *,
         suffix: str,
         current_selected: object = selected,
+        current_book_states: tuple[tuple[str, ...], ...] = book_states,
     ) -> int:
         row_id = global_batch_runtime._store_global_auction_receipt(
             conn,
@@ -737,7 +738,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
             probability_ineligible_by_family={},
             book_epoch_identity=f"book-{suffix}",
             book_asset_count=1,
-            book_asset_states=book_states,
+            book_asset_states=current_book_states,
             wealth_witness=SimpleNamespace(
                 witness_identity=f"wealth-{suffix}",
                 economic_identity="wealth-economics-current",
@@ -775,6 +776,61 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         assert field in full_summary
         assert field not in duplicate_summary
     assert len(rows[1]["artifact_json"]) < len(rows[0]["artifact_json"])
+
+    changed_book_states = (
+        (*book_states[0][:6], "book-new-yes", *book_states[0][7:]),
+        book_states[1],
+    )
+    delta_row_id = store(
+        suffix="book-changed",
+        current_book_states=changed_book_states,
+    )
+    delta_row = conn.execute(
+        "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+        (delta_row_id,),
+    ).fetchone()
+    delta_summary = json.loads(delta_row["artifact_json"])["summary"]
+    assert delta_row["mode"] == "global_single_order_auction_duplicate"
+    assert delta_summary["payload_reference_fields"] == [
+        "buy_sizing_rejections_zlib_b64",
+        "candidate_evaluations_zlib_b64",
+    ]
+    assert delta_summary["book_native_side_base_decision_log_id"] == full_row_id
+    assert delta_summary["book_native_side_delta_removed_count"] == 0
+    assert delta_summary["book_native_side_delta_upsert_count"] == 1
+    delta_json = zlib.decompress(
+        base64.b64decode(delta_summary["book_native_side_delta_zlib_b64"])
+    )
+    assert hashlib.sha256(delta_json).hexdigest() == (
+        delta_summary["book_native_side_delta_sha256"]
+    )
+    delta = json.loads(delta_json)
+    base_book_side_states = json.loads(
+        zlib.decompress(
+            base64.b64decode(full_summary["book_native_side_states_zlib_b64"])
+        )
+    )
+    reconstructed = {
+        tuple(row[:5]): row for row in base_book_side_states["rows"]
+    }
+    for key in delta["removed_keys"]:
+        reconstructed.pop(tuple(key))
+    for row in delta["upsert_rows"]:
+        reconstructed[tuple(row[:5])] = row
+    reconstructed_json = json.dumps(
+        {
+            "fields": list(global_batch_runtime._BOOK_NATIVE_SIDE_STATE_FIELDS),
+            "rows": sorted(reconstructed.values()),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert hashlib.sha256(reconstructed_json).hexdigest() == (
+        delta_summary["book_native_side_states_sha256"]
+    )
+    assert len(delta_summary["book_native_side_delta_zlib_b64"]) < len(
+        full_summary["book_native_side_states_zlib_b64"]
+    )
 
     winner = SimpleNamespace(
         decision=SimpleNamespace(
