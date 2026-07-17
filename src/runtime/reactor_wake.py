@@ -18,7 +18,12 @@ REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
 REACTOR_WAKE_SOCKET_SUFFIX = ".sock"
 REACTOR_URGENT_WAKE_SUFFIX = ".urgent"
-URGENT_WAKE_REASONS = frozenset({"day0_extreme_event_committed"})
+URGENT_WAKE_REASONS = frozenset(
+    {
+        "day0_extreme_event_committed",
+        "market_price_advanced",
+    }
+)
 
 
 @dataclass(frozen=True)

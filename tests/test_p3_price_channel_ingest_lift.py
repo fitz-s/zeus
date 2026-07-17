@@ -1,12 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-08 (R2 fix: caller-side no-regression invariants —
-#   the original lift left 3 test modules bound to src.main for the lifted producers)
+# Last reused or audited: 2026-07-17 (price-channel durable-event reactor wake)
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-07-08
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -817,9 +816,13 @@ def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
 def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypatch):
     from src.events import price_channel_redecision_router as router
     from src.ingest import price_channel_ingest
+    from src.runtime import reactor_wake
     from src.state import db
 
     order: list[str] = []
+
+    class Redecision:
+        event_id = "evt-price-1"
 
     class ReadConnection:
         def __init__(self, name: str) -> None:
@@ -845,7 +848,7 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
         assert [world.name, trade.name, forecasts.name] == ["world", "trade", "forecasts"]
         assert events == ["quote"]
         order.append("build")
-        return ["redecision"]
+        return [Redecision()]
 
     monkeypatch.setattr(router, "_edli_price_channel_redecision_events_for_events", build)
 
@@ -865,11 +868,17 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
     )
 
     def write(_conn, events):  # noqa: ANN001
-        assert events == ["redecision"]
+        assert len(events) == 1
+        assert events[0].event_id == "evt-price-1"
         order.append("write:redecision")
         return 1
 
     monkeypatch.setattr(router, "_edli_write_price_channel_redecision_events", write)
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: order.append(f"wake:{kwargs}"),
+    )
 
     router._edli_price_channel_redecision_sink()(["quote"])
 
@@ -885,7 +894,21 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
         "write:redecision",
         "commit:world",
         "exit:world-writer",
+        "wake:{'source': 'price_channel_redecision_router', "
+        "'reason': 'market_price_advanced', 'event_ids': ('evt-price-1',)}",
     ]
+
+
+def test_price_channel_redecision_wake_is_targeted_urgent_fast_path():
+    from src.events import reactor
+    from src.runtime.reactor_wake import URGENT_WAKE_REASONS
+
+    source = inspect.getsource(reactor.run_edli_event_reactor_cycle)
+
+    assert "market_price_advanced" in URGENT_WAKE_REASONS
+    assert 'producer_wake_reason == "market_price_advanced"' in source
+    assert "committed_event_wake" in source
+    assert "targeted_only=producer_fast_path and bool(targeted_event_ids)" in source
 
 
 def test_price_channel_redecision_sink_closes_partial_read_open(monkeypatch):

@@ -613,10 +613,24 @@ def _edli_price_channel_redecision_sink(_world_with_trades_conn=None, *, trade_s
             )
             world_write.commit()
         if emitted:
+            from src.runtime.reactor_wake import publish_reactor_wake
+
+            event_ids = tuple(
+                event_id
+                for event in events_to_emit
+                if (event_id := str(getattr(event, "event_id", "") or "").strip())
+            )
+            publish_reactor_wake(
+                source="price_channel_redecision_router",
+                reason="market_price_advanced",
+                event_ids=event_ids,
+            )
             logger.info(
-                "EDLI market-channel price trigger emitted redecision events=%d quote_events=%d",
+                "EDLI market-channel price trigger emitted redecision events=%d "
+                "quote_events=%d reactor_wake_events=%d",
                 emitted,
                 len(events),
+                len(event_ids),
             )
 
     return _sink

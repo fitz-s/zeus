@@ -5158,6 +5158,11 @@ def run_edli_event_reactor_cycle(
     committed_day0_wake = (
         producer_wake_reason == "day0_extreme_event_committed"
     )
+    committed_price_wake = (
+        producer_wake_reason == "market_price_advanced"
+        and bool(producer_wake_event_ids)
+    )
+    committed_event_wake = committed_day0_wake or committed_price_wake
     forecast_wake_family_order: list[tuple[str, str, str]] = []
     forecast_wake_families: set[tuple[str, str, str]] = set()
     for raw_family in producer_wake_families:
@@ -5175,7 +5180,7 @@ def run_edli_event_reactor_cycle(
         producer_wake_reason == "forecast_posterior_advanced"
         and bool(forecast_wake_families)
     )
-    producer_fast_path = committed_day0_wake or targeted_forecast_wake
+    producer_fast_path = committed_event_wake or targeted_forecast_wake
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return False
     if _defer_for_held_position_monitor("edli_event_reactor"):
@@ -5358,7 +5363,7 @@ def run_edli_event_reactor_cycle(
         _log_stage("pending_prune")
         _fsr_events = []
         if (
-            not committed_day0_wake
+            not committed_event_wake
             and edli_cfg.get("forecast_snapshot_trigger_enabled")
         ):
             try:
@@ -5419,7 +5424,7 @@ def run_edli_event_reactor_cycle(
         _emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
         _emit_acquired = (
             False
-            if committed_day0_wake
+            if committed_event_wake
             else _edli_acquire_mutex(_emit_mutex, timeout=_emit_lock_timeout_s)
         )
         if _emit_acquired:
@@ -5498,7 +5503,7 @@ def run_edli_event_reactor_cycle(
                 _log_stage("emit_commit")
             finally:
                 _emit_mutex.release()
-        elif not committed_day0_wake:
+        elif not committed_event_wake:
             _log.warning(
                 "EDLI reactor emit skipped: world write mutex unavailable after %.3fs; "
                 "draining already-queued candidates so heartbeat/monitor/redecision keep cadence.",
@@ -5507,10 +5512,12 @@ def run_edli_event_reactor_cycle(
             _log_stage("emit_lock_skipped")
         else:
             _log.info(
-                "EDLI reactor committed-Day0 wake: skipping forecast/day0 discovery "
-                "and draining the durable event immediately"
+                "EDLI reactor committed producer wake: reason=%s skipping "
+                "forecast/day0 discovery and draining %d durable events immediately",
+                producer_wake_reason,
+                len(targeted_event_ids),
             )
-            _log_stage("committed_day0_fast_path")
+            _log_stage("committed_event_fast_path")
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
         # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
         # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
