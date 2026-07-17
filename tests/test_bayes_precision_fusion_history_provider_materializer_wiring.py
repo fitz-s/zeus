@@ -224,14 +224,20 @@ def _seed_current_single_runs(conn, *, values, request=None, anchor_value=27.0):
         target_local_date=date.fromisoformat(target_date), tz_name="Europe/Paris",
     )
     all_vals = {"ecmwf_ifs": anchor_value, **values}
+    # Arrival guard (C1-AVAIL-CLOCK, fail-closed since 91c8f65f3): the served row's captured_at
+    # must be a REAL parseable possession stamp <= computed_at, or the capture excludes the
+    # model on missing availability evidence. The old placeholder 'cap' was unparseable and
+    # silently zeroed the extras set.
+    source_available_at = _dt(3).isoformat()
+    captured_at = _dt(3, 30).isoformat()
     for m, v in all_vals.items():
         conn.execute(
             """INSERT INTO raw_model_forecasts
                (model, city, target_date, metric, source_cycle_time, source_available_at,
                 captured_at, lead_days, forecast_value_c, endpoint, model_name, source_family)
-               VALUES (?, 'Paris', ?, 'high', ?, 'avail', 'cap', ?, ?, 'single_runs', ?,
+               VALUES (?, 'Paris', ?, 'high', ?, ?, ?, ?, ?, 'single_runs', ?,
                        'openmeteo_single_runs')""",
-            (m, target_date, cyc, lead, v, m),
+            (m, target_date, cyc, source_available_at, captured_at, lead, v, m),
         )
 
 
@@ -295,22 +301,28 @@ def test_real_provider_no_leak_future_rows_ignored(monkeypatch) -> None:
 # =====================================================================================
 def test_both_flags_off_byte_identical(monkeypatch) -> None:
     _disable_other_layers(monkeypatch)
-    # Build twice with both flags OFF (shipped default); seed history both times to prove it is
-    # inert on the money path.
+    # Build twice with both flags OFF; seed history both times to prove it is
+    # inert on the money path. 2026-07-17 repair: the LIVE settings.json now ships the
+    # fusion flag ON, so "OFF" must be pinned explicitly (the test's premise is the OFF
+    # posture, not whatever the operator's live config says).
+    monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_enabled", False)
+    monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", False)
+    # Flag-OFF is additionally non-live-eligible now (no fused-q carrier -> no row), so the
+    # byte-identity proof compares the canonical compute results (the same values a row
+    # would have carried).
     conn_a = _conn()
-    pid_a = mod._insert_posterior(conn_a, _request(), metric="high", anchor_id=1)
-    row_a = _row(conn_a, pid_a)
+    res_a = mod._compute_posterior_payload(conn_a, _request(), metric="high", anchor_id=1)
 
     conn_b = _conn()
     _seed_history(conn_b, decision=date(2026, 6, 7),
                   models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"])
-    pid_b = mod._insert_posterior(conn_b, _request(), metric="high", anchor_id=1)
-    row_b = _row(conn_b, pid_b)
+    res_b = mod._compute_posterior_payload(conn_b, _request(), metric="high", anchor_id=1)
 
-    assert row_a["q_json"] == row_b["q_json"]
-    assert row_a["posterior_identity_hash"] == row_b["posterior_identity_hash"]
-    assert row_a["posterior_config_hash"] == row_b["posterior_config_hash"]
-    assert "bayes_precision_fusion" not in json.loads(row_b["provenance_json"])
+    assert not res_a.live_eligible and not res_b.live_eligible
+    assert res_a.q == res_b.q
+    assert res_a.replacement_q_mode == res_b.replacement_q_mode
+    assert res_a.capture_status == res_b.capture_status
+    assert mod._insert_posterior(conn_a, _request(), metric="high", anchor_id=1) is None
 
 
 def test_capture_on_fusion_off_money_path_byte_identical(monkeypatch) -> None:
@@ -318,23 +330,25 @@ def test_capture_on_fusion_off_money_path_byte_identical(monkeypatch) -> None:
     + identity hash must equal the both-OFF baseline; raw_model_forecasts accrual is irrelevant to
     the money path (the override reads ONLY the fusion flag)."""
     _disable_other_layers(monkeypatch)
-    # Baseline: both OFF.
+    # Baseline: both OFF (pinned explicitly — the LIVE settings.json ships them ON, 2026-07-17).
+    monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_enabled", False)
+    monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", False)
+    # Fusion-OFF is non-live-eligible now (no fused-q carrier -> no row), so the proof
+    # compares the canonical compute results (same values a row would have carried).
     conn_base = _conn()
-    pid_base = mod._insert_posterior(conn_base, _request(), metric="high", anchor_id=1)
-    base = _row(conn_base, pid_base)
+    base = mod._compute_posterior_payload(conn_base, _request(), metric="high", anchor_id=1)
 
     # capture ON, fusion OFF + a fully-accrued history present on the conn.
     _enable_capture(monkeypatch)
     conn_cap = _conn()
     _seed_history(conn_cap, decision=date(2026, 6, 7),
                   models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"])
-    pid_cap = mod._insert_posterior(conn_cap, _request(), metric="high", anchor_id=1)
-    cap = _row(conn_cap, pid_cap)
+    cap = mod._compute_posterior_payload(conn_cap, _request(), metric="high", anchor_id=1)
 
-    assert cap["q_json"] == base["q_json"], "capture flag must not change the posterior (money path)"
-    assert cap["posterior_identity_hash"] == base["posterior_identity_hash"]
-    assert cap["posterior_config_hash"] == base["posterior_config_hash"]
-    assert "bayes_precision_fusion" not in json.loads(cap["provenance_json"])
+    assert cap.q == base.q, "capture flag must not change the posterior (money path)"
+    assert cap.replacement_q_mode == base.replacement_q_mode
+    assert cap.capture_status == base.capture_status
+    assert not cap.live_eligible and not base.live_eligible
 
 
 def test_provider_self_supplies_row_factory_tuple_conn_identical_history() -> None:

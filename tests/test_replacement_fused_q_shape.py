@@ -235,6 +235,9 @@ def test_flag_off_fused_shape_falls_to_fused_center_only_never_cold_aifs(monkeyp
     # but a fused CENTER present, the fallback q is the fused-center-only Normal (center=mu*, zero
     # AIFS pull) — NOT the cold 0.8-AIFS soft-anchor q. This REPLACES the old
     # "flag-off == byte-identical soft-anchor" assertion (the cold fallback is the thing being killed).
+    # 2026-07-17 repair: FUSED_CENTER_ONLY_NORMAL is no longer live-eligible, so no row is
+    # written; the antibody now inspects the canonical compute result directly (same values
+    # the historical row assertions read).
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _disable_fused_shape(monkeypatch)
@@ -242,20 +245,18 @@ def test_flag_off_fused_shape_falls_to_fused_center_only_never_cold_aifs(monkeyp
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
     _seed_history(conn, decision=date(2026, 6, 7), models=models)
     _seed_current_single_runs(conn, values=_live_values())
-    pid = _materialize(conn)
-    row = _row(conn, pid)
-    prov = json.loads(row["provenance_json"])
-    assert prov["q_shape"] == "fused_center_only_normal", (
+    result = mod._compute_posterior_payload(conn, _request(), metric="high", anchor_id=1)
+    assert result.replacement_q_mode == "FUSED_CENTER_ONLY_NORMAL", (
         "fused-shape flag OFF with a fused center must fall to the fused-center-only Normal, "
         "NEVER the cold AIFS soft-anchor q"
     )
-    assert prov["replacement_q_mode"] == "FUSED_CENTER_ONLY_NORMAL"
-    # The fused center still drives the q; predictive sigma recorded for shadow audit.
-    assert prov["bayes_precision_fusion"]["method"] in {"T2_BAYES", "EQUAL_WEIGHT"}
-    # Full Normal support: every bin strictly positive (no zero-coverage category), summing to 1.
-    q = json.loads(row["q_json"])
+    assert not result.live_eligible  # center-only Normal is not a tradeable carrier
+    # Full Normal support: every bin strictly positive (no zero-coverage category), summing
+    # to 1 — and SHAPED (not the uniform placeholder), i.e. the fused center drove the q.
+    q = result.q
     assert q and all(p > 0.0 for p in q.values())
     assert sum(q.values()) == pytest.approx(1.0, abs=1e-6)
+    assert max(q.values()) > min(q.values())
 
 
 def test_fused_shape_total_integrator_failure_never_cold_aifs(monkeypatch) -> None:
@@ -277,14 +278,12 @@ def test_fused_shape_total_integrator_failure_never_cold_aifs(monkeypatch) -> No
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
     _seed_history(conn, decision=date(2026, 6, 7), models=models)
     _seed_current_single_runs(conn, values=_live_values())
-    pid = _materialize(conn)
-    row = _row(conn, pid)
-    prov = json.loads(row["provenance_json"])
-    assert prov["q_shape"] != "aifs_member_votes_soft_anchor", (
-        "a total fused construction failure must NEVER serve the cold 0.8-AIFS soft-anchor q"
-    )
-    assert prov["q_shape"] == "uniform_placeholder_pending_fused"
-    q = json.loads(row["q_json"])
+    # 2026-07-17 repair: FUSED_Q_BUILD_FAILED is not live-eligible (no row is written), so the
+    # antibody inspects the canonical compute result directly.
+    result = mod._compute_posterior_payload(conn, _request(), metric="high", anchor_id=1)
+    assert result.replacement_q_mode == "FUSED_Q_BUILD_FAILED"
+    assert not result.live_eligible
+    q = result.q
     assert sum(q.values()) == pytest.approx(1.0, abs=1e-6)
     # Uniform: every bin equal mass (the honest max-entropy seed, not an AIFS-shaped distribution).
     _vals = list(q.values())
@@ -299,17 +298,14 @@ def test_fused_shape_total_integrator_failure_never_cold_aifs(monkeypatch) -> No
 
 
 def _materialize_no_aifs(conn):
-    """A materialization request with NO AIFS extraction (the drop-AIFS live posture)."""
-    import dataclasses
+    """A materialization request with NO AIFS extraction (the drop-AIFS live posture).
 
-    req = dataclasses.replace(
-        _request(),
-        aifs_extraction=None,
-        aifs_source_run_id=None,
-        aifs_source_available_at=None,
-        aifs_artifact_id=None,
-    )
-    return mod._insert_posterior(conn, req, metric="high", anchor_id=1)
+    2026-07-17 repair: the AIFS fields were deleted from
+    ``ReplacementForecastMaterializeRequest`` entirely (a1c2163e4 runtime unify), so the
+    plain ``_request()`` IS the no-AIFS request — ``dataclasses.replace`` with the removed
+    field names now raises TypeError.
+    """
+    return mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
 
 
 def test_no_aifs_extraction_still_materializes_fused_posterior(monkeypatch) -> None:
@@ -326,14 +322,13 @@ def test_no_aifs_extraction_still_materializes_fused_posterior(monkeypatch) -> N
     pid = _materialize_no_aifs(conn)
     row = _row(conn, pid)
     prov = json.loads(row["provenance_json"])
-    # The fused Normal materialized WITHOUT any AIFS extraction.
+    # The fused Normal materialized WITHOUT any AIFS extraction. (2026-07-17 repair: the
+    # aifs_* provenance keys were deleted with the request fields — their absence IS the
+    # drop-AIFS posture; assert none re-appeared.)
     assert prov["q_shape"] == "fused_normal_direct", (
         "fused-q path must materialize a posterior with NO AIFS extraction present"
     )
-    assert prov["aifs_present"] is False
-    assert prov["aifs_identity"] is None
-    assert prov["aifs_probabilities"] == {}
-    assert prov["aifs_member_count"] == 0
+    assert not any(k.startswith("aifs") for k in prov)
     q = json.loads(row["q_json"])
     assert q and all(p > 0.0 for p in q.values())
     assert sum(q.values()) == pytest.approx(1.0, abs=1e-6)
@@ -350,20 +345,17 @@ def test_no_aifs_fused_build_failure_falls_to_fused_center_only_never_cold_aifs(
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
     _seed_history(conn, decision=date(2026, 6, 7), models=models)
     _seed_current_single_runs(conn, values=_live_values())
-    pid = _materialize_no_aifs(conn)
-    row = _row(conn, pid)
-    prov = json.loads(row["provenance_json"])
-    assert prov["q_shape"] == "fused_center_only_normal"
-    assert prov["replacement_q_mode"] == "FUSED_CENTER_ONLY_NORMAL"
-    assert prov["aifs_present"] is False
-    # No AIFS member-vote bounds attach to a fused row: bounds stay NULL (non-tradeable, honest).
-    bounds = conn.execute(
-        "SELECT q_lcb_json, q_ucb_json FROM forecast_posteriors WHERE posterior_id = ?", (pid,)
-    ).fetchone()
-    assert bounds["q_lcb_json"] is None and bounds["q_ucb_json"] is None
-    q = json.loads(row["q_json"])
+    # 2026-07-17 repair: FUSED_CENTER_ONLY_NORMAL is not live-eligible (no row is written),
+    # so the antibody inspects the canonical compute result directly.
+    result = mod._compute_posterior_payload(conn, _request(), metric="high", anchor_id=1)
+    assert result.replacement_q_mode == "FUSED_CENTER_ONLY_NORMAL"
+    assert not result.live_eligible
+    # No member-vote bounds attach to this non-live carrier: bounds stay None (honest).
+    assert result.q_lcb_map is None and result.q_ucb_map is None
+    q = result.q
     assert q and all(p > 0.0 for p in q.values())
     assert sum(q.values()) == pytest.approx(1.0, abs=1e-6)
+    assert max(q.values()) > min(q.values())  # shaped by the fused center, not uniform
 
 
 def test_predictive_sigma_none_does_not_fabricate_spread_from_center_uncertainty(monkeypatch) -> None:
@@ -393,15 +385,15 @@ def test_predictive_sigma_none_does_not_fabricate_spread_from_center_uncertainty
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
     _seed_history(conn, decision=date(2026, 6, 7), models=models)
     _seed_current_single_runs(conn, values=_live_values())
-    pid = _materialize_no_aifs(conn)
-    row = _row(conn, pid)
-    prov = json.loads(row["provenance_json"])
-    assert prov["q_shape"] == "uniform_placeholder_pending_fused", (
-        "predictive_sigma None must NOT fabricate a fused-center Normal from center uncertainty"
-    )
-    assert prov["q_shape"] != "aifs_member_votes_soft_anchor"
-    assert prov["replacement_q_mode"] != "FUSED_CENTER_ONLY_NORMAL"
-    q = json.loads(row["q_json"])
+    # 2026-07-17 repair: a sigma-less override is not live-eligible (no row is written), so
+    # the antibody inspects the canonical compute result directly. The substantive claim is
+    # unchanged: the q must remain the honest UNIFORM seed — no Normal fabricated from
+    # anchor_sigma_c (center uncertainty), no cold soft-anchor shape.
+    result = mod._compute_posterior_payload(conn, _request(), metric="high", anchor_id=1)
+    assert not result.live_eligible
+    q = result.q
     assert sum(q.values()) == pytest.approx(1.0, abs=1e-6)
     _vals = list(q.values())
-    assert all(v == pytest.approx(_vals[0], abs=1e-9) for v in _vals)
+    assert all(v == pytest.approx(_vals[0], abs=1e-9) for v in _vals), (
+        "predictive_sigma None must NOT fabricate a fused-center Normal from center uncertainty"
+    )

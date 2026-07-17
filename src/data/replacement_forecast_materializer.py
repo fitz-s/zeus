@@ -1217,11 +1217,28 @@ class _CurrentEvidenceShape:
     shape_lag_hours: float
     translation_applied: bool
     ens_center_delta_raw_c: float
+    # Between-spread freshest-coherent-cohort provenance (consult v2 (b), 2026-07-17):
+    # populated ONLY when the ±3h cohort filter actually excluded a provider from the
+    # between term (None otherwise). None fields are DROPPED from as_payload so every
+    # pre-existing row's provenance payload stays byte-identical; they are NEVER part of
+    # the shape_hash identity dict (the cohort-filtered between value itself already
+    # distinguishes the shape).
+    between_cohort_models: tuple[str, ...] | None = None
+    between_cohort_excluded: tuple[str, ...] | None = None
 
     def as_payload(self) -> dict[str, object]:
         payload = asdict(self)
         payload.pop("members_c")
+        if payload.get("between_cohort_models") is None:
+            payload.pop("between_cohort_models", None)
+            payload.pop("between_cohort_excluded", None)
         return payload
+
+
+# Freshest-coherent-cohort window for the between term (consult v2 (b), 2026-07-17):
+# providers within this many hours of the freshest provider cycle count as simultaneous.
+# ±3h spans one 6h issuance cycle's half-width — models one full cycle behind are OUT.
+BETWEEN_COHORT_WINDOW_HOURS = 3.0
 
 
 def _current_evidence_shape_from_values(
@@ -1234,6 +1251,7 @@ def _current_evidence_shape_from_values(
     provider_weights: Mapping[str, float],
     center_c: float,
     carrier_cycle_time: str | datetime | None = None,
+    provider_cycles: Mapping[str, str] | None = None,
 ) -> _CurrentEvidenceShape:
     """Compose current ensemble and provider disagreement without a fitted floor.
 
@@ -1256,6 +1274,17 @@ def _current_evidence_shape_from_values(
     is kept as provenance-only ``ens_center_delta_raw_c``. Omitting
     ``carrier_cycle_time`` (legacy call sites) or passing the same cycle as
     ``source_cycle_time`` leaves today's same-cycle semantics untouched.
+
+    ``provider_cycles`` (freshest-coherent-cohort, consult v2 (b), 2026-07-17):
+    optional model -> served cycle ISO stamp. When supplied, the BETWEEN term is
+    computed only over providers whose cycle is within ``BETWEEN_COHORT_WINDOW_HOURS``
+    of the freshest provider cycle — cross-cycle displacement is staleness error
+    (already priced as v_m(lag) variance in the center weights), not simultaneous
+    model disagreement, and folding it into between would double-count it. The
+    CENTER and its weights are untouched (stale providers still enter the center,
+    downweighted, never excluded). FAIL-OPEN: ``provider_cycles`` absent, a
+    provider's cycle missing/unparseable, or a coherent cohort of fewer than 2
+    providers -> between over ALL providers, byte-identical to today.
     """
 
     raw_members = tuple(float(value) for value in members_c)
@@ -1308,8 +1337,52 @@ def _current_evidence_shape_from_values(
     within = math.sqrt(
         sum((value - member_mean) ** 2 for value in members) / len(members)
     )
+    # Freshest-coherent-cohort between (consult v2 (b)): simultaneous disagreement is
+    # only measurable among providers speaking from (near-)the-same cycle; a stale
+    # provider's displacement is issuance-lag error, already priced as v_m(lag) in the
+    # center weights. Cohort = providers within BETWEEN_COHORT_WINDOW_HOURS of the
+    # freshest parseable provider cycle; a provider with a missing/unparseable cycle is
+    # INCLUDED (fail-open: absent provenance never shrinks the evidence basis). Weights
+    # renormalized within the cohort so between stays a proper weighted spread. Fail-open
+    # to ALL providers when no cycle parses or the coherent cohort is < 2.
+    cohort = normalized
+    between_cohort_models: tuple[str, ...] | None = None
+    between_cohort_excluded: tuple[str, ...] | None = None
+    if provider_cycles is not None:
+        cycle_by_model: dict[str, datetime] = {}
+        for model, _value, _weight in normalized:
+            raw_cycle = provider_cycles.get(model)
+            if raw_cycle is None:
+                continue
+            try:
+                cycle_by_model[model] = _to_utc(
+                    str(raw_cycle), field_name="provider_cycle"
+                )
+            except Exception:
+                continue
+        if cycle_by_model:
+            freshest = max(cycle_by_model.values())
+            coherent = tuple(
+                (model, value, weight)
+                for model, value, weight in normalized
+                if model not in cycle_by_model
+                or (freshest - cycle_by_model[model]).total_seconds() / 3600.0
+                <= BETWEEN_COHORT_WINDOW_HOURS
+            )
+            if len(coherent) >= 2 and len(coherent) < len(normalized):
+                cohort_total = sum(weight for _, _, weight in coherent)
+                cohort = tuple(
+                    (model, value, weight / cohort_total)
+                    for model, value, weight in coherent
+                )
+                between_cohort_models = tuple(model for model, _, _ in coherent)
+                between_cohort_excluded = tuple(
+                    model
+                    for model, _, _ in normalized
+                    if model not in between_cohort_models
+                )
     between = math.sqrt(
-        sum(weight * (value - center) ** 2 for _, value, weight in normalized)
+        sum(weight * (value - center) ** 2 for _, value, weight in cohort)
     )
     # These members remain absolute settlement-bin evidence downstream.  Their
     # displacement from the served center is therefore current disagreement,
@@ -1377,6 +1450,13 @@ def _current_evidence_shape_from_values(
         shape_lag_hours=shape_lag_hours,
         translation_applied=translation_applied,
         ens_center_delta_raw_c=ens_center_delta_raw,
+        # Cohort provenance intentionally OUTSIDE the `identity` dict above: when the
+        # filter is inactive these are None (payload-dropped, shape_hash byte-identical
+        # for every existing row); when active, the filtered `between` value inside
+        # `identity` already changes the hash — stamping the model lists there too would
+        # be redundant identity churn.
+        between_cohort_models=between_cohort_models,
+        between_cohort_excluded=between_cohort_excluded,
     )
 
 
@@ -1388,8 +1468,14 @@ def _read_current_evidence_shape(
     provider_values_c: Mapping[str, float],
     provider_weights: Mapping[str, float],
     center_c: float,
+    provider_cycles: Mapping[str, str] | None = None,
 ) -> _CurrentEvidenceShape | None:
-    """Read the latest causal target-specific ECMWF ENS available at decision time."""
+    """Read the latest causal target-specific ECMWF ENS available at decision time.
+
+    ``provider_cycles`` (optional, fail-open): model -> served cycle ISO stamp,
+    threaded into the between-term freshest-coherent-cohort filter of
+    ``_current_evidence_shape_from_values``. Omitting it is byte-identical to today.
+    """
 
     try:
         decision_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
@@ -1464,6 +1550,7 @@ def _read_current_evidence_shape(
             provider_weights=provider_weights,
             center_c=center_c,
             carrier_cycle_time=carrier_cycle,
+            provider_cycles=provider_cycles,
         )
     except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
         return None
@@ -1917,6 +2004,55 @@ def _replacement_bayes_precision_fusion_override(
         if capture.anchor_z is not None:
             _raw_m2_and_n[_ANCHOR] = (capture.anchor_raw_m2_native, capture.anchor_raw_n_train)
             _z_by_model[_ANCHOR] = float(capture.anchor_z)
+        # FITTED STALENESS VARIANCE (consult v2 (b), 2026-07-17): a member whose CURRENT
+        # value is served from a cycle OLDER than the decision's selected cycle carries
+        # measured extra error variance v_m(cycle-lag) — fitted walk-forward per
+        # (model, metric, lead-bucket) by scripts/fit_model_staleness_variance.py. The lag
+        # is CYCLE-lag (selected cycle − served row's cycle), NOT capture-lag
+        # (ServedInstrumentValue.age_hours = captured_at − own cycle): the train_residuals
+        # that price this member were queried at the decision lead, i.e. they assume the
+        # selected cycle; a promptly-captured stale cycle has near-zero capture-lag but the
+        # full issuance lag of unpriced error. v is degC² (train residuals are degC even for
+        # F-cities — _serving_unit only scales the floor/shrink target), added to raw_m2
+        # BEFORE the EB shrink/floor so thin histories keep their prior damping. Stale
+        # members are DOWNWEIGHTED, never excluded (E4: exclusion measured +0.152C worse).
+        # FAIL-OPEN: artifact absent / model unknown / anchor / None-m2 member / any error
+        # -> v absent -> `_center_m2_and_n is _raw_m2_and_n` -> byte-identical weights.
+        # The anchor is excluded because its z is the request-cycle OM9 anchor value, not a
+        # served_current row — it has no cycle-lag by construction.
+        _staleness_v_by_model: dict[str, float] = {}
+        try:
+            from src.forecast.staleness_variance import v_for as _staleness_v_for  # noqa: PLC0415
+
+            _sel_cycle_dt = _to_utc(request.source_cycle_time, field_name="source_cycle_time")
+            for _m, (_rm2, _rn) in _raw_m2_and_n.items():
+                if _m == _ANCHOR or _rm2 is None:
+                    continue
+                _served = served_current.get(str(_m))
+                if _served is None:
+                    continue
+                try:
+                    _served_cycle_dt = _to_utc(
+                        str(_served.served_cycle), field_name="served_cycle"  # type: ignore[union-attr]
+                    )
+                    _lag_h = (_sel_cycle_dt - _served_cycle_dt).total_seconds() / 3600.0
+                except Exception:
+                    continue
+                _v = float(_staleness_v_for(str(_m), metric, _lag_h))
+                if math.isfinite(_v) and _v > 0.0:
+                    _staleness_v_by_model[str(_m)] = _v
+        except Exception:
+            _staleness_v_by_model = {}
+        _center_m2_and_n = _raw_m2_and_n
+        if _staleness_v_by_model:
+            _center_m2_and_n = {
+                _m: (
+                    (_rm2 + _staleness_v_by_model[_m], _rn)
+                    if _m in _staleness_v_by_model and _rm2 is not None
+                    else (_rm2, _rn)
+                )
+                for _m, (_rm2, _rn) in _raw_m2_and_n.items()
+            }
         # Serving unit (F-city vs C-city): read from the request bins (the degC residuals stored
         # in train_residuals are always in degC so the unit scaling only affects the floor/shrink
         # target — matching the spine's _u logic and the operator's f06d2176bc fix).
@@ -1936,7 +2072,7 @@ def _replacement_bayes_precision_fusion_override(
             request.city, list(_raw_m2_and_n.keys()), anchor_model=_ANCHOR
         )
         _weights, _mu_from_center = _raw_center(
-            _raw_m2_and_n, _z_by_model, unit=_serving_unit,
+            _center_m2_and_n, _z_by_model, unit=_serving_unit,
             repr_m2_by_model=_sigma_repr_by_model,
         )
         if _weights and _z_by_model:
@@ -1961,11 +2097,21 @@ def _replacement_bayes_precision_fusion_override(
                 "repr_m2": float(_sigma_repr_by_model.get(str(_m), 0.0)),
                 "weight": float(_weights.get(str(_m), 0.0)),
             }
+            # Fitted staleness variance provenance (degC², added to raw_m2 in the center
+            # denominator). Key present ONLY when the inflation actually fired for this
+            # model, so the basis payload and hash stay byte-identical whenever the
+            # artifact is absent or every member is cycle-fresh (fail-open invariant:
+            # posterior_config_hash consumes this hash and must not churn on a no-op).
+            if str(_m) in _staleness_v_by_model:
+                _precision_center_basis[str(_m)]["staleness_m2"] = float(
+                    _staleness_v_by_model[str(_m)]
+                )
         _precision_basis_hash = _json_hash(
             {
                 "unit": _serving_unit,
                 "basis": {
                     k: [v["raw_m2"], v["n"], v["repr_m2"], v["weight"]]
+                    + ([v["staleness_m2"]] if "staleness_m2" in v else [])
                     for k, v in sorted(_precision_center_basis.items())
                 },
             }
@@ -2137,6 +2283,14 @@ def _replacement_bayes_precision_fusion_override(
                             if model in _source_clock_used_models
                         },
                         center_c=float(_mu_diagonal),
+                        # Freshest-coherent-cohort between (consult v2 (b)): served
+                        # cycle stamps for the cohort filter. A model without a served
+                        # row (e.g. the anchor) is simply absent — fail-open included.
+                        provider_cycles={
+                            str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
+                            for _m in _source_clock_used_models
+                            if _m in served_current
+                        },
                     )
                     # The live source-clock route has one shape authority: current
                     # target-specific evidence.  A missing/invalid ENS carrier is
@@ -2188,6 +2342,13 @@ def _replacement_bayes_precision_fusion_override(
                         for model, weight in _weights.items()
                     },
                     center_c=float(_mu_diagonal),
+                    # Freshest-coherent-cohort between (consult v2 (b)); same fail-open
+                    # threading as the one-scheme branch above.
+                    provider_cycles={
+                        str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
+                        for _m in _source_clock_used_models
+                        if _m in served_current
+                    },
                 )
                 if _source_clock_current_shape is not None:
                     _source_clock_center_sigma_c = (
