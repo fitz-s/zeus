@@ -948,6 +948,19 @@ class GlobalBatchSubmitResult:
             raise ValueError("submitted receipt must be the one global winner")
 
 
+@dataclass(frozen=True)
+class _PreSubmitCheck:
+    disposition: str | None
+    should_submit: bool
+    reject_stage: str | None = None
+    reject_reason: str | None = None
+    dead_letter_stage: str | None = None
+    dead_letter_error: str | None = None
+    transient_reason: str | None = None
+    substrate_block_kind: str | None = None
+    log_family: bool = False
+
+
 class OpportunityEventReactor:
     def __init__(
         self,
@@ -1489,8 +1502,9 @@ class OpportunityEventReactor:
         ``claim()``) across that I/O serialized every world write behind slow
         network calls → WAL lock starvation. The contract on ``world_write_lock`` /
         ``world_write_mutex`` (db.py) is explicit: NEVER hold across HTTP. We honour
-        it by committing the pre-submit world write unit (claim + gate/reject
-        writes) and releasing the mutex BEFORE the network submit, running
+        it by evaluating read-only gates before taking the writer, committing
+        the pre-submit world write unit (claim + verdict writes), and releasing
+        the mutex BEFORE the network submit, running
         ``self._submit`` with NO mutex and NO open world txn, then re-acquiring the
         mutex for a SECOND world write unit (post-submit ledger writes + mark).
 
@@ -1498,7 +1512,25 @@ class OpportunityEventReactor:
         between windows (and between events) and the ingestor gets frequent write
         windows. ``fetch_pending`` (a read) stays OUTSIDE the lock.
         """
-        # ---- Window A: pre-submit world write unit (claim + gates) under mutex ----
+        # Read-only gates run before Window A. They can touch large SQLite truth
+        # surfaces, so holding the single world writer while evaluating them would
+        # block observation/event producers without protecting any mutation.
+        pre_submit_error: Exception | None = None
+        pre_submit_check: _PreSubmitCheck | None = None
+        try:
+            pre_submit_check = self._check_one_pre_submit(
+                event,
+                decision_time=decision_time,
+                global_batch=defer_submit,
+            )
+        except Exception as exc:
+            if _is_sqlite_lock_error(exc):
+                result.rejection_reasons.append(_PRE_SUBMIT_WORLD_WRITE_LOCK_RETRY)
+                result.retried += 1
+                return
+            pre_submit_error = exc
+
+        # ---- Window A: atomic claim + verdict persistence under mutex ----
         # Every event contends on the same writer. After one full wait expires,
         # later events probe without waiting until one succeeds; that success ends
         # the contention episode and restores the normal wait for the next event.
@@ -1578,11 +1610,20 @@ class OpportunityEventReactor:
                 return
             try:
                 self._store.conn.execute("SAVEPOINT edli_reactor_event")
-                pre_disposition, should_submit = self._process_one_pre_submit(
+                if pre_submit_error is not None:
+                    self._dead_letter_unknown(
+                        event,
+                        pre_submit_error,
+                        decision_time=decision_time,
+                        result=result,
+                    )
+                    return
+                assert pre_submit_check is not None
+                pre_disposition, should_submit = self._apply_pre_submit_check(
                     event,
+                    pre_submit_check,
                     decision_time=decision_time,
                     result=result,
-                    global_batch=defer_submit,
                 )
                 if not should_submit:
                     self._finalize_disposition(
@@ -2533,28 +2574,15 @@ class OpportunityEventReactor:
                 "belief cache write failed (fail-soft)", exc_info=True
             )
 
-    def _process_one_pre_submit(
+    def _check_one_pre_submit(
         self,
         event: OpportunityEvent,
         *,
         decision_time: datetime,
-        result: ReactorResult,
         global_batch: bool = False,
-    ) -> tuple[str | None, bool]:
-        """Pre-submit gate phase (#95 SEV-2.1).
+    ) -> _PreSubmitCheck:
+        """Evaluate read-only gates before acquiring the world writer."""
 
-        Runs every gate that does NOT require the network submit. Returns
-        ``(disposition, should_submit)``:
-          * ``should_submit is True`` (disposition ``None``) → all gates passed;
-            the caller commits the pre-submit world write unit, releases the
-            mutex, and invokes the (network) submit OUTSIDE the lock.
-          * ``should_submit is False`` → terminal/retry; ``disposition`` is one of
-            ``None`` (a gate reject, its ledgers already written here),
-            ``_FSR_PARTIAL_DEAD_LETTER`` or ``_EXECUTABLE_SNAPSHOT_RETRY``.
-
-        Any world-DB ledger write here happens inside Window A (mutex held,
-        savepoint open) — none of these paths touch the network.
-        """
         assert_available_for_decision(event, decision_time)
         # DELETED 2026-06-12 (gate inventory D2): market-channel event types
         # stopped reaching this queue 2026-06-06 (upstream routing); the
@@ -2603,24 +2631,35 @@ class OpportunityEventReactor:
                     f"source_run_completeness_status={src_completeness!r} not in "
                     "{'COMPLETE', 'PARTIAL'}; dead-lettering"
                 )
-                self._reject_event(event, "SOURCE_TRUTH", "FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE", result, decision_time=decision_time)
-                self._store.mark_dead_letter(
-                    event,
-                    failure_stage="FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
-                    error_message=error_msg,
-                    created_at=decision_time.astimezone(UTC).isoformat(),
+                return _PreSubmitCheck(
+                    disposition=_FSR_PARTIAL_DEAD_LETTER,
+                    should_submit=False,
+                    reject_stage="SOURCE_TRUTH",
+                    reject_reason="FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
+                    dead_letter_stage="FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
+                    dead_letter_error=error_msg,
                 )
-                result.dead_lettered += 1
-                return _FSR_PARTIAL_DEAD_LETTER, False
         if self._config.reactor_mode not in EDLI_PROCESSING_REACTOR_MODES:
-            self._reject_event(event, "LIVE_CAP", "REACTOR_NOT_LIVE", result, decision_time=decision_time)
-            return None, False
+            return _PreSubmitCheck(
+                disposition=None,
+                should_submit=False,
+                reject_stage="LIVE_CAP",
+                reject_reason="REACTOR_NOT_LIVE",
+            )
         if event.event_type == "DAY0_EXTREME_UPDATED" and not _day0_hard_fact_payload_live_eligible(event):
-            self._reject_event(event, "SOURCE_TRUTH", "DAY0_HARD_FACT_AUTHORITY_BLOCKED", result, decision_time=decision_time)
-            return None, False
+            return _PreSubmitCheck(
+                disposition=None,
+                should_submit=False,
+                reject_stage="SOURCE_TRUTH",
+                reject_reason="DAY0_HARD_FACT_AUTHORITY_BLOCKED",
+            )
         if not self._source_truth_gate(event):
-            self._reject_event(event, "SOURCE_TRUTH", "SOURCE_TRUTH_BLOCKED", result, decision_time=decision_time)
-            return None, False
+            return _PreSubmitCheck(
+                disposition=None,
+                should_submit=False,
+                reject_stage="SOURCE_TRUTH",
+                reject_reason="SOURCE_TRUTH_BLOCKED",
+            )
         if (
             not global_batch
             and not self._executable_snapshot_gate(event, decision_time.astimezone(UTC))
@@ -2635,10 +2674,12 @@ class OpportunityEventReactor:
             # the NEXT cycle finds the substrate fresh and the event PROCESSES instead of spinning
             # against the gate until horizon. This is the fix for "an event blocked AT the reactor
             # gate never reaches the refresher" — the refresher is now reached for exactly it.
-            self._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
-            self._record_substrate_block(event, kind="snapshot")
-            return _EXECUTABLE_SNAPSHOT_RETRY, False
-        self._log_family_once(event)
+            return _PreSubmitCheck(
+                disposition=_EXECUTABLE_SNAPSHOT_RETRY,
+                should_submit=False,
+                transient_reason="EXECUTABLE_SNAPSHOT_BLOCKED",
+                substrate_block_kind="snapshot",
+            )
         if not self._riskguard_gate(event):
             # TRANSIENT REQUEUE, never terminal consumption (2026-06-12
             # riskguard-storm incident): the gate fails closed to RED on a
@@ -2651,9 +2692,51 @@ class OpportunityEventReactor:
             # submits while blocked (the gate is not weakened), and a sustained
             # genuine halt terminalizes only when an event horizon fires, carrying
             # the honest RISK_GUARD_BLOCKED cause.
-            self._transient_requeue_reasons[event.event_id] = "RISK_GUARD_BLOCKED"
-            return _EXECUTABLE_SNAPSHOT_RETRY, False
-        return None, True
+            return _PreSubmitCheck(
+                disposition=_EXECUTABLE_SNAPSHOT_RETRY,
+                should_submit=False,
+                transient_reason="RISK_GUARD_BLOCKED",
+                log_family=True,
+            )
+        return _PreSubmitCheck(
+            disposition=None,
+            should_submit=True,
+            log_family=True,
+        )
+
+    def _apply_pre_submit_check(
+        self,
+        event: OpportunityEvent,
+        check: _PreSubmitCheck,
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+    ) -> tuple[str | None, bool]:
+        """Persist a pre-submit verdict inside the short claimed write unit."""
+
+        if check.log_family:
+            self._log_family_once(event)
+        if check.transient_reason is not None:
+            self._transient_requeue_reasons[event.event_id] = check.transient_reason
+        if check.substrate_block_kind is not None:
+            self._record_substrate_block(event, kind=check.substrate_block_kind)
+        if check.reject_stage is not None and check.reject_reason is not None:
+            self._reject_event(
+                event,
+                check.reject_stage,
+                check.reject_reason,
+                result,
+                decision_time=decision_time,
+            )
+        if check.dead_letter_stage is not None:
+            self._store.mark_dead_letter(
+                event,
+                failure_stage=check.dead_letter_stage,
+                error_message=str(check.dead_letter_error or ""),
+                created_at=decision_time.astimezone(UTC).isoformat(),
+            )
+            result.dead_lettered += 1
+        return check.disposition, check.should_submit
 
     def _process_one_post_submit(
         self,

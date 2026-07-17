@@ -1860,6 +1860,41 @@ def test_sqlite_lock_during_pre_submit_gate_is_retryable_not_dead_lettered():
     assert _processing_status(conn, event.event_id) == "pending"
 
 
+def test_read_only_pre_submit_gates_run_without_world_writer():
+    from src.state.db import world_mutex_is_held
+
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    lock_states: list[tuple[str, bool]] = []
+
+    def _gate(name):
+        def _check(*_args):
+            lock_states.append((name, world_mutex_is_held()))
+            return True
+
+        return _check
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=_gate("source"),
+        executable_snapshot_gate=_gate("snapshot"),
+        riskguard_gate=_gate("risk"),
+        final_intent_submit=lambda _event, _decision_time: None,
+        reject=lambda *_args: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    assert lock_states == [
+        ("source", False),
+        ("snapshot", False),
+        ("risk", False),
+    ]
+
+
 def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
     """Stale JIT price failures may return before the adapter can build a bound final intent."""
     payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)

@@ -460,7 +460,8 @@ def test_successful_claim_probe_restores_normal_wait(monkeypatch):
     monkeypatch.setattr("src.events.reactor.world_write_mutex", lambda: mutex)
     reactor = object.__new__(OpportunityEventReactor)
     reactor._store = _Store()
-    reactor._process_one_pre_submit = lambda *_args, **_kwargs: (None, False)
+    reactor._check_one_pre_submit = lambda *_args, **_kwargs: object()
+    reactor._apply_pre_submit_check = lambda *_args, **_kwargs: (None, False)
     reactor._finalize_disposition = lambda *_args, **_kwargs: None
     result = ReactorResult()
 
