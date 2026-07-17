@@ -5593,16 +5593,33 @@ def run_edli_event_reactor_cycle(
             else _prune_mutex.acquire(timeout=_prune_lock_timeout_s)
         )
         if _prune_acquired:
+            _prune_lease_held = True
+
+            def _yield_prune_write_lease() -> bool:
+                nonlocal _prune_lease_held
+                conn.commit()
+                _prune_mutex.release()
+                _prune_lease_held = False
+                # Cross-process writers poll the flock every 10ms. Yield one poll
+                # quantum so a fresh ingest fact already waiting on this maintenance
+                # lease gets the writer before the next prune step.
+                time.sleep(0.01)
+                _prune_lease_held = _prune_mutex.acquire(timeout=0.0)
+                return _prune_lease_held
+
             try:
                 _edli_prune_pending_working_set(
                     store,
                     decision_time=now,
                     day0_family_admission=_day0_family_admission,
                     urgent_wake_pending=_urgent_wake_pending,
+                    yield_write_lease=_yield_prune_write_lease,
                 )
-                conn.commit()
+                if _prune_lease_held:
+                    conn.commit()
             finally:
-                _prune_mutex.release()
+                if _prune_lease_held:
+                    _prune_mutex.release()
         elif not producer_fast_path:
             _log.warning(
                 "EDLI reactor prune skipped: world write mutex unavailable after %.3fs; "
@@ -6532,6 +6549,8 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
 _EDLI_DAY0_PAUSE_RECOVERY_PENDING: bool | None = None
+_EDLI_STATIC_CLOSE_RECOVERY_PENDING = True
+_EDLI_SNAPSHOT_DEADLINE_RECOVERY_PENDING = True
 
 
 def _edli_note_day0_pause_rejection(event_type: str, reason: str) -> None:
@@ -6550,6 +6569,7 @@ def _edli_prune_pending_working_set(
     decision_time: datetime,
     day0_family_admission: _Day0LiveFamilyAdmission | None = None,
     urgent_wake_pending: Callable[[], bool] | None = None,
+    yield_write_lease: Callable[[], bool] | None = None,
 ) -> None:
     """Prune stale/superseded rows before snapshotting the redecision skip set.
 
@@ -6570,6 +6590,8 @@ def _edli_prune_pending_working_set(
     _log = _logging.getLogger("zeus.events.reactor")
 
     global _EDLI_DAY0_PAUSE_RECOVERY_PENDING, _EDLI_LAST_PRUNE_MONOTONIC
+    global _EDLI_SNAPSHOT_DEADLINE_RECOVERY_PENDING
+    global _EDLI_STATIC_CLOSE_RECOVERY_PENDING
     edli_cfg = _settings_section("edli", {})
     # ANTIBODY (2026-06-08, operator directive): the working-set prune is NON-OPTIONAL.
     # It is the ONLY drain of the pending opportunity_event_processing set (archive_expired_
@@ -6593,6 +6615,7 @@ def _edli_prune_pending_working_set(
     budget_s = _edli_prune_budget_seconds(edli_cfg)
     prune_started = time.monotonic()
     saved_busy_timeout_ms: int | None = None
+    lease_available = True
 
     try:
         row = store.conn.execute("PRAGMA busy_timeout").fetchone()
@@ -6602,10 +6625,13 @@ def _edli_prune_pending_working_set(
         saved_busy_timeout_ms = None
 
     def _log_prune_step(step: str, started: float, count: int | None = None) -> None:
+        nonlocal lease_available
         elapsed = time.monotonic() - started
         if elapsed >= 1.0:
             count_suffix = "" if count is None else f" count={count}"
             _log.info("EDLI reactor prune step completed: %s elapsed_s=%.3f%s", step, elapsed, count_suffix)
+        if yield_write_lease is not None:
+            lease_available = yield_write_lease()
 
     def _restore_busy_timeout() -> None:
         nonlocal saved_busy_timeout_ms
@@ -6625,11 +6651,21 @@ def _edli_prune_pending_working_set(
     )
 
     def _budget_exhausted(next_step: str) -> bool:
+        if not lease_available:
+            _log.info(
+                "EDLI reactor prune yielded world writer before %s; "
+                "deferring maintenance behind the waiting writer",
+                next_step,
+            )
+            _edli_clear_sqlite_progress_handler(store.conn)
+            _restore_busy_timeout()
+            return True
         if urgent_wake_pending is not None and urgent_wake_pending():
             _log.info(
                 "EDLI reactor prune preempted before %s by urgent producer wake",
                 next_step,
             )
+            _edli_clear_sqlite_progress_handler(store.conn)
             _restore_busy_timeout()
             return True
         if budget_s <= 0:
@@ -6644,6 +6680,7 @@ def _edli_prune_pending_working_set(
             elapsed,
             budget_s,
         )
+        _edli_clear_sqlite_progress_handler(store.conn)
         _restore_busy_timeout()
         return True
 
@@ -6762,10 +6799,19 @@ def _edli_prune_pending_working_set(
         if _budget_exhausted("requeue_false_static_venue_close_day0_dead_letters"):
             return
         _step_started = time.monotonic()
-        _static_close_recovered = store.requeue_false_static_venue_close_day0_dead_letters(
-            decision_time=decision_time.isoformat(),
-            batch_limit=min(batch_limit, 1000),
-        )
+        _static_close_recovered = 0
+        if _EDLI_STATIC_CLOSE_RECOVERY_PENDING:
+            _recovery_limit = min(batch_limit, 1000)
+            _static_close_recovered = store.requeue_false_static_venue_close_day0_dead_letters(
+                decision_time=decision_time.isoformat(),
+                batch_limit=_recovery_limit,
+            )
+            # Current code cannot create this retired failure signature. Drain a
+            # possible inherited batch after process start, then stop rescanning it
+            # every minute unless a full batch proves more repair debt remains.
+            _EDLI_STATIC_CLOSE_RECOVERY_PENDING = (
+                _static_close_recovered >= _recovery_limit
+            )
         _log_prune_step(
             "requeue_false_static_venue_close_day0_dead_letters",
             _step_started,
@@ -6788,12 +6834,18 @@ def _edli_prune_pending_working_set(
         if _budget_exhausted("requeue_false_executable_snapshot_deadline_day0_dead_letters"):
             return
         _step_started = time.monotonic()
-        _snapshot_deadline_recovered = (
-            store.requeue_false_executable_snapshot_deadline_day0_dead_letters(
-                decision_time=decision_time.isoformat(),
-                batch_limit=min(batch_limit, 1000),
+        _snapshot_deadline_recovered = 0
+        if _EDLI_SNAPSHOT_DEADLINE_RECOVERY_PENDING:
+            _recovery_limit = min(batch_limit, 1000)
+            _snapshot_deadline_recovered = (
+                store.requeue_false_executable_snapshot_deadline_day0_dead_letters(
+                    decision_time=decision_time.isoformat(),
+                    batch_limit=_recovery_limit,
+                )
             )
-        )
+            _EDLI_SNAPSHOT_DEADLINE_RECOVERY_PENDING = (
+                _snapshot_deadline_recovered >= _recovery_limit
+            )
         _log_prune_step(
             "requeue_false_executable_snapshot_deadline_day0_dead_letters",
             _step_started,

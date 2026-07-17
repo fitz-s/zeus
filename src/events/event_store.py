@@ -2556,27 +2556,40 @@ class EventStore:
         # dead-letter rows every prune cycle.
         active_target_floor = (decision_time_utc.date() - timedelta(days=1)).isoformat()
         limit = max(1, min(int(batch_limit or 500), 5000))
-        rows = self.conn.execute(
+        dead_letter_rows = self.conn.execute(
             """
-            SELECT e.event_id,
-                   json_extract(e.payload_json, '$.city') AS city,
-                   json_extract(e.payload_json, '$.target_date') AS target_date
+            SELECT p.event_id
               FROM opportunity_event_processing p
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-              JOIN event_dead_letters d
-                ON d.consumer_name = p.consumer_name
-               AND d.event_id = p.event_id
+                   INDEXED BY idx_opportunity_event_processing_status
+              CROSS JOIN event_dead_letters d
              WHERE p.consumer_name = ?
                AND p.processing_status = 'dead_letter'
-               AND e.event_type = 'DAY0_EXTREME_UPDATED'
-               AND json_extract(e.payload_json, '$.target_date') >= ?
+               AND d.consumer_name = p.consumer_name
+               AND d.event_id = p.event_id
                AND d.failure_stage = 'MONEY_PATH_HORIZON_EXPIRED'
                AND d.error_message LIKE '%MARKET_VENUE_CLOSED%'
                AND d.error_message LIKE '%F1 12:00-UTC close%'
+             ORDER BY d.created_at DESC
              LIMIT ?
             """,
-            (self.consumer_name, active_target_floor, limit),
+            (self.consumer_name, limit),
+        ).fetchall()
+        dead_letter_ids = [str(row[0] or "") for row in dead_letter_rows if row[0]]
+        if not dead_letter_ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in dead_letter_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT event_id,
+                   json_extract(payload_json, '$.city') AS city,
+                   json_extract(payload_json, '$.target_date') AS target_date
+              FROM opportunity_events
+             WHERE event_id IN ({placeholders})
+               AND event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(payload_json, '$.target_date') >= ?
+            """,
+            (*dead_letter_ids, active_target_floor),
         ).fetchall()
 
         recover: list[str] = []

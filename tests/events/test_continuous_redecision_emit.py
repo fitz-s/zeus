@@ -2370,6 +2370,9 @@ def test_reactor_prune_scans_day0_pause_recovery_only_when_pending(monkeypatch):
     store = EventStore(world)
     calls = []
     original = store.requeue_processed_day0_entries_paused
+    legacy_calls = {"static": 0, "snapshot": 0}
+    original_static = store.requeue_false_static_venue_close_day0_dead_letters
+    original_snapshot = store.requeue_false_executable_snapshot_deadline_day0_dead_letters
 
     monkeypatch.setattr(
         main,
@@ -2388,6 +2391,8 @@ def test_reactor_prune_scans_day0_pause_recovery_only_when_pending(monkeypatch):
     )
     monkeypatch.setattr(reactor, "_EDLI_LAST_PRUNE_MONOTONIC", None)
     monkeypatch.setattr(reactor, "_EDLI_DAY0_PAUSE_RECOVERY_PENDING", None)
+    monkeypatch.setattr(reactor, "_EDLI_STATIC_CLOSE_RECOVERY_PENDING", True)
+    monkeypatch.setattr(reactor, "_EDLI_SNAPSHOT_DEADLINE_RECOVERY_PENDING", True)
 
     def counted_recovery(**kwargs):
         calls.append(kwargs)
@@ -2397,6 +2402,25 @@ def test_reactor_prune_scans_day0_pause_recovery_only_when_pending(monkeypatch):
         store,
         "requeue_processed_day0_entries_paused",
         counted_recovery,
+    )
+
+    def counted_static(**kwargs):
+        legacy_calls["static"] += 1
+        return original_static(**kwargs)
+
+    def counted_snapshot(**kwargs):
+        legacy_calls["snapshot"] += 1
+        return original_snapshot(**kwargs)
+
+    monkeypatch.setattr(
+        store,
+        "requeue_false_static_venue_close_day0_dead_letters",
+        counted_static,
+    )
+    monkeypatch.setattr(
+        store,
+        "requeue_false_executable_snapshot_deadline_day0_dead_letters",
+        counted_snapshot,
     )
     decision_time = datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc)
 
@@ -2411,10 +2435,46 @@ def test_reactor_prune_scans_day0_pause_recovery_only_when_pending(monkeypatch):
     reactor._edli_prune_pending_working_set(store, decision_time=decision_time)
     reactor._edli_prune_pending_working_set(store, decision_time=decision_time)
     assert len(calls) == 2
+    assert legacy_calls == {"static": 1, "snapshot": 1}
 
 
-def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
-    """Maintenance prune may skip remaining work, but must not poison later claim waits."""
+def test_reactor_prune_yields_writer_lease_between_steps(monkeypatch):
+    """Waiting ingest writers preempt maintenance at the first step boundary."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda name, default=None: {
+            "reactor_prune_interval_seconds": 0,
+            "reactor_prune_batch_limit": 10,
+            "reactor_prune_budget_seconds": 30,
+        }
+        if name == "edli"
+        else (default if default is not None else {}),
+    )
+    monkeypatch.setattr(store, "archive_orphan_processing_rows", lambda *, batch_limit: 0)
+    monkeypatch.setattr(
+        store,
+        "archive_expired_candidates",
+        lambda **_kwargs: pytest.fail("lost maintenance lease must stop later steps"),
+    )
+    yields = []
+
+    reactor._edli_prune_pending_working_set(
+        store,
+        decision_time=datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
+        yield_write_lease=lambda: yields.append(True) or False,
+    )
+
+    assert yields == [True]
+
+
+def test_reactor_prune_budget_exhaustion_restores_sqlite_controls(monkeypatch):
+    """Maintenance prune may stop, but must not poison later DB work."""
 
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
@@ -2452,6 +2512,16 @@ def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
     )
 
     assert world.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    assert world.execute(
+        """
+        WITH RECURSIVE x(n) AS (
+            SELECT 1
+            UNION ALL
+            SELECT n + 1 FROM x WHERE n < 1000
+        )
+        SELECT SUM(n) FROM x
+        """
+    ).fetchone()[0] == 500500
 
 
 def test_sqlite_deadline_interrupts_and_clears():
