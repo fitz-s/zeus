@@ -3823,7 +3823,7 @@ def _edli_reactor_wake_poll_once() -> bool:
             or _edli_redecision_screen_lock.locked()
         ):
             return False
-        _edli_continuous_redecision_screen_cycle()
+        _dispatch_edli_redecision_screen_from_wake()
         ran = True
     else:
         ran = False
@@ -3904,6 +3904,16 @@ def _edli_reactor_wake_poll_once() -> bool:
         len(wake_families),
     )
     return True
+
+
+def _dispatch_edli_redecision_screen_from_wake() -> None:
+    """Run substrate confirmation without occupying the urgent wake listener."""
+
+    threading.Thread(
+        target=_edli_continuous_redecision_screen_cycle,
+        name="edli-redecision-wake",
+        daemon=True,
+    ).start()
 
 
 def _run_edli_reactor_wake_listener(

@@ -1507,7 +1507,7 @@ def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(
         main_module,
-        "_edli_continuous_redecision_screen_cycle",
+        "_dispatch_edli_redecision_screen_from_wake",
         lambda: calls.append("screen"),
     )
     monkeypatch.setattr(
@@ -1521,6 +1521,33 @@ def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
 
     assert main_module._edli_reactor_wake_poll_once() is True
     assert calls == ["screen", "ack"]
+
+
+def test_substrate_refresh_screen_dispatch_does_not_block_wake_listener(monkeypatch):
+    import threading
+    import time
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_screen() -> None:
+        started.set()
+        assert release.wait(2.0)
+
+    monkeypatch.setattr(
+        main_module,
+        "_edli_continuous_redecision_screen_cycle",
+        blocking_screen,
+    )
+    try:
+        began = time.perf_counter()
+        main_module._dispatch_edli_redecision_screen_from_wake()
+        elapsed = time.perf_counter() - began
+
+        assert elapsed < 0.1
+        assert started.wait(1.0)
+    finally:
+        release.set()
 
 
 def test_forecast_wake_is_not_blocked_by_held_position_monitor(monkeypatch):
