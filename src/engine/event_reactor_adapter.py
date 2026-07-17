@@ -8152,13 +8152,6 @@ def event_bound_live_adapter_from_trade_conn(
                     "global book epoch cache miss: phase=after_bind reason=%s",
                     cache_after_reason,
                 )
-                if bind_slice is not probabilities:
-                    full_metadata = {}
-                    bound_probabilities = _bind(
-                        probabilities,
-                        mode="current_metadata_fallback",
-                        metadata_sink=full_metadata,
-                    )
             if (
                 cached is not None
                 and eligible_refresh_family_keys == frozenset()

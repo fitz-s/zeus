@@ -4562,7 +4562,6 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     }
     bind_calls = []
     forced_gamma_calls = []
-    expire_next_full_metadata = {"value": False}
     capture_calls = []
     book_calls = []
 
@@ -4583,11 +4582,6 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         )
         if trade_conn is None:
             forced_gamma_calls.append(family_keys)
-        expire_miami = (
-            expire_next_full_metadata["value"]
-            and trade_conn is not None
-            and len(probability_witnesses) > 1
-        )
         if metadata_sink is not None:
             for family_key, probability in probability_witnesses.items():
                 for binding in probability.bindings:
@@ -4595,23 +4589,14 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
                         binding.yes_token_id,
                         binding.no_token_id,
                     ):
-                        metadata_sink[(binding.condition_id, token_id)] = (
-                            {
-                                "captured_at": "2020-01-01T00:00:00+00:00",
-                                "freshness_deadline": "2020-01-01T00:01:00+00:00",
-                            }
-                            if expire_miami and family_key == miami
-                            else {
-                                "_global_current_gamma": True,
-                                "enable_orderbook": True,
-                                "active": True,
-                                "closed": False,
-                                "accepting_orders": True,
-                                "tradeability_status_json": "{}",
-                            }
-                        )
-        if expire_miami:
-            expire_next_full_metadata["value"] = False
+                        metadata_sink[(binding.condition_id, token_id)] = {
+                            "_global_current_gamma": True,
+                            "enable_orderbook": True,
+                            "active": True,
+                            "closed": False,
+                            "accepting_orders": True,
+                            "tradeability_status_json": "{}",
+                        }
         return dict(probability_witnesses)
 
     def fake_capture(_trade_conn, **kwargs):
@@ -4763,7 +4748,6 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         "_global_book_metadata_refresh_family_keys",
         lambda *_args, **_kwargs: frozenset({dallas}),
     )
-    expire_next_full_metadata["value"] = True
     rebuilt_adapter = make_adapter()
     rebuilt_adapter.process_global_batch(
         (event, ineligible_event),
@@ -4785,12 +4769,11 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     # q changed, but the condition/token topology did not. Reuse the still-current
     # cached bindings and exact scoped subset while refreshing only a triggered
     # price family's live books.
-    # A rebuilt adapter has no closure-local metadata, so any full capture first
-    # certifies current metadata for that capture's complete family scope.
+    # A rebuilt adapter has no closure-local metadata, so capture fetches only
+    # the missing family's current Gamma metadata after the scoped refresh.
     assert bind_calls == [
         ("metadata", (dallas, miami)),
         ("metadata", (dallas,)),
-        ("metadata", (dallas, miami)),
         ("metadata", (miami,)),
     ]
     assert forced_gamma_calls == [(miami,)]
