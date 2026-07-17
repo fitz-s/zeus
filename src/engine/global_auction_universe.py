@@ -1230,13 +1230,15 @@ def bind_current_global_probability_tokens(
         return dict(probability_witnesses)
 
     local_tokens: dict[str, tuple[str, str]] = {}
+    local_metadata_by_condition: dict[str, Mapping[str, object]] = {}
     if trade_conn is not None:
         if checked_at_utc is None or checked_at_utc.tzinfo is None:
             raise ValueError("GLOBAL_LOCAL_TOKEN_CHECK_TIME_INVALID")
         checked_at_utc = checked_at_utc.astimezone(timezone.utc)
+        local_source = work_by_family if refresh_metadata else missing_by_family
         condition_ids = tuple(
             binding.condition_id
-            for witness in missing_by_family.values()
+            for witness in local_source.values()
             for binding in witness.bindings
         )
         for row in _global_book_snapshot_rows(
@@ -1251,22 +1253,10 @@ def bind_current_global_probability_tokens(
             no = str(row.get("no_token_id") or "").strip()
             if not condition_id or not yes or not no:
                 continue
-            try:
-                captured_at = datetime.fromisoformat(
-                    str(row.get("captured_at") or "").replace("Z", "+00:00")
-                )
-                freshness_deadline = datetime.fromisoformat(
-                    str(row.get("freshness_deadline") or "").replace(
-                        "Z", "+00:00"
-                    )
-                )
-            except (TypeError, ValueError):
-                continue
-            if captured_at.tzinfo is None or freshness_deadline.tzinfo is None:
-                continue
-            captured_at = captured_at.astimezone(timezone.utc)
-            freshness_deadline = freshness_deadline.astimezone(timezone.utc)
-            if not captured_at <= checked_at_utc <= freshness_deadline:
+            if not _global_book_metadata_is_current(
+                row,
+                checked_at_utc=checked_at_utc,
+            ):
                 continue
             pair = (yes, no)
             previous = local_tokens.get(condition_id)
@@ -1275,6 +1265,30 @@ def bind_current_global_probability_tokens(
                     f"GLOBAL_LOCAL_TOKEN_IDENTITY_AMBIGUOUS:{condition_id}"
                 )
             local_tokens[condition_id] = pair
+            local_metadata_by_condition.setdefault(condition_id, row)
+
+    local_metadata_family_keys: set[str] = set()
+    if metadata_sink is not None:
+        for family_key, witness in work_by_family.items():
+            condition_ids = {
+                binding.condition_id for binding in witness.bindings
+            }
+            if not condition_ids or not condition_ids.issubset(
+                local_metadata_by_condition
+            ):
+                continue
+            local_metadata_family_keys.add(family_key)
+            for binding in witness.bindings:
+                metadata = local_metadata_by_condition[binding.condition_id]
+                yes, no = local_tokens[binding.condition_id]
+                metadata_sink[(binding.condition_id, yes)] = metadata
+                metadata_sink[(binding.condition_id, no)] = metadata
+
+    remote_work_by_family = {
+        family_key: witness
+        for family_key, witness in work_by_family.items()
+        if family_key not in local_metadata_family_keys
+    }
 
     from concurrent.futures import ThreadPoolExecutor
     from src.data.market_scanner import _boolish_market_field, _extract_outcomes
@@ -1300,11 +1314,11 @@ def bind_current_global_probability_tokens(
         return slug
 
     events: dict[str, Mapping[str, object] | None] = {}
-    if refresh_metadata and get_gamma_markets is not None:
+    if remote_work_by_family and refresh_metadata and get_gamma_markets is not None:
         condition_ids = tuple(
             dict.fromkeys(
                 binding.condition_id
-                for witness in work_by_family.values()
+                for witness in remote_work_by_family.values()
                 for binding in witness.bindings
             )
         )
@@ -1379,7 +1393,7 @@ def bind_current_global_probability_tokens(
                 event_by_id[event_id] = nested_event
             return event_by_id, metadata_ambiguous
 
-        for family_key, witness in work_by_family.items():
+        for family_key, witness in remote_work_by_family.items():
             family_condition_ids = tuple(
                 binding.condition_id for binding in witness.bindings
             )
@@ -1434,7 +1448,7 @@ def bind_current_global_probability_tokens(
             }
     else:
         slug_by_family: dict[str, str] = {}
-        for family_key, witness in work_by_family.items():
+        for family_key, witness in remote_work_by_family.items():
             tokens_bound = all(
                 (binding.yes_token_id and binding.no_token_id)
                 or binding.condition_id in local_tokens
@@ -1464,7 +1478,11 @@ def bind_current_global_probability_tokens(
             rebound[family_key] = witness
             continue
         event = events.get(family_key)
-        if refresh_metadata and event is None:
+        if (
+            refresh_metadata
+            and event is None
+            and family_key not in local_metadata_family_keys
+        ):
             raise ValueError(f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}")
         condition_ids = {binding.condition_id for binding in witness.bindings}
         token_map = {
