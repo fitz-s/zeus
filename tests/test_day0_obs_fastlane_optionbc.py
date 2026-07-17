@@ -898,12 +898,18 @@ class TestDay0MetarSourceClockTick:
 
             def emit_prefetched(self, **_kw):
                 self.family_admission = _kw["family_admission"]
+                assert _kw["persist_ledger"] is False
                 order.append("emit")
                 _kw["inserted_event_ids"].extend(("event-b", "event-a"))
                 _kw["inserted_families"].extend(
                     (("Paris", "2026-06-12", "high"),)
                 )
                 return 2
+
+            def persist_prefetched_ledger(self, **_kw):
+                assert _kw["prefetch"] is prefetch
+                order.append("ledger")
+                return True
 
         class _Conn:
             def execute(self, sql, _params=()):
@@ -957,9 +963,76 @@ class TestDay0MetarSourceClockTick:
         }
         wake_entry = next(item for item in order if item.startswith("wake:"))
         assert order.index("commit") < order.index(wake_entry)
+        assert "ledger" not in order
         assert "wake:event-b,event-a" in wake_entry
         assert "(('Paris', '2026-06-12', 'high'),)" in wake_entry
         assert emitter.family_admission is admission
+
+    def test_non_emitting_pass_flushes_deferred_ledger(self, monkeypatch):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        order: list[str] = []
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+            eligible=((_wu_icao_city(), object(), "2026-06-12"),),
+        )
+
+        class _Emitter:
+            def prefetch(self, **_kw):
+                return prefetch
+
+            def emit_prefetched(self, **_kw):
+                assert _kw["persist_ledger"] is False
+                order.append("emit")
+                return 0
+
+            def persist_prefetched_ledger(self, **_kw):
+                assert _kw["prefetch"] is prefetch
+                order.append("ledger")
+                return True
+
+        class _Conn:
+            def execute(self, _sql, _params=()):
+                return self
+
+            def commit(self):
+                order.append("commit")
+
+            def rollback(self):
+                order.append("rollback")
+
+            def close(self):
+                order.append("close")
+
+        class _Mutex:
+            def acquire(self, *, timeout):
+                return True
+
+            def release(self):
+                order.append("release")
+
+        emitter = self._primed(_Emitter())
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
+        monkeypatch.setattr(
+            "src.runtime.reactor_wake.publish_reactor_wake",
+            lambda **_kw: (_ for _ in ()).throw(
+                AssertionError("non-emitting pass must not wake the reactor")
+            ),
+        )
+
+        result = im._day0_metar_source_clock_tick.__wrapped__()
+
+        assert result == {
+            "status": "COMMITTED",
+            "pending_reports": 1,
+            "events_emitted": 0,
+        }
+        assert order.index("commit") < order.index("ledger")
 
     def test_committed_event_survives_reactor_wake_failure(
         self, monkeypatch, caplog

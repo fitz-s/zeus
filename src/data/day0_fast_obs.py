@@ -1628,6 +1628,7 @@ class Day0FastObsEmitter:
         family_admission=None,
         inserted_event_ids: list[str] | None = None,
         inserted_families: list[tuple[str, str, str]] | None = None,
+        persist_ledger: bool = True,
     ) -> int:
         """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
 
@@ -1690,29 +1691,6 @@ class Day0FastObsEmitter:
             )
             if not emission_eligible:
                 return 0
-        # day0 defect-ledger (2026-07-16): append every parsed report to the
-        # publication-stream ledger for fast-eligible stations — ONE short
-        # write under the mutex we already hold here, never across the HTTP
-        # fetch (that happened in prefetch(), outside the mutex). Fail-soft:
-        # a ledger append failure must never block the existing emission
-        # pipeline (see _append_metar_prints_to_ledger docstring).
-        ledger_reports = (
-            reports
-            if prefetch.ledger_reports is None
-            else list(prefetch.ledger_reports)
-        )
-        if _append_metar_prints_to_ledger(
-            world_conn,
-            emission_eligible,
-            ledger_reports,
-        ):
-            with self._lock:
-                for report in ledger_reports:
-                    key = _report_publication_key(report)
-                    if key is None:
-                        continue
-                    self._ledgered_report_keys.add(key)
-                    self._pending_ledger_reports.pop(key, None)
         trigger = Day0ExtremeUpdatedTrigger(
             EventWriter(world_conn),
             day0_is_tradeable=day0_is_tradeable,
@@ -1859,7 +1837,50 @@ class Day0FastObsEmitter:
                     "DAY0_FAST_OBS_CITY_FAILED city=%s exc=%s: %s",
                     getattr(city, "name", "?"), type(exc).__name__, exc,
                 )
+        if persist_ledger:
+            self.persist_prefetched_ledger(
+                world_conn=world_conn,
+                prefetch=prefetch,
+            )
         return emitted
+
+    def persist_prefetched_ledger(
+        self,
+        *,
+        world_conn,
+        prefetch: FastObsPrefetch,
+    ) -> bool:
+        """Persist additive publication history after the trade fact is durable.
+
+        ``observation_prints`` makes restart recovery better, but it is not the
+        executable Day0 fact. The ingest source clock calls this in a separate,
+        best-effort transaction on a later non-emitting pass so ledger volume
+        can never contend with a new ``DAY0_EXTREME_UPDATED`` decision.
+        """
+
+        if not prefetch.eligible:
+            return True
+        ledger_reports = (
+            list(prefetch.reports)
+            if prefetch.ledger_reports is None
+            else list(prefetch.ledger_reports)
+        )
+        if not ledger_reports:
+            return True
+        if not _append_metar_prints_to_ledger(
+            world_conn,
+            prefetch.eligible,
+            ledger_reports,
+        ):
+            return False
+        with self._lock:
+            for report in ledger_reports:
+                key = _report_publication_key(report)
+                if key is None:
+                    continue
+                self._ledgered_report_keys.add(key)
+                self._pending_ledger_reports.pop(key, None)
+        return True
 
     def emit_events(
         self,

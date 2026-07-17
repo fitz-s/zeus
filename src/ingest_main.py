@@ -235,6 +235,53 @@ def _stage_day0_metar_commit(
             _DAY0_METAR_PENDING_COMMITS[-1] = staged
 
 
+def _persist_day0_metar_ledger_after_wake(prefetch: Any) -> bool:
+    """Best-effort additive ledger flush outside the Day0 alpha transaction."""
+
+    persist = getattr(_day0_metar_emitter(), "persist_prefetched_ledger", None)
+    if not callable(persist):
+        return False
+    ledger_reports = getattr(prefetch, "ledger_reports", ())
+    if ledger_reports is not None and not tuple(ledger_reports):
+        return True
+
+    conn = None
+    mutex = None
+    acquired = False
+    try:
+        from src.state.db import get_world_connection, world_write_mutex
+
+        conn = get_world_connection(write_class="live")
+        conn.execute("PRAGMA busy_timeout = 1")
+        mutex = world_write_mutex()
+        acquired = mutex.acquire(timeout=0.0)
+        if not acquired:
+            return False
+        conn.execute("BEGIN IMMEDIATE")
+        if not persist(world_conn=conn, prefetch=prefetch):
+            conn.rollback()
+            return False
+        conn.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 - additive history never blocks alpha
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        logger.warning(
+            "DAY0_METAR_LEDGER_DEFERRED reason=%s:%s",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    finally:
+        if acquired and mutex is not None:
+            mutex.release()
+        if conn is not None:
+            conn.close()
+
+
 def _commit_pending_day0_metar(*, origin: str) -> dict:
     """Commit an already-fetched METAR delta without repeating network I/O."""
 
@@ -292,6 +339,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 family_admission=family_admission,
                 inserted_event_ids=inserted_event_ids,
                 inserted_families=inserted_families,
+                persist_ledger=False,
             )
             conn.commit()
             del _DAY0_METAR_PENDING_COMMITS[0]
@@ -335,11 +383,21 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 emitted,
                 exc_info=True,
             )
+    # Never reacquire the world writer after waking the reactor for a new
+    # trade fact. The emitter retains unledgered publication identities, and a
+    # later non-emitting source pass persists them outside the alpha window.
+    ledger_persisted = (
+        _persist_day0_metar_ledger_after_wake(prefetch)
+        if emitted == 0
+        else False
+    )
     logger.info(
-        "DAY0_METAR_COMMIT_COMPLETED origin=%s pending_reports=%d emitted=%d",
+        "DAY0_METAR_COMMIT_COMPLETED origin=%s pending_reports=%d emitted=%d "
+        "ledger_persisted=%s",
         origin,
         pending_reports,
         emitted,
+        ledger_persisted,
     )
     return {
         "status": "COMMITTED",
