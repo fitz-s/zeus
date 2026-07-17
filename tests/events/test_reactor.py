@@ -354,6 +354,38 @@ def test_cycle_entry_gate_stops_before_pending_event_work():
     ]
 
 
+def test_blocked_entry_cycle_returns_before_runtime_db_setup(monkeypatch):
+    import src.main as main
+    import src.state.db as db
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    class _Lock:
+        def locked(self):
+            return False
+
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {
+            "enabled": True,
+            "event_writer_enabled": True,
+        },
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: None)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.YELLOW)
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("blocked entry cycle must not open the world DB"),
+    )
+
+    assert run_edli_event_reactor_cycle(active_lock=_Lock()) is True
+
+
 def _global_batch_probe_reactor(
     store, observations, *, incomplete=False, next_claim_event=None
 ):

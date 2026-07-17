@@ -5340,6 +5340,14 @@ def run_edli_event_reactor_cycle(
     if active_lock.locked():
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return False
+    from src.riskguard.risk_level import RiskLevel
+    from src.riskguard.riskguard import get_current_level
+
+    if get_current_level() != RiskLevel.GREEN:
+        _log.info(
+            "EDLI reactor skipped before runtime DB setup: new entries are globally blocked"
+        )
+        return True
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
@@ -5353,8 +5361,6 @@ def run_edli_event_reactor_cycle(
     from src.events.event_priority import day0_is_tradeable_for_scope
     from src.events.event_store import EventStore
     from src.risk_allocator import snapshot_global_auction_capital_authority
-    from src.riskguard.risk_level import RiskLevel
-    from src.riskguard.riskguard import get_current_level
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
