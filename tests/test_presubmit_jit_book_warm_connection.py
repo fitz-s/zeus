@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last reused/audited: 2026-07-17
 # Authority basis: 2026-06-22 forward real-chain incident + frontier consult
 #   REQ-20260622-044035. The pre-submit JIT /book fetch (GATE #84) constructed a
 #   FRESH PolymarketClient per call, so every submit paid a cold TLS handshake.
@@ -211,6 +211,154 @@ def test_jit_book_provider_uses_fresh_projection_then_rest_fallback(monkeypatch)
     rest_book, _rest_observed_at, rest_authority_id = fetch(token)
     assert rest_book["hash"] == "rest-hash"
     assert rest_authority_id == "clob_jit_book"
+    assert rest_calls == [token]
+
+
+def test_jit_book_provider_uses_continuity_proven_incremental_depth(
+    monkeypatch,
+    tmp_path,
+):
+    from src.events import reactor
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            depth_before_json TEXT,
+            PRIMARY KEY (token_id, direction)
+        )
+        """
+    )
+    token = "token-continuous"
+    now = datetime.now(timezone.utc)
+    connected_at = now - timedelta(minutes=5)
+    quote_seen_at = now - timedelta(minutes=4)
+    depth = {
+        "bids": [{"price": "0.40", "size": "100"}],
+        "asks": [{"price": "0.60", "size": "100"}],
+    }
+    conn.execute(
+        "INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?)",
+        (
+            token,
+            "buy_yes",
+            quote_seen_at.isoformat(),
+            "channel-hash",
+            json.dumps(depth),
+        ),
+    )
+    continuity_path = tmp_path / "market-channel-continuity.json"
+    continuity_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "channel": "market_channel",
+                "connected": True,
+                "connected_at": connected_at.isoformat(),
+                "observed_at": now.isoformat(),
+                "active_token_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    rest_calls = []
+
+    class StubClient:
+        def get_orderbook_snapshot(self, token_id):
+            rest_calls.append(token_id)
+            return {"asset_id": token_id, "hash": "rest-hash", **depth}
+
+    monkeypatch.setattr(reactor, "_edli_pre_submit_jit_clob_client", lambda: StubClient())
+    monkeypatch.setattr(
+        reactor,
+        "_edli_run_pre_submit_clob_call",
+        lambda _name, call, **_kwargs: call(),
+    )
+    fetch = reactor._edli_pre_submit_jit_book_quote_provider(
+        conn,
+        max_quote_age_ms=1000,
+        continuity_path=continuity_path,
+    )
+
+    book, observed_at, authority_id = fetch(token)
+
+    assert book == {"asset_id": token, "hash": "channel-hash", **depth}
+    assert observed_at == now
+    assert authority_id == "price_channel_continuity"
+    assert rest_calls == []
+
+
+def test_jit_book_provider_rejects_prior_generation_channel_depth(monkeypatch, tmp_path):
+    from src.events import reactor
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            depth_before_json TEXT,
+            PRIMARY KEY (token_id, direction)
+        )
+        """
+    )
+    token = "token-prior-generation"
+    now = datetime.now(timezone.utc)
+    connected_at = now - timedelta(seconds=10)
+    depth = {"bids": [], "asks": [{"price": "0.60", "size": "100"}]}
+    conn.execute(
+        "INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?)",
+        (
+            token,
+            "buy_yes",
+            (connected_at - timedelta(seconds=1)).isoformat(),
+            "stale-hash",
+            json.dumps(depth),
+        ),
+    )
+    continuity_path = tmp_path / "market-channel-continuity.json"
+    continuity_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "channel": "market_channel",
+                "connected": True,
+                "connected_at": connected_at.isoformat(),
+                "observed_at": now.isoformat(),
+                "active_token_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    rest_calls = []
+
+    class StubClient:
+        def get_orderbook_snapshot(self, token_id):
+            rest_calls.append(token_id)
+            return {"asset_id": token_id, "hash": "rest-hash", **depth}
+
+    monkeypatch.setattr(reactor, "_edli_pre_submit_jit_clob_client", lambda: StubClient())
+    monkeypatch.setattr(
+        reactor,
+        "_edli_run_pre_submit_clob_call",
+        lambda _name, call, **_kwargs: call(),
+    )
+    fetch = reactor._edli_pre_submit_jit_book_quote_provider(
+        conn,
+        max_quote_age_ms=1000,
+        continuity_path=continuity_path,
+    )
+
+    book, _observed_at, authority_id = fetch(token)
+
+    assert book["hash"] == "rest-hash"
+    assert authority_id == "clob_jit_book"
     assert rest_calls == [token]
 
 

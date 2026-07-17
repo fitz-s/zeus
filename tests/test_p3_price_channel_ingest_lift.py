@@ -2633,6 +2633,30 @@ def test_price_channel_settings_section_accepts_live_edli_alias(monkeypatch):
     assert lane._settings_section("edli_v1") == {"enabled": True}
 
 
+def test_market_channel_continuity_proof_is_atomically_published(monkeypatch, tmp_path):
+    from src import config
+    from src.ingest import price_channel_ingest as lane
+
+    target = tmp_path / lane.MARKET_CHANNEL_CONTINUITY_FILENAME
+    monkeypatch.setattr(config, "state_path", lambda _filename: target)
+    lane._write_market_channel_continuity(
+        {
+            "schema_version": 1,
+            "channel": "market_channel",
+            "connected": True,
+            "connected_at": "2026-07-17T03:00:00+00:00",
+            "observed_at": "2026-07-17T03:00:00.500000+00:00",
+            "active_token_count": 154,
+        }
+    )
+
+    proof = json.loads(target.read_text(encoding="utf-8"))
+    assert proof["connected"] is True
+    assert proof["active_token_count"] == 154
+    assert isinstance(proof["pid"], int) and proof["pid"] > 0
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_no_regression_market_channel_online_service_wiring_lives_in_lane_module():
     """RELATIONSHIP: the market-channel online-service wiring moved to the lane module.
 

@@ -1,9 +1,10 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-07-17
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import threading
 from contextlib import nullcontext
@@ -643,6 +644,125 @@ def test_buffered_older_delta_cannot_regress_seeded_quote():
     assert latest == ("2026-05-24T10:00:02+00:00", "seed-hash")
 
 
+def test_price_change_updates_full_depth_even_when_touch_is_unchanged():
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+    ingestor.seed_from_rest(
+        lambda _token: {},
+        received_at="2026-05-24T10:00:00+00:00",
+        pre_cached={
+            "token-1": {
+                "asset_id": "token-1",
+                "market": "0xcondition",
+                "timestamp": "2026-05-24T10:00:00+00:00",
+                "bids": [
+                    {"price": "0.48", "size": "10"},
+                    {"price": "0.47", "size": "5"},
+                ],
+                "asks": [
+                    {"price": "0.52", "size": "10"},
+                    {"price": "0.53", "size": "20"},
+                ],
+                "hash": "seed-hash",
+            }
+        },
+    )
+
+    removed = ingestor.handle_message(
+        {
+            "event_type": "price_change",
+            "market": "0xcondition",
+            "timestamp": "2026-05-24T10:00:01+00:00",
+            "price_changes": [
+                {
+                    "asset_id": "token-1",
+                    "price": "0.48",
+                    "size": "0",
+                    "side": "BUY",
+                    "hash": "hash-2",
+                    "best_bid": "0.47",
+                    "best_ask": "0.52",
+                }
+            ],
+        },
+        received_at="2026-05-24T10:00:01.010000+00:00",
+    )
+    assert removed is not None
+    depth = json.loads(cache.get("token-1").depth_json)
+    assert depth["bids"] == [{"price": "0.47", "size": "5"}]
+
+    changed = ingestor.handle_message(
+        {
+            "event_type": "price_change",
+            "market": "0xcondition",
+            "timestamp": "2026-05-24T10:00:02+00:00",
+            "price_changes": [
+                {
+                    "asset_id": "token-1",
+                    "price": "0.53",
+                    "size": "25",
+                    "side": "SELL",
+                    "hash": "hash-3",
+                    "best_bid": "0.47",
+                    "best_ask": "0.52",
+                }
+            ],
+        },
+        received_at="2026-05-24T10:00:02.010000+00:00",
+    )
+    assert changed is not None
+    depth = json.loads(cache.get("token-1").depth_json)
+    assert depth["asks"] == [
+        {"price": "0.52", "size": "10"},
+        {"price": "0.53", "size": "25"},
+    ]
+    latest = conn.execute(
+        "SELECT quote_seen_at, book_hash_before, depth_before_json "
+        "FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()
+    assert latest[:2] == ("2026-05-24T10:00:02+00:00", "hash-3")
+    assert json.loads(latest[2]) == depth
+
+
+def test_price_change_packet_expands_every_asset_delta():
+    from src.events.triggers.market_channel_ingestor import _parse_channel_messages
+
+    messages = _parse_channel_messages(
+        json.dumps(
+            {
+                "event_type": "price_change",
+                "market": "0xcondition",
+                "timestamp": "2026-05-24T10:00:00+00:00",
+                "price_changes": [
+                    {
+                        "asset_id": "token-yes",
+                        "price": "0.50",
+                        "size": "20",
+                        "side": "BUY",
+                    },
+                    {
+                        "asset_id": "token-no",
+                        "price": "0.50",
+                        "size": "20",
+                        "side": "SELL",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert [message["asset_id"] for message in messages] == ["token-yes", "token-no"]
+    assert all(len(message["price_changes"]) == 1 for message in messages)
+    assert all(message["timestamp"] == "2026-05-24T10:00:00+00:00" for message in messages)
+
+
 def test_seed_from_rest_can_seed_priority_subset_before_full_universe():
     conn, writer = _conn_writer()
     cache = QuoteCache()
@@ -767,6 +887,51 @@ def test_subscribed_seed_fetches_off_event_loop_thread():
     assert fetch_threads and fetch_threads[0] != caller_thread
 
 
+def test_channel_continuity_probe_publishes_successful_pong(monkeypatch):
+    import src.events.triggers.market_channel_ingestor as market_channel
+
+    conn, writer = _conn_writer()
+    proofs = []
+
+    class FakeWebSocket:
+        async def ping(self):
+            pong = asyncio.get_running_loop().create_future()
+            pong.set_result(None)
+            return pong
+
+    async def run_probe():
+        session_done = asyncio.Event()
+
+        def capture(proof):  # noqa: ANN001
+            proofs.append(proof)
+            session_done.set()
+
+        service = MarketChannelOnlineService(
+            MarketChannelIngestor(
+                writer,
+                active_token_ids={"token-1"},
+                token_metadata=_metadata(),
+            ),
+            continuity_sink=capture,
+        )
+        service._connected_at = "2026-07-17T03:00:00+00:00"
+        await service._probe_channel_continuity(
+            FakeWebSocket(),
+            session_done=session_done,
+            stop_event=None,
+            active_token_count=1,
+            logger=None,
+        )
+
+    monkeypatch.setattr(market_channel, "MARKET_CHANNEL_CONTINUITY_PROBE_SECONDS", 0.001)
+    asyncio.run(run_probe())
+
+    assert len(proofs) == 1
+    assert proofs[0]["connected"] is True
+    assert proofs[0]["connected_at"] == "2026-07-17T03:00:00+00:00"
+    assert proofs[0]["active_token_count"] == 1
+
+
 def test_websocket_subscribes_before_rest_seed(monkeypatch):
     import websockets
 
@@ -833,6 +998,86 @@ def test_websocket_subscribes_before_rest_seed(monkeypatch):
         "SELECT transition FROM market_channel_connectivity_events ORDER BY occurred_at"
     ).fetchall()
     assert transitions == [("connected",)]
+
+
+def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
+    import websockets
+
+    conn, writer = _conn_writer()
+    order = []
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+    stop = asyncio.Event()
+
+    def fetch(token_id):  # noqa: ANN001
+        order.append("seed_started")
+        fetch_started.set()
+        assert release_fetch.wait(timeout=2.0)
+        order.append("seed_finished")
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "seed-hash",
+        }
+
+    class FakeWebSocket:
+        emitted = False
+
+        async def send(self, _payload):  # noqa: ANN001
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.emitted:
+                stop.set()
+                raise StopAsyncIteration
+            await asyncio.to_thread(fetch_started.wait, 2.0)
+            self.emitted = True
+            order.append("ws_delta")
+            release_fetch.set()
+            return json.dumps(
+                {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "token-1",
+                    "market": "0xcondition",
+                    "best_bid": "0.49",
+                    "best_ask": "0.51",
+                    "hash": "delta-hash",
+                }
+            )
+
+    class FakeConnect:
+        async def __aenter__(self):
+            return FakeWebSocket()
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+    monkeypatch.setattr(websockets, "connect", lambda *_args, **_kwargs: FakeConnect())
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+        ),
+        fetch_orderbook=fetch,
+    )
+
+    asyncio.run(
+        service.run_websocket_forever(
+            stop_event=stop,
+            reconnect_delay_seconds=0,
+            world_mutex=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    )
+
+    assert order.index("ws_delta") < order.index("seed_finished")
 
 
 def test_disconnect_transition_commits_after_rollback(monkeypatch):

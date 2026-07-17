@@ -18,6 +18,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Iterator, Literal
 
 from src.events.event_coalescer import EventCoalescer
@@ -28,6 +29,8 @@ from src.events.idempotency import stable_event_id
 UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 REST_SEED_COMMIT_CHUNK_SIZE = 16
+MARKET_CHANNEL_CONTINUITY_PROBE_SECONDS = 0.5
+MARKET_CHANNEL_CONTINUITY_PONG_TIMEOUT_SECONDS = 1.0
 _logger = logging.getLogger(__name__)
 
 
@@ -156,6 +159,8 @@ class MarketChannelIngestor:
         self._seen_quote_event_ids: set[str] = set()
         self._seen_quote_event_order: deque[str] = deque()
         self._seen_quote_event_limit = 20_000
+        self._latest_projection_event_ids: set[str] = set()
+        self._latest_projection_event_order: deque[str] = deque()
 
     def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
         metadata = self._token_metadata.get(str(token_id))
@@ -339,9 +344,17 @@ class MarketChannelIngestor:
             gap_start=gap_start if gap_marked else None,
             gap_recovered_at=received_at if gap_marked else None,
         )
-        return _event_from_payload(payload, source="polymarket_market_channel", received_at=received_at)
+        event = _event_from_payload(
+            payload,
+            source="polymarket_market_channel",
+            received_at=received_at,
+        )
+        if depth_json is not None:
+            self._mark_latest_projection_event(event.event_id)
+        return event
 
     def _bba_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
+        source_event_type = str(message.get("event_type") or message.get("type") or "")
         token_id = _message_token_id(message)
         if not token_id and message.get("price_changes"):
             token_id = str(message["price_changes"][0].get("asset_id") or "")
@@ -351,16 +364,22 @@ class MarketChannelIngestor:
         metadata = self._metadata_for_message({**message, **change}, token_id=token_id)
         if metadata is None:
             return None
+        previous = self.quote_cache.get(token_id)
+        depth_json = (
+            _apply_price_change_depth(previous.depth_json if previous is not None else None, change)
+            if source_event_type == "price_change"
+            else None
+        )
         payload = MarketBookEventPayload(
             condition_id=metadata.condition_id,
             token_id=token_id,
             outcome_label=metadata.outcome_label,  # type: ignore[arg-type]
-            event_type="BEST_BID_ASK_CHANGED",
+            event_type="BOOK_SNAPSHOT" if depth_json is not None else "BEST_BID_ASK_CHANGED",
             quote_seen_at=_timestamp_ms_to_iso(message.get("timestamp")) or received_at,
             book_hash=str(change.get("hash") or ""),
             best_bid=_float_or_none(change.get("best_bid")),
             best_ask=_float_or_none(change.get("best_ask")),
-            depth_json=None,
+            depth_json=depth_json,
             tick_size=metadata.min_tick_size,
             min_order_size=metadata.min_order_size,
             neg_risk=metadata.neg_risk,
@@ -443,7 +462,12 @@ class MarketChannelIngestor:
             str(payload.get("quote_seen_at") or event.available_at)
         ) < _quote_instant(previous.quote_seen_at)
 
-    def _write_feasibility_evidence(self, event: OpportunityEvent) -> None:
+    def _write_feasibility_evidence(
+        self,
+        event: OpportunityEvent,
+        *,
+        append_evidence: bool = True,
+    ) -> None:
         if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
             return
         payload = json.loads(event.payload_json)
@@ -459,6 +483,7 @@ class MarketChannelIngestor:
                 self._feasibility_conn,
                 feasibility_evidence_from_quote(event, direction=direction),
                 schema=self._feasibility_schema,
+                append_evidence=append_evidence,
             )
 
     def _new_market_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
@@ -509,6 +534,8 @@ class MarketChannelIngestor:
 
     def _commit_market_event(self, event: OpportunityEvent) -> EventWriteResult | MarketChannelQuoteResult:
         if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+            latest_projection_only = event.event_id in self._latest_projection_event_ids
+            self._latest_projection_event_ids.discard(event.event_id)
             if self._quote_event_seen(event.event_id):
                 return MarketChannelQuoteResult(
                     event_id=event.event_id,
@@ -518,7 +545,10 @@ class MarketChannelIngestor:
                     evidence_written=False,
                 )
             self._remember_quote_event(event.event_id)
-            self._write_feasibility_evidence(event)
+            self._write_feasibility_evidence(
+                event,
+                append_evidence=not latest_projection_only,
+            )
             self._notify_market_event_sink([event])
             return MarketChannelQuoteResult(
                 event_id=event.event_id,
@@ -532,6 +562,15 @@ class MarketChannelIngestor:
             self._write_feasibility_evidence(event)
             self._notify_market_event_sink([event])
         return result
+
+    def _mark_latest_projection_event(self, event_id: str) -> None:
+        if event_id in self._latest_projection_event_ids:
+            return
+        self._latest_projection_event_ids.add(event_id)
+        self._latest_projection_event_order.append(event_id)
+        while len(self._latest_projection_event_order) > self._seen_quote_event_limit:
+            expired = self._latest_projection_event_order.popleft()
+            self._latest_projection_event_ids.discard(expired)
 
     def _quote_event_seen(self, event_id: str) -> bool:
         return event_id in self._seen_quote_event_ids
@@ -1058,6 +1097,7 @@ class MarketChannelOnlineService:
     fetch_orderbooks: RestOrderbookBatchFetch | None = None
     invalidate_snapshot: Callable[[MarketChannelAction], None] | None = None
     refresh_snapshot: Callable[[MarketChannelAction], None] | None = None
+    continuity_sink: Callable[[dict[str, Any]], None] | None = None
     connected: bool = False
     gap_start: str | None = None
     refresh_action_count: int = 0
@@ -1068,8 +1108,38 @@ class MarketChannelOnlineService:
     seed_first_token_ids: set[str] = field(default_factory=set)
     rest_seed_backpressure_count: int = 0
     rest_seed_backpressure_reason: str | None = None
+    _connected_at: str | None = None
     _refresh_window_start: datetime | None = None
     _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
+
+    def _publish_continuity(
+        self,
+        *,
+        connected: bool,
+        observed_at: str,
+        active_token_count: int,
+        logger: Any | None = None,
+    ) -> None:
+        if self.continuity_sink is None:
+            return
+        try:
+            self.continuity_sink(
+                {
+                    "schema_version": 1,
+                    "channel": "market_channel",
+                    "connected": bool(connected),
+                    "connected_at": self._connected_at,
+                    "observed_at": observed_at,
+                    "active_token_count": max(0, int(active_token_count)),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - proof loss falls back to REST
+            if logger is not None:
+                logger.warning(
+                    "EDLI market-channel continuity publish failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
     def on_connect(
         self,
@@ -1254,6 +1324,70 @@ class MarketChannelOnlineService:
                 pre_captured_books=captured,
             )
         return written
+
+    async def _seed_subscribed_books(
+        self,
+        *,
+        active_token_ids: set[str],
+        world_mutex: Any,
+        commit: Callable[[], None] | None,
+        logger: Any | None,
+    ) -> int:
+        if self.fetch_orderbook is None:
+            return 0
+        seed_first = {
+            str(token_id)
+            for token_id in self.seed_first_token_ids
+            if str(token_id) in active_token_ids
+        }
+        written = 0
+        if seed_first:
+            written += await self.seed_rest_books_after_subscribe(
+                token_ids=seed_first,
+                world_mutex=world_mutex,
+                commit=commit,
+                logger=logger,
+            )
+        written += await self.seed_rest_books_after_subscribe(
+            token_ids=active_token_ids - seed_first,
+            world_mutex=world_mutex,
+            commit=commit,
+            logger=logger,
+        )
+        return written
+
+    async def _probe_channel_continuity(
+        self,
+        ws: Any,
+        *,
+        session_done: asyncio.Event,
+        stop_event: Any | None,
+        active_token_count: int,
+        logger: Any | None,
+    ) -> None:
+        while not session_done.is_set():
+            try:
+                await asyncio.wait_for(
+                    session_done.wait(),
+                    timeout=MARKET_CHANNEL_CONTINUITY_PROBE_SECONDS,
+                )
+                return
+            except TimeoutError:
+                pass
+            if stop_event is not None and stop_event.is_set():
+                await ws.close()
+                return
+            pong = await ws.ping()
+            await asyncio.wait_for(
+                pong,
+                timeout=MARKET_CHANNEL_CONTINUITY_PONG_TIMEOUT_SECONDS,
+            )
+            self._publish_continuity(
+                connected=True,
+                observed_at=datetime.now(UTC).isoformat(),
+                active_token_count=active_token_count,
+                logger=logger,
+            )
 
     def _fetch_rest_seed_books(
         self,
@@ -1494,11 +1628,12 @@ class MarketChannelOnlineService:
         _world_mutex = world_mutex if world_mutex is not None else _world_write_mutex()
 
         while stop_event is None or not stop_event.is_set():
+            active_token_ids: set[str] = set()
             try:
                 active_token_ids = self.ingestor.active_token_ids_open_at()
                 async with websockets.connect(
                     endpoint,
-                    ping_interval=20,
+                    ping_interval=None if self.continuity_sink is not None else 20,
                     ping_timeout=20,
                     max_queue=max(1024, len(active_token_ids) * 8),
                 ) as ws:
@@ -1515,6 +1650,7 @@ class MarketChannelOnlineService:
                     connected_at = datetime.now(UTC).isoformat()
                     self.connected = True
                     self.gap_start = None
+                    self._connected_at = connected_at
                     with _world_mutex:
                         insert_market_channel_connectivity_event(
                             self.ingestor._feasibility_conn,
@@ -1525,58 +1661,70 @@ class MarketChannelOnlineService:
                         )
                         if commit is not None:
                             commit()
-                    seed_first = sorted(
-                        str(token_id)
-                        for token_id in self.seed_first_token_ids
-                        if str(token_id) in active_token_ids
+                    self._publish_continuity(
+                        connected=True,
+                        observed_at=connected_at,
+                        active_token_count=len(active_token_ids),
+                        logger=logger,
                     )
-                    if self.fetch_orderbook is not None:
-                        if seed_first:
-                            await self.seed_rest_books_after_subscribe(
-                                token_ids=seed_first,
-                                world_mutex=_world_mutex,
-                                commit=commit,
-                                logger=logger,
-                            )
-                        await self.seed_rest_books_after_subscribe(
-                            token_ids=active_token_ids - set(seed_first),
-                            world_mutex=_world_mutex,
-                            commit=commit,
-                            logger=logger,
-                        )
                     if logger is not None:
                         logger.info(
                             "EDLI market-channel connected for %d active weather tokens",
                             len(active_token_ids),
                         )
-                    async for raw_message in ws:
-                        # Hold the world-DB write mutex ONLY around the DB
-                        # write+commit unit for this message batch — never across
-                        # the ``async for`` recv (network I/O) nor across
-                        # _handle_action (which runs refresh/invalidate callbacks
-                        # doing HTTP + zeus_trades.db writes, a DIFFERENT DB / K1
-                        # split). Actions are COLLECTED under the lock and executed
-                        # AFTER release so the world mutex stays short and never
-                        # spans a venue fetch.
-                        pending_actions: list[MarketChannelAction] = []
-                        with self.ingestor.defer_market_event_sink():
-                            with _world_mutex:
-                                for message in _parse_channel_messages(raw_message):
-                                    action_or_result = self.ingestor.handle_message(
-                                        message,
-                                        received_at=datetime.now(UTC).isoformat(),
+                    session_done = asyncio.Event()
+                    try:
+                        async with asyncio.TaskGroup() as tasks:
+                            tasks.create_task(
+                                self._seed_subscribed_books(
+                                    active_token_ids=active_token_ids,
+                                    world_mutex=_world_mutex,
+                                    commit=commit,
+                                    logger=logger,
+                                )
+                            )
+                            if self.continuity_sink is not None:
+                                tasks.create_task(
+                                    self._probe_channel_continuity(
+                                        ws,
+                                        session_done=session_done,
+                                        stop_event=stop_event,
+                                        active_token_count=len(active_token_ids),
+                                        logger=logger,
                                     )
-                                    if isinstance(action_or_result, MarketChannelAction):
-                                        pending_actions.append(action_or_result)
-                                self.ingestor.flush_coalesced(market_budget=100)
-                                if not self.ingestor._market_event_sink_independently_coordinated:
-                                    self.ingestor.flush_deferred_market_event_sink()
-                                if commit is not None:
-                                    commit()
-                            if self.ingestor._market_event_sink_independently_coordinated:
-                                self.ingestor.flush_deferred_market_event_sink()
-                        for _action in pending_actions:
-                            self._handle_action(_action)
+                                )
+                            async for raw_message in ws:
+                                # Hold the world-DB write mutex ONLY around the DB
+                                # write+commit unit for this message batch — never across
+                                # recv/network I/O or _handle_action callbacks.
+                                pending_actions: list[MarketChannelAction] = []
+                                with self.ingestor.defer_market_event_sink():
+                                    with _world_mutex:
+                                        for message in _parse_channel_messages(raw_message):
+                                            action_or_result = self.ingestor.handle_message(
+                                                message,
+                                                received_at=datetime.now(UTC).isoformat(),
+                                            )
+                                            if isinstance(action_or_result, MarketChannelAction):
+                                                pending_actions.append(action_or_result)
+                                        self.ingestor.flush_coalesced(market_budget=100)
+                                        if not self.ingestor._market_event_sink_independently_coordinated:
+                                            self.ingestor.flush_deferred_market_event_sink()
+                                        if commit is not None:
+                                            commit()
+                                    if self.ingestor._market_event_sink_independently_coordinated:
+                                        self.ingestor.flush_deferred_market_event_sink()
+                                self._publish_continuity(
+                                    connected=True,
+                                    observed_at=datetime.now(UTC).isoformat(),
+                                    active_token_count=len(active_token_ids),
+                                    logger=logger,
+                                )
+                                for _action in pending_actions:
+                                    self._handle_action(_action)
+                            session_done.set()
+                    finally:
+                        session_done.set()
                     if stop_event is None or not stop_event.is_set():
                         raise ConnectionError("market channel stream ended")
             except Exception as exc:  # noqa: BLE001 - network loop must retry
@@ -1598,6 +1746,12 @@ class MarketChannelOnlineService:
                         self.on_disconnect(gap_start=gap_start)
                         if commit is not None:
                             commit()
+                    self._publish_continuity(
+                        connected=False,
+                        observed_at=gap_start,
+                        active_token_count=len(active_token_ids),
+                        logger=logger,
+                    )
                 except Exception as persist_exc:  # noqa: BLE001
                     try:
                         if rollback is not None:
@@ -1896,6 +2050,69 @@ def _best_price(levels: object, *, best: str) -> float | None:
     return max(parsed) if best == "bid" else min(parsed)
 
 
+def _apply_price_change_depth(depth_json: str | None, change: dict[str, Any]) -> str | None:
+    if not depth_json:
+        return None
+    try:
+        depth = json.loads(depth_json)
+        side = str(change.get("side") or "").upper()
+        price = Decimal(str(change.get("price")))
+        size = Decimal(str(change.get("size")))
+    except (InvalidOperation, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(depth, dict)
+        or not isinstance(depth.get("bids"), list)
+        or not isinstance(depth.get("asks"), list)
+        or side not in {"BUY", "SELL"}
+        or not Decimal("0") < price <= Decimal("1")
+        or size < Decimal("0")
+    ):
+        return None
+
+    levels_by_side: dict[str, dict[Decimal, dict[str, str]]] = {}
+    for key in ("bids", "asks"):
+        levels: dict[Decimal, dict[str, str]] = {}
+        for level in depth[key]:
+            if not isinstance(level, dict):
+                return None
+            try:
+                level_price = Decimal(str(level.get("price")))
+                level_size = Decimal(str(level.get("size")))
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+            if (
+                not Decimal("0") < level_price <= Decimal("1")
+                or level_size <= Decimal("0")
+            ):
+                return None
+            levels[level_price] = {
+                "price": str(level.get("price")),
+                "size": str(level.get("size")),
+            }
+        levels_by_side[key] = levels
+
+    key = "bids" if side == "BUY" else "asks"
+    if size == 0:
+        levels_by_side[key].pop(price, None)
+    else:
+        levels_by_side[key][price] = {
+            "price": str(change.get("price")),
+            "size": str(change.get("size")),
+        }
+    projected = {
+        "bids": [
+            levels_by_side["bids"][level_price]
+            for level_price in sorted(levels_by_side["bids"], reverse=True)
+        ],
+        "asks": [
+            levels_by_side["asks"][level_price]
+            for level_price in sorted(levels_by_side["asks"])
+        ],
+    }
+    return json.dumps(projected, sort_keys=True, separators=(",", ":"))
+
+
 def _float_or_none(value: object) -> float | None:
     if value is None or value == "":
         return None
@@ -1929,9 +2146,22 @@ def _parse_channel_messages(raw_message: object) -> list[dict[str, Any]]:
         raw_message = raw_message.decode("utf-8")
     parsed = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
     if isinstance(parsed, dict):
+        if str(parsed.get("event_type") or parsed.get("type") or "") == "price_change":
+            changes = parsed.get("price_changes")
+            if isinstance(changes, list) and changes:
+                outer = {key: value for key, value in parsed.items() if key != "price_changes"}
+                return [
+                    {**outer, **change, "price_changes": [change]}
+                    for change in changes
+                    if isinstance(change, dict)
+                ]
         return [parsed]
     if isinstance(parsed, list):
-        return [item for item in parsed if isinstance(item, dict)]
+        messages: list[dict[str, Any]] = []
+        for item in parsed:
+            if isinstance(item, dict):
+                messages.extend(_parse_channel_messages(item))
+        return messages
     return []
 
 

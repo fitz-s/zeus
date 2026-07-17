@@ -148,6 +148,20 @@ MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MIN = 128
 MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MAX = 2048
 MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT = 32
 MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT = 32
+MARKET_CHANNEL_CONTINUITY_FILENAME = "market-channel-continuity.json"
+
+
+def _write_market_channel_continuity(payload: dict[str, object]) -> None:
+    """Publish one short-lived cross-process proof of market-channel continuity."""
+
+    from src.config import state_path
+
+    target = state_path(MARKET_CHANNEL_CONTINUITY_FILENAME)
+    proof = dict(payload)
+    proof["pid"] = os.getpid()
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(proof, sort_keys=True), encoding="utf-8")
+    tmp.replace(target)
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
@@ -2874,6 +2888,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     ),
                     refresh_window_seconds=float(edli_cfg.get("market_channel_refresh_window_seconds", 60.0) or 60.0),
                     seed_first_token_ids=seed_first_token_ids,
+                    continuity_sink=_write_market_channel_continuity,
                 )
                 run_market_channel_service_forever(
                     service,

@@ -75,6 +75,7 @@ DEFAULT_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS = 300.0
 DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS = 750
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA = 50
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER = 4
+MARKET_CHANNEL_CONTINUITY_FILENAME = "market-channel-continuity.json"
 
 
 def _portfolio_snapshot_submit_gate(
@@ -7086,10 +7087,90 @@ def _edli_fresh_projected_pre_submit_book(
         return None
 
 
+def _edli_continuity_proven_pre_submit_book(
+    trade_conn,
+    token_id: str,
+    *,
+    max_quote_age_ms: int,
+    continuity_path: Path | None = None,
+):
+    """Return the current-generation WS depth while its continuity proof is live."""
+
+    if trade_conn is None or max_quote_age_ms <= 0:
+        return None
+    try:
+        if continuity_path is None:
+            from src.config import state_path
+
+            continuity_path = state_path(MARKET_CHANNEL_CONTINUITY_FILENAME)
+        proof = json.loads(continuity_path.read_text(encoding="utf-8"))
+        if not isinstance(proof, dict):
+            return None
+        connected_at = _parse_utc_instant(proof.get("connected_at"))
+        observed_at = _parse_utc_instant(proof.get("observed_at"))
+        checked_at = datetime.now(timezone.utc)
+        if (
+            proof.get("schema_version") != 1
+            or proof.get("channel") != "market_channel"
+            or proof.get("connected") is not True
+            or connected_at is None
+            or observed_at is None
+            or connected_at > observed_at
+        ):
+            return None
+        proof_age_ms = (checked_at - observed_at).total_seconds() * 1000.0
+        if proof_age_ms < 0.0 or proof_age_ms > float(max_quote_age_ms):
+            return None
+        row = trade_conn.execute(
+            """
+            SELECT quote_seen_at,
+                   book_hash_before,
+                   depth_before_json
+              FROM execution_feasibility_latest
+             WHERE token_id = ?
+               AND direction IN ('buy_yes', 'buy_no')
+             ORDER BY quote_seen_at DESC
+             LIMIT 1
+            """,
+            (str(token_id),),
+        ).fetchone()
+        if row is None or row[2] in (None, ""):
+            return None
+        quote_seen_at = _parse_utc_instant(row[0])
+        if (
+            quote_seen_at is None
+            or quote_seen_at < connected_at
+            or quote_seen_at > observed_at
+        ):
+            return None
+        depth = json.loads(str(row[2]))
+        book_hash = str(row[1] or "").strip()
+        if (
+            not isinstance(depth, Mapping)
+            or not isinstance(depth.get("bids"), list)
+            or not isinstance(depth.get("asks"), list)
+            or not book_hash
+        ):
+            return None
+        return (
+            {
+                "asset_id": str(token_id),
+                "hash": book_hash,
+                "bids": list(depth["bids"]),
+                "asks": list(depth["asks"]),
+            },
+            observed_at,
+            "price_channel_continuity",
+        )
+    except (json.JSONDecodeError, OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
 def _edli_pre_submit_jit_book_quote_provider(
     trade_conn=None,
     *,
     max_quote_age_ms: int = 1000,
+    continuity_path: Path | None = None,
 ):
     """Build the selected-token pre-submit book authority (GATE #84).
 
@@ -7106,11 +7187,18 @@ def _edli_pre_submit_jit_book_quote_provider(
     last_observation = {}
 
     def _fetch(token_id: str):
-        projected = _edli_fresh_projected_pre_submit_book(
+        projected = _edli_continuity_proven_pre_submit_book(
             trade_conn,
             token_id,
             max_quote_age_ms=max_quote_age_ms,
+            continuity_path=continuity_path,
         )
+        if projected is None:
+            projected = _edli_fresh_projected_pre_submit_book(
+                trade_conn,
+                token_id,
+                max_quote_age_ms=max_quote_age_ms,
+            )
         if projected is not None:
             last_observation[str(token_id)] = projected
             return projected
