@@ -6545,6 +6545,15 @@ def event_bound_live_adapter_from_trade_conn(
                 return False
             return True
 
+        def _day0_selection_cancelled() -> bool:
+            current = reactor_urgent_wake_revision()
+            return (
+                current is not None
+                and current != _global_batch_urgent_wake_revision[0]
+                and reactor_urgent_wake_reason()
+                == "day0_extreme_event_committed"
+            )
+
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
 
@@ -7626,6 +7635,7 @@ def event_bound_live_adapter_from_trade_conn(
                     forecast_conn,
                 ),
                 epoch_superseded=_epoch_superseded,
+                selection_cancelled=_day0_selection_cancelled,
             )
             logging.getLogger(__name__).info(
                 "global probability family cache: hits=%d ineligible_hits=%d "

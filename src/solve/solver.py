@@ -3048,6 +3048,7 @@ def select_global_single_order(
         [GlobalSingleOrderAnyCandidate], str | None
     ]
     | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> GlobalSingleOrderDecision:
     """Select one current executable order across every family and native side.
 
@@ -3154,10 +3155,49 @@ def select_global_single_order(
         raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")
 
     rejections: dict[str, str] = {}
+    scored: list[GlobalSingleOrderDecision] = []
+    buy_sizing_rejections: dict[str, GlobalBuySizingRejection] = {}
+
+    def selection_cancelled() -> bool:
+        if cancelled is None:
+            return False
+        try:
+            return bool(cancelled())
+        except Exception:  # noqa: BLE001 - a wake hint cannot invent a trade veto
+            return False
+
+    def cancelled_decision() -> GlobalSingleOrderDecision:
+        reason = "GLOBAL_SELECTION_CANCELLED"
+        cancelled_rejections = {
+            candidate.candidate_id: rejections.get(candidate.candidate_id, reason)
+            for candidate in candidates
+        }
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons=cancelled_rejections,
+            candidate_evaluations=_global_candidate_evaluations(
+                candidates,
+                rejections=cancelled_rejections,
+                default_rejection=reason,
+            ),
+            candidate_input_count=len(candidates),
+        )
+
+    if selection_cancelled():
+        return cancelled_decision()
+
     eligible: list[
         tuple[GlobalSingleOrderAnyCandidate, np.ndarray, float, str]
     ] = []
     for candidate in candidates:
+        if selection_cancelled():
+            return cancelled_decision()
         reason: str | None = candidate.eligibility_reason
         q_samples: np.ndarray | None = None
         probability_witness = probability_witnesses.get(candidate.family_key)
@@ -3288,10 +3328,10 @@ def select_global_single_order(
             candidate_input_count=len(candidates),
         )
 
-    scored: list[GlobalSingleOrderDecision] = []
-    buy_sizing_rejections: dict[str, GlobalBuySizingRejection] = {}
     capital_authority_available = True
     for candidate, q_samples, band_alpha, _band_basis in eligible:
+        if selection_cancelled():
+            return cancelled_decision()
         if isinstance(candidate, GlobalSingleOrderSellCandidate):
             score = _score_global_single_order_sell(
                 candidate,

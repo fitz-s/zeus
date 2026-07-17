@@ -1390,6 +1390,7 @@ def process_current_global_batch(
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
     epoch_superseded: Callable[[], bool] | None = None,
+    selection_cancelled: Callable[[], bool] | None = None,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -2006,7 +2007,14 @@ def process_current_global_batch(
                 candidate_policy_rejection_resolver=candidate_policy,
                 preflight_excluded_by_family=preflight_excluded_by_family,
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+                cancelled=selection_cancelled,
             )
+            if (
+                selected.decision.candidate is None
+                and selected.decision.no_trade_reason
+                == "GLOBAL_SELECTION_CANCELLED"
+            ):
+                return selected
             _store_global_auction_receipt(
                 trade_conn,
                 selected=selected,

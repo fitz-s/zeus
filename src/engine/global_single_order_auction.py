@@ -380,6 +380,7 @@ def select_prepared_global_auction(
     preflight_excluded_by_family: Mapping[str, str] | None = None,
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
     | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> PreparedGlobalAuctionResult:
     """Compare every prepared family and return at most one current winner.
 
@@ -611,6 +612,7 @@ def select_prepared_global_auction(
         ),
         candidate_payoff_q_lcb_resolver=_candidate_payoff_q_lcb,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
+        cancelled=cancelled,
     )
     if decision.candidate is None:
         return PreparedGlobalAuctionResult(decision=decision, winner_event_id=None)

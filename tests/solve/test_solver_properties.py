@@ -1068,6 +1068,7 @@ def _global_select(
     candidate_policy_rejection_resolver=None,
     fractional_kelly_multiplier="1",
     resolution_hours_by_family=None,
+    cancelled=None,
 ):
     candidates = tuple(candidates)
     if probability_witnesses is None:
@@ -1124,7 +1125,64 @@ def _global_select(
             candidate_portfolio_endowment_resolver
         ),
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
+        cancelled=cancelled,
     )
+
+
+def test_global_single_order_stops_before_scoring_when_cancelled(monkeypatch):
+    candidate = _global_candidate(
+        candidate_id="cancelled-before-score",
+        family="cancelled-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.40", "20"),),
+    )
+    monkeypatch.setattr(
+        S,
+        "_score_global_single_order",
+        lambda *_args, **_kwargs: pytest.fail(
+            "cancelled selection must not score a candidate"
+        ),
+    )
+
+    decision = _global_select((candidate,), cancelled=lambda: True)
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_SELECTION_CANCELLED"
+    assert decision.rejection_reasons == {
+        candidate.candidate_id: "GLOBAL_SELECTION_CANCELLED"
+    }
+
+
+def test_global_single_order_stops_between_candidate_scores():
+    candidates = (
+        _global_candidate(
+            candidate_id="score-first",
+            family="first-family",
+            side="YES",
+            q=0.80,
+            levels=(("0.40", "20"),),
+        ),
+        _global_candidate(
+            candidate_id="cancel-before-second",
+            family="second-family",
+            side="YES",
+            q=0.80,
+            levels=(("0.40", "20"),),
+        ),
+    )
+    checks = 0
+
+    def cancelled() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 5
+
+    decision = _global_select(candidates, cancelled=cancelled)
+
+    assert checks == 5
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_SELECTION_CANCELLED"
 
 
 def test_global_single_order_sell_can_beat_positive_buy_and_cash():
