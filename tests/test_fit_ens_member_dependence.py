@@ -1,14 +1,19 @@
 # Created: 2026-07-17
 # Last reused/audited: 2026-07-17
 # Authority basis: docs/operations/current/plans/upstream_data_physical_2026-07-17.md
-#   §Consult v2 (f) — effective-n from measured member dependence; walk-forward
-#   no-leak discipline per combo_experiments_report.md.
+#   §Consult v2 (f) — effective-n from measured member dependence; coverage
+#   calibration per the cp_coverage measurement 2026-07-17 (ICC is provenance,
+#   the operational rho is the smallest rho with nominal empirical coverage).
 """Unit tests for scripts/fit_ens_member_dependence.py — no live DB required.
 
-Covers: (1) identical-within-event members varying across events => rho -> 1 =>
-n_eff -> 1; (2) near-independent member indicators => rho ~ 0; (3) strict
-walk-forward boundary (target_date == as_of never trains); (4) determinism
-(same DB state + as_of + generated_at => byte-identical artifact JSON).
+Covers: (a) perfect-forecast synthetic (outcome drawn from the member
+distribution => hit rate matches k/n) => calibrated rho ~ 0; (b) overconfident
+synthetic (settlement frequently OUTSIDE all-member support => r(0) exceeds
+UCB(0,n,0)) => calibrated rho > 0 with violated_k_at_zero containing 0;
+(c) strict walk-forward boundary + determinism (byte-identical across two runs
+INCLUDING the seeded bootstrap); (d) ICC provenance: perfectly dependent
+members give rho_icc=1 while the coverage rho stays 0 — the exact distinction
+that motivated the recalibration.
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ import fit_ens_member_dependence as fed  # noqa: E402
 
 def _make_db(rows: list[dict]) -> sqlite3.Connection:
     """rows: dicts with city, target_date, metric, members (list of float|None),
+    settlement_value (degrees, unit 'C' unless settlement_value_unit overrides),
     plus optional members_unit / settlement_unit / rounding_policy / filter-column
     overrides (defaults satisfy the serving-side snapshot filter)."""
     conn = sqlite3.connect(":memory:")
@@ -76,56 +82,107 @@ def _make_db(rows: list[dict]) -> sqlite3.Connection:
             seen_settlement.add(key)
             conn.execute(
                 "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?)",
-                (r["city"], r["target_date"], r["metric"], 20.0, "C", "VERIFIED"),
+                (
+                    r["city"],
+                    r["target_date"],
+                    r["metric"],
+                    r.get("settlement_value", 20.0),
+                    r.get("settlement_value_unit", "C"),
+                    "VERIFIED",
+                ),
             )
     conn.commit()
     return conn
 
 
 def _dates(n: int) -> list[str]:
+    assert n <= 336, "12 months x 28 days"
     return [f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(n)]
 
 
-def test_identical_members_give_rho_one_and_n_eff_one() -> None:
-    """Members identical WITHIN each event, alternating 20C/21C across events:
-    the member indicators are perfectly dependent => rho=1 => n_eff=1."""
+def _events(conn: sqlite3.Connection):
+    return fed.load_settled_member_events(conn, as_of="2026-12-31")
+
+
+def test_perfect_forecast_gives_rho_near_zero() -> None:
+    """Outcome drawn from the SAME distribution as the members: the settled bin
+    lands on a k-hit bin with frequency ~ k/n, which the rho=0 CP UCB covers
+    with margin => calibrated rho ~ 0."""
+    rng = np.random.default_rng(7)
+    rows = []
+    for i, d in enumerate(_dates(336)):
+        center = 18.0 + (i % 5)
+        members = (center + rng.normal(0.0, 2.0, size=51)).round(2).tolist()
+        outcome = float(center + rng.normal(0.0, 2.0))
+        rows.append(
+            {
+                "city": f"C{i % 8}",
+                "target_date": d,
+                "metric": "high",
+                "members": members,
+                "settlement_value": outcome,
+            }
+        )
+    conn = _make_db(rows)
+    metrics, pooled = fed.estimate_metrics(_events(conn), reps=200)
+    cell = metrics["high"]
+    # ~0: bounded by per-k bootstrap noise at 400 targets; an order of magnitude
+    # below any meaningful widening (live measurement: high 0.0051, ICC 0.294).
+    assert cell["rho"] < 0.02, cell
+    assert cell["rho_calibrated"] < 0.02
+    assert pooled["rho_calibrated"] < 0.02
+    assert cell["n_members"] == 51
+    assert cell["n_targets"] == 336
+
+
+def test_overconfident_ensemble_gives_positive_rho() -> None:
+    """All 51 members in bin 20 but settlement lands OUTSIDE all-member support
+    (bin 21) on 50% of events: r(0) over the zero-hit grid cells exceeds
+    UCB(0,51,0)=0.057 => violated at k=0 => calibrated rho > 0."""
+    rows = [
+        {
+            "city": "C1",
+            "target_date": d,
+            "metric": "high",
+            "members": [20.0] * 51,
+            "settlement_value": 21.0 if i % 2 == 0 else 20.0,
+        }
+        for i, d in enumerate(_dates(200))
+    ]
+    conn = _make_db(rows)
+    metrics, _pooled = fed.estimate_metrics(_events(conn), reps=200)
+    cell = metrics["high"]
+    # PAD_C=3 grid around bin 20 => 6 zero-hit bins per target; outcome lands in
+    # one of them (bin 21) on 50% of targets => r(0) ~ 0.5/6 ~ 0.083 > 0.057.
+    assert 0 in cell["violated_k_at_zero"], cell
+    assert cell["rho"] > 0.0
+    assert cell["rho_calibrated"] > 0.0
+    assert cell["n_eff"] < cell["n_members"]
+
+
+def test_icc_provenance_diverges_from_coverage_rho() -> None:
+    """Perfectly dependent members (identical within each event, alternating
+    across events) with a PERFECT forecast (settlement == the member value):
+    rho_icc = 1 (total member correlation) while the coverage-calibrated
+    operational rho stays 0 (the bound is never violated) — the exact
+    ICC-vs-coverage distinction the 2026-07-17 measurement established."""
     rows = [
         {
             "city": "C1",
             "target_date": d,
             "metric": "high",
             "members": [20.0 if i % 2 == 0 else 21.0] * 51,
+            "settlement_value": 20.0 if i % 2 == 0 else 21.0,
         }
-        for i, d in enumerate(_dates(60))
+        for i, d in enumerate(_dates(80))
     ]
     conn = _make_db(rows)
-    metrics = fed.estimate_rho_by_metric(
-        fed.load_settled_member_events(conn, as_of="2026-12-31")
-    )
+    metrics, _pooled = fed.estimate_metrics(_events(conn), reps=200)
     cell = metrics["high"]
-    assert cell["rho"] == 1.0
-    assert abs(cell["n_eff"] - 1.0) < 1e-9
-    assert cell["n_members"] == 51
-    assert cell["n_targets"] == 60
-
-
-def test_near_independent_members_give_rho_near_zero() -> None:
-    """Members iid across the event's own draw => indicator ICC ~ 0."""
-    rng = np.random.default_rng(11)
-    rows = [
-        {
-            "city": "C1",
-            "target_date": d,
-            "metric": "high",
-            "members": (20.0 + rng.integers(0, 2, size=51)).tolist(),
-        }
-        for d in _dates(200)
-    ]
-    conn = _make_db(rows)
-    metrics = fed.estimate_rho_by_metric(
-        fed.load_settled_member_events(conn, as_of="2026-12-31")
-    )
-    assert metrics["high"]["rho"] < 0.05
+    assert cell["rho_icc"] == 1.0
+    assert cell["rho"] == 0.0
+    assert cell["rho_calibrated"] == 0.0
+    assert cell["violated_k_at_zero"] == []
 
 
 def test_walk_forward_boundary_excludes_as_of_and_later() -> None:
@@ -137,9 +194,10 @@ def test_walk_forward_boundary_excludes_as_of_and_later() -> None:
             "city": "C1",
             "target_date": d,
             "metric": "high",
-            "members": [20.0 if i % 2 == 0 else 21.0] * 51,
+            "members": [20.0] * 51,
+            "settlement_value": 20.0,
         }
-        for i, d in enumerate(dates)
+        for d in dates
     ]
     conn = _make_db(rows)
     events = fed.load_settled_member_events(conn, as_of=as_of)
@@ -155,6 +213,7 @@ def test_unsettled_and_filtered_snapshots_are_excluded() -> None:
         "target_date": "2026-01-01",
         "metric": "high",
         "members": [20.0] * 51,
+        "settlement_value": 20.0,
     }
     rows = [
         good,
@@ -170,17 +229,23 @@ def test_unsettled_and_filtered_snapshots_are_excluded() -> None:
 
 
 def test_determinism_byte_identical_artifact() -> None:
+    """Same DB state + as_of + generated_at => byte-identical artifact JSON,
+    INCLUDING the seeded target-clustered bootstrap (fixed BOOT_SEED)."""
     rng = np.random.default_rng(5)
-    rows = [
-        {
-            "city": "C1",
-            "target_date": d,
-            "metric": m,
-            "members": (20.0 + rng.integers(0, 3, size=51)).tolist(),
-        }
-        for d in _dates(50)
-        for m in ("high", "low")
-    ]
+    rows = []
+    for i, d in enumerate(_dates(60)):
+        for m in ("high", "low"):
+            members = (20.0 + rng.integers(0, 3, size=51)).tolist()
+            rows.append(
+                {
+                    "city": "C1",
+                    "target_date": d,
+                    "metric": m,
+                    "members": members,
+                    # Half the outcomes inside member support, half one bin out.
+                    "settlement_value": members[0] if i % 2 == 0 else 24.0,
+                }
+            )
     payloads = []
     for _ in range(2):
         conn = _make_db(rows)
@@ -192,8 +257,17 @@ def test_determinism_byte_identical_artifact() -> None:
         )
         payloads.append(json.dumps(artifact, sort_keys=True))
     assert payloads[0] == payloads[1]
-    metrics = json.loads(payloads[0])["metrics"]
+    doc = json.loads(payloads[0])
+    metrics = doc["metrics"]
     assert set(metrics) == {"high", "low"}
+    assert doc["_meta"]["boot_seed"] == fed.BOOT_SEED
+    assert doc["_meta"]["boot_reps"] == fed.N_BOOT
     for cell in metrics.values():
         assert 0.0 <= cell["rho"] <= 1.0
         assert 1.0 <= cell["n_eff"] <= cell["n_members"]
+        # Thin metrics (< MIN_TARGETS_FOR_METRIC_RHO targets) take the
+        # conservative max(own, pooled) as their operational rho.
+        assert cell["pooled_fallback_applied"] is True
+        assert cell["rho"] == max(
+            cell["rho_calibrated"], cell["rho_pooled_calibrated"]
+        )
