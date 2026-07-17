@@ -1658,6 +1658,75 @@ def test_quote_burst_coalesces_before_bounded_write_retry(monkeypatch):
     assert ingestor.quote_cache.get("token-1").book_hash == "burst-100"
 
 
+def test_quote_projection_contention_retries_with_bounded_backoff(monkeypatch):
+    from src.events.triggers import market_channel_ingestor as market_channel
+
+    conn, writer = _conn_writer()
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        coalescer=coalescer,
+    )
+    ingestor.handle_message(
+        {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "backoff-quote",
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-07-17T12:00:00+00:00",
+    )
+    service = MarketChannelOnlineService(ingestor)
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(market_channel.asyncio, "sleep", fake_sleep)
+
+    async def run():
+        wake = asyncio.Event()
+        wake.set()
+        connection_done = asyncio.Event()
+        initial_seed_done = asyncio.Event()
+        initial_seed_done.set()
+
+        class Gate:
+            enters = 0
+
+            def __enter__(self):
+                self.enters += 1
+                if self.enters <= 3:
+                    raise TimeoutError("trade quote writer busy")
+                connection_done.set()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+                return False
+
+        await service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids={"token-1"},
+            write_gate=Gate(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+
+    asyncio.run(run())
+
+    assert delays == [0.05, 0.1, 0.2]
+    assert service.quote_projection_backpressure_count == 3
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 0}
+
+
 def test_continuity_publication_coalesces_quotes_but_not_state_changes(monkeypatch):
     proofs: list[dict] = []
     monotonic = iter((10.0, 10.1, 10.26, 10.27))

@@ -34,6 +34,7 @@ REST_SEED_FETCH_BATCH_SIZE = 128
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS = 0.05
+MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS = 1.0
 _logger = logging.getLogger(__name__)
 
 
@@ -1677,6 +1678,7 @@ class MarketChannelOnlineService:
         if self.ingestor._coalescer is None:
             return
         final_contention_attempts = 0
+        retry_seconds = MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS
         while True:
             if not wake.is_set():
                 try:
@@ -1719,11 +1721,16 @@ class MarketChannelOnlineService:
                     final_contention_attempts += 1
                     if final_contention_attempts >= 2:
                         return
-                await asyncio.sleep(MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS)
+                await asyncio.sleep(retry_seconds)
+                retry_seconds = min(
+                    MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS,
+                    retry_seconds * 2.0,
+                )
                 wake.set()
                 continue
 
             final_contention_attempts = 0
+            retry_seconds = MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS
             self._publish_continuity(
                 connected=True,
                 observed_at=datetime.now(UTC).isoformat(),
