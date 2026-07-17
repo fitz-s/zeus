@@ -845,6 +845,124 @@ def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str)
     return condition_buy_sides_fresh(write_conn, condition_id, fresh_at_iso)
 
 
+def _conditions_buy_sides_fresh(
+    write_conn,
+    condition_ids: Iterable[str],
+    fresh_at_iso: str,
+) -> set[str]:
+    """Return fresh conditions with bounded SQL independent of scope size."""
+
+    ordered = tuple(
+        dict.fromkeys(
+            condition_id
+            for raw in condition_ids
+            if (condition_id := str(raw or "").strip())
+        )
+    )
+    if not ordered:
+        return set()
+
+    def _table_exists(table: str) -> bool:
+        row = write_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table,),
+        ).fetchone()
+        return row is not None
+
+    try:
+        latest_exists = _table_exists("executable_market_snapshot_latest")
+        append_exists = _table_exists("executable_market_snapshots")
+        invalidations_exist = _table_exists("executable_market_snapshot_invalidations")
+    except sqlite3.Error:
+        return set()
+
+    # Minimal test doubles and legacy callers may not expose snapshot tables.
+    # Preserve their scalar contract while production uses the bounded path.
+    if not latest_exists and not append_exists:
+        return {
+            condition_id
+            for condition_id in ordered
+            if _condition_buy_sides_fresh(write_conn, condition_id, fresh_at_iso)
+        }
+
+    try:
+        variable_limit = write_conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    except (AttributeError, sqlite3.Error):
+        variable_limit = 500
+    chunk_size = max(1, min(500, int(variable_limit) - 1))
+
+    def _from_table(table: str, scoped: tuple[str, ...]) -> set[str]:
+        if not scoped:
+            return set()
+        state: dict[str, tuple[str, str, set[str]]] = {}
+        invalidation_filter = ""
+        if invalidations_exist:
+            invalidation_filter = """
+              AND NOT EXISTS (
+                    SELECT 1
+                      FROM executable_market_snapshot_invalidations inv
+                     WHERE inv.invalidated_at >= snapshot.captured_at
+                       AND (
+                            inv.condition_id = snapshot.condition_id
+                            OR inv.token_id = snapshot.selected_outcome_token_id
+                            OR inv.token_id = snapshot.yes_token_id
+                            OR inv.token_id = snapshot.no_token_id
+                       )
+              )
+            """
+        for offset in range(0, len(scoped), chunk_size):
+            chunk = scoped[offset: offset + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = write_conn.execute(
+                f"""
+                SELECT snapshot.condition_id,
+                       snapshot.yes_token_id,
+                       snapshot.no_token_id,
+                       snapshot.selected_outcome_token_id
+                  FROM {table} snapshot
+                 WHERE snapshot.condition_id IN ({placeholders})
+                   AND snapshot.freshness_deadline >= ?
+                   {invalidation_filter}
+                 ORDER BY snapshot.condition_id,
+                          snapshot.captured_at DESC,
+                          snapshot.snapshot_id DESC
+                """,
+                (*chunk, fresh_at_iso),
+            ).fetchall()
+            for row in rows:
+                condition_id = str(row[0] or "").strip()
+                yes = str(row[1] or "").strip()
+                no = str(row[2] or "").strip()
+                selected = str(row[3] or "").strip()
+                if not condition_id:
+                    continue
+                current = state.get(condition_id)
+                if current is None:
+                    current = (yes, no, set())
+                    state[condition_id] = current
+                if selected:
+                    current[2].add(selected)
+        return {
+            condition_id
+            for condition_id, (yes, no, selected) in state.items()
+            if yes and no and yes in selected and no in selected
+        }
+
+    try:
+        fresh = _from_table(
+            "executable_market_snapshot_latest",
+            ordered,
+        ) if latest_exists else set()
+        unresolved = tuple(condition_id for condition_id in ordered if condition_id not in fresh)
+        if unresolved and append_exists:
+            fresh.update(_from_table("executable_market_snapshots", unresolved))
+        return fresh
+    except sqlite3.Error:
+        # Read failure is not evidence of freshness. The caller will submit the
+        # affected conditions for recapture or stop at its absolute deadline.
+        return set()
+
+
 def _prune_fresh_market_outcomes_for_snapshot_refresh(
     write_conn,
     markets: list[dict],
@@ -866,6 +984,37 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     }
     if not forced_conditions.issubset(scoped_conditions):
         raise ValueError("forced refresh conditions must be inside the exact condition scope")
+    freshness_candidates: list[str] = []
+    for market in markets:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("snapshot freshness prune deadline exceeded")
+        market_condition_ids = {
+            str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            for outcome in market.get("outcomes", []) or []
+            if isinstance(outcome, dict)
+            and str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+        }
+        restrict_this_market = bool(scoped_conditions and market_condition_ids & scoped_conditions)
+        for outcome in market.get("outcomes", []) or []:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("snapshot freshness prune deadline exceeded")
+            if not isinstance(outcome, dict):
+                continue
+            condition_id = str(
+                outcome.get("condition_id") or outcome.get("market_id") or ""
+            ).strip()
+            if restrict_this_market and condition_id not in scoped_conditions:
+                continue
+            if condition_id and condition_id not in forced_conditions:
+                freshness_candidates.append(condition_id)
+    fresh_conditions = _conditions_buy_sides_fresh(
+        write_conn,
+        freshness_candidates,
+        fresh_at_iso,
+    )
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("snapshot freshness prune deadline exceeded")
+
     pruned: list[dict] = []
     fresh_conditions_skipped = 0
     stale_conditions_submitted = 0
@@ -888,12 +1037,7 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
             cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
             if restrict_this_market and cid not in scoped_conditions:
                 continue
-            is_fresh = False
-            if cid and cid not in forced_conditions:
-                is_fresh = _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso)
-                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-                    raise TimeoutError("snapshot freshness prune deadline exceeded")
-            if is_fresh:
+            if cid in fresh_conditions:
                 fresh_conditions_skipped += 1
                 continue
             stale_outcomes.append(outcome)

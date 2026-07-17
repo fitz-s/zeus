@@ -4180,6 +4180,174 @@ def test_prune_fresh_market_outcomes_stops_after_deadline(monkeypatch):
         )
 
 
+def test_prune_fresh_market_outcomes_batches_latest_projection_reads():
+    class _TracingConn:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self.latest_queries = 0
+            self.append_queries = 0
+
+        def execute(self, sql, params=()):
+            text = " ".join(str(sql).split())
+            if "FROM executable_market_snapshot_latest snapshot" in text:
+                self.latest_queries += 1
+            if "FROM executable_market_snapshots snapshot" in text:
+                self.append_queries += 1
+            return self._wrapped.execute(sql, params)
+
+        def getlimit(self, category):
+            return self._wrapped.getlimit(category)
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            snapshot_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            snapshot_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    conditions = [f"cond-{index}" for index in range(100)]
+    conn.executemany(
+        """
+        INSERT INTO executable_market_snapshot_latest VALUES (
+            ?, ?, ?, ?, ?,
+            '2026-07-13T00:00:00+00:00',
+            '2026-07-13T00:05:00+00:00'
+        )
+        """,
+        [
+            (condition_id, selected, f"snap-{condition_id}-{side}", yes, no)
+            for condition_id in conditions
+            for side, selected, yes, no in (
+                ("yes", f"yes-{condition_id}", f"yes-{condition_id}", f"no-{condition_id}"),
+                ("no", f"no-{condition_id}", f"yes-{condition_id}", f"no-{condition_id}"),
+            )
+        ],
+    )
+    traced = _TracingConn(conn)
+    market = {
+        "outcomes": [
+            {"condition_id": condition_id, "token_id": f"yes-{condition_id}"}
+            for condition_id in conditions
+        ]
+    }
+
+    pruned, fresh_skipped, stale_submitted = (
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
+            traced,
+            [market],
+            fresh_at_iso="2026-07-13T00:01:00+00:00",
+        )
+    )
+
+    assert pruned == []
+    assert fresh_skipped == 100
+    assert stale_submitted == 0
+    assert traced.latest_queries == 1
+    assert traced.append_queries == 0
+
+
+def test_prune_fresh_market_outcomes_batches_invalidation_filter():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            snapshot_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshot_invalidations (
+            invalidation_id TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            reason TEXT,
+            invalidated_at TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    for condition_id in ("fresh", "invalidated"):
+        conn.executemany(
+            """
+            INSERT INTO executable_market_snapshot_latest VALUES (
+                ?, ?, ?, ?, ?,
+                '2026-07-13T00:00:00+00:00',
+                '2026-07-13T00:05:00+00:00'
+            )
+            """,
+            [
+                (
+                    condition_id,
+                    f"yes-{condition_id}",
+                    f"snap-{condition_id}-yes",
+                    f"yes-{condition_id}",
+                    f"no-{condition_id}",
+                ),
+                (
+                    condition_id,
+                    f"no-{condition_id}",
+                    f"snap-{condition_id}-no",
+                    f"yes-{condition_id}",
+                    f"no-{condition_id}",
+                ),
+            ],
+        )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_invalidations VALUES (
+            'inv-1', 'invalidated', NULL, 'tick_size_change',
+            '2026-07-13T00:00:30+00:00',
+            '2026-07-13T00:00:30+00:00'
+        )
+        """
+    )
+    market = {
+        "outcomes": [
+            {"condition_id": "fresh", "token_id": "yes-fresh"},
+            {"condition_id": "invalidated", "token_id": "yes-invalidated"},
+        ]
+    }
+
+    pruned, fresh_skipped, stale_submitted = (
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
+            conn,
+            [market],
+            fresh_at_iso="2026-07-13T00:01:00+00:00",
+        )
+    )
+
+    assert fresh_skipped == 1
+    assert stale_submitted == 1
+    assert [row["condition_id"] for row in pruned[0]["outcomes"]] == ["invalidated"]
+
+
 def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeypatch):
     world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
     forecasts_conn = _FakeConn()
