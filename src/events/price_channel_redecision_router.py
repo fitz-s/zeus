@@ -334,7 +334,12 @@ def _edli_screened_entry_family_keys_for_price_channel(
     try:
         beliefs = [
             belief
-            for belief in _all_latest_beliefs(world_conn, decision_time=decision_iso)
+            for belief in _all_latest_beliefs(
+                world_conn,
+                decision_time=decision_iso,
+                forecast_only_admissible=True,
+                family_keys=clean_families,
+            )
             if (
                 str(belief.city or "").strip(),
                 str(belief.target_date or "").strip(),
@@ -412,6 +417,22 @@ def _edli_pending_redecision_entity_keys(world_conn) -> set[str]:
     return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
 
 
+def _edli_pending_redecision_family_keys(
+    entity_keys: set[str],
+) -> set[tuple[str, str, str]]:
+    """Recover the canonical family prefix from FSR redecision entity keys."""
+
+    families: set[tuple[str, str, str]] = set()
+    for entity_key in entity_keys:
+        parts = str(entity_key or "").split("|", 3)
+        if len(parts) != 4:
+            continue
+        city, target_date, metric, source_run_id = (part.strip() for part in parts)
+        if city and target_date and metric in {"high", "low"} and source_run_id:
+            families.add((city, target_date, metric))
+    return families
+
+
 def _edli_redecision_event_with_origin(
     event,
     origin: str,
@@ -477,6 +498,17 @@ def _edli_price_channel_redecision_events_for_events(
         tokens,
         trade_schema=trade_schema,
     )
+    pending_entity_keys = _edli_pending_redecision_entity_keys(world_conn)
+    pending_families = _edli_pending_redecision_family_keys(pending_entity_keys)
+    families.difference_update(pending_families)
+    if not families:
+        logger.debug(
+            "EDLI price-channel redecision skipped: all quote families already pending "
+            "tokens=%d pending_families=%d",
+            len(tokens),
+            len(pending_families),
+        )
+        return []
     try:
         decision_time = datetime.fromisoformat(str(received_at).replace("Z", "+00:00"))
         if decision_time.tzinfo is None:
@@ -535,7 +567,7 @@ def _edli_price_channel_redecision_events_for_events(
         received_at=decision_time.isoformat(),
         limit=None,
         source=f"market_channel_price:{decision_time.isoformat()}",
-        already_pending_keys=_edli_pending_redecision_entity_keys(world_conn),
+        already_pending_keys=pending_entity_keys,
         event_type="EDLI_REDECISION_PENDING",
         restrict_to_families=families,
     )

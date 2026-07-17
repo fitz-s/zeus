@@ -356,6 +356,38 @@ def test_latest_belief_reader_filters_forecast_only_inadmissible_families():
     assert {belief.target_date for belief in beliefs} == {"2026-06-02"}
 
 
+def test_latest_belief_reader_targets_requested_families_in_sql():
+    conn = _mem_world()
+    for city in ("Wuhan", "Shanghai"):
+        cr.cache_belief(
+            conn,
+            family_id=f"{city}|2026-06-02|high",
+            city=city,
+            target_date="2026-06-02",
+            temperature_metric="high",
+            snapshot_id=f"{city.lower()}-snap",
+            calibrator_model_hash="identity",
+            bin_labels=["b29", "b30"],
+            p_posterior_vec=[0.1, 0.9],
+            recorded_at="2026-06-01T11:35:00+00:00",
+        )
+    statements = []
+    conn.set_trace_callback(statements.append)
+
+    beliefs = cr._all_latest_beliefs(
+        conn,
+        family_keys={("Wuhan", "2026-06-02", "high")},
+    )
+
+    assert [(belief.city, belief.target_date, belief.metric) for belief in beliefs] == [
+        ("Wuhan", "2026-06-02", "high")
+    ]
+    reads = [sql for sql in statements if "FROM requested r" in sql]
+    assert len(reads) == 1
+    assert "json_each" in reads[0]
+    assert "p.city = r.city" in reads[0]
+
+
 def test_executable_price_reader_ignores_closed_or_non_active_snapshot_rows():
     trade = sqlite3.connect(":memory:")
     trade.row_factory = sqlite3.Row

@@ -689,6 +689,7 @@ def _all_latest_beliefs(
     decision_time: str | datetime | None = None,
     scan_limit: int | None = None,
     forecast_only_admissible: bool = False,
+    family_keys: set[tuple[str, str, str]] | None = None,
 ) -> list[CachedBelief]:
     cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
     if _has_condition_ids_column(conn):
@@ -699,6 +700,21 @@ def _all_latest_beliefs(
         cols += ", q_lcb_yes_json"
     if _has_column(conn, "probability_trace_fact", "q_lcb_no_json"):
         cols += ", q_lcb_no_json"
+    requested_families = None
+    if family_keys is not None:
+        requested_families = {
+            (
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                str(metric or "").strip(),
+            )
+            for city, target_date, metric in family_keys
+            if str(city or "").strip()
+            and str(target_date or "").strip()
+            and str(metric or "").strip() in {"high", "low"}
+        }
+        if not requested_families:
+            return []
     if scan_limit is None:
         try:
             scan_limit = int(
@@ -710,23 +726,69 @@ def _all_latest_beliefs(
         except (TypeError, ValueError):
             scan_limit = _DEFAULT_LATEST_BELIEF_SCAN_LIMIT
     scan_limit = max(1, int(scan_limit))
-    rows = conn.execute(
-        f"""
-        SELECT {cols}
-          FROM probability_trace_fact
-         WHERE decision_id >= ?
-           AND decision_id < ?
-         ORDER BY recorded_at DESC, trace_id DESC
-         LIMIT ?
-        """,
-        (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
-    ).fetchall()
+    if requested_families is None:
+        rows = conn.execute(
+            f"""
+            SELECT {cols}
+              FROM probability_trace_fact
+             WHERE decision_id >= ?
+               AND decision_id < ?
+             ORDER BY recorded_at DESC, trace_id DESC
+             LIMIT ?
+            """,
+            (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
+        ).fetchall()
+    else:
+        has_metric = _has_temperature_metric_column(conn)
+        requested = (
+            requested_families
+            if has_metric
+            else {(city, target_date) for city, target_date, _metric in requested_families}
+        )
+        request_columns = "city, target_date, metric" if has_metric else "city, target_date"
+        request_extract = (
+            "json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
+            "json_extract(value, '$[2]')"
+            if has_metric
+            else "json_extract(value, '$[0]'), json_extract(value, '$[1]')"
+        )
+        metric_join = "AND p.temperature_metric = r.metric" if has_metric else ""
+        rows = conn.execute(
+            f"""
+            WITH requested({request_columns}) AS (
+                SELECT {request_extract}
+                  FROM json_each(?)
+            )
+            SELECT {', '.join(f'p.{column.strip()}' for column in cols.split(','))}
+              FROM requested r
+              CROSS JOIN probability_trace_fact p
+             WHERE p.city = r.city
+               AND p.target_date = r.target_date
+               {metric_join}
+               AND p.decision_id >= ?
+               AND p.decision_id < ?
+             ORDER BY p.recorded_at DESC, p.trace_id DESC
+             LIMIT ?
+            """,
+            (
+                json.dumps(tuple(requested), separators=(",", ":")),
+                _BELIEF_PREFIX,
+                _prefix_upper_bound(_BELIEF_PREFIX),
+                scan_limit,
+            ),
+        ).fetchall()
     decision_time_utc = _decision_time_utc(decision_time)
     seen: set[RedecisionScreenKey] = set()
     out: list[CachedBelief] = []
     for row in rows:
         belief = _row_to_belief(row)
         if belief is None:
+            continue
+        if requested_families is not None and (
+            str(belief.city or "").strip(),
+            str(belief.target_date or "").strip(),
+            str(belief.metric or "").strip(),
+        ) not in requested_families:
             continue
         if forecast_only_admissible and not _belief_forecast_only_admissible(
             belief,

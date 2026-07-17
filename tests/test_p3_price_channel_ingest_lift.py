@@ -888,6 +888,12 @@ def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
 
     assert "held_families = _edli_held_family_keys_for_tokens" in src
     assert "entry_families = _edli_screened_entry_family_keys_for_price_channel" in src
+    assert "family_keys=clean_families" in inspect.getsource(
+        router._edli_screened_entry_family_keys_for_price_channel
+    )
+    assert "forecast_only_admissible=True" in inspect.getsource(
+        router._edli_screened_entry_family_keys_for_price_channel
+    )
     assert "set(families) - set(held_families)" in src
     assert "resting_families = _edli_resting_family_keys_for_tokens" in src
     assert "families = held_families | entry_families | resting_families" in src
@@ -1402,6 +1408,15 @@ def test_price_channel_resting_order_family_emits_and_debounces_on_second_tick(m
     assert payload["redecision_origin"] == "market_price"
     assert payload["price_changed_token_ids"] == ["resting-yes"]
 
+    from src.events import price_channel_redecision_router as router
+
+    monkeypatch.setattr(
+        router,
+        "_edli_screened_entry_family_keys_for_price_channel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an already-pending family must skip the entry screen"
+        ),
+    )
     second_emitted = _edli_emit_price_channel_redecisions_for_events(
         world_conn,
         trade_conn,
