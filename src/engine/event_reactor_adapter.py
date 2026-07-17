@@ -900,17 +900,17 @@ def _global_book_epoch_cache_namespace(
     return None
 
 
-def _global_book_refresh_family_keys(
+def _global_refresh_family_keys(
     events: Iterable[object],
+    *,
+    event_types: frozenset[str],
 ) -> frozenset[str] | None:
     """Return exact changed families; malformed decision triggers force full refresh."""
 
     family_keys: set[str] = set()
     for event in events:
         event_type = str(getattr(event, "event_type", "") or "")
-        if event_type not in (
-            _FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES
-        ):
+        if event_type not in event_types:
             continue
         try:
             payload = json.loads(str(getattr(event, "payload_json", "") or ""))
@@ -931,6 +931,25 @@ def _global_book_refresh_family_keys(
             )
         )
     return frozenset(family_keys)
+
+
+def _global_probability_refresh_family_keys(
+    events: Iterable[object],
+) -> frozenset[str] | None:
+    return _global_refresh_family_keys(
+        events,
+        event_types=frozenset({"FORECAST_SNAPSHOT_READY"})
+        | _DAY0_LANE_EVENT_TYPES,
+    )
+
+
+def _global_book_refresh_family_keys(
+    events: Iterable[object],
+) -> frozenset[str] | None:
+    return _global_refresh_family_keys(
+        events,
+        event_types=frozenset({_EDLI_REDECISION_EVENT_TYPE}),
+    )
 
 
 def _merge_global_book_epoch_delta(
@@ -5942,7 +5961,10 @@ def event_bound_live_adapter_from_trade_conn(
         )
 
         events = tuple(events)
-        refresh_family_keys = _global_book_refresh_family_keys(events)
+        probability_refresh_family_keys = (
+            _global_probability_refresh_family_keys(events)
+        )
+        book_refresh_family_keys = _global_book_refresh_family_keys(events)
 
         def _epoch_superseded() -> bool:
             current = reactor_urgent_wake_revision()
@@ -5989,8 +6011,8 @@ def event_bound_live_adapter_from_trade_conn(
             except (TypeError, ValueError):
                 family_key = ""
             force_refresh = (
-                refresh_family_keys is None
-                or family_key in refresh_family_keys
+                probability_refresh_family_keys is None
+                or family_key in probability_refresh_family_keys
             )
             if force_refresh:
                 probability_cache_stats["refresh"] += 1
@@ -6288,6 +6310,8 @@ def event_bound_live_adapter_from_trade_conn(
                 *,
                 mode,
                 token_hint=None,
+                projected=None,
+                captured_at=None,
             ):
                 tokens = _global_book_prefetch_tokens(
                     probability_slice,
@@ -6296,14 +6320,16 @@ def event_bound_live_adapter_from_trade_conn(
                     tokens = token_hint
                 if tokens is None:
                     return None
-                captured_at = datetime.now(UTC)
+                projection_checked = captured_at is not None
+                captured_at = captured_at or datetime.now(UTC)
                 fetch_started = _time.monotonic()
-                projected = _projected_global_books(
-                    trade_conn,
-                    tokens,
-                    checked_at=captured_at,
-                    max_age=FRESHNESS_WINDOW_DEFAULT,
-                )
+                if not projection_checked:
+                    projected = _projected_global_books(
+                        trade_conn,
+                        tokens,
+                        checked_at=captured_at,
+                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    )
                 projected_books, projected_at = (
                     projected if projected is not None else ({}, None)
                 )
@@ -6318,7 +6344,7 @@ def event_bound_live_adapter_from_trade_conn(
                         mode,
                         _time.monotonic() - fetch_started,
                         len(tokens),
-                        len(books),
+                        len(projected_books),
                         max(
                             0,
                             int(
@@ -6432,7 +6458,7 @@ def event_bound_live_adapter_from_trade_conn(
                 checked_at=cache_checked_at,
                 allowed=True,
                 topology_hint=speculative_topology,
-                mutable_family_keys=refresh_family_keys,
+                mutable_family_keys=book_refresh_family_keys,
             )
             if cached_before_bind is None:
                 logging.getLogger(__name__).info(
@@ -6441,8 +6467,10 @@ def event_bound_live_adapter_from_trade_conn(
                 )
             eligible_refresh_family_keys = (
                 None
-                if refresh_family_keys is None
-                else frozenset(refresh_family_keys.intersection(probabilities))
+                if book_refresh_family_keys is None
+                else frozenset(
+                    book_refresh_family_keys.intersection(probabilities)
+                )
             )
             if (
                 cached_before_bind is not None
@@ -6498,7 +6526,7 @@ def event_bound_live_adapter_from_trade_conn(
             prefetch_token_hint = None
             if (
                 cached_before_bind is None
-                or refresh_family_keys is None
+                or book_refresh_family_keys is None
             ):
                 prefetch_slice = probabilities
                 prefetch_mode = "full_books"
@@ -6595,6 +6623,22 @@ def event_bound_live_adapter_from_trade_conn(
             else:
                 from concurrent.futures import ThreadPoolExecutor
 
+                projection_at = datetime.now(UTC)
+                projection_tokens = _global_book_prefetch_tokens(
+                    prefetch_slice
+                )
+                if projection_tokens is None:
+                    projection_tokens = prefetch_token_hint
+                projected = (
+                    _projected_global_books(
+                        trade_conn,
+                        projection_tokens,
+                        checked_at=projection_at,
+                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    )
+                    if projection_tokens is not None
+                    else None
+                )
                 with ThreadPoolExecutor(
                     max_workers=1,
                     thread_name_prefix="global-clob-prefetch",
@@ -6604,6 +6648,8 @@ def event_bound_live_adapter_from_trade_conn(
                         prefetch_slice,
                         mode=prefetch_mode,
                         token_hint=prefetch_token_hint,
+                        projected=projected,
+                        captured_at=projection_at,
                     )
                     rebound_probabilities = _bind(
                         bind_slice,
@@ -6619,7 +6665,7 @@ def event_bound_live_adapter_from_trade_conn(
                 bound_probabilities,
                 checked_at=cache_checked_at,
                 allowed=True,
-                mutable_family_keys=refresh_family_keys,
+                mutable_family_keys=book_refresh_family_keys,
             )
             if cached is None:
                 logging.getLogger(__name__).info(

@@ -2922,10 +2922,7 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
         topology_conn=topology,
         calibration_conn=world,
     )
-    event = replace(
-        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
-        event_type="BOOK_SNAPSHOT",
-    )
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
     adapter.process_global_batch(
         (event,),
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
@@ -3058,7 +3055,7 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
     world.close()
 
 
-def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
+def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     monkeypatch,
 ):
     trade = sqlite3.connect(":memory:")
@@ -3137,6 +3134,27 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
             );
         """
     )
+    fresh_at = _dt.datetime.now(_dt.timezone.utc)
+    trade.execute(
+        "UPDATE executable_market_snapshots "
+        "SET captured_at = ?, freshness_deadline = ?",
+        (
+            (fresh_at - _dt.timedelta(seconds=1)).isoformat(),
+            (fresh_at + _dt.timedelta(minutes=3)).isoformat(),
+        ),
+    )
+    trade.execute(
+        "UPDATE executable_market_snapshot_latest SET freshness_deadline = ?",
+        ((fresh_at + _dt.timedelta(minutes=3)).isoformat(),),
+    )
+    projected = era._projected_global_books(
+        trade,
+        ("yes-token-a", "no-token-a"),
+        checked_at=_dt.datetime.now(_dt.timezone.utc),
+        max_age=_dt.timedelta(minutes=3),
+    )
+    assert projected is not None
+    assert set(projected[0]) == {"yes-token-a"}
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
@@ -3176,14 +3194,15 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
                 SimpleNamespace(
                     bin_id="bin-a",
                     condition_id="condition-a",
-                    yes_token_id="",
-                    no_token_id="",
+                    yes_token_id="yes-token-a",
+                    no_token_id="no-token-a",
                 ),
             ),
         )
     }
     bind_started = threading.Event()
     book_started = threading.Event()
+    book_calls = []
 
     def fake_bind(
         _forecast_conn,
@@ -3221,6 +3240,7 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
             return False
 
         def get_orderbook_snapshots(self, tokens, **_):
+            book_calls.append(tuple(tokens))
             book_started.set()
             assert bind_started.wait(1.0), "Gamma bind did not overlap CLOB prefetch"
             return {
@@ -3265,6 +3285,7 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
     assert bound["family"].bindings[0].no_token_id == "no-token-a"
     assert epoch.witness_identity == "book-current"
     assert len(capture_calls) == 1
+    assert book_calls == [("no-token-a",)]
     trade.close()
     forecast.close()
     topology.close()
@@ -3625,6 +3646,7 @@ def test_live_adapter_discards_stale_hint_then_prefetches_unknown_full_refresh(
                     city="Dallas",
                     source_run_id="run-dallas",
                 ),
+                event_type="EDLI_REDECISION_PENDING",
                 payload_json="{}",
             ),
         ),
@@ -3748,7 +3770,10 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         "process_current_global_batch",
         fake_process,
     )
-    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="EDLI_REDECISION_PENDING",
+    )
     ineligible_event = _global_scope_event(
         city="Alpha",
         source_run_id="run-alpha",
@@ -4057,6 +4082,19 @@ def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
         event_type="EDLI_REDECISION_PENDING",
     )
     assert era._global_book_refresh_family_keys((price_event,)) == {
+        weather_family_id(
+            city="Dallas",
+            target_date="2026-07-11",
+            metric="high",
+        )
+    }
+    forecast_event = _global_scope_event(
+        city="Dallas",
+        source_run_id="run-dallas",
+    )
+    assert era._global_book_refresh_family_keys((forecast_event,)) == frozenset()
+    assert era._global_probability_refresh_family_keys((price_event,)) == frozenset()
+    assert era._global_probability_refresh_family_keys((forecast_event,)) == {
         weather_family_id(
             city="Dallas",
             target_date="2026-07-11",
