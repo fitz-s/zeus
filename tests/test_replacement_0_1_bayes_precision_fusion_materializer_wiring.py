@@ -244,6 +244,86 @@ def test_current_evidence_shape_converts_native_fahrenheit_members() -> None:
     assert shape.members_c[-1] == pytest.approx(24.5)
 
 
+def _seed_current_ens_at_cycle(conn, *, request, ens_cycle_time: datetime) -> None:
+    """Seed the current-evidence ENS carrier row at an EXPLICIT source_cycle_time, distinct
+    from the carrier's own source_cycle_time, so staleness-age tests can drive the ENS row
+    arbitrarily older than the carrier cycle."""
+
+    req = request
+    members_c = [24.0 + (index - 25) * 0.02 for index in range(51)]
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            city, target_date, temperature_metric, physical_quantity,
+            observation_field, issue_time, valid_time, available_at,
+            fetch_time, lead_hours, members_json, model_version, dataset_id,
+            source_id, source_cycle_time, source_available_at,
+            forecast_window_attribution_status, contributes_to_target_extrema,
+            causality_status, boundary_ambiguous, authority, members_unit
+        ) VALUES (?, ?, 'high', 'temperature', 'high_temp', ?, ?, ?, ?, 24.0,
+                  ?, 'ecmwf_ens', 'test-current-ens', 'ecmwf_open_data', ?, ?,
+                  'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'VERIFIED', 'degC')
+        """,
+        (
+            req.city,
+            mod._date_text(req.target_date),
+            ens_cycle_time.isoformat(),
+            datetime(2026, 6, 7, 12, tzinfo=UTC).isoformat(),
+            ens_cycle_time.isoformat(),
+            ens_cycle_time.isoformat(),
+            json.dumps(members_c),
+            ens_cycle_time.isoformat(),
+            ens_cycle_time.isoformat(),
+        ),
+    )
+
+
+def test_current_evidence_shape_rejects_ens_cycle_older_than_staleness_bound() -> None:
+    """P1: the current-evidence ENS carrier row must obey the SAME staleness horizon
+    (REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT = 30h) that governs posterior readiness.
+    A row whose ENS cycle is 31h older than the carrier cycle must NOT be selected as
+    "current evidence" — silently serving it would launder stale-as-fresh."""
+    from datetime import timedelta
+
+    conn = _conn()
+    req = _request()
+    stale_cycle = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time") - timedelta(hours=31)
+    _seed_current_ens_at_cycle(conn, request=req, ens_cycle_time=stale_cycle)
+
+    shape = mod._read_current_evidence_shape(
+        conn,
+        req,
+        metric="high",
+        provider_values_c={"ecmwf_ifs": 24.0, "icon_global": 25.0},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        center_c=24.5,
+    )
+
+    assert shape is None
+
+
+def test_current_evidence_shape_accepts_ens_cycle_within_staleness_bound() -> None:
+    """Counterpart to the rejection test: a row 29h older than the carrier cycle (inside the
+    30h bound) IS selected as current evidence."""
+    from datetime import timedelta
+
+    conn = _conn()
+    req = _request()
+    fresh_cycle = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time") - timedelta(hours=29)
+    _seed_current_ens_at_cycle(conn, request=req, ens_cycle_time=fresh_cycle)
+
+    shape = mod._read_current_evidence_shape(
+        conn,
+        req,
+        metric="high",
+        provider_values_c={"ecmwf_ifs": 24.0, "icon_global": 25.0},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        center_c=24.5,
+    )
+
+    assert shape is not None
+
+
 def _enable_flag(monkeypatch):
     import src.config as cfg
     monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_enabled", True)

@@ -1333,8 +1333,17 @@ def _read_current_evidence_shape(
 
     try:
         decision_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
-        carrier_cycle = _to_utc(
+        carrier_cycle_dt = _to_utc(
             request.source_cycle_time, field_name="source_cycle_time"
+        )
+        carrier_cycle = carrier_cycle_dt.isoformat()
+        # Same one-clock staleness law that governs posterior readiness
+        # (replacement_source_cycle_max_age_hours) also bounds how old the ENS carrier row
+        # may be to still call itself "current evidence" — an unbounded walk-back silently
+        # launders a stale ENS cycle into decision-time current evidence.
+        min_evidence_cycle = (
+            carrier_cycle_dt
+            - timedelta(hours=replacement_source_cycle_max_age_hours())
         ).isoformat()
         row = conn.execute(
             """
@@ -1354,6 +1363,7 @@ def _read_current_evidence_shape(
               AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
               AND contributes_to_target_extrema = 1
               AND COALESCE(source_cycle_time, issue_time) <= ?
+              AND COALESCE(source_cycle_time, issue_time) >= ?
               AND COALESCE(source_available_at, available_at) <= ?
             ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
                      COALESCE(source_available_at, available_at) DESC,
@@ -1365,6 +1375,7 @@ def _read_current_evidence_shape(
                 _date_text(request.target_date),
                 metric,
                 carrier_cycle,
+                min_evidence_cycle,
                 decision_at,
             ),
         ).fetchone()
