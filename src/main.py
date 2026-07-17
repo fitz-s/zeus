@@ -40,7 +40,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 
@@ -4837,6 +4837,7 @@ def _edli_build_forecast_snapshot_events(
     suppress_recent_no_value_refutations: bool = False,
     budget_seconds: float | None = None,
     restrict_to_families: set[tuple[str, str, str]] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[Any]:
     """Build FSR events without mutating world DB.
 
@@ -4857,9 +4858,17 @@ def _edli_build_forecast_snapshot_events(
         if budget_seconds is not None and float(budget_seconds) > 0
         else None
     )
-    _edli_install_sqlite_deadline(world_conn, deadline_monotonic=deadline_monotonic)
+    _edli_install_sqlite_deadline(
+        world_conn,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
     forecasts_conn = get_forecasts_connection_read_only()
-    _edli_install_sqlite_deadline(forecasts_conn, deadline_monotonic=deadline_monotonic)
+    _edli_install_sqlite_deadline(
+        forecasts_conn,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
     try:
         trigger = ForecastSnapshotReadyTrigger(
             EventWriter(world_conn),
@@ -4877,11 +4886,16 @@ def _edli_build_forecast_snapshot_events(
         )
     except sqlite3.OperationalError as exc:
         if "interrupted" in str(exc).lower():
-            logger.warning(
-                "EDLI forecast-snapshot build budget exhausted after %.3fs; "
-                "skipping emit this cycle and draining already-queued candidates.",
-                float(budget_seconds or 0.0),
-            )
+            if cancelled is not None and cancelled():
+                logger.info(
+                    "EDLI forecast-snapshot build preempted by urgent producer wake"
+                )
+            else:
+                logger.warning(
+                    "EDLI forecast-snapshot build budget exhausted after %.3fs; "
+                    "skipping emit this cycle and draining already-queued candidates.",
+                    float(budget_seconds or 0.0),
+                )
             return []
         raise
     finally:
@@ -5030,6 +5044,7 @@ def _edli_pending_entity_keys(
     event_types: tuple[str, ...] = ("FORECAST_SNAPSHOT_READY",),
     max_rows_per_status: int = 5_000,
     deadline_monotonic: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> set[str]:
     """entity_keys of opportunity_events still unprocessed for the EDLI reactor consumer.
 
@@ -5057,6 +5072,7 @@ def _edli_pending_entity_keys(
             _edli_install_sqlite_deadline(
                 world_conn,
                 deadline_monotonic=deadline_monotonic,
+                cancelled=cancelled,
             )
         try:
             row = world_conn.execute("PRAGMA busy_timeout").fetchone()
@@ -5141,14 +5157,26 @@ _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
 
 
 
-def _edli_install_sqlite_deadline(conn, *, deadline_monotonic: float | None) -> None:
-    """Interrupt long SQLite reads/writes once the caller's wall-clock budget is spent."""
+def _edli_install_sqlite_deadline(
+    conn,
+    *,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """Interrupt SQLite when its budget expires or higher-value work arrives."""
 
-    if deadline_monotonic is None:
+    if deadline_monotonic is None and cancelled is None:
         return
 
     def _deadline_progress() -> int:
-        return 1 if time.monotonic() >= deadline_monotonic else 0
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return 1
+        if cancelled is not None:
+            try:
+                return 1 if cancelled() else 0
+            except Exception:  # noqa: BLE001 - cancellation is an optimization.
+                return 0
+        return 0
 
     conn.set_progress_handler(_deadline_progress, 1_000)
 

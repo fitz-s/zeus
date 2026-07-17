@@ -2396,6 +2396,47 @@ def test_sqlite_deadline_interrupts_and_clears():
     assert conn.execute("SELECT 1").fetchone()[0] == 1
 
 
+def test_sqlite_deadline_interrupts_for_higher_value_work():
+    """Urgent producer work must interrupt maintenance before its wall budget."""
+
+    conn = sqlite3.connect(":memory:")
+    main._edli_install_sqlite_deadline(
+        conn,
+        deadline_monotonic=None,
+        cancelled=lambda: True,
+    )
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            conn.execute(
+                """
+                WITH RECURSIVE x(n) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT n + 1 FROM x WHERE n < 1000000
+                )
+                SELECT sum(n) FROM x
+                """
+            ).fetchone()
+    finally:
+        main._edli_clear_sqlite_progress_handler(conn)
+
+    assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+
+def test_reactor_maintenance_is_preemptible_by_urgent_wakes():
+    """Recovery scans may not retain the decision lock after alpha changes."""
+
+    cycle_src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
+    prune_src = inspect.getsource(reactor._edli_prune_pending_working_set)
+    forecast_src = inspect.getsource(main._edli_build_forecast_snapshot_events)
+
+    assert "reactor_urgent_wake_revision" in cycle_src
+    assert "urgent_wake_pending=_urgent_wake_pending" in cycle_src
+    assert "cancelled=_urgent_wake_pending" in cycle_src
+    assert "cancelled=urgent_wake_pending" in prune_src
+    assert "cancelled=cancelled" in forecast_src
+
+
 def test_forecast_snapshot_build_is_reactor_budgeted():
     """FSR event build is before process_pending; it must not be an unbounded reactor stage."""
 
@@ -2418,8 +2459,9 @@ def test_day0_emit_is_reactor_budgeted():
         reactor._edli_day0_emit_busy_timeout_ms
     )
     assert "budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg)" in cycle_src
-    assert "_edli_install_sqlite_deadline(world_conn" in emit_src
-    assert "_edli_install_sqlite_deadline(trade_conn" in emit_src
+    assert emit_src.count("_edli_install_sqlite_deadline(") >= 2
+    assert "world_conn," in emit_src
+    assert "trade_conn," in emit_src
     assert "_edli_set_sqlite_busy_timeout_ms(world_conn, day0_busy_timeout_ms)" in emit_src
     assert "_edli_set_sqlite_busy_timeout_ms(trade_conn, day0_busy_timeout_ms)" in emit_src
     assert "EDLI day0 emit budget exhausted" in emit_src
