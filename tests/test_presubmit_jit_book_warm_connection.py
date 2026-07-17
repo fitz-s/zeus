@@ -201,12 +201,16 @@ def test_jit_book_provider_uses_fresh_projection_then_rest_fallback(monkeypatch)
     assert observed_at == captured_at
     assert authority_id == "price_channel_projection"
     assert rest_calls == []
+    assert fetch.consume_last(token) == (book, observed_at, authority_id)
+    assert fetch.consume_last(token) is None
 
     conn.execute(
         "UPDATE executable_market_snapshots SET captured_at = ?",
         ((datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat(),),
     )
-    assert fetch(token)["hash"] == "rest-hash"
+    rest_book, _rest_observed_at, rest_authority_id = fetch(token)
+    assert rest_book["hash"] == "rest-hash"
+    assert rest_authority_id == "clob_jit_book"
     assert rest_calls == [token]
 
 
