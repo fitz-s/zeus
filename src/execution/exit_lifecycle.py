@@ -500,7 +500,7 @@ def _active_exit_sell_for_lock(
     )
     if active_exit is not None:
         return active_exit
-    _commit_before_exit_venue_io(conn, stage="active_exit_open_order_scan")
+    _commit_exit_write_boundary(conn, stage="active_exit_open_order_scan")
     return _venue_open_exit_sell_order(
         clob,
         token_id=token_id,
@@ -812,8 +812,8 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _commit_before_exit_venue_io(conn: sqlite3.Connection | None, *, stage: str) -> None:
-    """Release trade DB writes before live cancel/sell HTTP calls."""
+def _commit_exit_write_boundary(conn: sqlite3.Connection | None, *, stage: str) -> None:
+    """Release trade DB writes before slow exit work or venue I/O."""
 
     if conn is None:
         return
@@ -821,7 +821,7 @@ def _commit_before_exit_venue_io(conn: sqlite3.Connection | None, *, stage: str)
         conn.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "exit lifecycle commit before venue I/O failed at %s: %s",
+            "exit lifecycle write-boundary commit failed at %s: %s",
             stage,
             exc,
         )
@@ -2908,7 +2908,7 @@ def _record_exit_intent_before_execution_gates(
         event_type="EXIT_INTENT",
         extra_payload=_exit_intent_audit_payload(exit_intent),
     )
-    _commit_before_exit_venue_io(conn, stage="exit_intent")
+    _commit_exit_write_boundary(conn, stage="exit_intent")
 
 
 def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
@@ -3326,7 +3326,7 @@ def _execute_live_exit(
                 )
                 log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason)
             return f"collateral_blocked: {collateral_reason}"
-        _commit_before_exit_venue_io(conn, stage="collateral_refresh")
+        _commit_exit_write_boundary(conn, stage="collateral_refresh")
 
     # Pre-sell collateral check (fail-closed)
     can_sell, collateral_reason = check_sell_collateral(
@@ -5190,6 +5190,7 @@ def check_pending_exits(
             stats["pending_exit_defer_reason"] = "cycle_budget"
             break
         processed_scan_positions += 1
+        _commit_exit_write_boundary(conn, stage="pending_exit_position_scan")
         raw_exit_state = getattr(pos, "exit_state", "")
         exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
         fill = _exit_trade_fact_close_candidate(conn, pos)
@@ -5366,7 +5367,7 @@ def check_pending_exits(
                 stats["filled_from_trade_fact"] = stats.get("filled_from_trade_fact", 0) + 1
                 continue
 
-        _commit_before_exit_venue_io(conn, stage="pending_exit_status_poll")
+        _commit_exit_write_boundary(conn, stage="pending_exit_status_poll")
         status, status_payload = _check_order_fill(clob, exit_order_id)
         if conn is not None:
             if status:
@@ -5557,7 +5558,7 @@ def check_pending_exits(
                     stats["unchanged"] += 1
             else:
                 token_id = _asset_id_for_position(pos)
-                _commit_before_exit_venue_io(conn, stage="pending_exit_reprice")
+                _commit_exit_write_boundary(conn, stage="pending_exit_reprice")
                 if _cancel_stale_pending_exit_for_reprice(
                     conn=conn,
                     position=pos,

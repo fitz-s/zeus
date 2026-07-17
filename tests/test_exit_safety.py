@@ -2185,7 +2185,10 @@ def test_retrying_pending_exit_posted_without_command_releases_before_poll(conn)
     assert runtime_position.order_status == "filled"
 
 
-def test_pending_exit_status_poll_releases_db_transaction_before_venue_io(conn):
+def test_pending_exit_status_poll_releases_db_transaction_before_local_scan_and_venue_io(
+    conn,
+    monkeypatch,
+):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
 
@@ -2225,6 +2228,18 @@ def test_pending_exit_status_poll_releases_db_transaction_before_venue_io(conn):
         ("cmd-pending-exit-lock-boundary",),
     )
     assert conn.in_transaction
+
+    original_close_candidate = exit_lifecycle._exit_trade_fact_close_candidate
+
+    def assert_unlocked_before_trade_fact_scan(*args, **kwargs):
+        assert conn.in_transaction is False
+        return original_close_candidate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_exit_trade_fact_close_candidate",
+        assert_unlocked_before_trade_fact_scan,
+    )
 
     class FakeClob:
         def get_order_status(self, order_id):
