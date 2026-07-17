@@ -16941,18 +16941,26 @@ def _assert_final_jit_witness_revalidates_intent(
     provisional: PreSubmitAuthorityWitness,
     final: PreSubmitAuthorityWitness,
 ) -> None:
-    """Require two genuine JIT observations without freezing a moving book.
+    """Require two current executable-book observations without freezing the book.
 
     The provisional fetch supplies the touch used to build the intent.  The
     final fetch independently validates that exact side, limit, and size against
-    current depth in the provider.  Requiring identical hashes or opposite-side
-    prices after that validation rejects harmless book movement and adds no
+    current depth in the provider.  The provider may serve a fresh canonical
+    price-channel projection, continuity-proven channel depth, or a direct CLOB
+    fetch; all three are current venue-book authorities and run the same final
+    depth validation.  Requiring identical hashes, source routes, or opposite-
+    side prices after that validation rejects harmless book movement and adds no
     execution guarantee.
     """
 
+    current_book_authorities = {
+        "clob_jit_book",
+        "price_channel_continuity",
+        "price_channel_projection",
+    }
     if (
-        provisional.book_authority_id != "clob_jit_book"
-        or final.book_authority_id != "clob_jit_book"
+        provisional.book_authority_id not in current_book_authorities
+        or final.book_authority_id not in current_book_authorities
         or not provisional.book_hash
         or not final.book_hash
     ):

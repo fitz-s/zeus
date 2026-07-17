@@ -5604,7 +5604,20 @@ def test_gate84_jit_response_must_bind_requested_token(monkeypatch):
         provider(_gate84_final_intent(side="BUY"), object(), decision_time)
 
 
-def test_gate84_final_jit_witness_revalidates_intent_on_changed_book(monkeypatch):
+@pytest.mark.parametrize(
+    "provisional_authority,final_authority",
+    [
+        ("clob_jit_book", "clob_jit_book"),
+        ("price_channel_projection", "price_channel_projection"),
+        ("price_channel_continuity", "price_channel_continuity"),
+        ("price_channel_projection", "clob_jit_book"),
+    ],
+)
+def test_gate84_final_jit_witness_revalidates_intent_on_changed_book(
+    monkeypatch,
+    provisional_authority,
+    final_authority,
+):
     from src.engine import event_reactor_adapter as adapter
     from src.events import reactor
 
@@ -5627,6 +5640,11 @@ def test_gate84_final_jit_witness_revalidates_intent_on_changed_book(monkeypatch
     )
     provisional = provider(provisional_intent, object(), decision_time)
     final = provider(_strict_jit_final_intent(), object(), decision_time)
+    provisional = replace(
+        provisional,
+        book_authority_id=provisional_authority,
+    )
+    final = replace(final, book_authority_id=final_authority)
 
     adapter._assert_final_jit_witness_revalidates_intent(
         provisional=provisional,
