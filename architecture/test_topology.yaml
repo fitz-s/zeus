@@ -383,7 +383,8 @@ test_trust_policy:
     tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
-    tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-17"}
+    tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-17", note: "Fast METAR publication persistence, event identities, and exact committed-family wake propagation."}
+    tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-17", note: "Day0 METAR source-clock scheduling, bounded commit retry, and durable event/family wake ordering."}
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
@@ -580,7 +581,7 @@ test_trust_policy:
     tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
     # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2).
     tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-14"}
-    tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-05-23"}
+    tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-07-17", note: "Forecast daemon ownership plus reactor wake routing, including family-bearing Day0 wakes that avoid event-payload rereads."}
     # 2026-05-23 schedule fix: cron triggers must fire after safe_fetch windows (a0d51d480b507f324 root-cause).
     tests/test_ecmwf_opendata_ingest_schedule.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}

@@ -856,6 +856,9 @@ class TestDay0MetarSourceClockTick:
             def emit_prefetched(self, **_kw):
                 order.append("emit")
                 _kw["inserted_event_ids"].extend(("event-b", "event-a"))
+                _kw["inserted_families"].extend(
+                    (("Paris", "2026-06-12", "high"),)
+                )
                 return 2
 
         class _Conn:
@@ -890,7 +893,8 @@ class TestDay0MetarSourceClockTick:
         monkeypatch.setattr(
             "src.runtime.reactor_wake.publish_reactor_wake",
             lambda **kwargs: order.append(
-                f"wake:{','.join(kwargs['event_ids'])}"
+                f"wake:{','.join(kwargs['event_ids'])}:"
+                f"{kwargs['forecast_families']}"
             ),
         )
 
@@ -903,7 +907,8 @@ class TestDay0MetarSourceClockTick:
         }
         wake_entry = next(item for item in order if item.startswith("wake:"))
         assert order.index("commit") < order.index(wake_entry)
-        assert "wake:event-b,event-a" in order
+        assert "wake:event-b,event-a" in wake_entry
+        assert "(('Paris', '2026-06-12', 'high'),)" in wake_entry
 
     def test_committed_event_survives_reactor_wake_failure(
         self, monkeypatch, caplog

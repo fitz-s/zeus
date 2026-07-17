@@ -1146,6 +1146,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
         "ingest_main",
         "day0_extreme_event_committed",
         ("event-day0",),
+        (("Paris", "2026-07-16", "high"),),
     )
 
     class _Lock:
@@ -1186,7 +1187,9 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     monkeypatch.setattr(
         main,
         "_day0_wake_target_families",
-        lambda event_ids: frozenset({("Paris", "2026-07-16", "high")}),
+        lambda _event_ids: pytest.fail(
+            "family-bearing Day0 wake must not reread event payloads"
+        ),
     )
     monkeypatch.setattr(
         main,
@@ -1209,7 +1212,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     assert main._edli_reactor_wake_poll_once() is True
     assert calls == [
         "monitor:[('Paris', '2026-07-16', 'high')]:urgent=True",
-        "reactor:day0_extreme_event_committed:event-day0:0",
+        "reactor:day0_extreme_event_committed:event-day0:1",
     ]
     assert pending.is_set() is False
 

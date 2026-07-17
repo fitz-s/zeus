@@ -785,14 +785,20 @@ class TestLedgerPublicationDelta:
         )
         assert pf1.ledger_reports == (first,)
         inserted_event_ids: list[str] = []
+        inserted_families: list[tuple[str, str, str]] = []
         assert emitter.emit_prefetched(
             world_conn=conn,
             prefetch=pf1,
             received_at=(t0 + timedelta(minutes=5)).isoformat(),
             inserted_event_ids=inserted_event_ids,
+            inserted_families=inserted_families,
         ) == 2
         assert len(inserted_event_ids) == 2
         assert len(set(inserted_event_ids)) == 2
+        assert inserted_families == [
+            ("Tokyo", "2026-06-10", "high"),
+            ("Tokyo", "2026-06-10", "low"),
+        ]
 
         pf2 = emitter.prefetch(
             cities=[_tokyo()],

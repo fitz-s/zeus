@@ -1627,6 +1627,7 @@ class Day0FastObsEmitter:
         day0_is_tradeable: bool = True,
         family_admission=None,
         inserted_event_ids: list[str] | None = None,
+        inserted_families: list[tuple[str, str, str]] | None = None,
     ) -> int:
         """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
 
@@ -1833,6 +1834,10 @@ class Day0FastObsEmitter:
                         emitted += 1
                         if inserted_event_ids is not None:
                             inserted_event_ids.append(result.event_id)
+                        if inserted_families is not None:
+                            inserted_families.append(
+                                (city_name, target_date, metric)
+                            )
                         logger.info(
                             "DAY0_FAST_OBS_EMIT city=%s date=%s metric=%s rounded=%s "
                             "obs_time=%s available_at=%s samples=%d skipped_unit_law=%d freshness=%s",

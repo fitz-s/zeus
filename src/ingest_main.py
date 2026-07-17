@@ -153,6 +153,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
     acquired = False
     emitted = 0
     inserted_event_ids: list[str] = []
+    inserted_families: list[tuple[str, str, str]] = []
     pending_reports = 0
     try:
         if not _DAY0_METAR_PENDING_COMMITS:
@@ -196,6 +197,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 limit=max(50, len(prefetch.eligible) * 2),
                 day0_is_tradeable=day0_is_tradeable,
                 inserted_event_ids=inserted_event_ids,
+                inserted_families=inserted_families,
             )
             conn.commit()
             del _DAY0_METAR_PENDING_COMMITS[0]
@@ -230,6 +232,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 source="day0_metar_source_clock",
                 reason="day0_extreme_event_committed",
                 event_ids=tuple(inserted_event_ids),
+                forecast_families=tuple(dict.fromkeys(inserted_families)),
             )
         except Exception:
             logger.warning(

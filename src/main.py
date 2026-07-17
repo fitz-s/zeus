@@ -3868,7 +3868,11 @@ def _edli_reactor_wake_poll_once() -> bool:
     ):
         return False
     if day0_wake and not substrate_refresh_wake:
-        target_families = _day0_wake_target_families(wake_event_ids)
+        target_families = (
+            frozenset(wake_families)
+            if wake_families
+            else _day0_wake_target_families(wake_event_ids)
+        )
         if _day0_wake_requires_exit_monitor(target_families):
             try:
                 monitor_ran = _exit_monitor_cycle(
