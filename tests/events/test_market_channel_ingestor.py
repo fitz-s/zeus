@@ -890,51 +890,6 @@ def test_subscribed_seed_fetches_off_event_loop_thread():
     assert fetch_threads and fetch_threads[0] != caller_thread
 
 
-def test_channel_continuity_probe_publishes_successful_pong(monkeypatch):
-    import src.events.triggers.market_channel_ingestor as market_channel
-
-    conn, writer = _conn_writer()
-    proofs = []
-
-    class FakeWebSocket:
-        async def ping(self):
-            pong = asyncio.get_running_loop().create_future()
-            pong.set_result(None)
-            return pong
-
-    async def run_probe():
-        session_done = asyncio.Event()
-
-        def capture(proof):  # noqa: ANN001
-            proofs.append(proof)
-            session_done.set()
-
-        service = MarketChannelOnlineService(
-            MarketChannelIngestor(
-                writer,
-                active_token_ids={"token-1"},
-                token_metadata=_metadata(),
-            ),
-            continuity_sink=capture,
-        )
-        service._connected_at = "2026-07-17T03:00:00+00:00"
-        await service._probe_channel_continuity(
-            FakeWebSocket(),
-            session_done=session_done,
-            stop_event=None,
-            active_token_count=1,
-            logger=None,
-        )
-
-    monkeypatch.setattr(market_channel, "MARKET_CHANNEL_CONTINUITY_PROBE_SECONDS", 0.001)
-    asyncio.run(run_probe())
-
-    assert len(proofs) == 1
-    assert proofs[0]["connected"] is True
-    assert proofs[0]["connected_at"] == "2026-07-17T03:00:00+00:00"
-    assert proofs[0]["active_token_count"] == 1
-
-
 def test_websocket_subscribes_before_rest_seed(monkeypatch):
     import websockets
 
@@ -1011,6 +966,7 @@ def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
     fetch_started = threading.Event()
     release_fetch = threading.Event()
     stop = asyncio.Event()
+    proofs = []
 
     def fetch(token_id):  # noqa: ANN001
         order.append("seed_started")
@@ -1068,6 +1024,7 @@ def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
             token_metadata=_metadata(),
         ),
         fetch_orderbook=fetch,
+        continuity_sink=proofs.append,
     )
 
     asyncio.run(
@@ -1081,6 +1038,9 @@ def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
     )
 
     assert order.index("ws_delta") < order.index("seed_finished")
+    assert len(proofs) == 2
+    assert proofs[-1]["connected"] is True
+    assert proofs[-1]["observed_at"] >= proofs[-1]["connected_at"]
 
 
 def test_disconnect_transition_commits_after_rollback(monkeypatch):

@@ -29,8 +29,6 @@ from src.events.idempotency import stable_event_id
 UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 REST_SEED_COMMIT_CHUNK_SIZE = 16
-MARKET_CHANNEL_CONTINUITY_PROBE_SECONDS = 0.5
-MARKET_CHANNEL_CONTINUITY_PONG_TIMEOUT_SECONDS = 1.0
 _logger = logging.getLogger(__name__)
 
 
@@ -1360,39 +1358,6 @@ class MarketChannelOnlineService:
         )
         return written
 
-    async def _probe_channel_continuity(
-        self,
-        ws: Any,
-        *,
-        session_done: asyncio.Event,
-        stop_event: Any | None,
-        active_token_count: int,
-        logger: Any | None,
-    ) -> None:
-        while not session_done.is_set():
-            try:
-                await asyncio.wait_for(
-                    session_done.wait(),
-                    timeout=MARKET_CHANNEL_CONTINUITY_PROBE_SECONDS,
-                )
-                return
-            except TimeoutError:
-                pass
-            if stop_event is not None and stop_event.is_set():
-                await ws.close()
-                return
-            pong = await ws.ping()
-            await asyncio.wait_for(
-                pong,
-                timeout=MARKET_CHANNEL_CONTINUITY_PONG_TIMEOUT_SECONDS,
-            )
-            self._publish_continuity(
-                connected=True,
-                observed_at=datetime.now(UTC).isoformat(),
-                active_token_count=active_token_count,
-                logger=logger,
-            )
-
     def _fetch_rest_seed_books(
         self,
         token_ids: list[str],
@@ -1637,7 +1602,7 @@ class MarketChannelOnlineService:
                 active_token_ids = self.ingestor.active_token_ids_open_at()
                 async with websockets.connect(
                     endpoint,
-                    ping_interval=None if self.continuity_sink is not None else 20,
+                    ping_interval=20,
                     ping_timeout=20,
                     max_queue=max(1024, len(active_token_ids) * 8),
                 ) as ws:
@@ -1676,59 +1641,44 @@ class MarketChannelOnlineService:
                             "EDLI market-channel connected for %d active weather tokens",
                             len(active_token_ids),
                         )
-                    session_done = asyncio.Event()
-                    try:
-                        async with asyncio.TaskGroup() as tasks:
-                            tasks.create_task(
-                                self._seed_subscribed_books(
-                                    active_token_ids=active_token_ids,
-                                    world_mutex=_world_mutex,
-                                    commit=commit,
-                                    logger=logger,
-                                )
+                    async with asyncio.TaskGroup() as tasks:
+                        tasks.create_task(
+                            self._seed_subscribed_books(
+                                active_token_ids=active_token_ids,
+                                world_mutex=_world_mutex,
+                                commit=commit,
+                                logger=logger,
                             )
-                            if self.continuity_sink is not None:
-                                tasks.create_task(
-                                    self._probe_channel_continuity(
-                                        ws,
-                                        session_done=session_done,
-                                        stop_event=stop_event,
-                                        active_token_count=len(active_token_ids),
-                                        logger=logger,
-                                    )
-                                )
-                            async for raw_message in ws:
-                                # Hold the world-DB write mutex ONLY around the DB
-                                # write+commit unit for this message batch — never across
-                                # recv/network I/O or _handle_action callbacks.
-                                pending_actions: list[MarketChannelAction] = []
-                                with self.ingestor.defer_market_event_sink():
-                                    with _world_mutex:
-                                        for message in _parse_channel_messages(raw_message):
-                                            action_or_result = self.ingestor.handle_message(
-                                                message,
-                                                received_at=datetime.now(UTC).isoformat(),
-                                            )
-                                            if isinstance(action_or_result, MarketChannelAction):
-                                                pending_actions.append(action_or_result)
-                                        self.ingestor.flush_coalesced(market_budget=100)
-                                        if not self.ingestor._market_event_sink_independently_coordinated:
-                                            self.ingestor.flush_deferred_market_event_sink()
-                                        if commit is not None:
-                                            commit()
-                                    if self.ingestor._market_event_sink_independently_coordinated:
+                        )
+                        async for raw_message in ws:
+                            # Hold the world-DB write mutex ONLY around the DB
+                            # write+commit unit for this message batch — never across
+                            # recv/network I/O or _handle_action callbacks.
+                            pending_actions: list[MarketChannelAction] = []
+                            with self.ingestor.defer_market_event_sink():
+                                with _world_mutex:
+                                    for message in _parse_channel_messages(raw_message):
+                                        action_or_result = self.ingestor.handle_message(
+                                            message,
+                                            received_at=datetime.now(UTC).isoformat(),
+                                        )
+                                        if isinstance(action_or_result, MarketChannelAction):
+                                            pending_actions.append(action_or_result)
+                                    self.ingestor.flush_coalesced(market_budget=100)
+                                    if not self.ingestor._market_event_sink_independently_coordinated:
                                         self.ingestor.flush_deferred_market_event_sink()
-                                self._publish_continuity(
-                                    connected=True,
-                                    observed_at=datetime.now(UTC).isoformat(),
-                                    active_token_count=len(active_token_ids),
-                                    logger=logger,
-                                )
-                                for _action in pending_actions:
-                                    self._handle_action(_action)
-                            session_done.set()
-                    finally:
-                        session_done.set()
+                                    if commit is not None:
+                                        commit()
+                                if self.ingestor._market_event_sink_independently_coordinated:
+                                    self.ingestor.flush_deferred_market_event_sink()
+                            self._publish_continuity(
+                                connected=True,
+                                observed_at=datetime.now(UTC).isoformat(),
+                                active_token_count=len(active_token_ids),
+                                logger=logger,
+                            )
+                            for _action in pending_actions:
+                                self._handle_action(_action)
                     if stop_event is None or not stop_event.is_set():
                         raise ConnectionError("market channel stream ended")
             except Exception as exc:  # noqa: BLE001 - network loop must retry
