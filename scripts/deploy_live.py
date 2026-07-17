@@ -1116,6 +1116,34 @@ def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, 
     return True, f"live restart entry pause guard armed: {tail}"
 
 
+def _pause_entries_with_stuck_live_recovery(
+    labels: list[str],
+    *,
+    live_was_loaded: bool,
+) -> tuple[bool, str]:
+    """Arm the restart guard after physically stopping a lock-stuck live daemon.
+
+    A live process can hold the world DB writer longer than the guard timeout.
+    Once that process is unloaded it has no entry side-effect authority, so it
+    is safe to retry the durable pause before any daemon is started again.
+    Other pause failures remain fail-closed.
+    """
+
+    ok, detail = _pause_entries_for_live_restart_if_needed(labels)
+    writer_stuck = "timed out after" in detail or "database is locked" in detail
+    if ok or not live_was_loaded or not writer_stuck:
+        return ok, detail
+    stopped, stop_detail = _stop_label(LIVE_TRADING_LABEL)
+    if not stopped:
+        return False, f"{detail}\n{stop_detail}"
+    retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(labels)
+    return (
+        retry_ok,
+        f"{detail}\n{stop_detail}; pause guard retry after process absence: "
+        f"{retry_detail}",
+    )
+
+
 def _resume_entries_after_verified_live_restart_if_needed(
     labels: list[str],
 ) -> tuple[bool, str]:
@@ -1310,7 +1338,10 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         else False
     )
 
-    pause_ok, pause_detail = _pause_entries_for_live_restart_if_needed(labels)
+    pause_ok, pause_detail = _pause_entries_with_stuck_live_recovery(
+        labels,
+        live_was_loaded=live_was_loaded_before,
+    )
     if not pause_ok:
         print("REFUSING to restart — live entry pause guard is not armed:")
         print(pause_detail)
