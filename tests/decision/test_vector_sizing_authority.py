@@ -303,7 +303,8 @@ def test_robust_delta_u_walks_cost_curve_once_without_numeric_drift(monkeypatch,
     scalar = np.asarray([prepared.robust_at(value) for value in stakes])
     calls = 0
     batched = prepared.robust_many(stakes)
-    np.testing.assert_array_equal(batched, scalar)
+    np.testing.assert_allclose(batched, scalar, rtol=0.0, atol=5e-15)
+    assert int(np.argmax(batched)) == int(np.argmax(scalar))
     assert calls == len(stakes)
 
     low_exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("100"))
@@ -320,7 +321,8 @@ def test_robust_delta_u_walks_cost_curve_once_without_numeric_drift(monkeypatch,
         [ruin_prepared.robust_at(value) for value in ruin_stakes]
     )
     ruin_batched = ruin_prepared.robust_many(ruin_stakes)
-    np.testing.assert_array_equal(ruin_batched, ruin_scalar)
+    np.testing.assert_allclose(ruin_batched, ruin_scalar, rtol=0.0, atol=5e-15)
+    assert int(np.argmax(ruin_batched)) == int(np.argmax(ruin_scalar))
 
     mixed_exposure = PortfolioExposureVector.from_outcome_wealth(
         matrix,

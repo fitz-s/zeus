@@ -500,12 +500,11 @@ class _PreparedSizing:
     family expired before it could fill).
 
     This precomputes, ONCE per candidate, the (n_draws × n_outcomes) effective-π matrix
-    ``Pi`` and the per-outcome existing wealth ``A``. Each stake evaluation walks the
-    candidate's executable cost curve once, builds the full growth vector ``g(s)``, then
-    performs one ``Pi @ g`` matmul and one quantile. Because ΔU is LINEAR in π, the matmul
-    is numerically identical to the per-draw ``_delta_u_at_stake`` sum: the SAME
-    effective_outcome_pi, the SAME Decimal-wealth ruin rule, the SAME alpha-quantile.
-    It is a pure speedup, NOT a cap/haircut/behavior change.
+    ``Pi`` and the per-outcome existing wealth ``A``. A stake grid walks each executable
+    cost once, stacks the growth vectors into ``G``, then evaluates every draw and stake
+    with one fused ``Pi × G`` contraction and one batched quantile. Because ΔU is LINEAR
+    in π, this preserves the same effective_outcome_pi, Decimal-wealth ruin rule, and
+    alpha-quantile. It is a pure speedup, NOT a cap/haircut/behavior change.
     """
 
     __slots__ = (
@@ -590,7 +589,7 @@ class _PreparedSizing:
         return float(np.quantile(du, self.alpha))
 
     def robust_many(self, stakes_usd: Sequence[Decimal]) -> np.ndarray:
-        """Robust ΔU for one stake grid using one batched quantile call."""
+        """Robust ΔU for one stake grid using one contraction and batched quantile."""
         stakes = tuple(stakes_usd)
         if not stakes:
             return np.empty(0, dtype=float)
@@ -598,19 +597,29 @@ class _PreparedSizing:
         n_outcomes = len(self.outcomes)
         ruin = np.zeros((n_outcomes, len(stakes)), dtype=bool)
         invalid = np.zeros(len(stakes), dtype=bool)
-        du = np.empty((self._Pi.shape[0], len(stakes)), dtype=float)
+        growth = np.zeros((n_outcomes, len(stakes)), dtype=float)
         for column, stake in enumerate(stakes):
             result = self._growth_at(stake)
             if result is None:
                 invalid[column] = True
-                du[:, column] = -np.inf
                 continue
-            g, ruin[:, column] = result
-            # Keep the original contiguous GEMV reduction order bit-identical to
-            # robust_at; only the quantile reduction is batched across columns.
-            du[:, column] = self._Pi @ g
+            growth[:, column], ruin[:, column] = result
+
+        # Outcome families are narrow. A BLAS GEMM can fan this contraction across the
+        # whole worker pool, increasing p95 and competing with independent reactor work.
+        # The direct C contraction stays single-threaded.
+        du = np.einsum("ij,jk->ik", self._Pi, growth, optimize=False)
+        du[:, invalid] = -np.inf
 
         ruin_columns = ruin.any(axis=0)
+        if not invalid.any() and not ruin_columns.any():
+            return np.quantile(
+                du,
+                self.alpha,
+                axis=0,
+                overwrite_input=True,
+            )
+
         affected = np.zeros(len(stakes), dtype=bool)
         all_ruin = np.zeros(len(stakes), dtype=bool)
         for column in np.flatnonzero(ruin_columns & ~invalid):
@@ -635,10 +644,17 @@ class _PreparedSizing:
         batch_columns = ~(invalid | affected)
         if batch_columns.any():
             values[batch_columns] = np.quantile(
-                du[:, batch_columns], self.alpha, axis=0
+                du[:, batch_columns],
+                self.alpha,
+                axis=0,
+                overwrite_input=True,
             )
         for column in np.flatnonzero(scalar_columns):
-            values[column] = np.quantile(du[:, column], self.alpha)
+            values[column] = np.quantile(
+                du[:, column],
+                self.alpha,
+                overwrite_input=True,
+            )
         return values
 
     def _growth_at(self, stake_usd: Decimal) -> tuple[np.ndarray, np.ndarray] | None:
