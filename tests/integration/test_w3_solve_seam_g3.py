@@ -2678,7 +2678,12 @@ def test_current_forecast_global_probability_still_requires_replacement_readines
     forecast.close()
 
 
-def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
+@pytest.mark.parametrize(
+    "event_factory",
+    [_global_scope_event, _global_day0_scope_event],
+    ids=["forecast", "day0"],
+)
+def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_factory):
     import src.data.polymarket_client as polymarket_client
     import src.engine.global_auction_universe as universe
     import src.runtime.reactor_wake as reactor_wake
@@ -2766,7 +2771,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         auction_capital_authority=CapacityAuthority(),
     )
     urgent_revision["value"] = (4, 5, 6)
-    event = _global_day0_scope_event(
+    event = event_factory(
         city="Dallas",
         source_run_id="run-dallas",
     )
@@ -3985,6 +3990,7 @@ def test_live_adapter_discards_stale_hint_then_prefetches_unknown_full_refresh(
         ),
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
     )
+    assert captured["restrict_to_family_keys"] is None
     probability = {
         "family": SimpleNamespace(
             family_key="family",
