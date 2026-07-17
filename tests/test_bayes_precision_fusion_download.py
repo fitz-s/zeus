@@ -258,8 +258,8 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
     got = dl._default_live_fetch_locations_batched(
         models=["ecmwf_ifs"],
         locations=[
-            (48.967, 2.428, "Europe/Paris", date(2026, 6, 9)),
-            (52.520, 13.405, "Europe/Berlin", date(2026, 6, 9)),
+            (48.967, 2.428, "Europe/Paris", (date(2026, 6, 9),)),
+            (52.520, 13.405, "Europe/Berlin", (date(2026, 6, 9),)),
         ],
         run=datetime(2026, 6, 8, 0, tzinfo=UTC),
         forecast_hours=120,
@@ -272,8 +272,8 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
     assert params["timezone"] == "Europe/Paris,Europe/Berlin"
     assert params["cell_selection"] == dl.BAYES_PRECISION_FUSION_CELL_SELECTION
     assert got == [
-        {"ecmwf_ifs": (22.0, 19.0)},
-        {"ecmwf_ifs": (32.0, 29.0)},
+        {date(2026, 6, 9): {"ecmwf_ifs": (22.0, 19.0)}},
+        {date(2026, 6, 9): {"ecmwf_ifs": (32.0, 29.0)}},
     ]
 
 
@@ -288,8 +288,8 @@ def test_source_clock_download_reuses_one_multi_location_response(
     def _locations(**kwargs):
         calls.append(list(kwargs["locations"]))
         return [
-            {"ecmwf_ifs": (22.0, 10.0)},
-            {"ecmwf_ifs": (24.0, 12.0)},
+            {date(2026, 6, 9): {"ecmwf_ifs": (22.0, 10.0)}},
+            {date(2026, 6, 9): {"ecmwf_ifs": (24.0, 12.0)}},
         ]
 
     monkeypatch.setattr(dl, "_default_live_fetch_locations_batched", _locations)
@@ -317,6 +317,57 @@ def test_source_clock_download_reuses_one_multi_location_response(
     assert report["written_row_count"] == 2
     assert report["single_runs_location_batch_count"] == 1
     assert report["single_runs_location_count"] == 2
+    assert report["single_runs_location_target_date_count"] == 2
+
+
+def test_source_clock_download_reuses_city_payload_across_target_dates(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    targets = [
+        dl.BayesPrecisionFusionDownloadTarget(
+            city="Paris",
+            metric="high",
+            target_date=target_date,
+            lead_days=lead_days,
+            latitude=48.967,
+            longitude=2.428,
+            timezone_name="Europe/Paris",
+        )
+        for target_date, lead_days in (("2026-06-09", 1), ("2026-06-10", 2))
+    ]
+    calls: list[object] = []
+
+    def _locations(**kwargs):
+        calls.append(kwargs["locations"])
+        return [
+            {
+                date(2026, 6, 9): {"ecmwf_ifs": (22.0, 10.0)},
+                date(2026, 6, 10): {"ecmwf_ifs": (23.0, 11.0)},
+            }
+        ]
+
+    monkeypatch.setattr(dl, "_default_live_fetch_locations_batched", _locations)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
+
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        targets=targets,
+        models=("ecmwf_ifs",),
+        include_previous_runs=False,
+        prune_after=False,
+        allow_single_runs_fallback=False,
+    )
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 1
+    assert calls[0][0][3] == (date(2026, 6, 9), date(2026, 6, 10))
+    assert report["written_row_count"] == 2
+    assert report["single_runs_location_count"] == 1
+    assert report["single_runs_location_target_date_count"] == 2
 
 
 def test_source_clock_multi_location_429_remains_retryable(tmp_path, monkeypatch) -> None:
@@ -332,7 +383,10 @@ def test_source_clock_multi_location_429_remains_retryable(tmp_path, monkeypatch
     monkeypatch.setattr(
         dl,
         "_default_live_fetch_locations_batched",
-        lambda **kwargs: [dict(error) for _ in kwargs["locations"]],
+        lambda **kwargs: [
+            {target_date: dict(error) for target_date in location[3]}
+            for location in kwargs["locations"]
+        ],
     )
     monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
 

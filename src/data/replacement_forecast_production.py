@@ -625,9 +625,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             if not targets:
                 continue
             grouped_targets: list[list[BayesPrecisionFusionDownloadTarget]] = []
-            group_index: dict[tuple[str, str], int] = {}
+            group_index: dict[str, int] = {}
             for target in targets:
-                key = (target.city, target.target_date)
+                key = target.city
                 index = group_index.get(key)
                 if index is None:
                     group_index[key] = len(grouped_targets)

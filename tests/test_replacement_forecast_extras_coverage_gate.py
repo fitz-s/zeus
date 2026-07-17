@@ -588,9 +588,13 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
 
     assert seen == [
         ("Seoul", "2026-07-17", "high"),
-        ("Paris", "2026-07-16", "high"),
         ("Seoul", "2026-07-16", "high"),
+        ("Paris", "2026-07-16", "high"),
     ]
+    assert report["priority_probe_families"] == (
+        ("Seoul", "2026-07-17"),
+        ("Seoul", "2026-07-16"),
+    )
     assert report["status"] == (
         "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )

@@ -753,12 +753,12 @@ def _default_live_fetch_batched(
 def _default_live_fetch_locations_batched(
     *,
     models: list[str],
-    locations: Sequence[tuple[float, float, str, date]],
+    locations: Sequence[tuple[float, float, str, Sequence[date]]],
     run: datetime,
     forecast_hours: int,
     deadline_monotonic: float | None = None,
-) -> list[dict[str, tuple[float | None, float | None]]]:
-    """Fetch one run for multiple locations in one source-clock HTTP request."""
+) -> list[dict[date, dict[str, tuple[float | None, float | None]]]]:
+    """Fetch one run per city and parse every requested target date from its payload."""
 
     if not locations:
         return []
@@ -795,13 +795,16 @@ def _default_live_fetch_locations_batched(
                 f"{len(payloads) if isinstance(payloads, list) else type(payloads).__name__}"
             )
         return [
-            _parse_batched_single_runs_payload(
-                location_payload,
-                models,
-                target_local_date,
-                timezone_name,
-            )
-            for location_payload, (_, _, timezone_name, target_local_date) in zip(
+            {
+                target_local_date: _parse_batched_single_runs_payload(
+                    location_payload,
+                    models,
+                    target_local_date,
+                    timezone_name,
+                )
+                for target_local_date in target_local_dates
+            }
+            for location_payload, (_, _, timezone_name, target_local_dates) in zip(
                 payloads,
                 locations,
                 strict=True,
@@ -809,7 +812,10 @@ def _default_live_fetch_locations_batched(
         ]
     except Exception as exc:
         error = {_BATCH_TRANSPORT_ERROR_KEY: (str(exc), None)}
-        return [dict(error) for _ in locations]
+        return [
+            {target_local_date: dict(error) for target_local_date in target_local_dates}
+            for _, _, _, target_local_dates in locations
+        ]
 
 
 def _parse_batched_single_runs_payload(
@@ -1478,6 +1484,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     ] = {}
     location_batch_count = 0
     location_count = 0
+    location_target_date_count = 0
     source_clock_location_fast_path = (
         not _use_legacy_per_model
         and not include_previous_runs
@@ -1490,15 +1497,14 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         model = requested_models[0]
         locations_by_run: dict[
             datetime,
-            list[
+            dict[
+                str,
                 tuple[
-                    str,
-                    str,
                     BayesPrecisionFusionDownloadTarget,
-                    date,
-                ]
+                    list[tuple[str, date]],
+                ],
             ],
-        ] = defaultdict(list)
+        ] = defaultdict(dict)
         for (city, target_date), city_targets in target_groups:
             ref = city_targets[0]
             if (
@@ -1531,11 +1537,17 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             ):
                 single_success_models.add(model)
                 continue
-            locations_by_run[request.run].append(
-                (city, target_date, ref, date.fromisoformat(target_date))
-            )
+            city_plan = locations_by_run[request.run].get(city)
+            if city_plan is None:
+                locations_by_run[request.run][city] = (
+                    ref,
+                    [(target_date, date.fromisoformat(target_date))],
+                )
+            else:
+                city_plan[1].append((target_date, date.fromisoformat(target_date)))
 
-        for run, planned in sorted(locations_by_run.items()):
+        for run, city_plans in sorted(locations_by_run.items()):
+            planned = list(city_plans.items())
             for offset in range(0, len(planned), _SOURCE_CLOCK_LOCATION_BATCH_SIZE):
                 chunk = planned[offset : offset + _SOURCE_CLOCK_LOCATION_BATCH_SIZE]
                 locations = [
@@ -1543,9 +1555,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         ref.latitude,
                         ref.longitude,
                         ref.timezone_name,
-                        target_local_date,
+                        tuple(target_date for _, target_date in target_dates),
                     )
-                    for _, _, ref, target_local_date in chunk
+                    for _, (ref, target_dates) in chunk
                 ]
                 results = _default_live_fetch_locations_batched(
                     models=[model],
@@ -1560,12 +1572,18 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 )
                 location_batch_count += 1
                 location_count += len(chunk)
-                for (city, target_date, _, _), result in zip(
+                location_target_date_count += sum(
+                    len(target_dates) for _, (_, target_dates) in chunk
+                )
+                for (city, (_, target_dates)), result_by_date in zip(
                     chunk,
                     results,
                     strict=True,
                 ):
-                    location_results[(city, target_date, run.isoformat())] = result
+                    for target_date, target_local_date in target_dates:
+                        location_results[
+                            (city, target_date, run.isoformat())
+                        ] = result_by_date[target_local_date]
 
     for group_index, ((city, target_date), city_targets) in enumerate(target_groups):
         if abort_transport:
@@ -1950,4 +1968,5 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "global_models_unavailable": sorted(global_single_unavailable),
         "single_runs_location_batch_count": location_batch_count,
         "single_runs_location_count": location_count,
+        "single_runs_location_target_date_count": location_target_date_count,
     }
