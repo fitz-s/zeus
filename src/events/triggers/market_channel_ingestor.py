@@ -270,10 +270,12 @@ class MarketChannelIngestor:
             if commit is not None:
                 commit()
         except BaseException:
-            if rollback is not None:
-                rollback()
-            for event in events:
-                self._coalescer.enqueue(event)
+            try:
+                if rollback is not None:
+                    rollback()
+            finally:
+                for event in events:
+                    self._coalescer.enqueue(event)
             raise
         for event in quote_events:
             self._remember_quote_event(event.event_id)

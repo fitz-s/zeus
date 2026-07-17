@@ -1,6 +1,6 @@
 # Created: 2026-06-20
-# Last audited: 2026-07-11
-# Last reused/audited: 2026-07-11
+# Last audited: 2026-07-17
+# Last reused/audited: 2026-07-17
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). The held- and
 #   candidate-priority refresh still uses one attached connection when it can emit both
 #   WORLD and TRADE facts. The forever market-channel loop is different: quote projection
@@ -219,6 +219,38 @@ def test_trade_gate_never_takes_world_mutex(monkeypatch):
         "exit:coordinator",
         "exit:world_mutex",
     ]
+
+
+def test_live_quote_gate_has_millisecond_contention_budget(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+
+    leases: list[dict[str, int]] = []
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, *_args, **kwargs):
+            leases.append(kwargs)
+            yield
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+
+    with lane._edli_price_channel_trade_write_gate(owner="quote-budget-antibody"):
+        pass
+
+    assert leases == [
+        {
+            "owner": "quote-budget-antibody",
+            "write_class": "live",
+            "deadline_ms": lane.PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+            "max_hold_ms": lane.PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
+        }
+    ]
+    assert leases[0]["deadline_ms"] <= 25
 
 
 def test_forever_ingestor_uses_owner_connections_not_attached_connection():

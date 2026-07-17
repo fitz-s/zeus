@@ -164,11 +164,18 @@ def _write_market_channel_continuity(payload: dict[str, object]) -> None:
     tmp.replace(target)
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
+PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 25
+PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS = 100
+PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS = 25
 PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
 PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
 
 
-def _bound_price_channel_sqlite_wait(conn) -> None:
+def _bound_price_channel_sqlite_wait(
+    conn,
+    *,
+    timeout_ms: int | None = None,
+) -> None:
     """Keep SQLite contention inside the price-channel writer hold budget.
 
     The composed world+trade gate serializes every live writer behind this
@@ -179,7 +186,12 @@ def _bound_price_channel_sqlite_wait(conn) -> None:
     price-channel writer connection.
     """
 
-    conn.execute(f"PRAGMA busy_timeout = {PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS}")
+    budget_ms = (
+        PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS
+        if timeout_ms is None
+        else max(0, int(timeout_ms))
+    )
+    conn.execute(f"PRAGMA busy_timeout = {budget_ms}")
 
 
 def _price_channel_clob_timeout(deadline_monotonic: float):
@@ -230,9 +242,18 @@ def _budgeted_orderbook_fetchers(clob, *, deadline_monotonic: float):
 class _PriceChannelWriteGate:
     """Reusable context manager for one price-channel DB write unit."""
 
-    def __init__(self, *, owner: str, scope: str) -> None:
+    def __init__(
+        self,
+        *,
+        owner: str,
+        scope: str,
+        deadline_ms: int = PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
+        max_hold_ms: int = PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+    ) -> None:
         self._owner = owner
         self._scope = scope
+        self._deadline_ms = max(0, int(deadline_ms))
+        self._max_hold_ms = max(0, int(max_hold_ms))
         self._stack: contextlib.ExitStack | None = None
 
     def __enter__(self):
@@ -261,8 +282,8 @@ class _PriceChannelWriteGate:
                     dbs,
                     owner=self._owner,
                     write_class="live",
-                    deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
-                    max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+                    deadline_ms=self._deadline_ms,
+                    max_hold_ms=self._max_hold_ms,
                 )
             )
         except BaseException:
@@ -289,7 +310,12 @@ def _edli_price_channel_world_write_gate(*, owner: str) -> _PriceChannelWriteGat
 
 
 def _edli_price_channel_trade_write_gate(*, owner: str) -> _PriceChannelWriteGate:
-    return _PriceChannelWriteGate(owner=owner, scope="trade")
+    return _PriceChannelWriteGate(
+        owner=owner,
+        scope="trade",
+        deadline_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+        max_hold_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
+    )
 
 
 @contextlib.contextmanager
@@ -2760,7 +2786,10 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         world_conn = get_world_connection(write_class="live")
         feasibility_conn = get_trade_connection(write_class="live")
         _bound_price_channel_sqlite_wait(world_conn)
-        _bound_price_channel_sqlite_wait(feasibility_conn)
+        _bound_price_channel_sqlite_wait(
+            feasibility_conn,
+            timeout_ms=PRICE_CHANNEL_QUOTE_SQLITE_BUSY_TIMEOUT_MS,
+        )
 
         def _commit_quote() -> None:
             feasibility_conn.commit()
