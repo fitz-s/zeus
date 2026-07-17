@@ -340,6 +340,7 @@ def append_hourly_window(
                     retry_after=_retry_embargo(hours=1),
                 )
                 d += timedelta(days=1)
+            conn.commit()
             current = chunk_end + timedelta(days=1)
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)

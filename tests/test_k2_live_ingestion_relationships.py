@@ -150,6 +150,95 @@ def test_R2_forecasts_sources_match_registry() -> None:
     )
 
 
+def test_R2_hourly_failure_commits_before_next_fetch(monkeypatch) -> None:
+    """A failed coverage write must not hold the WAL lock across HTTP."""
+    from src.config import cities_by_name
+
+    conn = _memdb()
+    calls = 0
+
+    def fail(_city, _start, _end):
+        nonlocal calls
+        if calls:
+            assert not conn.in_transaction
+        calls += 1
+        return [], "network error"
+
+    monkeypatch.setattr(hourly_instants_append, "_fetch_with_retry", fail)
+    start = date(2026, 7, 14)
+    stats = hourly_instants_append.append_hourly_window(
+        cities_by_name["NYC"],
+        start,
+        start + timedelta(days=1),
+        conn,
+        rebuild_run_id="test",
+        chunk_days=1,
+        sleep_seconds=0.0,
+    )
+
+    assert calls == 2
+    assert stats["fetch_errors"] == 2
+    assert not conn.in_transaction
+
+
+def test_R2_solar_failure_commits_before_next_fetch(monkeypatch) -> None:
+    """Solar failure telemetry must release the writer before HTTP retries."""
+    from src.config import cities_by_name
+
+    conn = _memdb()
+    calls = 0
+
+    def fail(_city, _start, _end):
+        nonlocal calls
+        if calls:
+            assert not conn.in_transaction
+        calls += 1
+        return [], "network error"
+
+    monkeypatch.setattr(solar_append, "_fetch_with_retry", fail)
+    start = date(2026, 7, 14)
+    stats = solar_append.append_solar_window(
+        cities_by_name["NYC"],
+        start,
+        start + timedelta(days=1),
+        conn,
+        rebuild_run_id="test",
+        chunk_days=1,
+        sleep_seconds=0.0,
+    )
+
+    assert calls == 2
+    assert stats["fetch_errors"] == 2
+    assert not conn.in_transaction
+
+
+def test_R2_ogimet_failure_commits_before_next_fetch(monkeypatch) -> None:
+    """Per-day Ogimet sleeps and fetches must run outside write transactions."""
+    conn = _memdb()
+    calls = 0
+
+    def fail(*_args):
+        nonlocal calls
+        if calls:
+            assert not conn.in_transaction
+        calls += 1
+        return None
+
+    monkeypatch.setattr(daily_obs_append, "_fetch_ogimet_day", fail)
+    monkeypatch.setattr(daily_obs_append.time, "sleep", lambda _seconds: None)
+    start = date(2026, 7, 14)
+    stats = daily_obs_append.append_ogimet_city(
+        "Istanbul",
+        [start, start + timedelta(days=1)],
+        conn,
+        rebuild_run_id="test",
+    )
+
+    assert calls == 2
+    assert stats["fetch_errors"] == 2
+    assert not conn.in_transaction
+
+
 # ---------------------------------------------------------------------------
 # R3 — daily_obs_append reads WU station config from cities.json (R-G)
 # ---------------------------------------------------------------------------

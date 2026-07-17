@@ -1403,6 +1403,7 @@ def append_ogimet_city(
                 reason=CoverageReason.NETWORK_ERROR,
                 retry_after=_retry_embargo(hours=2),
             )
+            conn.commit()
             continue
 
         high_val, low_val, report_count, first_utc, last_utc = result
@@ -1443,6 +1444,7 @@ def append_ogimet_city(
                 reason=CoverageReason.GUARD_REJECTED,
                 retry_after=_retry_embargo(hours=24),
             )
+            conn.commit()
             continue
 
         try:
@@ -1460,6 +1462,7 @@ def append_ogimet_city(
                 retry_after=_retry_embargo(hours=1),
             )
 
+        conn.commit()
         # Be polite to ogimet — 1 second between per-day requests
         time.sleep(1.0)
 
