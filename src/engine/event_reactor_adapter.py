@@ -9158,6 +9158,16 @@ def _global_probability_tightening_from_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if (
+        reason.startswith(
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:locked:"
+        )
+        and "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=" in reason
+    ):
+        # The live-order mutex is family-scoped: an active order makes this
+        # family's complete sibling set unavailable, not the rest of the epoch.
+        return "BLOCKED"
     if reason.startswith(
         (
             "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:",

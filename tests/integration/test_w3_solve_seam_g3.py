@@ -4494,6 +4494,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "condition_id=condition-a:q_lcb=0.72:transform_lcb=0.965560157285",
             "BLOCKED",
         ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:locked:input=22:"
+            "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=22",
+            "BLOCKED",
+        ),
     ),
 )
 def test_global_preflight_block_scope_is_explicit(reason, status):
