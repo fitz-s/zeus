@@ -2015,6 +2015,7 @@ def scan_current_global_auction_scope(
         received_at=decision_at_utc.isoformat(),
         limit=None,
         source="global-auction-current-scope",
+        phase_filter_exempt_families=set(held),
     )
     events = current_global_scope_events_with_day0(
         forecast_events,

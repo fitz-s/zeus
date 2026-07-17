@@ -5299,11 +5299,14 @@ def test_current_day0_scope_keeps_completed_family_only_when_still_held(
 def test_global_scope_refuses_a_held_family_without_probability_carrier(
     monkeypatch,
 ):
+    calls = []
+
     class EmptyTrigger:
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def build_committed_snapshot_events(self, **_kwargs):
+        def build_committed_snapshot_events(self, **kwargs):
+            calls.append(kwargs)
             return ()
 
     monkeypatch.setattr(universe, "ForecastSnapshotReadyTrigger", EmptyTrigger)
@@ -5329,6 +5332,10 @@ def test_global_scope_refuses_a_held_family_without_probability_carrier(
             ),
             held_families=(("Held", "2026-07-08", "high"),),
         )
+
+    assert calls[0]["phase_filter_exempt_families"] == {
+        ("Held", "2026-07-08", "high")
+    }
 
 
 @pytest.fixture(autouse=True)
