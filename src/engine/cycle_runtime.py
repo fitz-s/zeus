@@ -5054,6 +5054,11 @@ def execute_monitoring_phase(
             deps.logger.warning("held monitor urgent-preemption probe failed: %s", exc)
             return False
 
+    if urgent_preemption_requested():
+        summary["held_monitor_preempted"] = True
+        summary["held_monitor_defer_reason"] = "urgent_day0_wake"
+        return portfolio_dirty, tracker_dirty
+
     if run_exit_preflight:
         try:
             exit_stats = check_pending_exits(portfolio, clob, conn=conn)

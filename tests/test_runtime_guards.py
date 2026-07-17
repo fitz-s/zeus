@@ -10572,7 +10572,7 @@ def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(mon
     assert summary["exit_chain_missing_closed"] == 1
 
 
-def test_periodic_monitor_preempts_before_orderbook_prefetch_for_day0_wake(
+def test_periodic_monitor_preempts_before_exit_preflight_for_day0_wake(
     monkeypatch,
 ):
     pos = Position(
@@ -10603,13 +10603,8 @@ def test_periodic_monitor_preempts_before_orderbook_prefetch_for_day0_wake(
     )
     monkeypatch.setattr(
         "src.execution.exit_lifecycle.check_pending_exits",
-        lambda *_args, **_kwargs: (
-            preflight_calls.append("completed")
-            or {
-                "filled": 0,
-                "retried": 1,
-                "filled_positions": [],
-            }
+        lambda *_args, **_kwargs: pytest.fail(
+            "urgent preemption must happen before pending-exit network work"
         ),
     )
 
@@ -10623,11 +10618,10 @@ def test_periodic_monitor_preempts_before_orderbook_prefetch_for_day0_wake(
         should_preempt_for_urgent_day0=lambda: True,
     )
 
-    assert preflight_calls == ["completed"]
-    assert p_dirty is True
+    assert preflight_calls == []
+    assert p_dirty is False
     assert t_dirty is False
     assert summary["held_monitor_preempted"] is True
-    assert summary["held_monitor_positions_deferred"] == 1
     assert summary["held_monitor_defer_reason"] == "urgent_day0_wake"
     assert "held_monitor_orderbooks_requested" not in summary
 

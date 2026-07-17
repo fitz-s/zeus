@@ -5880,17 +5880,33 @@ def _exit_monitor_cycle(
         logger.info(
             "periodic exit_monitor servicing full portfolio after bounded Day0 priority"
         )
+    should_preempt_for_urgent_day0 = None
+    if urgent_day0:
+        from src.runtime.reactor_wake import (
+            reactor_urgent_wake_reason,
+            reactor_urgent_wake_revision,
+        )
+
+        urgent_revision = reactor_urgent_wake_revision()
+
+        def _newer_day0_wake_pending() -> bool:
+            current = reactor_urgent_wake_revision()
+            return (
+                current is not None
+                and current != urgent_revision
+                and reactor_urgent_wake_reason() == "day0_extreme_event_committed"
+            )
+
+        should_preempt_for_urgent_day0 = _newer_day0_wake_pending
+    elif not pending_before_claim:
+        should_preempt_for_urgent_day0 = _day0_urgent_wake_pending.is_set
     try:
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             mark_held_position_monitor_complete=_held_position_monitor_active.clear,
             monitor_claimed=True,
             target_families=target_families,
-            should_preempt_for_urgent_day0=(
-                None
-                if urgent_day0 or pending_before_claim
-                else _day0_urgent_wake_pending.is_set
-            ),
+            should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
         )
         if monitor_succeeded is not True:
             raise RuntimeError("EXIT_MONITOR_CYCLE_INCOMPLETE")

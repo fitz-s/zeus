@@ -5813,6 +5813,52 @@ def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
     assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
 
 
+def test_urgent_exit_monitor_yields_to_newer_day0_wake(monkeypatch) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+    from src.runtime import reactor_wake
+
+    revisions = iter(((1, 1, 1), (2, 2, 2)))
+    captured = {}
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        captured.update(kwargs)
+        assert kwargs["should_preempt_for_urgent_day0"]() is True
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_reason",
+        lambda: "day0_extreme_event_committed",
+    )
+
+    assert (
+        main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-07-17", "high")}),
+            urgent_day0=True,
+        )
+        is True
+    )
+    assert captured["target_families"] == frozenset({("Paris", "2026-07-17", "high")})
+    assert main_module._held_position_monitor_active.is_set() is False
+
+
 def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
     monkeypatch,
 ) -> None:
