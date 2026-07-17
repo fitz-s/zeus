@@ -8569,6 +8569,15 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     claimed_targets.clear()
     actuated.clear()
     venue_calls[0] = 0
+    supersession_checks = [0]
+
+    def _wake_after_cut():
+        supersession_checks[0] += 1
+        # scope, both probability families, the completed probability set,
+        # and book capture are fenced. A later wake belongs to the next epoch
+        # and cannot starve this winner's exact JIT preflight.
+        return supersession_checks[0] > 5
+
     fenced = global_batch_runtime.process_current_global_batch(
         (event_a,),
         decision_time=decision_at,
@@ -8601,12 +8610,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
                 event, actuation, at
             )
         ),
+        epoch_superseded=_wake_after_cut,
     )
 
     assert len(claimed_targets) == 1
     assert claimed_targets[0].source.endswith(f":{fence_economic_identity}")
     assert fenced.winner_event_id == claimed_targets[0].event_id
     assert fenced.venue_submit_count == 1
+    assert supersession_checks[0] == 5
     assert fence_selection_calls[0] == 1
     assert set(fenced.receipts) == {
         event_a.event_id,

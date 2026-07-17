@@ -1701,6 +1701,11 @@ def process_current_global_batch(
             }
         if superseded("book_epoch_fence"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
+        # The complete q/book/wealth cut is immutable from this point forward.
+        # Later global wakes belong to the next epoch. Consulting them again
+        # below would starve actuation whenever unrelated books update
+        # continuously; the selected action still crosses exact JIT
+        # probability/book/wealth preflight before any venue side effect.
         initial_book_stage = (
             "book_epoch_fence"
             if preflight_winner is not None
@@ -1907,8 +1912,6 @@ def process_current_global_batch(
             return selected
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
-        if superseded("select_fence"):
-            return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         initial_select_stage = (
             "select_fence" if preflight_winner is not None else "select_initial"
         )
@@ -1970,8 +1973,6 @@ def process_current_global_batch(
                 tuple[str, str, str, str], float
             ] = {}
             while True:
-                if superseded("winner_preflight"):
-                    return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
                 preflight_at = current_time()
                 if preflight_at > auction_deadline:
                     return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
@@ -1995,8 +1996,6 @@ def process_current_global_batch(
                 after_preflight = venue_submit_count()
                 if after_preflight != before_preflight:
                     return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
-                if superseded("winner_preflight_complete"):
-                    return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
                 _store_global_preflight_receipt(
                     trade_conn,
                     selected=selected,
@@ -2134,8 +2133,6 @@ def process_current_global_batch(
                     preflight_excluded_by_candidate=excluded_by_candidate,
                     payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 )
-                if superseded("select_preflight_fallthrough"):
-                    return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
                 log_stage(
                     "select_preflight_fallthrough",
                     families=len(prepared_by_event) - len(excluded_by_family),
@@ -2167,8 +2164,6 @@ def process_current_global_batch(
                 winner_id = winner.event_id
             binding_token = preflight.binding_token
 
-        if superseded("actuation"):
-            return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         actuation_at = current_time()
         if preflight_winner is not None and actuation_at > auction_deadline:
             return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
