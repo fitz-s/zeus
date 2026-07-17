@@ -229,6 +229,129 @@ def test_source_clock_fetch_uses_remaining_deadline_without_retries(monkeypatch)
     assert 0.0 < float(captured["timeout"]) <= 0.2
 
 
+def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypatch) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    captured: dict[str, object] = {}
+
+    def _payload(base: float) -> dict[str, object]:
+        return {
+            "hourly": {
+                "time": [
+                    "2026-06-09T00:00",
+                    "2026-06-09T03:00",
+                    "2026-06-09T12:00",
+                    "2026-06-09T21:00",
+                ],
+                "temperature_2m": [base - 1.0, base, base + 2.0, base + 1.0],
+            },
+            "hourly_units": {"temperature_2m": "°C"},
+        }
+
+    def _fetch(_url, params, **kwargs):
+        captured["params"] = params
+        captured.update(kwargs)
+        return [_payload(20.0), _payload(30.0)]
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=["ecmwf_ifs"],
+        locations=[
+            (48.967, 2.428, "Europe/Paris", date(2026, 6, 9)),
+            (52.520, 13.405, "Europe/Berlin", date(2026, 6, 9)),
+        ],
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        forecast_hours=120,
+    )
+
+    params = captured["params"]
+    assert isinstance(params, dict)
+    assert params["latitude"] == "48.967,52.52"
+    assert params["longitude"] == "2.428,13.405"
+    assert params["timezone"] == "Europe/Paris,Europe/Berlin"
+    assert params["cell_selection"] == dl.BAYES_PRECISION_FUSION_CELL_SELECTION
+    assert got == [
+        {"ecmwf_ifs": (22.0, 19.0)},
+        {"ecmwf_ifs": (32.0, 29.0)},
+    ]
+
+
+def test_source_clock_download_reuses_one_multi_location_response(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    calls: list[list[tuple[float, float, str, date]]] = []
+
+    def _locations(**kwargs):
+        calls.append(list(kwargs["locations"]))
+        return [
+            {"ecmwf_ifs": (22.0, 10.0)},
+            {"ecmwf_ifs": (24.0, 12.0)},
+        ]
+
+    monkeypatch.setattr(dl, "_default_live_fetch_locations_batched", _locations)
+    monkeypatch.setattr(
+        dl,
+        "_default_live_fetch_batched",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("per-location fetch must not run")
+        ),
+    )
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
+
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        targets=_two_city_targets(),
+        models=("ecmwf_ifs",),
+        include_previous_runs=False,
+        prune_after=False,
+        allow_single_runs_fallback=False,
+    )
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 2
+    assert report["written_row_count"] == 2
+    assert report["single_runs_location_batch_count"] == 1
+    assert report["single_runs_location_count"] == 2
+
+
+def test_source_clock_multi_location_429_remains_retryable(tmp_path, monkeypatch) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    error = {
+        dl._BATCH_TRANSPORT_ERROR_KEY: (
+            "Open-Meteo 429 Too Many Requests",
+            None,
+        )
+    }
+    monkeypatch.setattr(
+        dl,
+        "_default_live_fetch_locations_batched",
+        lambda **kwargs: [dict(error) for _ in kwargs["locations"]],
+    )
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
+
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        targets=_two_city_targets(),
+        models=("ecmwf_ifs",),
+        include_previous_runs=False,
+        prune_after=False,
+        allow_single_runs_fallback=False,
+    )
+
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert report["transport_aborted_remaining_targets"] is True
+    assert report["written_row_count"] == 0
+    assert report["single_runs_location_batch_count"] == 1
+
+
 def test_persist_lock_obeys_source_clock_deadline(tmp_path) -> None:
     from src.data.bayes_precision_fusion_download import (
         _PersistDeadlineExceeded,

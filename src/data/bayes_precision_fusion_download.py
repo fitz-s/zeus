@@ -479,6 +479,7 @@ SingleRunsFetchFn = Callable[..., float | None]
 PreviousRunsFetchFn = Callable[..., float | None]
 
 _BATCH_TRANSPORT_ERROR_KEY = "__BAYES_PRECISION_FUSION_BATCH_TRANSPORT_ERROR__"
+_SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
 
 
 def _is_quota_transport_error(message: object) -> bool:
@@ -747,6 +748,68 @@ def _default_live_fetch_batched(
             None,
         )
     }
+
+
+def _default_live_fetch_locations_batched(
+    *,
+    models: list[str],
+    locations: Sequence[tuple[float, float, str, date]],
+    run: datetime,
+    forecast_hours: int,
+    deadline_monotonic: float | None = None,
+) -> list[dict[str, tuple[float | None, float | None]]]:
+    """Fetch one run for multiple locations in one source-clock HTTP request."""
+
+    if not locations:
+        return []
+    try:
+        from src.data.openmeteo_client import fetch  # noqa: PLC0415
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+            SINGLE_RUNS_FORECAST_URL,
+        )
+
+        params = {
+            "latitude": ",".join(str(latitude) for latitude, _, _, _ in locations),
+            "longitude": ",".join(str(longitude) for _, longitude, _, _ in locations),
+            "hourly": "temperature_2m",
+            "models": ",".join(OPENMETEO_MODEL_IDS.get(model, model) for model in models),
+            "run": run.strftime("%Y-%m-%dT%H:%M"),
+            "forecast_hours": forecast_hours,
+            "temperature_unit": "celsius",
+            "timezone": ",".join(timezone_name for _, _, timezone_name, _ in locations),
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
+        }
+        payload = fetch(
+            SINGLE_RUNS_FORECAST_URL,
+            params,
+            endpoint_label="bayes_precision_fusion_single_runs_locations_batched",
+            quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+            fast_fail_429=True,
+            **_deadline_fetch_kwargs(deadline_monotonic),
+        )
+        payloads = [payload] if len(locations) == 1 and isinstance(payload, dict) else payload
+        if not isinstance(payloads, list) or len(payloads) != len(locations):
+            raise RuntimeError(
+                "Open-Meteo multi-location response count mismatch: "
+                f"expected={len(locations)} got="
+                f"{len(payloads) if isinstance(payloads, list) else type(payloads).__name__}"
+            )
+        return [
+            _parse_batched_single_runs_payload(
+                location_payload,
+                models,
+                target_local_date,
+                timezone_name,
+            )
+            for location_payload, (_, _, timezone_name, target_local_date) in zip(
+                payloads,
+                locations,
+                strict=True,
+            )
+        ]
+    except Exception as exc:
+        error = {_BATCH_TRANSPORT_ERROR_KEY: (str(exc), None)}
+        return [dict(error) for _ in locations]
 
 
 def _parse_batched_single_runs_payload(
@@ -1409,6 +1472,101 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         targets_by_city_date[(t.city, t.target_date)].append(t)
 
     target_groups = list(targets_by_city_date.items())
+    location_results: dict[
+        tuple[str, str, str],
+        dict[str, tuple[float | None, float | None]],
+    ] = {}
+    location_batch_count = 0
+    location_count = 0
+    source_clock_location_fast_path = (
+        not _use_legacy_per_model
+        and not include_previous_runs
+        and not allow_single_runs_fallback
+        and len(requested_models) == 1
+        and len(target_groups) > 1
+        and not _timebox_expired()
+    )
+    if source_clock_location_fast_path:
+        model = requested_models[0]
+        locations_by_run: dict[
+            datetime,
+            list[
+                tuple[
+                    str,
+                    str,
+                    BayesPrecisionFusionDownloadTarget,
+                    date,
+                ]
+            ],
+        ] = defaultdict(list)
+        for (city, target_date), city_targets in target_groups:
+            ref = city_targets[0]
+            if (
+                not _model_in_domain(
+                    model,
+                    lat=ref.latitude,
+                    lon=ref.longitude,
+                    lead_days=int(ref.lead_days),
+                )
+                or model in SINGLE_RUNS_UNSERVABLE_MODELS
+            ):
+                continue
+            request = _single_runs_request_for_model(model)
+            if (
+                model not in source_clock_single_runs
+                and not _model_publishes_cycle(model, request.run.hour)
+            ):
+                continue
+            request_cycle_iso = request.run.isoformat()
+            if all(
+                _has_persisted_row(
+                    model=model,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    source_cycle_time=request_cycle_iso,
+                    endpoint="single_runs",
+                )
+                for metric in ("high", "low")
+            ):
+                single_success_models.add(model)
+                continue
+            locations_by_run[request.run].append(
+                (city, target_date, ref, date.fromisoformat(target_date))
+            )
+
+        for run, planned in sorted(locations_by_run.items()):
+            for offset in range(0, len(planned), _SOURCE_CLOCK_LOCATION_BATCH_SIZE):
+                chunk = planned[offset : offset + _SOURCE_CLOCK_LOCATION_BATCH_SIZE]
+                locations = [
+                    (
+                        ref.latitude,
+                        ref.longitude,
+                        ref.timezone_name,
+                        target_local_date,
+                    )
+                    for _, _, ref, target_local_date in chunk
+                ]
+                results = _default_live_fetch_locations_batched(
+                    models=[model],
+                    locations=locations,
+                    run=run,
+                    forecast_hours=forecast_hours,
+                    deadline_monotonic=(
+                        wall_clock_deadline - 0.25
+                        if wall_clock_deadline is not None
+                        else None
+                    ),
+                )
+                location_batch_count += 1
+                location_count += len(chunk)
+                for (city, target_date, _, _), result in zip(
+                    chunk,
+                    results,
+                    strict=True,
+                ):
+                    location_results[(city, target_date, run.isoformat())] = result
+
     for group_index, ((city, target_date), city_targets) in enumerate(target_groups):
         if abort_transport:
             break
@@ -1556,16 +1714,24 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 if _timebox_expired():
                     timeboxed = True
                     break
-                sv_map = _default_live_fetch_batched(
-                    models=single_models,
-                    latitude=ref.latitude,
-                    longitude=ref.longitude,
-                    timezone_name=ref.timezone_name,
-                    run=single_run,
-                    target_local_date=target_local_date,
-                    forecast_hours=forecast_hours,
-                    allow_per_model_fallback=allow_single_runs_fallback,
-                    deadline_monotonic=wall_clock_deadline,
+                location_result = location_results.pop(
+                    (city, target_date, single_run.isoformat()),
+                    None,
+                )
+                sv_map = (
+                    dict(location_result)
+                    if location_result is not None
+                    else _default_live_fetch_batched(
+                        models=single_models,
+                        latitude=ref.latitude,
+                        longitude=ref.longitude,
+                        timezone_name=ref.timezone_name,
+                        run=single_run,
+                        target_local_date=target_local_date,
+                        forecast_hours=forecast_hours,
+                        allow_per_model_fallback=allow_single_runs_fallback,
+                        deadline_monotonic=wall_clock_deadline,
+                    )
                 )
                 single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 if single_transport_error is not None:
@@ -1782,4 +1948,6 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "global_models_expected": len(global_models_expected),
         "global_models_dropped_scoped": sorted(global_single_dropped_scoped),
         "global_models_unavailable": sorted(global_single_unavailable),
+        "single_runs_location_batch_count": location_batch_count,
+        "single_runs_location_count": location_count,
     }
