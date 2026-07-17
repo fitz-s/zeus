@@ -1391,6 +1391,7 @@ def process_current_global_batch(
     claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
     epoch_superseded: Callable[[], bool] | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
+    restrict_to_family_keys: frozenset[str] | None = None,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -1398,6 +1399,11 @@ def process_current_global_batch(
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
     decision_time = decision_time.astimezone(UTC)
     event_tuple = tuple(events)
+    if restrict_to_family_keys is not None and (
+        not restrict_to_family_keys
+        or any(not str(family_key or "").strip() for family_key in restrict_to_family_keys)
+    ):
+        raise ValueError("GLOBAL_AUCTION_RESTRICTED_SCOPE_INVALID")
     claimed_target_by_scope_and_economics: dict[
         tuple[str, str], OpportunityEvent
     ] = {}
@@ -1731,6 +1737,29 @@ def process_current_global_batch(
         if superseded("scope_scan"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         decision_scope = full_scope
+        if restrict_to_family_keys is not None:
+            current_family_keys = frozenset(full_scope.family_keys)
+            missing_family_keys = restrict_to_family_keys.difference(
+                current_family_keys
+            )
+            if missing_family_keys:
+                return reject(
+                    "GLOBAL_AUCTION_RESTRICTED_SCOPE_MISSING:"
+                    + ",".join(sorted(missing_family_keys))
+                )
+            decision_scope = current_global_auction_scope_from_events(
+                tuple(
+                    event
+                    for family_key, event in full_scope.events_by_family
+                    if family_key in restrict_to_family_keys
+                ),
+                captured_at_utc=scope_at,
+            )
+            _LOG.info(
+                "global batch restricted scope: families=%d global_families=%d",
+                len(decision_scope.events_by_family),
+                len(full_scope.events_by_family),
+            )
         if not buy_candidates_enabled:
             held_family_keys = frozenset(
                 weather_family_id(

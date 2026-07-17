@@ -6516,10 +6516,15 @@ def event_bound_live_adapter_from_trade_conn(
             events
         )
         entry_submit_suppression_reason = _entry_global_submit_suppression_reason()
-        day0_urgent_batch = any(
+        day0_urgent_batch = bool(events) and all(
             str(getattr(event, "event_type", "") or "")
             == "DAY0_EXTREME_UPDATED"
             for event in events
+        )
+        urgent_scope_family_keys = (
+            probability_refresh_family_keys
+            if day0_urgent_batch and probability_refresh_family_keys
+            else None
         )
         if entry_submit_suppression_reason is not None:
             logging.getLogger(__name__).info(
@@ -7636,6 +7641,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
+                restrict_to_family_keys=urgent_scope_family_keys,
             )
             logging.getLogger(__name__).info(
                 "global probability family cache: hits=%d ineligible_hits=%d "

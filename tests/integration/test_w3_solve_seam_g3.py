@@ -2766,7 +2766,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         auction_capital_authority=CapacityAuthority(),
     )
     urgent_revision["value"] = (4, 5, 6)
-    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    event = _global_day0_scope_event(
+        city="Dallas",
+        source_run_id="run-dallas",
+    )
 
     result = adapter.process_global_batch(
         (event,),
@@ -2779,6 +2782,15 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
     assert captured["epoch_superseded"]() is True
+    assert captured["restrict_to_family_keys"] == frozenset(
+        {
+            era.weather_family_id(
+                city="Dallas",
+                target_date="2026-07-11",
+                metric="high",
+            )
+        }
+    )
     assert callable(captured["candidate_policy_rejection_resolver"])
     assert captured["buy_candidates_enabled"] is False
     candidate = SimpleNamespace(family_key="family-dallas")
@@ -8953,6 +8965,111 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
     )
     assert repeated.event_id == result.next_claim_event.event_id
     assert result.receipts[event_a.event_id].reason == "GLOBAL_WINNER_AWAITS_CLAIM"
+
+
+def test_global_batch_restricts_urgent_scope_to_changed_families(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b),
+        captured_at_utc=decision_at,
+    )
+    prepared_events = []
+    selected_scopes = []
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+
+    def select(*_args, **kwargs):
+        selected_scopes.append(kwargs["current_scope"])
+        return SimpleNamespace(
+            decision=SimpleNamespace(
+                candidate=None,
+                no_trade_reason="CASH_DOMINATES",
+                rejection_reasons={},
+                candidate_evaluations=(),
+            ),
+            winner_event_id=None,
+            actuation=None,
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def prepare(event, _at):
+        prepared_events.append(event.event_id)
+        payload = json.loads(event.payload_json)
+        family_key = era.weather_family_id(
+            city=payload["city"],
+            target_date=payload["target_date"],
+            metric=payload["metric"],
+        )
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=SimpleNamespace(
+                probability_witness=SimpleNamespace(
+                    family_key=family_key,
+                    captured_at_utc=decision_at,
+                    posterior_identity_hash=payload["source_run_id"],
+                    witness_identity=f"q-{family_key}",
+                    q_version=f"q-{family_key}",
+                    family_binding_identity=f"binding-{family_key}",
+                    sample_matrix_identity=f"samples-{family_key}",
+                    band_alpha=0.05,
+                    band_basis="lower-tail",
+                )
+            ),
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=prepare,
+        actuate_winner=lambda *_: pytest.fail("no-trade scope must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        restrict_to_family_keys=frozenset({scope.family_keys[0]}),
+    )
+
+    assert prepared_events == [event_a.event_id]
+    assert len(selected_scopes) == 1
+    assert selected_scopes[0].family_keys == (scope.family_keys[0],)
+    assert result.receipts[event_a.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"
+    )
 
 
 def test_global_batch_requeues_claimed_epoch_when_new_durable_fact_arrives(
