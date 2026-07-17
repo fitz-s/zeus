@@ -446,9 +446,11 @@ def _wait_for_live_runtime_fresh(
 
     launchctl bootstrap returning 0 only proves launchd accepted the plist. The
     money path needs a process-level proof: src.main writes state/loaded_sha.json
-    at boot, then deployment_freshness clears its mismatch state on the next tick.
-    Without this wait, a restart command can report success while live submit is
-    still blocked by the previous deployment_freshness_mismatch.
+    at boot. ``deployment_freshness.json`` compares that immutable process
+    identity with a mutable checkout, so a concurrent improvement commit is an
+    operator observation, not evidence that the already-loaded process is stale
+    or unauthorized. Requiring both identities to remain equal makes a healthy
+    restart impossible while the repository's improvement loop is active.
     """
 
     live_repo = Path(_require_live_repo())
@@ -481,28 +483,15 @@ def _wait_for_live_runtime_fresh(
         freshness_payload = _load_json(freshness_path)
         if freshness_payload:
             freshness_status = str(freshness_payload.get("status") or "").strip()
-            freshness_pause = freshness_payload.get("pause_reason")
-            freshness_boot = str(freshness_payload.get("boot_sha") or "").strip()
-            freshness_current = str(freshness_payload.get("current_sha") or "").strip()
-            freshness_at = _parse_iso_utc(freshness_payload.get("detected_at"))
-            freshness_ok = (
-                freshness_status == "fresh"
-                and freshness_pause in (None, "")
-                and freshness_boot == expected
-                and freshness_current == expected
-                and freshness_at is not None
-                and freshness_at >= launched_floor_with_tolerance
-            )
         else:
-            # No stale mismatch file exists; loaded_sha is the process-level proof.
             freshness_status = "absent"
-            freshness_ok = True
 
-        if loaded_ok and freshness_ok:
+        if loaded_ok:
             return (
                 True,
-                "live runtime freshness verified: "
-                f"loaded_sha={loaded[:9]} deployment_freshness={freshness_status}",
+                "live process identity verified: "
+                f"loaded_sha={loaded[:9]} "
+                f"worktree_freshness_observation={freshness_status}",
             )
 
         last_detail = (

@@ -2287,7 +2287,7 @@ def test_deploy_live_retries_bootstrap_after_reload_race(monkeypatch, tmp_path):
     assert sum(1 for call in calls if call[:2] == ["launchctl", "bootstrap"]) == 2
 
 
-def test_deploy_live_waits_for_loaded_sha_and_freshness_state(monkeypatch, tmp_path):
+def test_deploy_live_waits_for_loaded_process_identity(monkeypatch, tmp_path):
     dl = _load("deploy_live_runtime_fresh_wait", "deploy_live.py")
     state = tmp_path / "state"
     state.mkdir()
@@ -2319,6 +2319,44 @@ def test_deploy_live_waits_for_loaded_sha_and_freshness_state(monkeypatch, tmp_p
 
     assert ok is True
     assert "loaded_sha" in detail
+
+
+def test_deploy_live_loaded_process_identity_survives_concurrent_checkout_advance(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_runtime_fresh_checkout_advance", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "a" * 40
+    current = "b" * 40
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    (state / "loaded_sha.json").write_text(
+        json.dumps({"loaded_sha": expected, "generated_at": datetime.now(timezone.utc).isoformat()}),
+        encoding="utf-8",
+    )
+    (state / "deployment_freshness.json").write_text(
+        json.dumps(
+            {
+                "boot_sha": expected,
+                "current_sha": current,
+                "status": "dirty_runtime_worktree",
+                "pause_reason": None,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_live_runtime_fresh(
+        expected_sha=expected,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "loaded_sha=" in detail
+    assert "worktree_freshness_observation=dirty_runtime_worktree" in detail
 
 
 def test_deploy_live_runtime_fresh_wait_rejects_stale_loaded_sha(monkeypatch, tmp_path):
