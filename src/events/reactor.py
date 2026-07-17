@@ -2462,6 +2462,7 @@ class OpportunityEventReactor:
                 if _money_path_reason_base(last_reason or "") in {
                     "EXECUTABLE_SNAPSHOT_BLOCKED",
                     "EXECUTABLE_SNAPSHOT_STALE",
+                    "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY",
                     "GLOBAL_FAMILY_INELIGIBLE",
                 } or _is_day0_hourly_refresh_reason(last_reason):
                     try:
@@ -4041,6 +4042,9 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "GLOBAL_AUCTION_NO_TRADE",
     "GLOBAL_AUCTION_FAILED",
     "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT",
+    # No family has a current admissible probability yet. Retain the events and
+    # release the trading lane long enough for the posterior substrate to advance.
+    "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY",
     # Preflight exhausted without proving the exact complete-auction CASH/HOLD
     # terminal below.  Preserve the event until the missing/changed authority is
     # rebuilt and a complete decision exists.

@@ -191,6 +191,23 @@ def test_global_topology_ineligible_refreshes_family_and_uses_retry_floor():
     )
 
 
+def test_global_empty_current_probability_uses_retry_floor():
+    conn, store = _store()
+    event = _event("snap-global-empty-current-q")
+    store.insert_or_ignore(event)
+    reason = "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY"
+    reactor = _reactor_with_reason(conn, store, reason)
+
+    result = reactor.process_pending(decision_time=_DT, limit=1)
+
+    assert _is_transient_money_path_reason(reason)
+    assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert datetime.fromisoformat(_claimed_at(conn, event.event_id)) >= (
+        _DT + timedelta(seconds=60)
+    )
+
+
 def test_runtime_authority_retry_floor_is_bounded(monkeypatch):
     monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "120")
     assert _runtime_authority_retry_delay_seconds() == 120.0
