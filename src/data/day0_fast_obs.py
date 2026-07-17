@@ -888,6 +888,10 @@ class Day0FastObsEmitter:
         default_factory=dict,
         init=False,
     )
+    _event_evaluated_report_keys: set[tuple[str, str, float]] = field(
+        default_factory=set,
+        init=False,
+    )
     _ledger_report_keys_loaded: bool = field(default=False, init=False)
     _ledger_cursor_id: int = field(default=0, init=False)
     _anomaly_cursor: int = field(default=0, init=False)
@@ -896,6 +900,28 @@ class Day0FastObsEmitter:
     def ledger_report_keys_loaded(self) -> bool:
         with self._lock:
             return self._ledger_report_keys_loaded
+
+    def prefetched_events_evaluated(self, prefetch: FastObsPrefetch) -> bool:
+        """True when every pending publication already crossed event commit."""
+
+        keys = {
+            key
+            for report in (prefetch.ledger_reports or ())
+            if (key := _report_publication_key(report)) is not None
+        }
+        if not keys:
+            return False
+        with self._lock:
+            return keys <= self._event_evaluated_report_keys
+
+    def mark_prefetched_events_evaluated(
+        self,
+        report_keys: Iterable[tuple[str, str, float]],
+    ) -> None:
+        """Record publication keys only after their event transaction commits."""
+
+        with self._lock:
+            self._event_evaluated_report_keys.update(report_keys)
 
     def sync_ledger_report_keys(
         self,
@@ -957,6 +983,7 @@ class Day0FastObsEmitter:
             self._ledgered_report_keys.update(keys)
             for key in keys:
                 self._pending_ledger_reports.pop(key, None)
+                self._event_evaluated_report_keys.discard(key)
             self._ledger_report_keys_loaded = True
         return len(keys)
 
@@ -1059,6 +1086,7 @@ class Day0FastObsEmitter:
                 self._ledgered_report_keys.update(ledgered_keys)
                 for key in ledgered_keys:
                     self._pending_ledger_reports.pop(key, None)
+                    self._event_evaluated_report_keys.discard(key)
             logger.info(
                 "DAY0_FAST_OBS_LEDGER_HYDRATED count=%d cities=%d",
                 len(reports), len(seen_city_stations),
@@ -1167,6 +1195,7 @@ class Day0FastObsEmitter:
                 self._ledgered_report_keys.update(ledgered_keys)
                 for key in ledgered_keys:
                     self._pending_ledger_reports.pop(key, None)
+                    self._event_evaluated_report_keys.discard(key)
         return len(reports)
 
     def _reports_with_status(self, stations: list[str]) -> tuple[list[MetarReport], str, Optional[float]]:
@@ -1628,6 +1657,7 @@ class Day0FastObsEmitter:
         family_admission=None,
         inserted_event_ids: list[str] | None = None,
         inserted_families: list[tuple[str, str, str]] | None = None,
+        evaluated_report_keys: list[tuple[str, str, float]] | None = None,
         persist_ledger: bool = True,
     ) -> int:
         """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
@@ -1697,9 +1727,17 @@ class Day0FastObsEmitter:
             family_admission=family_admission,
         )
         emitted = 0
+        attempted_stations: set[str] = set()
+        failed_stations: set[str] = set()
+        eligible_stations = {
+            str(source.station_id).strip().upper()
+            for _city, source, _target_date in emission_eligible
+        }
         for city, source, target_date in emission_eligible:
             if emitted >= max(1, int(limit)):
                 break
+            station = str(source.station_id).strip().upper()
+            attempted_stations.add(station)
             try:
                 extremes = running_extremes_for_local_day(
                     reports, city=city, target_date=target_date,
@@ -1833,10 +1871,23 @@ class Day0FastObsEmitter:
                             prefetch.freshness_status,
                         )
             except Exception as exc:  # noqa: BLE001 — one city must not kill the lane
+                failed_stations.add(station)
                 logger.warning(
                     "DAY0_FAST_OBS_CITY_FAILED city=%s exc=%s: %s",
                     getattr(city, "name", "?"), type(exc).__name__, exc,
                 )
+        if evaluated_report_keys is not None:
+            complete_stations = (attempted_stations - failed_stations) | {
+                str(report.station_id).strip().upper()
+                for report in (prefetch.ledger_reports or ())
+                if str(report.station_id).strip().upper() not in eligible_stations
+            }
+            evaluated_report_keys.extend(
+                key
+                for report in (prefetch.ledger_reports or ())
+                if str(report.station_id).strip().upper() in complete_stations
+                and (key := _report_publication_key(report)) is not None
+            )
         if persist_ledger:
             self.persist_prefetched_ledger(
                 world_conn=world_conn,
@@ -1880,6 +1931,7 @@ class Day0FastObsEmitter:
                     continue
                 self._ledgered_report_keys.add(key)
                 self._pending_ledger_reports.pop(key, None)
+                self._event_evaluated_report_keys.discard(key)
         return True
 
     def emit_events(

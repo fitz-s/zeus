@@ -1325,6 +1325,44 @@ class TestMutexNoHttpSplit:
         assert emitted == 2
         assert seen == ["Tokyo"]
 
+    def test_committed_event_evaluation_skips_only_ledgered_publications(self):
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        city = _tokyo()
+        report = _report("RJTT", t0, 21.0, t_group=False)
+        prefetch = fast_obs.FastObsPrefetch(
+            eligible=((city, fast_obs.fast_obs_source_for_city(city), "2026-06-10"),),
+            reports=(report,),
+            freshness_status=fast_obs.FETCH_FRESH,
+            cache_age_s=0.0,
+            decision_time=t0 + timedelta(minutes=5),
+            ledger_reports=(report,),
+        )
+        emitter = fast_obs.Day0FastObsEmitter()
+        conn = _world_conn()
+        evaluated: list[tuple[str, str, float]] = []
+
+        assert emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=prefetch,
+            received_at=(t0 + timedelta(minutes=5)).isoformat(),
+            evaluated_report_keys=evaluated,
+            persist_ledger=False,
+        ) == 2
+        assert evaluated
+        assert emitter.prefetched_events_evaluated(prefetch) is False
+
+        conn.commit()
+        emitter.mark_prefetched_events_evaluated(evaluated)
+        assert emitter.prefetched_events_evaluated(prefetch) is True
+
+        assert emitter.persist_prefetched_ledger(
+            world_conn=conn,
+            prefetch=prefetch,
+        ) is True
+        assert emitter.prefetched_events_evaluated(prefetch) is False
+
     def test_emit_prefetched_persists_anomaly_actions_with_world_conn(self, monkeypatch):
         from src.data import day0_oracle_anomaly as oa
         from src.data.day0_fast_obs import Day0FastObsEmitter, FastObsPrefetch

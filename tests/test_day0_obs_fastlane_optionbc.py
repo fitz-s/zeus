@@ -1034,6 +1034,44 @@ class TestDay0MetarSourceClockTick:
         }
         assert order.index("commit") < order.index("ledger")
 
+    def test_already_evaluated_publications_bypass_event_writer(self, monkeypatch):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+        )
+
+        class _Emitter:
+            def prefetch(self, **_kw):
+                return prefetch
+
+            def prefetched_events_evaluated(self, value):
+                assert value is prefetch
+                return True
+
+        emitter = self._primed(_Emitter())
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr(
+            im,
+            "_persist_day0_metar_ledger_after_wake",
+            lambda value: value is prefetch,
+        )
+        monkeypatch.setattr(
+            im,
+            "_stage_day0_metar_commit",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("evaluated publications must bypass event staging")
+            ),
+        )
+
+        assert im._day0_metar_source_clock_tick.__wrapped__() == {
+            "status": "LEDGER_FLUSHED",
+            "pending_reports": 1,
+        }
+
     def test_committed_event_survives_reactor_wake_failure(
         self, monkeypatch, caplog
     ):

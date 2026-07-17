@@ -294,6 +294,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
     emitted = 0
     inserted_event_ids: list[str] = []
     inserted_families: list[tuple[str, str, str]] = []
+    evaluated_report_keys: list[tuple[str, str, float]] = []
     pending_reports = 0
     try:
         if not _DAY0_METAR_PENDING_COMMITS:
@@ -339,9 +340,17 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 family_admission=family_admission,
                 inserted_event_ids=inserted_event_ids,
                 inserted_families=inserted_families,
+                evaluated_report_keys=evaluated_report_keys,
                 persist_ledger=False,
             )
             conn.commit()
+            mark_evaluated = getattr(
+                _day0_metar_emitter(),
+                "mark_prefetched_events_evaluated",
+                None,
+            )
+            if callable(mark_evaluated):
+                mark_evaluated(evaluated_report_keys)
             del _DAY0_METAR_PENDING_COMMITS[0]
         except sqlite3.OperationalError as exc:
             conn.rollback()
@@ -1183,6 +1192,13 @@ def _day0_metar_source_clock_tick():
             "status": "SOURCE_CURRENT",
             "freshness_status": prefetch.freshness_status,
             "reports": len(prefetch.reports),
+        }
+    events_evaluated = getattr(emitter, "prefetched_events_evaluated", None)
+    if callable(events_evaluated) and events_evaluated(prefetch):
+        persisted = _persist_day0_metar_ledger_after_wake(prefetch)
+        return {
+            "status": "LEDGER_FLUSHED" if persisted else "LEDGER_DEFERRED",
+            "pending_reports": len(pending_reports),
         }
     _stage_day0_metar_commit(
         prefetch,
