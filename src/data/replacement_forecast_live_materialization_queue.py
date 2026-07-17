@@ -1352,14 +1352,22 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             seed_dir=seed_dir,
             limit=int(seed_discovery_limit or seed_limit or limit),
         )
-    seed_processed, seed_failed, seed_reasons = _prepare_seed_requests(
-        seed_dir=seed_dir,
-        seed_processed_dir=seed_processed_dir,
-        seed_failed_dir=seed_failed_dir,
-        request_dir=request_path,
-        forecast_db=forecast_db,
-        limit=int(seed_limit or limit),
-    )
+    seed_batch_limit = limit if seed_limit is None else int(seed_limit)
+    if seed_batch_limit < 0:
+        raise ValueError("seed_limit must not be negative")
+    if seed_batch_limit:
+        seed_processed, seed_failed, seed_reasons = _prepare_seed_requests(
+            seed_dir=seed_dir,
+            seed_processed_dir=seed_processed_dir,
+            seed_failed_dir=seed_failed_dir,
+            request_dir=request_path,
+            forecast_db=forecast_db,
+            limit=seed_batch_limit,
+        )
+    else:
+        seed_processed, seed_failed, seed_reasons = [], [], [
+            "REPLACEMENT_LIVE_MATERIALIZATION_SEED_DEFERRED_FOR_REQUESTS"
+        ]
     if not request_path.exists():
         return ReplacementForecastLiveMaterializationQueueReport(
             status="NO_REQUESTS",

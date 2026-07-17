@@ -36,6 +36,8 @@ import subprocess
 import types
 from pathlib import Path
 
+import pytest
+
 from src.data.replacement_current_value_serving import (
     PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
     read_current_instrument_values,
@@ -590,6 +592,53 @@ def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None
     assert sidecar["reason_codes"] == [
         "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
     ]
+
+
+def test_materialization_queue_can_defer_seed_preparation_for_requests(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Shanghai",
+        "target_date": "2026-07-18",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-17T12:00:00+00:00",
+        "baseline_source_run_id": "baseline-run",
+        "openmeteo_source_run_id": "anchor-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "35C"}],
+    }
+    request_path = request_dir / "Shanghai.2026-07-18.high.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    monkeypatch.setattr(
+        queue_mod,
+        "_prepare_seed_requests",
+        lambda **_kwargs: pytest.fail("source requests must preempt seed preparation"),
+    )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        seed_dir=tmp_path / "seeds",
+        seed_processed_dir=tmp_path / "seeds-processed",
+        seed_failed_dir=tmp_path / "seeds-failed",
+        forecast_db=tmp_path / "forecasts.db",
+        seed_limit=0,
+        limit=1,
+        runner=lambda argv: subprocess.CompletedProcess(
+            list(argv), 0, stdout="ok\n", stderr=""
+        ),
+    )
+
+    assert report.processed_count == 1
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_SEED_DEFERRED_FOR_REQUESTS" in (
+        report.reason_codes
+    )
 
 
 def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_path) -> None:

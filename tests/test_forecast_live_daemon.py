@@ -186,18 +186,23 @@ def test_replacement_materialize_job_calls_undecorated_production_inner(monkeypa
     def _outer_wrapper() -> None:
         calls.append("outer")
 
-    def _inner_job(*, discover: bool = True, limit: int | None = None) -> None:
-        calls.append(f"inner:{discover}:{limit}")
+    def _inner_job(
+        *,
+        discover: bool = True,
+        limit: int | None = None,
+        seed_limit: int | None = None,
+    ) -> None:
+        calls.append(f"inner:{discover}:{limit}:{seed_limit}")
 
     _outer_wrapper.__wrapped__ = _inner_job  # type: ignore[attr-defined]
     monkeypatch.setattr(production, "_replacement_forecast_live_materialize_cycle", _outer_wrapper)
 
     _replacement_forecast_materialize_job.__wrapped__()
 
-    assert calls == ["inner:True:None"]
+    assert calls == ["inner:True:None:None"]
 
 
-def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tmp_path) -> None:
+def test_replacement_materialize_poll_bounds_pending_seed_work(monkeypatch, tmp_path) -> None:
     import src.data.replacement_forecast_production as production
     import src.ingest.forecast_live_daemon as daemon
 
@@ -205,7 +210,7 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
     seed_dir = Path(cfg["seed_dir"])
     seed_dir.mkdir(parents=True)
     (seed_dir / "urgent.json").write_text("{}\n", encoding="utf-8")
-    calls: list[tuple[bool, int | None]] = []
+    calls: list[tuple[bool, int | None, int | None]] = []
 
     monkeypatch.setattr(
         production,
@@ -215,7 +220,9 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
     monkeypatch.setattr(
         daemon,
         "_replacement_forecast_materialize_job",
-        lambda *, discover=True, limit=None: calls.append((discover, limit)),
+        lambda *, discover=True, limit=None, seed_limit=None: calls.append(
+            (discover, limit, seed_limit)
+        ),
     )
     monkeypatch.setattr(
         daemon, "_replacement_forecast_last_discovery_monotonic", 90.0
@@ -224,8 +231,39 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(False, 3)]
+    assert calls == [(False, 3, 1)]
     assert daemon._replacement_forecast_last_discovery_monotonic == 90.0
+
+
+def test_replacement_materialize_poll_prioritizes_requests_over_seeds(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_production as production
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = _materialization_queue_cfg(tmp_path)
+    for key in ("request_dir", "seed_dir"):
+        path = Path(cfg[key])
+        path.mkdir(parents=True)
+        (path / f"{key}.json").write_text("{}\n", encoding="utf-8")
+    calls: list[tuple[bool, int | None, int | None]] = []
+
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_materialize_job",
+        lambda *, discover=True, limit=None, seed_limit=None: calls.append(
+            (discover, limit, seed_limit)
+        ),
+    )
+
+    daemon._replacement_forecast_materialize_poll_job()
+
+    assert calls == [(False, 3, 0)]
 
 
 def test_replacement_materialize_pending_queue_preempts_due_discovery(
@@ -238,7 +276,7 @@ def test_replacement_materialize_pending_queue_preempts_due_discovery(
     seed_dir = Path(cfg["seed_dir"])
     seed_dir.mkdir(parents=True)
     (seed_dir / "urgent.json").write_text("{}\n", encoding="utf-8")
-    calls: list[tuple[bool, int | None]] = []
+    calls: list[tuple[bool, int | None, int | None]] = []
 
     monkeypatch.setattr(
         production,
@@ -248,7 +286,9 @@ def test_replacement_materialize_pending_queue_preempts_due_discovery(
     monkeypatch.setattr(
         daemon,
         "_replacement_forecast_materialize_job",
-        lambda *, discover=True, limit=None: calls.append((discover, limit)),
+        lambda *, discover=True, limit=None, seed_limit=None: calls.append(
+            (discover, limit, seed_limit)
+        ),
     )
     monkeypatch.setattr(
         daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
@@ -257,7 +297,7 @@ def test_replacement_materialize_pending_queue_preempts_due_discovery(
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(False, 3)]
+    assert calls == [(False, 3, 1)]
     assert daemon._replacement_forecast_last_discovery_monotonic == 0.0
 
 
@@ -266,7 +306,7 @@ def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_p
     import src.ingest.forecast_live_daemon as daemon
 
     cfg = _materialization_queue_cfg(tmp_path)
-    calls: list[tuple[bool, int | None]] = []
+    calls: list[tuple[bool, int | None, int | None]] = []
     monkeypatch.setattr(
         production,
         "_replacement_forecast_live_materialization_queue_config",
@@ -275,7 +315,9 @@ def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_p
     monkeypatch.setattr(
         daemon,
         "_replacement_forecast_materialize_job",
-        lambda *, discover=True, limit=None: calls.append((discover, limit)),
+        lambda *, discover=True, limit=None, seed_limit=None: calls.append(
+            (discover, limit, seed_limit)
+        ),
     )
     monkeypatch.setattr(
         daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
@@ -283,7 +325,7 @@ def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_p
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(True, 3)]
+    assert calls == [(True, 3, 1)]
     assert daemon._replacement_forecast_last_discovery_monotonic > 0.0
 
 
@@ -438,7 +480,7 @@ def test_materialization_poll_limit_bounds_seed_work(monkeypatch, tmp_path) -> N
     )
 
     result = production._run_replacement_forecast_live_materialization_queue_once(
-        cfg, discover=True, limit=8
+        cfg, discover=True, limit=8, seed_limit=1
     )
 
     assert result is report
@@ -453,7 +495,7 @@ def test_materialization_poll_limit_bounds_seed_work(monkeypatch, tmp_path) -> N
             "forecast_db": cfg["forecast_db"],
             "raw_manifest_dir": cfg["raw_manifest_dir"],
             "seed_discovery_limit": 8,
-            "seed_limit": 8,
+            "seed_limit": 1,
             "limit": 8,
             "discover": True,
         }

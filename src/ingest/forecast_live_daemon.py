@@ -1074,7 +1074,10 @@ def _replacement_cycle_availability_poll_job() -> None:
 
 @_scheduler_job(REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID)
 def _replacement_forecast_materialize_job(
-    *, discover: bool = True, limit: int | None = None
+    *,
+    discover: bool = True,
+    limit: int | None = None,
+    seed_limit: int | None = None,
 ) -> None:
     """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
 
@@ -1090,15 +1093,15 @@ def _replacement_forecast_materialize_job(
     _replacement_forecast_live_materialize_cycle.__wrapped__(
         discover=discover,
         limit=limit,
+        seed_limit=seed_limit,
     )
 
 
-def _replacement_forecast_queue_pending(cfg: dict[str, object]) -> bool:
-    for key in ("seed_dir", "request_dir"):
-        path = Path(str(cfg[key]))
-        if path.exists() and next(path.glob("*.json"), None) is not None:
-            return True
-    return False
+def _replacement_forecast_queue_pending(
+    cfg: dict[str, object], key: str
+) -> bool:
+    path = Path(str(cfg[key]))
+    return path.exists() and next(path.glob("*.json"), None) is not None
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
@@ -1111,23 +1114,32 @@ def _replacement_forecast_materialize_poll_job() -> None:
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    pending = _replacement_forecast_queue_pending(cfg)
+    requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
+    seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     now = time.monotonic()
     discovery_due = (
         now - _replacement_forecast_last_discovery_monotonic
         >= 60.0 * _replacement_forecast_materialize_interval_minutes()
     )
     batch_limit = int(cfg["poll_batch_limit"])
-    if pending:
+    if requests_pending:
         _replacement_forecast_materialize_job(
             discover=False,
             limit=batch_limit,
+            seed_limit=0,
+        )
+    elif seeds_pending:
+        _replacement_forecast_materialize_job(
+            discover=False,
+            limit=batch_limit,
+            seed_limit=1,
         )
     elif discovery_due:
         _replacement_forecast_last_discovery_monotonic = now
         _replacement_forecast_materialize_job(
             discover=True,
             limit=batch_limit,
+            seed_limit=1,
         )
 
 

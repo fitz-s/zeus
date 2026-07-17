@@ -1805,19 +1805,29 @@ def _replacement_forecast_download_cycle() -> None:
 
 @_scheduler_job("replacement_forecast_live_materialize")
 def _replacement_forecast_live_materialize_cycle(
-    *, discover: bool = True, limit: int | None = None
+    *,
+    discover: bool = True,
+    limit: int | None = None,
+    seed_limit: int | None = None,
 ) -> None:
     if not _replacement_forecast_live_materialization_enabled():
         return
     cfg = _replacement_forecast_live_materialization_queue_config()
     report = _run_replacement_forecast_live_materialization_queue_once(
-        cfg, discover=discover, limit=limit
+        cfg,
+        discover=discover,
+        limit=limit,
+        seed_limit=seed_limit,
     )
     _log_replacement_forecast_materialization_report(report)
 
 
 def _run_replacement_forecast_live_materialization_queue_once(
-    cfg: dict[str, object], *, discover: bool = True, limit: int | None = None
+    cfg: dict[str, object],
+    *,
+    discover: bool = True,
+    limit: int | None = None,
+    seed_limit: int | None = None,
 ):
     from src.data.replacement_forecast_live_materialization_queue import (
         process_replacement_forecast_live_materialization_queue,
@@ -1825,6 +1835,10 @@ def _run_replacement_forecast_live_materialization_queue_once(
 
     revision_before = _forecast_posterior_revision(cfg)
     batch_limit = int(cfg["limit"] if limit is None else limit)
+    seed_batch_limit = min(
+        int(cfg["seed_limit"]),
+        batch_limit if seed_limit is None else max(0, int(seed_limit)),
+    )
     report = process_replacement_forecast_live_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
@@ -1835,7 +1849,7 @@ def _run_replacement_forecast_live_materialization_queue_once(
         forecast_db=cfg["forecast_db"],
         raw_manifest_dir=cfg["raw_manifest_dir"],
         seed_discovery_limit=min(int(cfg["seed_discovery_limit"]), batch_limit),
-        seed_limit=min(int(cfg["seed_limit"]), batch_limit),
+        seed_limit=seed_batch_limit,
         limit=batch_limit,
         discover=discover,
     )
