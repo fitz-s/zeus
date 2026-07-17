@@ -5606,7 +5606,19 @@ def execute_monitoring_phase(
                 deps,
                 boundary="before_probability_refresh",
             )
-            edge_ctx = refresh_position(conn, clob, pos)
+            if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                from src.engine.monitor_refresh import refresh_exact_zero_position
+
+                edge_ctx = refresh_exact_zero_position(conn, clob, pos)
+                summary["day0_hard_fact_probability_refresh_bypassed"] = (
+                    summary.get(
+                        "day0_hard_fact_probability_refresh_bypassed",
+                        0,
+                    )
+                    + 1
+                )
+            else:
+                edge_ctx = refresh_position(conn, clob, pos)
             # === DAY0 HARD-FACT verdict — computed before the exit decision and
             # before closed-market pre-emption above. Settlement-authority hard
             # facts must not depend on estimator evidence.

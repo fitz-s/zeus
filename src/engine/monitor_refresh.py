@@ -4546,6 +4546,77 @@ def monitor_probability_refresh(
     return pos.p_posterior, pos, False
 
 
+def refresh_exact_zero_position(
+    conn,
+    clob: PolymarketClient,
+    pos: Position,
+) -> EdgeContext:
+    """Build a held-position context after settlement truth fixes q at zero."""
+
+    if pos.direction not in {"buy_yes", "buy_no"}:
+        raise ValueError(f"Unknown direction {pos.direction} for trade {pos.trade_id}")
+
+    pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
+    pos.last_monitor_best_bid = None
+    pos.last_monitor_best_ask = None
+    pos.last_monitor_market_vig = None
+    pos.last_monitor_whale_toxicity = False
+    pos.last_monitor_market_price_is_fresh = False
+    for attr in (_GLOBAL_MONITOR_SAMPLES_ATTR, _GLOBAL_MONITOR_ALPHA_ATTR):
+        try:
+            delattr(pos, attr)
+        except AttributeError:
+            pass
+
+    current_p_market = (
+        pos.last_monitor_market_price
+        if pos.last_monitor_market_price is not None
+        else pos.entry_price
+    )
+    quote = monitor_quote_refresh(conn, clob, pos)
+    if quote is not None:
+        pos.last_monitor_best_bid = quote.best_bid
+        pos.last_monitor_best_ask = quote.best_ask
+        current_p_market = quote.diagnostic_market_price
+        pos.last_monitor_market_price = current_p_market
+        pos.last_monitor_market_price_is_fresh = True
+
+    pos.selected_method = SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    pos.last_monitor_prob = 0.0
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = (
+        -float(current_p_market)
+        if pos.last_monitor_market_price_is_fresh
+        else float("nan")
+    )
+    _set_day0_zero_probability_exit_authority(pos, True)
+    _append_monitor_validation(pos, SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+    _append_monitor_validation(pos, "day0_hard_fact_probability_recompute_bypassed")
+    _persist_monitor_quote(conn, pos, quote)
+
+    forward_edge = float(pos.last_monitor_edge)
+    return EdgeContext(
+        p_raw=np.array([]),
+        p_cal=np.array([]),
+        p_market=np.array([float(current_p_market)]),
+        p_posterior=0.0,
+        forward_edge=forward_edge,
+        alpha=0.0,
+        confidence_band_upper=forward_edge,
+        confidence_band_lower=forward_edge,
+        entry_provenance=EntryMethod(pos.entry_method),
+        decision_snapshot_id=pos.decision_snapshot_id,
+        n_edges_found=1,
+        n_edges_after_fdr=1,
+        market_velocity_1h=0.0,
+        divergence_score=(
+            float(current_p_market)
+            if pos.last_monitor_market_price_is_fresh
+            else float("nan")
+        ),
+    )
+
+
 def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:
     """Fetch fresh market price and recompute P_posterior for a held position.
 

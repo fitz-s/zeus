@@ -1319,8 +1319,6 @@ class TestStructuralWinTerminalHold:
 
     def test_hard_fact_dead_bin_executes_without_global_auction(self, monkeypatch):
         import logging as _logging
-        import numpy as np
-        from src.contracts import EdgeContext, EntryMethod
         from src.engine import cycle_runtime
         from src.state.portfolio import Position, PortfolioState
 
@@ -1343,19 +1341,14 @@ class TestStructuralWinTerminalHold:
             def record_exit(self, position):
                 pass
 
-        def mock_refresh(conn, clob, position):
-            return EdgeContext(
-                p_raw=np.array([]), p_cal=np.array([]),
-                p_market=np.array([position.entry_price]),
-                p_posterior=position.p_posterior,
-                forward_edge=0.0, alpha=0.0,
-                confidence_band_upper=0.0, confidence_band_lower=0.0,
-                entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-                decision_snapshot_id="snap_ks", n_edges_found=1, n_edges_after_fdr=1,
-                market_velocity_1h=0.0, divergence_score=0.0,
-            )
-
-        monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+        monkeypatch.setattr(
+            "src.engine.monitor_refresh.refresh_position",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "exact-zero hard fact must bypass posterior recomputation"
+                )
+            ),
+        )
         monkeypatch.setattr(
             cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
             lambda conn, pos, *, deps, **kwargs: True,
@@ -1403,6 +1396,7 @@ class TestStructuralWinTerminalHold:
             deps=deps, exit_order_submit_enabled=True,
         )
         assert summary.get("day0_hard_fact_direct_exit_decisions") == 1
+        assert summary.get("day0_hard_fact_probability_refresh_bypassed") == 1
         exits = [r for r in results if getattr(r, "should_exit", False)]
         assert len(exits) == 1
         assert any(
