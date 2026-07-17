@@ -1336,6 +1336,9 @@ def _write_heartbeat() -> None:
 def _live_health_composite_cycle() -> None:
     """Refresh composite live-health without blocking the heartbeat pulse."""
 
+    if _defer_for_active_entry_reactor("live_health_composite"):
+        return
+
     from src.control.live_health import compute_composite_live_health
 
     compute_composite_live_health()

@@ -152,6 +152,26 @@ def test_live_health_composite_runs_as_separate_scheduler_job():
     assert 'executor="observability"' in main_source
 
 
+def test_live_health_composite_yields_to_active_entry_reactor(monkeypatch):
+    """Historical health scans must not contend with the live decision lane."""
+
+    import src.control.live_health as live_health
+    import src.main as main
+
+    monkeypatch.setattr(
+        main,
+        "_defer_for_active_entry_reactor",
+        lambda job_name: job_name == "live_health_composite",
+    )
+    monkeypatch.setattr(
+        live_health,
+        "compute_composite_live_health",
+        lambda: pytest.fail("health DB scans must yield to the active reactor"),
+    )
+
+    assert main._live_health_composite_cycle.__wrapped__() is None
+
+
 def test_scheduler_job_marks_running_before_completion(monkeypatch):
     """Long scheduler jobs must be visible as RUNNING before success/failure."""
 

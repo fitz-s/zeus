@@ -4450,18 +4450,44 @@ def _load_high_yes_edges_python(
             """,
             (cutoff,),
         ).fetchall()
-        market_rows = forecast_conn.execute(
-            """
-            SELECT city,
-                   target_date,
-                   temperature_metric,
-                   range_label,
-                   condition_id
-              FROM market_events
-             WHERE condition_id IS NOT NULL
-               AND range_label IS NOT NULL
-            """
-        ).fetchall()
+        families = sorted(
+            {
+                (
+                    str(row["city"] or ""),
+                    str(row["target_date"] or ""),
+                    str(row["temperature_metric"] or ""),
+                )
+                for row in posterior_rows
+                if row["city"] and row["target_date"] and row["temperature_metric"]
+            }
+        )
+        market_rows = []
+        for start in range(0, len(families), 250):
+            chunk = families[start : start + 250]
+            values_sql = ",".join("(?,?,?)" for _ in chunk)
+            params = tuple(value for family in chunk for value in family)
+            market_rows.extend(
+                forecast_conn.execute(
+                    f"""
+                    WITH requested_families(city, target_date, metric) AS (
+                        VALUES {values_sql}
+                    )
+                    SELECT DISTINCT m.city,
+                           m.target_date,
+                           m.temperature_metric,
+                           m.range_label,
+                           m.condition_id
+                      FROM requested_families f
+                      JOIN market_events m
+                        ON m.city = f.city
+                       AND m.target_date = f.target_date
+                       AND m.temperature_metric = f.metric
+                     WHERE m.condition_id IS NOT NULL
+                       AND m.range_label IS NOT NULL
+                    """,
+                    params,
+                ).fetchall()
+            )
     finally:
         forecast_conn.close()
 
