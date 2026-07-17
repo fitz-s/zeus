@@ -55,6 +55,45 @@ def test_confirmed_ws_trade_fact_appends_edli_user_trade_observed():
     assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 0
 
 
+def test_confirmed_ws_trade_fact_uses_command_order_after_matched_submit_unknown():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger, include_ack=False)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitUnknown",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "reason_code": "matched_submit_missing_trade_id",
+            "reconciliation_followup_required": True,
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    _insert_command(conn)
+    conn.execute("UPDATE venue_commands SET state='REVIEW_REQUIRED' WHERE command_id='cmd-1'")
+    append_trade_fact(
+        conn,
+        trade_id="trade-matched-submit",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="1" * 64,
+        raw_payload_json="{}",
+    )
+
+    assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 1
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "USER_TRADE_OBSERVED"
+
+
 def test_bridge_does_not_promote_non_confirmed_or_non_user_channel_facts():
     conn = _conn()
     ledger = LiveOrderAggregateLedger(conn)
@@ -226,7 +265,11 @@ def _insert_command(conn: sqlite3.Connection) -> None:
     )
 
 
-def _seed_edli_chain(ledger: LiveOrderAggregateLedger) -> None:
+def _seed_edli_chain(
+    ledger: LiveOrderAggregateLedger,
+    *,
+    include_ack: bool = True,
+) -> None:
     ledger.append_event(
         aggregate_id="event-1:intent-1",
         event_type="DecisionProofAccepted",
@@ -276,18 +319,19 @@ def _seed_edli_chain(ledger: LiveOrderAggregateLedger) -> None:
         occurred_at=NOW,
         source_authority="existing_executor",
     )
-    ledger.append_event(
-        aggregate_id="event-1:intent-1",
-        event_type="VenueSubmitAcknowledged",
-        payload={
-            "event_id": "event-1",
-            "final_intent_id": "intent-1",
-            "execution_command_id": "command-1",
-            "venue_order_id": "venue-1",
-        },
-        occurred_at=NOW,
-        source_authority="existing_executor",
-    )
+    if include_ack:
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="VenueSubmitAcknowledged",
+            payload={
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "execution_command_id": "command-1",
+                "venue_order_id": "venue-1",
+            },
+            occurred_at=NOW,
+            source_authority="existing_executor",
+        )
 
 
 def _pre_submit_payload() -> dict:

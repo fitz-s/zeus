@@ -30,8 +30,11 @@ def append_confirmed_trade_facts_to_edli(
 
     The source of authority remains the authenticated user channel: this bridge
     only consumes ``venue_trade_facts`` rows written as ``source='WS_USER'`` and
-    ``state='CONFIRMED'``. It also requires the trade fact to bind to the EDLI
-    execution command and the acknowledged venue order for the same aggregate.
+    ``state='CONFIRMED'``. The trade fact must bind to the EDLI execution command
+    and either its acknowledged venue order or the same canonical command's
+    persisted venue order. The latter covers a matched submit response that
+    returned an order id but omitted the trade id, so EDLI recorded
+    ``SubmitUnknown`` while the authenticated user channel later proved the fill.
     """
 
     _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
@@ -99,13 +102,16 @@ def append_confirmed_trade_facts_to_edli(
                             trade.trade_fact_id DESC
                ) AS logical_fill_rank
           FROM execution_commands exec
-          JOIN submit_acks ack
-            ON ack.aggregate_id = exec.aggregate_id
           JOIN {venue_commands} cmd
             ON cmd.decision_id = exec.execution_command_id
+          LEFT JOIN submit_acks ack
+            ON ack.aggregate_id = exec.aggregate_id
           JOIN {venue_trade_facts} trade
             ON trade.command_id = cmd.command_id
-           AND trade.venue_order_id = ack.venue_order_id
+           AND trade.venue_order_id = COALESCE(
+                   NULLIF(ack.venue_order_id, ''),
+                   NULLIF(cmd.venue_order_id, '')
+               )
          WHERE UPPER(COALESCE(trade.state, '')) = 'CONFIRMED'
            AND trade.source = 'WS_USER'
            AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
