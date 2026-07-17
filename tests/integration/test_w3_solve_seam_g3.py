@@ -2758,8 +2758,17 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
     )
     samples = np.tile(np.asarray(((0.4, 0.6),)), (400, 1))
 
-    def fake_prepare(_event, *, decision_time, max_age, **_):
+    def fake_prepare(
+        _event,
+        *,
+        decision_time,
+        max_age,
+        cache_metadata_out=None,
+        **_,
+    ):
         prepare_calls.append(decision_time)
+        if cache_metadata_out is not None:
+            cache_metadata_out["family_binding_hash"] = "family-binding"
         version = f"q-{len(prepare_calls)}"
         identity = joint_probability_witness_identity(
             family_key=family_key,
@@ -2842,6 +2851,28 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
     assert (
         reused.probability_witness.sample_matrix_identity
         == first.probability_witness.sample_matrix_identity
+    )
+    expected_certificate = era.stable_hash(
+        {
+            "event_id": scope_event.event_id,
+            "causal_snapshot_id": scope_event.causal_snapshot_id,
+            "family_binding_hash": "family-binding",
+            "q_version": reused.probability_witness.q_version,
+            "source_truth_identity": (
+                reused.probability_witness.source_truth_identity
+            ),
+            "captured_at_utc": at_1.isoformat(),
+        }
+    )
+    assert (
+        reused.probability_witness.authority_certificate_hash
+        == expected_certificate
+    )
+    assert reused.decision_id == era.stable_hash(
+        {
+            "authority_certificate_hash": expected_certificate,
+            "witness_identity": reused.probability_witness.witness_identity,
+        }
     )
 
     adapter().process_global_batch((scope_event,), at_2)

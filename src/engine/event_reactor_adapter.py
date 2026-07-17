@@ -331,7 +331,7 @@ _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
 
 _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK = threading.Lock()
 _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE: str | None = None
-_GLOBAL_PROBABILITY_FAMILY_CACHE: dict[str, tuple[str, object]] = {}
+_GLOBAL_PROBABILITY_FAMILY_CACHE: dict[str, tuple[str, str, object]] = {}
 
 
 def _global_probability_family_cache_namespace(
@@ -372,6 +372,9 @@ def _global_probability_family_cache_namespace(
 def _reissue_cached_global_probability_family(
     prepared: object,
     *,
+    event_id: str,
+    causal_snapshot_id: str,
+    family_binding_hash: str,
     captured_at_utc: datetime,
 ) -> object:
     from src.solve.solver import joint_probability_witness_identity
@@ -383,12 +386,25 @@ def _reissue_cached_global_probability_family(
         or captured_at_utc.tzinfo is None
         or previous_at is None
         or previous_at.tzinfo is None
+        or not event_id
+        or not causal_snapshot_id
+        or not family_binding_hash
     ):
         raise ValueError("GLOBAL_PROBABILITY_CACHE_TIME_INVALID")
     captured_at_utc = captured_at_utc.astimezone(UTC)
     age = captured_at_utc - previous_at.astimezone(UTC)
     if age.total_seconds() < 0.0 or age > witness.max_age:
         raise ValueError("GLOBAL_PROBABILITY_CACHE_EXPIRED")
+    authority_certificate_hash = stable_hash(
+        {
+            "event_id": event_id,
+            "causal_snapshot_id": causal_snapshot_id,
+            "family_binding_hash": family_binding_hash,
+            "q_version": witness.q_version,
+            "source_truth_identity": witness.source_truth_identity,
+            "captured_at_utc": captured_at_utc.isoformat(),
+        }
+    )
     identity = joint_probability_witness_identity(
         family_key=witness.family_key,
         bindings=witness.bindings,
@@ -397,7 +413,7 @@ def _reissue_cached_global_probability_family(
         topology_identity=witness.topology_identity,
         posterior_identity_hash=witness.posterior_identity_hash,
         source_truth_identity=witness.source_truth_identity,
-        authority_certificate_hash=witness.authority_certificate_hash,
+        authority_certificate_hash=authority_certificate_hash,
         band_alpha=witness.band_alpha,
         band_basis=witness.band_basis,
         yes_q_samples=witness.yes_q_samples,
@@ -405,8 +421,15 @@ def _reissue_cached_global_probability_family(
     )
     return dataclass_replace(
         prepared,
+        decision_id=stable_hash(
+            {
+                "authority_certificate_hash": authority_certificate_hash,
+                "witness_identity": identity,
+            }
+        ),
         probability_witness=dataclass_replace(
             witness,
+            authority_certificate_hash=authority_certificate_hash,
             captured_at_utc=captured_at_utc,
             witness_identity=identity,
         ),
@@ -418,9 +441,10 @@ def _probe_global_probability_family_cache(
     *,
     family_key: str,
     event_id: str,
+    causal_snapshot_id: str,
     captured_at_utc: datetime,
 ) -> object | None:
-    if not namespace or not family_key or not event_id:
+    if not namespace or not family_key or not event_id or not causal_snapshot_id:
         return None
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
@@ -430,7 +454,10 @@ def _probe_global_probability_family_cache(
         return None
     try:
         return _reissue_cached_global_probability_family(
-            cached[1],
+            cached[2],
+            event_id=event_id,
+            causal_snapshot_id=causal_snapshot_id,
+            family_binding_hash=cached[1],
             captured_at_utc=captured_at_utc,
         )
     except (AttributeError, TypeError, ValueError):
@@ -443,17 +470,22 @@ def _store_global_probability_family_cache(
     *,
     family_key: str,
     event_id: str,
+    family_binding_hash: str,
     prepared: object,
 ) -> None:
     global _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE
 
-    if not namespace or not family_key or not event_id:
+    if not namespace or not family_key or not event_id or not family_binding_hash:
         return
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
             _GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
             _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE = namespace
-        _GLOBAL_PROBABILITY_FAMILY_CACHE[family_key] = (event_id, prepared)
+        _GLOBAL_PROBABILITY_FAMILY_CACHE[family_key] = (
+            event_id,
+            family_binding_hash,
+            prepared,
+        )
 
 
 def _evict_global_probability_family_cache(
@@ -5191,6 +5223,8 @@ def event_bound_live_adapter_from_trade_conn(
     def _prepare_global_event(
         event: OpportunityEvent,
         decision_time: datetime,
+        *,
+        cache_metadata_out: dict[str, str] | None = None,
     ) -> EventSubmissionReceipt:
         """Prepare current family q without reading or writing executable prices."""
 
@@ -5204,6 +5238,7 @@ def event_bound_live_adapter_from_trade_conn(
                 observation_conn=calibration_conn,
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
+                cache_metadata_out=cache_metadata_out,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
             return EventSubmissionReceipt(
@@ -5947,19 +5982,28 @@ def event_bound_live_adapter_from_trade_conn(
                     probability_cache_namespace,
                     family_key=family_key,
                     event_id=event.event_id,
+                    causal_snapshot_id=event.causal_snapshot_id,
                     captured_at_utc=at,
                 )
                 if cached is not None:
                     probability_cache_stats["hit"] += 1
                     return _prepared_global_event_receipt(event, cached)
                 probability_cache_stats["miss"] += 1
-            receipt = _prepare_global_event(event, at)
+            cache_metadata: dict[str, str] = {}
+            receipt = _prepare_global_event(
+                event,
+                at,
+                cache_metadata_out=cache_metadata,
+            )
             prepared = receipt.prepared_global_family
             if prepared is not None:
                 _store_global_probability_family_cache(
                     probability_cache_namespace,
                     family_key=family_key,
                     event_id=event.event_id,
+                    family_binding_hash=str(
+                        cache_metadata.get("family_binding_hash") or ""
+                    ),
                     prepared=prepared,
                 )
             return receipt
@@ -25107,6 +25151,7 @@ def _prepare_current_global_probability_family(
     decision_time: datetime,
     max_age: timedelta,
     day0_payload_out: dict[str, object] | None = None,
+    cache_metadata_out: dict[str, str] | None = None,
 ):
     """Build a current joint-q witness without any executable-price dependency."""
 
@@ -25159,6 +25204,8 @@ def _prepare_current_global_probability_family(
             bound.rejection_reason or "EVENT_BOUND_CANDIDATE_BINDING_FAILED"
         )
     family = bound.candidate_family
+    if cache_metadata_out is not None:
+        cache_metadata_out["family_binding_hash"] = str(family.binding_hash)
     is_day0 = event.event_type == "DAY0_EXTREME_UPDATED"
     current_day0_payload: dict[str, object] | None = None
     day0_observation_conn = observation_conn or forecast_conn
