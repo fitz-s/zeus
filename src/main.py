@@ -3649,6 +3649,7 @@ def _edli_event_reactor_cycle(
         producer_wake_reason=producer_wake_reason,
         producer_wake_event_ids=producer_wake_event_ids,
         producer_wake_families=producer_wake_families,
+        urgent_day0_pending=_day0_urgent_wake_pending.is_set,
     )
 
 

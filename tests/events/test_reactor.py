@@ -34,6 +34,7 @@ from src.events.reactor import (
     ReactorResult,
     TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
+    _process_pending_cancelled,
     _rank_forecast_wake_events,
     _is_transient_money_path_reason,
 )
@@ -565,6 +566,58 @@ def test_global_batch_stops_claiming_when_cycle_is_cancelled():
         _processing_status(conn, event.event_id) == "pending"
         for event in events
     ) == 2
+
+
+def test_producer_batch_yields_only_to_day0_between_event_units():
+    def any_urgent():
+        return False
+
+    def day0_urgent():
+        return True
+
+    assert _process_pending_cancelled(
+        committed_day0_wake=True,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+    ) is None
+    assert _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+    ) is day0_urgent
+    assert _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+    ) is any_urgent
+
+
+def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", fake_run)
+    main._day0_urgent_wake_pending.clear()
+    try:
+        assert main._edli_event_reactor_cycle(
+            producer_wake_reason="market_price_advanced",
+            producer_wake_event_ids=("price-event",),
+        ) is True
+        assert captured["urgent_day0_pending"]() is False
+        main._day0_urgent_wake_pending.set()
+        assert captured["urgent_day0_pending"]() is True
+    finally:
+        main._day0_urgent_wake_pending.clear()
 
 
 @pytest.mark.parametrize(

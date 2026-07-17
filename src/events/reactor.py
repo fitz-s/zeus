@@ -5277,12 +5277,27 @@ def _current_live_fact_status(relative_path: str) -> str:
             return "CURRENT_FOR_LIVE" if "CURRENT_FOR_LIVE" in line else "STALE_FOR_LIVE"
     return "STALE_FOR_LIVE"
 
+def _process_pending_cancelled(
+    *,
+    committed_day0_wake: bool,
+    producer_fast_path: bool,
+    urgent_wake_pending: Callable[[], bool],
+    urgent_day0_pending: Callable[[], bool] | None,
+) -> Callable[[], bool] | None:
+    if committed_day0_wake:
+        return None
+    if producer_fast_path:
+        return urgent_day0_pending
+    return urgent_wake_pending
+
+
 def run_edli_event_reactor_cycle(
     *,
     active_lock,
     producer_wake_reason: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
+    urgent_day0_pending: Callable[[], bool] | None = None,
 ) -> bool:
     """EDLI event-reactor cycle body (R4-b3 extraction from src/main.py::
     _edli_event_reactor_cycle, 2026-07-08). main.py's scheduler hook is now a
@@ -5298,6 +5313,10 @@ def run_edli_event_reactor_cycle(
     ``.locked()`` state), so main.py -- the dispatcher -- retains ownership
     of the Lock object itself. This cycle owns the acquire/release lifecycle
     around its own run, exactly as it did before the extraction.
+
+    ``urgent_day0_pending`` is the dispatcher's cross-thread signal for a
+    newly committed observation. Lower-priority producer batches consult it
+    only between durable event units; the Day0 batch itself is never cancelled.
     """
     import logging as _logging
     from src.main import (
@@ -6018,7 +6037,12 @@ def run_edli_event_reactor_cycle(
             limit=proof_limit,
             targeted_event_ids=frozenset(targeted_event_ids),
             targeted_only=producer_fast_path and bool(targeted_event_ids),
-            cancelled=None if producer_fast_path else _urgent_wake_pending,
+            cancelled=_process_pending_cancelled(
+                committed_day0_wake=committed_day0_wake,
+                producer_fast_path=producer_fast_path,
+                urgent_wake_pending=_urgent_wake_pending,
+                urgent_day0_pending=urgent_day0_pending,
+            ),
         )
         _log_stage("process_pending")
         # Canonical event/finalization truth must commit before the derived status
