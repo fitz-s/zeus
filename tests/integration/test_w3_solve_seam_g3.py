@@ -4529,6 +4529,41 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
         separators=(",", ":"),
     )
     assert get_snapshot(conn, curve.snapshot_id) == snapshot
+    newer_substrate = replace(
+        old,
+        snapshot_id="newer-substrate",
+        gamma_market_id="gamma-b",
+        raw_gamma_payload_hash="e" * 64,
+    )
+    insert_snapshot(conn, newer_substrate)
+    conn.commit()
+    reused, reused_row = era._persist_global_candidate_executable_snapshot(
+        conn,
+        proof=SimpleNamespace(executable_snapshot_id=newer_substrate.snapshot_id),
+        candidate=candidate,
+        decision_time=captured + _dt.timedelta(seconds=2),
+    )
+    assert reused == snapshot
+    assert reused_row["snapshot_id"] == snapshot.snapshot_id
+
+    changed_curve = replace(
+        curve,
+        fee_model=FeeModel(fee_rate=Decimal("0.10")),
+    )
+    changed_candidate = replace(
+        candidate,
+        execution_curve_identity=executable_curve_identity(changed_curve),
+        executable_cost_curve=changed_curve,
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_SNAPSHOT_ID_COLLISION"):
+        era._persist_global_candidate_executable_snapshot(
+            conn,
+            proof=SimpleNamespace(
+                executable_snapshot_id=newer_substrate.snapshot_id
+            ),
+            candidate=changed_candidate,
+            decision_time=captured + _dt.timedelta(seconds=2),
+        )
     with pytest.raises(ValueError, match="LIVE_DEPTH_AUTHORITY_MISSING"):
         era._assert_taker_depth_authority_fresh(
             snapshot=old,

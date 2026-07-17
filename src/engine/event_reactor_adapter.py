@@ -7689,29 +7689,69 @@ def _persist_global_candidate_executable_snapshot(
         source="global_current_book_curve",
         token_id=candidate_token,
     )
-    snapshot = dataclass_replace(
-        base,
-        snapshot_id=str(curve.snapshot_id),
-        selected_outcome_token_id=candidate_token,
-        outcome_label=candidate_side,
-        min_tick_size=curve.min_tick,
-        min_order_size=curve.min_order_size,
-        fee_details=fee_details,
-        orderbook_top_bid=None,
-        orderbook_top_ask=levels[0].price,
-        orderbook_depth_jsonb=depth,
-        raw_orderbook_hash=raw_orderbook_hash,
-        authority_tier="CLOB",
-        captured_at=captured_at,
-        freshness_deadline=captured_at + curve.quote_ttl,
-        wide_spread_display_substitution=False,
-        depth_at_best_ask=int(levels[0].size),
-    )
-    existing = get_snapshot(trade_conn, snapshot.snapshot_id)
-    if existing is None:
+    snapshot_id = str(curve.snapshot_id)
+    existing = get_snapshot(trade_conn, snapshot_id)
+    if existing is not None:
+        # A cached global book epoch may cite the same immutable curve after the
+        # local proof substrate has advanced.  Reconstructing the row from that
+        # newer substrate changes non-curve metadata and falsely reports an ID
+        # collision.  The already-persisted row is authoritative when every
+        # submit-relevant current-book field still matches exactly.
+        expected = (
+            candidate_condition,
+            candidate_token,
+            candidate_side,
+            curve.min_tick,
+            curve.min_order_size,
+            fee_details,
+            None,
+            levels[0].price,
+            depth,
+            raw_orderbook_hash,
+            "CLOB",
+            captured_at,
+            captured_at + curve.quote_ttl,
+            int(levels[0].size),
+        )
+        observed = (
+            existing.condition_id,
+            existing.selected_outcome_token_id,
+            existing.outcome_label,
+            existing.min_tick_size,
+            existing.min_order_size,
+            existing.fee_details,
+            existing.orderbook_top_bid,
+            existing.orderbook_top_ask,
+            existing.orderbook_depth_jsonb,
+            existing.raw_orderbook_hash,
+            existing.authority_tier,
+            existing.captured_at,
+            existing.freshness_deadline,
+            existing.depth_at_best_ask,
+        )
+        if observed != expected:
+            raise ValueError("GLOBAL_JIT_SNAPSHOT_ID_COLLISION")
+        snapshot = existing
+    else:
+        snapshot = dataclass_replace(
+            base,
+            snapshot_id=snapshot_id,
+            selected_outcome_token_id=candidate_token,
+            outcome_label=candidate_side,
+            min_tick_size=curve.min_tick,
+            min_order_size=curve.min_order_size,
+            fee_details=fee_details,
+            orderbook_top_bid=None,
+            orderbook_top_ask=levels[0].price,
+            orderbook_depth_jsonb=depth,
+            raw_orderbook_hash=raw_orderbook_hash,
+            authority_tier="CLOB",
+            captured_at=captured_at,
+            freshness_deadline=captured_at + curve.quote_ttl,
+            wide_spread_display_substitution=False,
+            depth_at_best_ask=int(levels[0].size),
+        )
         insert_snapshot(trade_conn, snapshot)
-    elif existing.executable_snapshot_hash != snapshot.executable_snapshot_hash:
-        raise ValueError("GLOBAL_JIT_SNAPSHOT_ID_COLLISION")
     # The next phase performs a direct venue JIT fetch.  Do not carry a trade-DB
     # write transaction across that network boundary; the immutable row must be
     # durable before the proof bundle cites it.
