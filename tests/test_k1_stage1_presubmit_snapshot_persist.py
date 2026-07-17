@@ -110,6 +110,12 @@ def _witness(*, best_bid: float = 0.58, best_ask: float = 0.61) -> PreSubmitAuth
         venue_connectivity_checked_at=fetch_iso,
         balance_allowance_authority_id="collateral",
         balance_allowance_checked_at=fetch_iso,
+        orderbook_depth_jsonb=(
+            '{"asks":[{"price":"0.61","size":"12"}],'
+            '"asset_id":"no-token",'
+            '"bids":[{"price":"0.58","size":"8"}],'
+            '"hash":"venue-book-hash-abc123"}'
+        ),
         checked_at=fetch_iso,
         max_quote_age_ms=1000,
     )
@@ -142,6 +148,8 @@ def test_presubmit_snapshot_row_matches_witness_book() -> None:
     assert row.orderbook_top_ask == Decimal("0.61")
     assert row.orderbook_top_bid != elected.orderbook_top_bid
     assert row.orderbook_top_ask != elected.orderbook_top_ask
+    assert '"size":"12"' in row.orderbook_depth_jsonb
+    assert row.freshness_deadline == _FETCH_INSTANT + timedelta(seconds=1)
     # Family identity is inherited from the elected snapshot (mirror minimally).
     assert row.condition_id == elected.condition_id
     assert row.yes_token_id == elected.yes_token_id

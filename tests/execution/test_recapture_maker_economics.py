@@ -106,7 +106,7 @@ def _buy_fak_economics(*, shares=Decimal("10"), limit=Decimal("0.14")):
     }
 
 
-def _fresh_snapshot(*, top_ask):
+def _fresh_snapshot(*, top_ask, provenance_source=None, depth_json="{}"):
     return SimpleNamespace(
         snapshot_id="snap-fresh",
         executable_snapshot_hash="hash-fresh",
@@ -119,6 +119,10 @@ def _fresh_snapshot(*, top_ask):
         yes_token_id="tok-yes",
         no_token_id="tok-no",
         condition_id="cond-1",
+        orderbook_depth_jsonb=depth_json,
+        tradeability_status=SimpleNamespace(
+            provenance_source=provenance_source,
+        ),
     )
 
 
@@ -158,12 +162,21 @@ def _patched_recapture(monkeypatch):
     import src.engine.cycle_runtime as cycle_runtime
     import src.state.snapshot_repo as repo
 
-    state = {"fresh": _fresh_snapshot(top_ask=Decimal("0.20")), "capture_calls": 0}
+    state = {
+        "fresh": _fresh_snapshot(top_ask=Decimal("0.20")),
+        "latest": None,
+        "capture_calls": 0,
+    }
 
     def fake_get_snapshot(conn, snapshot_id):
         return _stale_snapshot() if snapshot_id == "snap-stale" else state["fresh"]
 
     monkeypatch.setattr(repo, "get_snapshot", fake_get_snapshot)
+    monkeypatch.setattr(
+        repo,
+        "latest_snapshot_for_market",
+        lambda _conn, _condition_id, _now: state["latest"],
+    )
     monkeypatch.setattr(
         snap_contract, "is_fresh", lambda snap, now: snap.snapshot_id == "snap-fresh"
     )
@@ -466,6 +479,74 @@ def test_taker_recaptures_even_when_elected_snapshot_is_fresh(_patched_recapture
         executor_mod,
         "simulate_clob_sweep",
         lambda **_k: SimpleNamespace(depth_status="PASS", average_price=Decimal("0.14")),
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(),
+        _final_intent(post_only=False, limit=0.14),
+        conn=object(),
+        submitted_shares=10.0,
+    )
+
+    assert _patched_recapture["capture_calls"] == 1
+    assert out.executable_snapshot_id == "snap-fresh"
+
+
+def test_taker_reuses_final_jit_depth_without_network_recapture(
+    _patched_recapture, monkeypatch
+):
+    """The exact final JIT row is already the submit-time depth recapture."""
+    import src.execution.executor as executor_mod
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["latest"] = _fresh_snapshot(
+        top_ask=Decimal("0.14"),
+        provenance_source="JIT_PRESUBMIT",
+        depth_json=(
+            '{"asks":[{"price":"0.14","size":"10"}],'
+            '"bids":[{"price":"0.13","size":"5"}]}'
+        ),
+    )
+    monkeypatch.setattr(
+        executor_mod,
+        "simulate_clob_sweep",
+        lambda **_k: SimpleNamespace(
+            depth_status="PASS",
+            average_price=Decimal("0.14"),
+            filled_shares=Decimal("10"),
+        ),
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(),
+        _final_intent(post_only=False, limit=0.14),
+        conn=object(),
+        submitted_shares=10.0,
+    )
+
+    assert _patched_recapture["capture_calls"] == 0
+    assert out.executable_snapshot_id == "snap-fresh"
+
+
+def test_taker_incomplete_jit_depth_falls_back_to_network_recapture(
+    _patched_recapture, monkeypatch
+):
+    import src.execution.executor as executor_mod
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["latest"] = _fresh_snapshot(
+        top_ask=Decimal("0.14"),
+        provenance_source="JIT_PRESUBMIT",
+        depth_json="{}",
+    )
+    monkeypatch.setattr(
+        executor_mod,
+        "simulate_clob_sweep",
+        lambda **_k: SimpleNamespace(
+            depth_status="PASS",
+            average_price=Decimal("0.14"),
+            filled_shares=Decimal("10"),
+        ),
     )
 
     out = _recapture_fresh_entry_snapshot_if_needed(

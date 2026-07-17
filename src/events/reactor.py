@@ -7765,8 +7765,19 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         )
         # Price is read last so slow venue/balance checks cannot age the book
         # before the full-depth curve binds to this same observation.
+        raw_book: dict[str, object] = {}
+
+        def _capture_book(selected_token_id: str):
+            if book_quote_provider is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+            response = book_quote_provider(selected_token_id)
+            current = dict(response[0] if isinstance(response, tuple) else response)
+            raw_book.clear()
+            raw_book.update(current)
+            return response
+
         jit = _edli_pre_submit_book_from_jit_fetch(
-            book_quote_provider,
+            _capture_book,
             token_id=token_id,
             side=side,
             limit_price=float(intent["limit_price"]) if has_limit_price else None,
@@ -7801,6 +7812,11 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             venue_connectivity_checked_at=checked_at.isoformat(),
             balance_allowance_authority_id=balance_authority_id,
             balance_allowance_checked_at=checked_at.isoformat(),
+            orderbook_depth_jsonb=json.dumps(
+                raw_book,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             checked_at=checked_at.isoformat(),
             max_quote_age_ms=max_quote_age_ms,
         )

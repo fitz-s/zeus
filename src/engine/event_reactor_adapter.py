@@ -1878,6 +1878,7 @@ class PreSubmitAuthorityWitness:
     venue_connectivity_checked_at: str
     balance_allowance_authority_id: str
     balance_allowance_checked_at: str
+    orderbook_depth_jsonb: str | None = None
     checked_at: str | None = None
     max_quote_age_ms: int = 1000
 
@@ -1891,10 +1892,6 @@ class PreSubmitAuthorityWitness:
 # k1_persist_presubmit_snapshot_enabled flag is DELETED; the persist is now
 # UNCONDITIONAL fail-soft (provenance substrate, never a throttle).
 JIT_PRESUBMIT_PROVENANCE_SOURCE = "JIT_PRESUBMIT"
-# The fresh JIT book carries the SAME price freshness window as the elected DB
-# row's executable window: captured_at + the snapshot freshness window. We mirror
-# the elected row's own window rather than fabricate a new constant.
-_K1_DEFAULT_PRESUBMIT_FRESHNESS_SECONDS = 30.0
 
 
 def build_presubmit_snapshot_row(
@@ -1930,9 +1927,12 @@ def build_presubmit_snapshot_row(
     window = (
         float(freshness_window_seconds)
         if freshness_window_seconds is not None
-        else _K1_DEFAULT_PRESUBMIT_FRESHNESS_SECONDS
+        else max(0.0, float(witness.max_quote_age_ms) / 1000.0)
     )
-    freshness_deadline = captured_at + timedelta(seconds=max(0.0, window))
+    freshness_deadline = min(
+        elected_snapshot.freshness_deadline,
+        captured_at + timedelta(seconds=max(0.0, window)),
+    )
 
     fresh_bid = (
         Decimal(str(witness.current_best_bid))
@@ -1945,12 +1945,35 @@ def build_presubmit_snapshot_row(
         else None
     )
 
+    depth_json = "{}"
+    if witness.orderbook_depth_jsonb:
+        try:
+            depth = json.loads(witness.orderbook_depth_jsonb)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            depth = None
+        if (
+            isinstance(depth, Mapping)
+            and isinstance(depth.get("bids"), list)
+            and isinstance(depth.get("asks"), list)
+        ):
+            depth_json = json.dumps(
+                depth,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
     # raw_orderbook_hash must be a 64-char sha256 hex digest (contract invariant).
-    # The witness book_hash is the venue's opaque hash string; sha256 it together
-    # with the fresh top-of-book so the row's orderbook-lineage hash is a valid,
-    # deterministic digest of exactly the JIT book that was witnessed.
+    # Prefer the full depth consumed by the final JIT validation. Legacy/test
+    # witnesses without depth retain the prior top-of-book lineage shape.
     raw_orderbook_hash = hashlib.sha256(
-        f"{JIT_PRESUBMIT_PROVENANCE_SOURCE}|{witness.book_hash}|{fresh_bid}|{fresh_ask}".encode("utf-8")
+        (
+            depth_json
+            if depth_json != "{}"
+            else (
+                f"{JIT_PRESUBMIT_PROVENANCE_SOURCE}|{witness.book_hash}|"
+                f"{fresh_bid}|{fresh_ask}"
+            )
+        ).encode("utf-8")
     ).hexdigest()
 
     # New immutable identity — never collides with the elected row's snapshot_id.
@@ -1973,13 +1996,13 @@ def build_presubmit_snapshot_row(
         snapshot_id=snapshot_id,
         orderbook_top_bid=fresh_bid,
         orderbook_top_ask=fresh_ask,
-        orderbook_depth_jsonb="{}",
+        orderbook_depth_jsonb=depth_json,
         raw_orderbook_hash=raw_orderbook_hash,
         authority_tier="CLOB",
         captured_at=captured_at,
         freshness_deadline=freshness_deadline,
-        # depth/microstructure are not re-derived from the single top-of-book JIT
-        # fetch; reset to the neutral defaults rather than carry stale elected depth.
+        # Microstructure telemetry is not needed for submit authority. Never carry
+        # the elected snapshot's stale aggregate when the JIT row is replaced.
         wide_spread_display_substitution=False,
         depth_at_best_ask=0,
         tradeability_status=status_payload,
@@ -14389,35 +14412,6 @@ def _build_live_execution_command_certificates(
         )
         fresh_best_bid = _optional_float(authority_witness.current_best_bid)
         fresh_best_ask = _optional_float(authority_witness.current_best_ask)
-        # K=1 STAGE 1 (k1_final_snapshot_authority_plan_2026-06-11.md §4): persist the
-        # fresh submit-time JIT book (R8 — already fetched [NET] above, inside the
-        # witness provider) as ONE first-class executable_market_snapshots row tagged
-        # source=JIT_PRESUBMIT, BEFORE it is consumed below. Pure additive persistence
-        # + provenance; the witness STILL flows through the existing R9-R15 path
-        # untouched. Wave-1 2026-06-12: the k1_persist_presubmit_snapshot_enabled flag is
-        # DELETED — this is the receipt's provenance substrate, not a throttle, so it now
-        # ALWAYS runs (fail-soft: a failed persist never blocks submit). §5.2 SQLite
-        # discipline: the [NET] fetch is done; this opens a short-lived zeus_trades
-        # write+commit only — the trade WAL lock is never held across the fetch, and
-        # zeus-world (#95 mutex) is untouched.
-        if trade_conn is not None:
-            _k1_elected_id = str(
-                executable_snapshot.payload.get("identity")
-                or executable_snapshot.payload.get("selected_snapshot_id")
-                or ""
-            )
-            _k1_elected_snapshot = None
-            if _k1_elected_id:
-                try:
-                    _k1_elected_snapshot = get_snapshot(trade_conn, _k1_elected_id)
-                except Exception:  # noqa: BLE001 - fail-soft: never block submit on a read
-                    _k1_elected_snapshot = None
-            persist_presubmit_jit_snapshot(
-                trade_conn,
-                _k1_elected_snapshot,
-                witness=authority_witness,
-                decision_time=decision_time,
-            )
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
         # Mode redecision at the live submit boundary: proof mode is not decorative, but
@@ -14834,6 +14828,27 @@ def _build_live_execution_command_certificates(
             final=final_authority_witness,
         )
         authority_witness = final_authority_witness
+        # Persist the FINAL exact side/limit/size JIT observation, not the
+        # provisional touch. Its full depth can then satisfy the executor's
+        # defense-in-depth recapture without another CLOB metadata/book wave.
+        if trade_conn is not None:
+            _k1_elected_id = str(
+                executable_snapshot.payload.get("identity")
+                or executable_snapshot.payload.get("selected_snapshot_id")
+                or ""
+            )
+            _k1_elected_snapshot = None
+            if _k1_elected_id:
+                try:
+                    _k1_elected_snapshot = get_snapshot(trade_conn, _k1_elected_id)
+                except Exception:  # noqa: BLE001 - fail-soft: never block submit on a read
+                    _k1_elected_snapshot = None
+            persist_presubmit_jit_snapshot(
+                trade_conn,
+                _k1_elected_snapshot,
+                witness=authority_witness,
+                decision_time=decision_time,
+            )
         current_utility_reason = _qkernel_current_state_actual_submit_rejection_reason(
             cert=actionable.payload.get("qkernel_execution_economics") or {},
             actual_stake_usd=(

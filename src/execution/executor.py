@@ -4952,7 +4952,7 @@ def _recapture_fresh_entry_snapshot_if_needed(
     """Refresh a stale executable snapshot without changing final-intent economics."""
 
     from src.contracts.executable_market_snapshot import is_fresh
-    from src.state.snapshot_repo import get_snapshot
+    from src.state.snapshot_repo import get_snapshot, latest_snapshot_for_market
 
     if conn is None:
         return legacy_intent
@@ -4966,42 +4966,54 @@ def _recapture_fresh_entry_snapshot_if_needed(
         if requires_fresh_taker_depth:
             raise ValueError("TAKER_FRESH_DEPTH_RECAPTURE_UNAVAILABLE:snapshot_missing")
         return legacy_intent
-    if is_fresh(snapshot, datetime.now(timezone.utc)) and not requires_fresh_taker_depth:
+    now = datetime.now(timezone.utc)
+    if is_fresh(snapshot, now) and not requires_fresh_taker_depth:
         return legacy_intent
     if os.environ.get("ZEUS_REPRICE_RECAPTURE_DISABLED"):
         if requires_fresh_taker_depth:
             raise ValueError("TAKER_FRESH_DEPTH_RECAPTURE_DISABLED")
         return legacy_intent
-    from types import SimpleNamespace
-    from src.data.market_scanner import capture_executable_market_snapshot
-    from src.data.polymarket_client import PolymarketClient
-    from src.engine.cycle_runtime import _market_dict_from_snapshot
+    fresh = None
+    if requires_fresh_taker_depth:
+        latest = latest_snapshot_for_market(conn, snapshot.condition_id, now)
+        if _is_reusable_presubmit_jit_snapshot(
+            latest,
+            final_intent=final_intent,
+            checked_at=now,
+        ):
+            fresh = latest
 
-    decision = SimpleNamespace(
-        tokens={
-            "token_id": snapshot.yes_token_id,
-            "no_token_id": snapshot.no_token_id,
-            "market_id": snapshot.condition_id,
-        },
-        edge=SimpleNamespace(direction=final_intent.direction),
-    )
-    captured_at = datetime.now(timezone.utc)
-    with PolymarketClient() as clob:
-        fields = capture_executable_market_snapshot(
-            conn,
-            market=_market_dict_from_snapshot(snapshot),
-            decision=decision,
-            clob=clob,
-            captured_at=captured_at,
-            scan_authority="VERIFIED",
-            execution_side="BUY",
+    if fresh is None:
+        from types import SimpleNamespace
+        from src.data.market_scanner import capture_executable_market_snapshot
+        from src.data.polymarket_client import PolymarketClient
+        from src.engine.cycle_runtime import _market_dict_from_snapshot
+
+        decision = SimpleNamespace(
+            tokens={
+                "token_id": snapshot.yes_token_id,
+                "no_token_id": snapshot.no_token_id,
+                "market_id": snapshot.condition_id,
+            },
+            edge=SimpleNamespace(direction=final_intent.direction),
         )
-    fresh_id = str(fields.get("executable_snapshot_id") or "")
-    fresh = get_snapshot(conn, fresh_id) if fresh_id else None
-    if fresh is None or not is_fresh(fresh, captured_at):
-        if requires_fresh_taker_depth:
-            raise ValueError("TAKER_FRESH_DEPTH_RECAPTURE_UNAVAILABLE:fresh_snapshot_missing")
-        return legacy_intent
+        captured_at = datetime.now(timezone.utc)
+        with PolymarketClient() as clob:
+            fields = capture_executable_market_snapshot(
+                conn,
+                market=_market_dict_from_snapshot(snapshot),
+                decision=decision,
+                clob=clob,
+                captured_at=captured_at,
+                scan_authority="VERIFIED",
+                execution_side="BUY",
+            )
+        fresh_id = str(fields.get("executable_snapshot_id") or "")
+        fresh = get_snapshot(conn, fresh_id) if fresh_id else None
+        if fresh is None or not is_fresh(fresh, captured_at):
+            if requires_fresh_taker_depth:
+                raise ValueError("TAKER_FRESH_DEPTH_RECAPTURE_UNAVAILABLE:fresh_snapshot_missing")
+            return legacy_intent
     if fresh.selected_outcome_token_id != final_intent.selected_token_id:
         raise ValueError("recaptured executable snapshot selected token mismatch")
     fresh_limit_price = _align_buy_limit_price_to_tick(
@@ -5127,6 +5139,46 @@ def _recapture_fresh_entry_snapshot_if_needed(
         executable_snapshot_min_tick_size=fresh.min_tick_size,
         executable_snapshot_min_order_size=fresh.min_order_size,
         executable_snapshot_neg_risk=fresh.neg_risk,
+    )
+
+
+def _is_reusable_presubmit_jit_snapshot(
+    snapshot,
+    *,
+    final_intent: FinalExecutionIntent,
+    checked_at: datetime,
+) -> bool:
+    """True when the final JIT witness already is the required taker recapture."""
+
+    if snapshot is None:
+        return False
+    status = getattr(snapshot, "tradeability_status", None)
+    if (
+        getattr(status, "provenance_source", None) != "JIT_PRESUBMIT"
+        or getattr(snapshot, "selected_outcome_token_id", None)
+        != final_intent.selected_token_id
+    ):
+        return False
+    from src.contracts.executable_market_snapshot import is_fresh
+
+    if not is_fresh(snapshot, checked_at):
+        return False
+    if (
+        Decimal(str(snapshot.min_tick_size)) != Decimal(str(final_intent.tick_size))
+        or Decimal(str(snapshot.min_order_size))
+        != Decimal(str(final_intent.min_order_size))
+        or bool(snapshot.neg_risk) != bool(final_intent.neg_risk)
+    ):
+        return False
+    try:
+        depth = json.loads(snapshot.orderbook_depth_jsonb)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return bool(
+        isinstance(depth, dict)
+        and isinstance(depth.get("bids"), list)
+        and isinstance(depth.get("asks"), list)
+        and depth.get("asks")
     )
 
 
