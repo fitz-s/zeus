@@ -1292,24 +1292,37 @@ def test_reactor_wake_acknowledges_event_durably_deferred_after_service(
     assert main._reactor_wake_events_finished(("event-retry",)) is False
 
 
-def test_reactor_wake_poll_does_not_spin_on_future_retry_floor(monkeypatch) -> None:
+def test_reactor_wake_poll_retires_durable_future_retry_hint(monkeypatch) -> None:
+    import threading
+
     import src.main as main
     from src.runtime import reactor_wake
 
-    wake = reactor_wake.ReactorWake(
-        "wake-deferred",
+    first = reactor_wake.ReactorWake(
+        "wake-deferred-first",
         "2026-07-16T12:00:00+00:00",
-        "price_channel",
-        "market_price_advanced",
-        ("event-retry",),
+        "day0_source_clock",
+        "day0_extreme_event_committed",
+        ("event-retry-first",),
     )
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    latest = reactor_wake.ReactorWake(
+        "wake-deferred-latest",
+        "2026-07-16T12:00:01+00:00",
+        "day0_source_clock",
+        "day0_extreme_event_committed",
+        ("event-retry-latest",),
+    )
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: first)
     monkeypatch.setattr(
         reactor_wake,
         "coalescible_reactor_wakes",
-        lambda _wake: (wake,),
+        lambda _wake: (first, latest),
     )
+    acknowledgements: list[tuple[str, ...]] = []
+    pending = threading.Event()
+    pending.set()
     monkeypatch.setattr(main, "_reactor_wake_events_ready", lambda _ids: False)
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
     monkeypatch.setattr(
         main,
         "_edli_event_reactor_cycle",
@@ -1318,7 +1331,50 @@ def test_reactor_wake_poll_does_not_spin_on_future_retry_floor(monkeypatch) -> N
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",
-        lambda _wake: pytest.fail("deferred wake must remain durable"),
+        lambda _selected: pytest.fail("coalesced wake must use batch acknowledgement"),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wakes",
+        lambda selected: acknowledgements.append(
+            tuple(wake.wake_id for wake in selected)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_identity",
+        lambda: (latest.wake_id, latest.reason),
+    )
+    monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert acknowledgements == [
+        ("wake-deferred-first", "wake-deferred-latest")
+    ]
+    assert main._edli_last_reactor_wake_id == "wake-deferred-first"
+    assert pending.is_set() is False
+
+
+def test_reactor_wake_poll_keeps_unsettled_not_ready_hint(monkeypatch) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-unsettled",
+        "2026-07-16T12:00:00+00:00",
+        "price_channel",
+        "market_price_advanced",
+        ("event-processing",),
+    )
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(main, "_reactor_wake_events_ready", lambda _ids: False)
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: False)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: pytest.fail("unsettled wake must remain durable"),
     )
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 

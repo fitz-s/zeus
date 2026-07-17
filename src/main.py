@@ -3899,17 +3899,66 @@ def _reactor_wake_events_ready(
     return not deferred
 
 
-def _edli_reactor_wake_poll_once() -> bool:
-    """Run the canonical reactor once for a new durable-producer wake hint."""
+def _acknowledge_edli_reactor_wake_batch(
+    wake,
+    wakes,
+    *,
+    day0_wake: bool,
+) -> bool:
+    """Retire serviced hints and keep the urgent in-memory signal exact."""
 
     global _edli_last_reactor_wake_id
 
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wake,
         acknowledge_reactor_wakes,
+        reactor_urgent_wake_identity,
+    )
+
+    acknowledged = (
+        acknowledge_reactor_wake(wake)
+        if len(wakes) == 1
+        else acknowledge_reactor_wakes(wakes)
+    )
+    if not acknowledged:
+        logger.warning(
+            "EDLI reactor processed wake id=%s batch=%d but queue acknowledgement failed; "
+            "leaving it pending for retry",
+            wake.wake_id,
+            len(wakes),
+        )
+        return False
+    if day0_wake:
+        acknowledged_wake_ids = {queued.wake_id for queued in wakes}
+        try:
+            next_urgent_identity = reactor_urgent_wake_identity()
+        except Exception:
+            logger.warning(
+                "Day0 urgent wake state could not be refreshed after acknowledgement; "
+                "keeping periodic monitor preemption armed",
+                exc_info=True,
+            )
+        else:
+            if (
+                next_urgent_identity is not None
+                and next_urgent_identity[0] not in acknowledged_wake_ids
+                and next_urgent_identity[1] == "day0_extreme_event_committed"
+            ):
+                _day0_urgent_wake_pending.set()
+            else:
+                _day0_urgent_wake_pending.clear()
+    _edli_last_reactor_wake_id = wake.wake_id
+    return True
+
+
+def _edli_reactor_wake_poll_once() -> bool:
+    """Run the canonical reactor once for a new durable-producer wake hint."""
+
+    global _edli_last_reactor_wake_id
+
+    from src.runtime.reactor_wake import (
         coalescible_reactor_wakes,
         read_reactor_wake,
-        reactor_urgent_wake_identity,
     )
 
     wake = read_reactor_wake()
@@ -3927,7 +3976,24 @@ def _edli_reactor_wake_poll_once() -> bool:
     day0_wake = wake.reason == "day0_extreme_event_committed"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
     if wake_event_ids and not _reactor_wake_events_ready(wake_event_ids):
-        return False
+        if not _reactor_wake_events_finished(wake_event_ids):
+            return False
+        if not _acknowledge_edli_reactor_wake_batch(
+            wake,
+            wakes,
+            day0_wake=day0_wake,
+        ):
+            return False
+        logger.info(
+            "EDLI reactor retired durably deferred wake id=%s source=%s "
+            "reason=%s batch=%d events=%d",
+            wake.wake_id,
+            wake.source,
+            wake.reason,
+            len(wakes),
+            len(wake_event_ids),
+        )
+        return True
     day0_target_families = None
     day0_requires_exit_monitor = False
     if day0_wake:
@@ -3988,38 +4054,12 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
     if wake_event_ids and not _reactor_wake_events_finished(wake_event_ids):
         return False
-    acknowledged = (
-        acknowledge_reactor_wake(wake)
-        if len(wakes) == 1
-        else acknowledge_reactor_wakes(wakes)
-    )
-    if not acknowledged:
-        logger.warning(
-            "EDLI reactor processed wake id=%s batch=%d but queue acknowledgement failed; "
-            "leaving it pending for retry",
-            wake.wake_id,
-            len(wakes),
-        )
+    if not _acknowledge_edli_reactor_wake_batch(
+        wake,
+        wakes,
+        day0_wake=day0_wake,
+    ):
         return False
-    if day0_wake:
-        try:
-            next_urgent_identity = reactor_urgent_wake_identity()
-        except Exception:
-            logger.warning(
-                "Day0 urgent wake state could not be refreshed after acknowledgement; "
-                "keeping periodic monitor preemption armed",
-                exc_info=True,
-            )
-        else:
-            if (
-                next_urgent_identity is not None
-                and next_urgent_identity[0] != wake.wake_id
-                and next_urgent_identity[1] == "day0_extreme_event_committed"
-            ):
-                _day0_urgent_wake_pending.set()
-            else:
-                _day0_urgent_wake_pending.clear()
-    _edli_last_reactor_wake_id = wake.wake_id
     logger.info(
         "EDLI reactor consumed wake id=%s source=%s reason=%s batch=%d events=%d families=%d",
         wake.wake_id,
