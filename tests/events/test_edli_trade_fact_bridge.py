@@ -94,6 +94,54 @@ def test_confirmed_ws_trade_fact_uses_command_order_after_matched_submit_unknown
     assert projection.current_state == "USER_TRADE_OBSERVED"
 
 
+def test_confirmed_ws_trade_bridge_skips_terminal_reconciled_aggregate():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    append_trade_fact(
+        conn,
+        trade_id="trade-first",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="2" * 64,
+        raw_payload_json="{}",
+    )
+    assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 1
+    conn.execute(
+        """
+        UPDATE edli_live_order_projection
+           SET current_state='RECONCILED', pending_reconcile=0
+         WHERE aggregate_id='event-1:intent-1'
+        """
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-late-duplicate",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW + timedelta(seconds=1),
+        venue_timestamp=NOW + timedelta(seconds=1),
+        raw_payload_hash="3" * 64,
+        raw_payload_json="{}",
+    )
+
+    assert append_confirmed_trade_facts_to_edli(conn, now=NOW + timedelta(seconds=1)) == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()[0] == 1
+
+
 def test_bridge_does_not_promote_non_confirmed_or_non_user_channel_facts():
     conn = _conn()
     ledger = LiveOrderAggregateLedger(conn)

@@ -121,8 +121,21 @@ def append_confirmed_trade_facts_to_edli(
                    FROM edli_live_order_events existing
                   WHERE existing.aggregate_id = exec.aggregate_id
                     AND existing.event_type = 'UserTradeObserved'
-                    AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
+                    AND COALESCE(
+                            json_extract(existing.payload_json, '$.trade_id'),
+                            json_extract(
+                                existing.payload_json,
+                                '$.authenticated_presence_proof.trade_id'
+                            )
+                        ) = trade.trade_id
                     AND json_extract(existing.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+               )
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM edli_live_order_projection proj
+                  WHERE proj.aggregate_id = exec.aggregate_id
+                    AND proj.current_state = 'RECONCILED'
+                    AND COALESCE(proj.pending_reconcile, 0) = 0
                )
         )
         SELECT *
@@ -143,27 +156,37 @@ def append_confirmed_trade_facts_to_edli(
             _row_get(row, "command_occurred_at"), default=default_now
         )
         message_hash = _message_hash(row)
-        append_user_trade_observed(
-            ledger,
-            aggregate_id=str(_row_get(row, "aggregate_id")),
-            event_id=str(_row_get(row, "event_id")),
-            final_intent_id=str(_row_get(row, "final_intent_id")),
-            source="polymarket_user_channel",
-            trade_status="CONFIRMED",
-            venue_order_id=str(_row_get(row, "venue_order_id")),
-            occurred_at=max(observed_at, command_occurred_at),
-            payload={
-                "raw_user_channel_message_hash": message_hash,
-                "trade_id": str(_row_get(row, "trade_id")),
-                "filled_size": str(_row_get(row, "filled_size")),
-                "fill_price": str(_row_get(row, "fill_price")),
-                "avg_fill_price": str(_row_get(row, "fill_price")),
-                "transaction_hash": _row_get(row, "tx_hash"),
-                "source_trade_observed_at": str(_row_get(row, "observed_at")),
-                "source_trade_fact_id": int(_row_get(row, "trade_fact_id")),
-                "source_trade_fact_authority": "venue_trade_facts:WS_USER:CONFIRMED",
-            },
-        )
+        try:
+            append_user_trade_observed(
+                ledger,
+                aggregate_id=str(_row_get(row, "aggregate_id")),
+                event_id=str(_row_get(row, "event_id")),
+                final_intent_id=str(_row_get(row, "final_intent_id")),
+                source="polymarket_user_channel",
+                trade_status="CONFIRMED",
+                venue_order_id=str(_row_get(row, "venue_order_id")),
+                occurred_at=max(observed_at, command_occurred_at),
+                payload={
+                    "raw_user_channel_message_hash": message_hash,
+                    "trade_id": str(_row_get(row, "trade_id")),
+                    "filled_size": str(_row_get(row, "filled_size")),
+                    "fill_price": str(_row_get(row, "fill_price")),
+                    "avg_fill_price": str(_row_get(row, "fill_price")),
+                    "transaction_hash": _row_get(row, "tx_hash"),
+                    "source_trade_observed_at": str(_row_get(row, "observed_at")),
+                    "source_trade_fact_id": int(_row_get(row, "trade_fact_id")),
+                    "source_trade_fact_authority": "venue_trade_facts:WS_USER:CONFIRMED",
+                },
+            )
+        except LiveOrderAggregateError as exc:
+            if "cannot append after terminal Reconciled projection" not in str(exc):
+                raise
+            logger.info(
+                "confirmed trade bridge: terminal aggregate replay skipped aggregate=%s trade=%s",
+                _row_get(row, "aggregate_id"),
+                _row_get(row, "trade_id"),
+            )
+            continue
         appended += 1
     return appended
 
