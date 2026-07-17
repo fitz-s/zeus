@@ -30822,6 +30822,9 @@ def _native_side_cost_curve_from_snapshot_row(
     # native QuoteLevel ladder onto BookLevel and let the contract enforce.
     levels = tuple(BookLevel(price=lvl.price, size=lvl.size) for lvl in asks)
     fee_model = FeeModel(fee_rate=Decimal(str(book.fee_rate)))
+    fee_details = _json_object(
+        row.get("fee_details_json") or row.get("fee_details") or {}
+    )
     return ExecutableCostCurve(
         token_id=str(token_id),
         side=side,  # type: ignore[arg-type]
@@ -30837,6 +30840,7 @@ def _native_side_cost_curve_from_snapshot_row(
         min_tick=book.min_tick_size,
         min_order_size=book.min_order_size,
         quote_ttl=_native_quote_ttl_from_row(row),
+        fee_details=fee_details,
     )
 
 

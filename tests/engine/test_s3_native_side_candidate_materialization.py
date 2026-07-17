@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Prove one native YES/NO candidate shape and its callback contracts.
 # Reuse: Re-audit identity, full-depth, and call-shape seams before auction changes.
 # Authority basis: "bin selection.md" §14.2 (NativeSideCandidate per bin per side) +
@@ -265,6 +265,28 @@ def test_current_global_execution_authority_uses_latest_full_native_ladder():
         decision_time=decision_time,
     ) is None
     conn.close()
+
+
+def test_native_side_curve_preserves_gamma_fee_provenance_for_submit_recapture():
+    row = _row(fee_rate_fraction=0.05)
+    fee_details = {
+        "fee_rate_fraction": 0.05,
+        "fee_rate_bps": 500.0,
+        "fee_rate_source_field": "fee_rate_fraction",
+        "feeSchedule_taker_only": True,
+        "source": "gamma_fee_schedule_family_cache",
+        "token_id": "yes-1",
+    }
+    row["fee_details_json"] = json.dumps(fee_details)
+
+    curve = era._native_side_cost_curve_from_snapshot_row(
+        row,
+        side="YES",
+        token_id="yes-1",
+    )
+
+    assert curve.fee_model.fee_rate == Decimal("0.05")
+    assert curve.fee_details == fee_details
 
 
 def _jit_curve(
