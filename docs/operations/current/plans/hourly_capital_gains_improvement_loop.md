@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-07-17 00:01Z tick — 目标重对齐到 ingest-to-submit alpha clock；Day0 重复抓取已删除并 live
+- **资本目标更新:** 不再以平均 cycle、SQL 数或订单吞吐作为终局。唯一热路径是 `source available -> ingest commit -> current q -> current book -> risk -> submit`；forecast reversal 使用百秒级市场窗口，deterministic observation reversal 必须先处理 exact held SELL 和互补 BUY，不能等待无关全市场重建。
+- **已完成突破口:** commit `1b4af08a5` 已由 ingest/main 自动重启加载。AWC METAR HTTP 现在只由 5 秒 ingest source clock 拥有；reactor 删除重复网络抓取，只增量读取 canonical observation ledger；WU-vs-METAR anomaly guard 复用 ingest cache 并独立调度。最终 focused coverage `146/146` 通过。
+- **live 证据:** source clock 在 `00:01:02Z` 持久化 4 个新 report 并发出 2 个 Day0 event；reactor 冷启动同步 3,106 个 retained ledger rows 仅约 `0.24s`。后续 targeted Day0 wake 的 probability prepare `0.67s`、family-delta book epoch `1.50s`、总 process_pending `2.28s`，证明受影响 family 的增量路径已存在。
+- **当前资本阻断:** 同一批 action 在 wealth binding 被 `CURRENT_WEALTH_OPEN_POSITION_INVALID` fail-closed；当时 chain projection 尚未给新 confirmed fill 完整 shares，随后 canonical reconciliation 已形成 4 个 token/shares 完整的 runtime-open positions。HEAD 的 `d32ac1483` 修复 matched-submit 后 confirmed-fill bridge，但尚需下一 exact-HEAD runtime cycle 证明该阻断消失。
+- **下一突破口:** deterministic observation event 当前仍可能被正在运行的 complete global auction 占用到约 18 秒。将其改为 alpha-expiry priority：先对受影响的 held position 做 exact current q/position/BID/risk preflight，再执行 reduce-only SELL；只有互补 new-risk BUY 才进入受影响-family auction。禁止绕过 venue/JIT/risk/settlement authority，也禁止复用 stale q/book。
+
 ### 2026-07-15 23:00Z tick — Codex pause 归因纠正；Seoul Day0 单模型退化根因与当前多模型可用性证明
 - **pause 归因:** active canonical `entries_paused=true` 是 Codex 在错误下单后的 live-money containment，不是用户/operator 指令；当前 reason=`codex_live_money_containment_after_bad_orders`。本 slice 保持暂停，不解除、不强制下单。
 - **当前根因:** Seoul Jul-16 held-position redecision 的 `finite_evidence_member_count=1`；canonical `day0_hourly_vectors` 只有 `ecmwf_ifs`，使 Day0 q/SELL robust band 退化为单模型证据。
