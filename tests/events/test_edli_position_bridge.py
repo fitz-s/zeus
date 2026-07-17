@@ -202,6 +202,7 @@ def _seed_confirmed_buy_no_aggregate(
     aggregate_id: str = "agg-edli-buyno-1",
     *,
     fills: list[tuple[float, float, float]] | None = None,
+    fill_payload_extras: list[dict] | None = None,
 ) -> str:
     """Seed a realistic CONFIRMED buy_no aggregate.
 
@@ -237,7 +238,8 @@ def _seed_confirmed_buy_no_aggregate(
         source_authority="engine_adapter",
     )
     seq = 3
-    for (size, price, fees) in fills:
+    for index, (size, price, fees) in enumerate(fills):
+        extras = fill_payload_extras[index] if fill_payload_extras else {}
         _insert_edli_event(
             conn, aggregate_id=aggregate_id, sequence=seq, event_type="UserTradeObserved",
             payload={
@@ -249,6 +251,7 @@ def _seed_confirmed_buy_no_aggregate(
                 "filled_size": size,
                 "avg_fill_price": price,
                 "fees": fees,
+                **extras,
             },
             source_authority="user_channel",
         )
@@ -865,6 +868,57 @@ def test_confirmed_edli_fill_appends_canonical_trade_fact(conn):
     assert payload["edli_aggregate_id"] == aggregate_id
     assert payload["source_edli_event_hash"] == fact["raw_payload_hash"]
     assert payload["fill_authority_state"] == "FILL_CONFIRMED"
+
+
+def test_confirmed_edli_fill_uses_linked_trade_fact_time_for_runtime_exposure(conn):
+    from src.state.db import query_entry_execution_fill_aggregate
+    from src.state.venue_command_repo import append_trade_fact
+
+    command_id = "cmd-fill-time-1"
+    _seed_venue_command_for_execution_command_id(
+        conn,
+        command_id=command_id,
+        execution_command_id=EXECUTION_COMMAND_ID,
+    )
+    source_fact_id = append_trade_fact(
+        conn,
+        trade_id="trade-fill-time-1",
+        venue_order_id=VENUE_ORDER_ID,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size="16.75",
+        fill_price="0.42",
+        source="WS_USER",
+        observed_at="2026-06-01T12:00:04+00:00",
+        venue_timestamp="2026-06-01T12:00:03+00:00",
+        raw_payload_hash="a" * 64,
+        raw_payload_json={"status": "CONFIRMED"},
+    )
+    aggregate_id = _seed_confirmed_buy_no_aggregate(
+        conn,
+        aggregate_id="agg-edli-fill-time-1",
+        fill_payload_extras=[
+            {
+                "source_trade_fact_id": source_fact_id,
+                "source_trade_observed_at": "2026-06-01T12:00:04+00:00",
+            }
+        ],
+    )
+
+    result = materialize_position_current_from_edli_fill(conn, aggregate_id)
+
+    fact = conn.execute(
+        "SELECT filled_at FROM execution_fact WHERE intent_id = ?",
+        (FINAL_INTENT_ID,),
+    ).fetchone()
+    assert fact["filled_at"] == "2026-06-01T12:00:03+00:00"
+    aggregate = query_entry_execution_fill_aggregate(
+        conn,
+        result["position_id"],
+        strict=True,
+    )
+    assert aggregate["shares_filled"] == pytest.approx(16.75)
+    assert aggregate["filled_cost_basis_usd"] == pytest.approx(7.035)
 
 
 def test_replay_of_same_edli_event_appends_no_additional_trade_fact(conn):

@@ -589,6 +589,52 @@ def _aggregate_fill_economics(fill_payloads: list[dict[str, Any]]) -> tuple[floa
     return total_size, avg_price, total_fees
 
 
+def _confirmed_fill_time(
+    conn: sqlite3.Connection,
+    fill_payloads: list[dict[str, Any]],
+) -> str | None:
+    """Return the latest source-observed fill time for confirmed fill legs."""
+    latest: datetime | None = None
+    for payload in fill_payloads:
+        values: list[object] = []
+        source_fact_id = payload.get("source_trade_fact_id")
+        if source_fact_id not in (None, ""):
+            try:
+                row = conn.execute(
+                    """
+                    SELECT venue_timestamp, observed_at
+                      FROM venue_trade_facts
+                     WHERE trade_fact_id = ?
+                     LIMIT 1
+                    """,
+                    (source_fact_id,),
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            if row is not None:
+                values.extend((row["venue_timestamp"], row["observed_at"]))
+        values.extend(
+            (
+                payload.get("venue_timestamp"),
+                payload.get("source_trade_observed_at"),
+            )
+        )
+        for value in values:
+            if not value:
+                continue
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.astimezone(timezone.utc)
+            if latest is None or parsed > latest:
+                latest = parsed
+            break
+    return latest.isoformat() if latest is not None else None
+
+
 def _resolve_strategy_key_from_pre_submit(
     pre_submit: dict[str, Any],
     *,
@@ -1778,6 +1824,7 @@ def materialize_position_current_from_edli_fill(
         identity["entry_method"] = certificate_entry_method
     fill_payloads = _confirmed_fill_payloads(events)
     filled_size, avg_fill_price, fees = _aggregate_fill_economics(fill_payloads)
+    authority_filled_at = _confirmed_fill_time(conn, fill_payloads)
     if filled_size <= 0 or avg_fill_price <= 0:
         raise EdliPositionBridgeError(
             f"EDLI_BRIDGE_FILL_ECONOMICS_INVALID: filled_size={filled_size} avg_fill_price={avg_fill_price}"
@@ -1899,10 +1946,10 @@ def materialize_position_current_from_edli_fill(
         # C4 telemetry-truth: posted_at = venue_commands.created_at (real
         # submit-intent time); NULL if command row absent (honest absence, so
         # latency_seconds computes NULL rather than synthetic 0.0).
-        # filled_at = NULL (bridge reconcile wall-clock is not the real fill time;
-        # no fill timestamp is available in the EDLI event payload).
+        # Keep bridge wall-clock out of fill truth. Authenticated user-channel
+        # payloads link back to venue_trade_facts; use that source timestamp.
         posted_at=_cmd_created_at,
-        filled_at=None,
+        filled_at=authority_filled_at,
         submitted_price=avg_fill_price,
         fill_price=avg_fill_price,
         shares=filled_size,
