@@ -1541,34 +1541,13 @@ def process_current_global_batch(
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
         scope_at = current_time()
         held_families = _current_held_weather_families(trade_conn)
-        day0_only = bool(event_tuple) and all(
-            event.event_type == "DAY0_EXTREME_UPDATED" for event in event_tuple
-        )
-        restricted_families = None
-        if day0_only:
-            restricted_families = {
-                (
-                    str(payload.get("city") or "").strip(),
-                    str(payload.get("target_date") or "").strip(),
-                    str(payload.get("metric") or "").strip().lower(),
-                )
-                for event in event_tuple
-                for payload in (payload_reader(event),)
-            }
         full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
             held_families=held_families,
-            restrict_to_families=restricted_families,
         )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
-        if day0_only:
-            _LOG.info(
-                "global batch Day0 urgent scope: claimed_events=%d families=%d",
-                len(event_tuple),
-                len(full_scope.events_by_family),
-            )
         if superseded("scope_scan"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         decision_scope = full_scope
