@@ -446,7 +446,10 @@ def test_balance_only_partial_exit_updates_chain_exposure() -> None:
     assert pos.filled_cost_basis_usd == pytest.approx(0.0), "filled_cost_basis_usd must not be touched"
 
 
-def test_size_mismatch_sync_populates_chain_economics_additively() -> None:
+@pytest.mark.parametrize("reported_cost", [10.4, 0.0])
+def test_size_mismatch_sync_populates_chain_economics_additively(
+    reported_cost: float,
+) -> None:
     """Antibody for PR1 critic in-spirit-F1: Rule-2 size-mismatch sync must
     populate chain_avg_price + chain_cost_basis_usd from chain observation,
     unconditionally, regardless of whether entry/fill fields are also updated.
@@ -506,7 +509,7 @@ def test_size_mismatch_sync_populates_chain_economics_additively() -> None:
         condition_id="c-sm",
         size=20.0,
         avg_price=0.52,
-        cost=10.4,
+        cost=reported_cost,
     )
 
     portfolio = PortfolioState(positions=[pos])

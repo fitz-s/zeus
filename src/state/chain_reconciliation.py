@@ -1936,8 +1936,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # trade-verified rescue branch below.
             if chain.avg_price > 0:
                 rescued.chain_avg_price = chain.avg_price
-            if chain.cost > 0:
-                rescued.chain_cost_basis_usd = chain.cost
+            chain_observed_cost = _chain_observed_cost(chain)
+            if chain_observed_cost > 0:
+                rescued.chain_cost_basis_usd = chain_observed_cost
             # PR D0 (Finding D0, Part-2 audit, 2026-05-27): discriminate rescue
             # authority by whether the position has a linked venue trade fact.
             # F1 (2026-05-28): the entry/fill economics mutations below now
@@ -2159,8 +2160,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # controlled by the existing _size_mismatch_eligible opt-in gate.
             if chain.avg_price > 0:
                 corrected.chain_avg_price = chain.avg_price
-            if chain.cost > 0:
-                corrected.chain_cost_basis_usd = chain.cost
+            chain_observed_cost = _chain_observed_cost(chain)
+            if chain_observed_cost > 0:
+                corrected.chain_cost_basis_usd = chain_observed_cost
             if chain.avg_price > 0:
                 if not _size_mismatch_eligible:
                     corrected.entry_price = chain.avg_price
