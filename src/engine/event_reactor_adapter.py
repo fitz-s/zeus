@@ -1838,7 +1838,7 @@ def _global_book_prefetch_epoch_at(
     fetch_finished_at: datetime,
     max_age: timedelta,
 ) -> datetime | None:
-    """Return the conservative cut time, or require expired projections to refetch."""
+    """Return a cut that remains consumable after local capture work."""
 
     if (
         fetch_started_at.tzinfo is None
@@ -1855,7 +1855,12 @@ def _global_book_prefetch_epoch_at(
     if projected_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_PROJECTION_CLOCK_INVALID")
     epoch_at = min(projected_at.astimezone(timezone.utc), started)
-    return epoch_at if finished - epoch_at <= max_age else None
+    usable_age = max_age - timedelta(seconds=1)
+    return (
+        epoch_at
+        if usable_age > timedelta(0) and finished - epoch_at <= usable_age
+        else None
+    )
 
 
 def _global_book_prefetch_is_consumable(

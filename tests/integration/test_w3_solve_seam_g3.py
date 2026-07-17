@@ -3750,6 +3750,25 @@ def test_global_book_prefetch_reserves_capture_freshness_budget():
     )
 
 
+def test_global_book_prefetch_cut_reserves_capture_freshness_budget():
+    started_at = _dt.datetime(2026, 7, 17, 12, tzinfo=_dt.timezone.utc)
+    finished_at = started_at + _dt.timedelta(seconds=2)
+    max_age = _dt.timedelta(seconds=30)
+
+    assert era._global_book_prefetch_epoch_at(
+        projected_at=finished_at - _dt.timedelta(seconds=29),
+        fetch_started_at=started_at,
+        fetch_finished_at=finished_at,
+        max_age=max_age,
+    ) == finished_at - _dt.timedelta(seconds=29)
+    assert era._global_book_prefetch_epoch_at(
+        projected_at=finished_at - _dt.timedelta(seconds=29, milliseconds=1),
+        fetch_started_at=started_at,
+        fetch_finished_at=finished_at,
+        max_age=max_age,
+    ) is None
+
+
 @pytest.mark.parametrize("projection_survives", [True, False])
 def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     monkeypatch,
