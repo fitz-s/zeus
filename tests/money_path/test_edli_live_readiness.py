@@ -42,6 +42,37 @@ def _strict_jit_final_intent() -> SimpleNamespace:
     )
 
 
+def _seed_pre_submit_collateral(
+    conn: sqlite3.Connection,
+    *,
+    balance_micro: int = 25_000_000,
+    allowance_micro: int = 25_000_000,
+    captured_at: datetime | None = None,
+    authority_tier: str = "CHAIN",
+) -> None:
+    from src.state.collateral_ledger import init_collateral_schema
+
+    init_collateral_schema(conn)
+    observed_at = captured_at or datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro, pusd_allowance_micro,
+            usdc_e_legacy_balance_micro, ctf_token_balances_json,
+            ctf_token_allowances_json, reserved_pusd_for_buys_micro,
+            reserved_tokens_for_sells_json, captured_at, authority_tier,
+            raw_balance_payload_hash
+        ) VALUES (?, ?, 0, '{}', '{}', 0, '{}', ?, ?, 'test-chain')
+        """,
+        (
+            balance_micro,
+            allowance_micro,
+            observed_at.astimezone(timezone.utc).isoformat(),
+            authority_tier,
+        ),
+    )
+
+
 def _edli_settings() -> dict:
     from src.config import settings
 
@@ -4052,6 +4083,7 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    _seed_pre_submit_collateral(conn)
     conn.execute(
         """
         CREATE TABLE execution_feasibility_evidence (
@@ -4119,9 +4151,9 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     assert witness.book_authority_id == "clob_jit_book"
     assert witness.heartbeat_authority_id == "heartbeat_supervisor"
     assert witness.user_ws_authority_id == "ws_gap_guard"
-    assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
+    assert witness.balance_allowance_authority_id == "canonical_collateral_ledger_chain"
     assert witness.balance_allowance_status == "OK"
-    assert len(clob_timeouts) == 2
+    assert len(clob_timeouts) == 1
     assert all(0 < timeout < 1.25 for timeout in clob_timeouts)
 
 
@@ -4134,6 +4166,7 @@ def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypat
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    _seed_pre_submit_collateral(conn)
     conn.execute(
         """
         CREATE TABLE execution_feasibility_evidence (
@@ -4201,10 +4234,45 @@ def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypat
     witness = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
     assert witness.balance_allowance_status == "OK"
-    assert calls == ["pusd"]
+    assert calls == []
 
 
-def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
+def test_main_pre_submit_canonical_collateral_subtracts_live_obligations():
+    from src.events import reactor
+
+    conn = sqlite3.connect(":memory:")
+    _seed_pre_submit_collateral(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations (
+            command_id, reservation_type, amount, created_at
+        ) VALUES ('reserved-buy', 'PUSD_BUY', 4000000, ?)
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO collateral_unsettled_proceeds (
+            command_id, direction, reservation_type, amount_micro, created_at
+        ) VALUES (
+            'filled-buy', 'OUTGOING_DEDUCTION', 'PUSD_BUY', 3000000, ?
+        )
+        """,
+        (now,),
+    )
+
+    payload = reactor._edli_canonical_buy_collateral_payload(
+        conn,
+        checked_at=datetime.now(timezone.utc),
+    )
+
+    assert payload["pusd_balance_micro"] == 18_000_000
+    assert payload["pusd_allowance_micro"] == 18_000_000
+    assert payload["balance_allowance_authority_id"] == "canonical_collateral_ledger_chain"
+
+
+def test_main_pre_submit_stale_canonical_collateral_fails_closed_without_network(monkeypatch):
     import src.main as main
     from src.events import reactor
     import src.control.heartbeat_supervisor as heartbeat_supervisor
@@ -4213,6 +4281,13 @@ def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+
+    _seed_pre_submit_collateral(
+        conn,
+        captured_at=datetime.now(timezone.utc)
+        - timedelta(seconds=COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS + 1),
+    )
     conn.execute(
         """
         CREATE TABLE execution_feasibility_evidence (
@@ -4234,8 +4309,7 @@ def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
     )
     monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
-    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "0.05")
-    release = threading.Event()
+    collateral_calls: list[str] = []
 
     class FakePolymarketClient:
         def __init__(self, *, public_http_timeout=None):
@@ -4254,11 +4328,8 @@ def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
             return self
 
         def get_collateral_payload(self):
-            release.wait(timeout=5.0)
-            return {
-                "pusd_balance_micro": 25_000_000,
-                "pusd_allowance_micro": 25_000_000,
-            }
+            collateral_calls.append("network")
+            raise AssertionError("BUY collateral must come from the canonical sidecar snapshot")
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
@@ -4272,14 +4343,11 @@ def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
     final_intent = _strict_jit_final_intent()
 
     started = time.monotonic()
-    try:
-        with pytest.raises(TimeoutError, match="timeout_guard: pre_submit_collateral_payload"):
-            provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
-    finally:
-        release.set()
-        conn.close()
+    with pytest.raises(ValueError, match="PRE_SUBMIT_COLLATERAL_SNAPSHOT_STALE"):
+        provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
     assert time.monotonic() - started < 1.0
+    assert collateral_calls == []
 
 
 def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkeypatch):
@@ -4351,6 +4419,7 @@ def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(mo
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    _seed_pre_submit_collateral(conn, allowance_micro=1_000_000)
     conn.execute(
         """
         CREATE TABLE execution_feasibility_evidence (
@@ -4421,6 +4490,7 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    _seed_pre_submit_collateral(conn)
     conn.execute(
         """
         CREATE TABLE execution_feasibility_evidence (
@@ -5105,6 +5175,7 @@ def _pre_submit_authority_witness(
 def _gate84_world_conn_with_stale_row(*, quote_seen_at: str):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    _seed_pre_submit_collateral(conn)
     conn.execute(
         """
         CREATE TABLE execution_feasibility_evidence (
@@ -5306,6 +5377,7 @@ def test_gate84_fresh_db_row_cannot_replace_submit_time_jit_book(monkeypatch):
     decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    _seed_pre_submit_collateral(conn)
     conn.execute(
         """
         CREATE TABLE execution_feasibility_evidence (

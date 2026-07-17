@@ -1222,7 +1222,7 @@ class PolymarketV2Adapter:
     ) -> dict[str, Any]:
         pusd_allowance_raw = raw.get("allowance")
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
-        authority_tier = "CHAIN"
+        authority_tier = "VENUE"
         allowance_source = "clob_balance_allowance"
         chain_allowance = (
             self._chain_collateral_allowance_micro()
@@ -1235,9 +1235,11 @@ class PolymarketV2Adapter:
             # ERC20 allowance across every venue spender is current executable
             # truth, including when the stale cache is non-zero.
             pusd_allowance_raw = chain_allowance
+            authority_tier = "CHAIN"
             allowance_source = "chain_erc20_allowance"
         elif allowance_int is None:
             pusd_allowance_raw = None
+            authority_tier = "DEGRADED"
             allowance_source = "missing"
         elif allowance_int == 0:
             pusd_allowance_raw = allowance_int

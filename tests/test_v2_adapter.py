@@ -750,7 +750,7 @@ def test_pusd_collateral_payload_skips_chain_allowance_fallback_for_heartbeat(tm
 
     assert payload["pusd_balance_micro"] == "100000000"
     assert payload["pusd_allowance_micro"] == 0
-    assert payload["authority_tier"] == "CHAIN"
+    assert payload["authority_tier"] == "DEGRADED"
     assert payload["pusd_allowance_source"] == "missing"
     assert rpc_calls == []
 
@@ -845,7 +845,7 @@ def test_collateral_payload_missing_allowance_remains_fail_closed_zero(tmp_path)
 
     assert payload["pusd_balance_micro"] == "100000000"
     assert payload["pusd_allowance_micro"] == 0
-    assert payload["authority_tier"] == "CHAIN"
+    assert payload["authority_tier"] == "DEGRADED"
     assert payload["pusd_allowance_source"] == "missing"
 
 
@@ -1019,6 +1019,34 @@ def test_collateral_payload_degrades_when_clob_zero_and_chain_unavailable(tmp_pa
     assert payload["pusd_allowance_micro"] == 0
     assert payload["pusd_allowance_source"] == "chain_erc20_unavailable_clob_zero"
     assert payload["authority_tier"] == "DEGRADED"
+
+
+def test_collateral_payload_does_not_label_clob_cache_as_chain_when_rpc_unavailable(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(
+        response={"balance": "100000000", "allowance": "1000000"}
+    )
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        rpc_call=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("rpc unavailable")
+        ),
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_allowance_micro"] == "1000000"
+    assert payload["pusd_allowance_source"] == "clob_balance_allowance"
+    assert payload["authority_tier"] == "VENUE"
 
 
 def test_collateral_payload_pusd_allowance_not_overwritten_by_ctf_positions(tmp_path):

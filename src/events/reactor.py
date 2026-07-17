@@ -7872,6 +7872,92 @@ def _edli_book_executable_depth(
             notional += price * level_size
     return shares, notional
 
+
+def _edli_canonical_buy_collateral_payload(
+    conn: sqlite3.Connection,
+    *,
+    checked_at: datetime,
+) -> dict[str, object]:
+    """Read current spendable BUY collateral without submit-path network I/O.
+
+    The post-trade-capital sidecar owns the CLOB balance + direct-chain
+    allowance refresh.  The order lane consumes that canonical snapshot and
+    subtracts every still-open reservation/unsettled deduction.  This preserves
+    chain allowance authority without aging the final JIT book on two Polygon
+    RPC calls for every candidate.
+    """
+
+    from src.state.collateral_ledger import (
+        COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS,
+        COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
+    )
+
+    try:
+        row = conn.execute(
+            """
+            SELECT pusd_balance_micro, pusd_allowance_micro, captured_at,
+                   authority_tier
+              FROM collateral_ledger_snapshots
+             ORDER BY id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        reserved_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0)
+              FROM collateral_reservations
+             WHERE reservation_type = 'PUSD_BUY' AND released_at IS NULL
+            """
+        ).fetchone()
+        unsettled_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount_micro), 0)
+              FROM collateral_unsettled_proceeds
+             WHERE direction = 'OUTGOING_DEDUCTION' AND settled_at IS NULL
+            """
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise ValueError("PRE_SUBMIT_COLLATERAL_SNAPSHOT_UNAVAILABLE") from exc
+    if row is None:
+        raise ValueError("PRE_SUBMIT_COLLATERAL_SNAPSHOT_MISSING")
+
+    try:
+        balance_micro = int(row[0] or 0)
+        allowance_micro = int(row[1] or 0)
+        captured_at = datetime.fromisoformat(str(row[2] or "").replace("Z", "+00:00"))
+        authority_tier = str(row[3] or "DEGRADED").strip().upper()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("PRE_SUBMIT_COLLATERAL_SNAPSHOT_INVALID") from exc
+    if captured_at.tzinfo is None:
+        raise ValueError("PRE_SUBMIT_COLLATERAL_SNAPSHOT_TIME_INVALID")
+    if authority_tier != "CHAIN":
+        raise ValueError(
+            f"PRE_SUBMIT_COLLATERAL_CHAIN_AUTHORITY_REQUIRED:{authority_tier}"
+        )
+
+    current = checked_at if checked_at.tzinfo is not None else checked_at.replace(tzinfo=UTC)
+    age_seconds = (
+        current.astimezone(UTC) - captured_at.astimezone(UTC)
+    ).total_seconds()
+    if age_seconds < -COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS:
+        raise ValueError("PRE_SUBMIT_COLLATERAL_SNAPSHOT_FUTURE")
+    if age_seconds > COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS:
+        raise ValueError("PRE_SUBMIT_COLLATERAL_SNAPSHOT_STALE")
+
+    reserved_micro = int(reserved_row[0] or 0) if reserved_row is not None else 0
+    unsettled_micro = int(unsettled_row[0] or 0) if unsettled_row is not None else 0
+    committed_micro = max(0, reserved_micro) + max(0, unsettled_micro)
+    return {
+        "pusd_balance_micro": max(0, balance_micro - committed_micro),
+        "pusd_allowance_micro": max(0, allowance_micro - committed_micro),
+        "ctf_token_balances_units": {},
+        "ctf_token_allowances_units": {},
+        "authority_tier": authority_tier,
+        "balance_allowance_authority_id": "canonical_collateral_ledger_chain",
+        "balance_allowance_checked_at": captured_at.astimezone(UTC).isoformat(),
+    }
+
+
 def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     book_evidence_conn, edli_cfg, *, book_quote_provider=None
 ):
@@ -7905,23 +7991,17 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             venue_summary_cache = _edli_venue_connectivity_authority_summary(checked_at)
         return venue_summary_cache
 
-    def _cached_collateral_payload(side: str) -> dict[str, object]:
+    def _cached_collateral_payload(
+        side: str,
+        checked_at: datetime,
+    ) -> dict[str, object]:
         nonlocal full_collateral_payload_cache, pusd_collateral_payload_cache
         normalized_side = str(side or "").upper()
         if normalized_side == "BUY" and pusd_collateral_payload_cache is None:
-            from src.data.polymarket_client import PolymarketClient
-
-            with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
-                adapter = clob._ensure_v2_adapter()
-                pusd_payload_fn = getattr(adapter, "get_pusd_collateral_payload", None)
-                if not callable(pusd_payload_fn):
-                    pusd_payload_fn = adapter.get_collateral_payload
-                pusd_collateral_payload_cache = dict(
-                    _edli_run_pre_submit_clob_call(
-                        "collateral_payload",
-                        pusd_payload_fn,
-                    )
-                )
+            pusd_collateral_payload_cache = _edli_canonical_buy_collateral_payload(
+                book_evidence_conn,
+                checked_at=checked_at,
+            )
         if normalized_side == "BUY":
             return pusd_collateral_payload_cache
         if full_collateral_payload_cache is None:
@@ -7955,11 +8035,18 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         heartbeat_summary = _edli_heartbeat_authority_summary()
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)
         venue_summary = _cached_venue_summary(checked_at)
-        balance_status, balance_authority_id = _edli_balance_allowance_status(
+        (
+            balance_status,
+            balance_authority_id,
+            balance_allowance_checked_at,
+        ) = _edli_balance_allowance_status(
             final_intent,
             checked_at,
             enabled=balance_check_enabled,
-            collateral_payload=_cached_collateral_payload(str(intent.get("side") or "")),
+            collateral_payload=_cached_collateral_payload(
+                str(intent.get("side") or ""),
+                checked_at,
+            ),
         )
         # Price is read last so slow venue/balance checks cannot age the book
         # before the full-depth curve binds to this same observation.
@@ -8009,7 +8096,7 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             venue_connectivity_authority_id=str(venue_summary["authority_id"]),
             venue_connectivity_checked_at=checked_at.isoformat(),
             balance_allowance_authority_id=balance_authority_id,
-            balance_allowance_checked_at=checked_at.isoformat(),
+            balance_allowance_checked_at=balance_allowance_checked_at,
             orderbook_depth_jsonb=json.dumps(
                 raw_book,
                 sort_keys=True,
@@ -8106,7 +8193,7 @@ def _edli_balance_allowance_status(
     *,
     enabled: bool,
     collateral_payload: dict[str, object] | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     if not enabled:
         raise ValueError("PRE_SUBMIT_ALLOWANCE_CHECK_DISABLED")
     from src.data.polymarket_client import PolymarketClient
@@ -8125,6 +8212,14 @@ def _edli_balance_allowance_status(
             )
     else:
         collateral = collateral_payload
+    balance_authority_id = str(
+        collateral.get("balance_allowance_authority_id")
+        or "polymarket_wallet_readonly"
+    )
+    balance_checked_at = str(
+        collateral.get("balance_allowance_checked_at")
+        or checked_at.isoformat()
+    )
     if side == "BUY":
         balance_micro = int(collateral.get("pusd_balance_micro") or 0)
         allowance_micro = int(collateral.get("pusd_allowance_micro") or 0)
@@ -8133,7 +8228,7 @@ def _edli_balance_allowance_status(
             raise ValueError("PRE_SUBMIT_PUSD_BALANCE_INSUFFICIENT")
         if allowance_micro < required_micro:
             raise ValueError("PRE_SUBMIT_PUSD_ALLOWANCE_INSUFFICIENT")
-        return "OK", "polymarket_wallet_readonly"
+        return "OK", balance_authority_id, balance_checked_at
     if side == "SELL":
         balances = collateral.get("ctf_token_balances_units") or {}
         allowances = collateral.get("ctf_token_allowances_units") or {}
@@ -8143,7 +8238,7 @@ def _edli_balance_allowance_status(
             raise ValueError("PRE_SUBMIT_CTF_BALANCE_INSUFFICIENT")
         if token_allowance < size:
             raise ValueError("PRE_SUBMIT_CTF_ALLOWANCE_INSUFFICIENT")
-        return "OK", "polymarket_wallet_readonly"
+        return "OK", balance_authority_id, balance_checked_at
     raise ValueError(f"PRE_SUBMIT_SIDE_UNSUPPORTED:{side}")
 
 def _row_float(row, key: str) -> float | None:
