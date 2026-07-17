@@ -2762,17 +2762,20 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "_entry_global_submit_suppression_reason",
         lambda: "entries_paused:test_containment",
     )
-    adapter = era.event_bound_live_adapter_from_trade_conn(
-        trade,
-        get_current_level=lambda: era.RiskLevel.GREEN,
-        forecast_conn=forecast,
-        topology_conn=topology,
-        calibration_conn=world,
-        portfolio_state_provider=lambda: pytest.fail(
-            "cycle-start portfolio must not back global selection wealth"
-        ),
-        auction_capital_authority=CapacityAuthority(),
-    )
+    def make_adapter():
+        return era.event_bound_live_adapter_from_trade_conn(
+            trade,
+            get_current_level=lambda: era.RiskLevel.GREEN,
+            forecast_conn=forecast,
+            topology_conn=topology,
+            calibration_conn=world,
+            portfolio_state_provider=lambda: pytest.fail(
+                "cycle-start portfolio must not back global selection wealth"
+            ),
+            auction_capital_authority=CapacityAuthority(),
+        )
+
+    adapter = make_adapter()
     urgent_revision["value"] = (4, 5, 6)
     event = event_factory(
         city="Dallas",
@@ -2939,7 +2942,15 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         )
     }
     provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
-    provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
+    rebuilt_adapter = make_adapter()
+    rebuilt_adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
+    )
+    captured["current_book_epoch_provider"](
+        probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
 
     assert metadata_calls == [
         {metadata_key: metadata for metadata_key in metadata_keys},
@@ -6700,6 +6711,37 @@ def test_global_book_metadata_refresh_tracks_unresolved_invalidation():
             probability.family_key: checked_at,
         },
     ) == {probability.family_key}
+
+
+def test_global_book_metadata_refresh_hwm_survives_adapter_rebuild_scope(
+    monkeypatch,
+    tmp_path,
+):
+    path = tmp_path / "trade.db"
+    first = sqlite3.connect(path)
+    rebuilt = sqlite3.connect(path)
+    other = sqlite3.connect(tmp_path / "other.db")
+    refreshed_at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE", None)
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY",
+        {},
+    )
+
+    era._record_global_book_metadata_refresh_hwm(
+        first,
+        ("family-alpha",),
+        refreshed_at=refreshed_at,
+    )
+
+    assert era._global_book_metadata_refresh_hwm(first) == {
+        "family-alpha": refreshed_at,
+    }
+    assert era._global_book_metadata_refresh_hwm(rebuilt) == {
+        "family-alpha": refreshed_at,
+    }
+    assert era._global_book_metadata_refresh_hwm(other) == {}
 
 
 def test_current_global_book_epoch_consumes_prefetched_books_at_original_cut():

@@ -328,6 +328,10 @@ class _GlobalBookEpochCacheEntry:
 _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
 _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
 
+_GLOBAL_BOOK_METADATA_REFRESH_LOCK = threading.Lock()
+_GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE: str | None = None
+_GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY: dict[str, datetime] = {}
+
 
 _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK = threading.Lock()
 _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE: str | None = None
@@ -1174,6 +1178,46 @@ def _global_book_epoch_cache_namespace(
             else f"memory:{id(trade_conn)}"
         )
     return None
+
+
+def _global_book_metadata_refresh_hwm(
+    trade_conn: sqlite3.Connection,
+) -> dict[str, datetime]:
+    global _GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE
+
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    if namespace is None:
+        return {}
+    with _GLOBAL_BOOK_METADATA_REFRESH_LOCK:
+        if _GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE != namespace:
+            _GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY.clear()
+            _GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE = namespace
+        return dict(_GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY)
+
+
+def _record_global_book_metadata_refresh_hwm(
+    trade_conn: sqlite3.Connection,
+    family_keys: Iterable[str],
+    *,
+    refreshed_at: datetime,
+) -> None:
+    global _GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE
+
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    if namespace is None or refreshed_at.tzinfo is None:
+        return
+    clean = frozenset(str(family_key or "").strip() for family_key in family_keys)
+    if not clean or any(not family_key for family_key in clean):
+        return
+    refreshed_at = refreshed_at.astimezone(UTC)
+    with _GLOBAL_BOOK_METADATA_REFRESH_LOCK:
+        if _GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE != namespace:
+            _GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY.clear()
+            _GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE = namespace
+        for family_key in clean:
+            previous = _GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY.get(family_key)
+            if previous is None or refreshed_at > previous:
+                _GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY[family_key] = refreshed_at
 
 
 def _global_refresh_family_keys(
@@ -7038,7 +7082,6 @@ def event_bound_live_adapter_from_trade_conn(
         book_metadata_by_key: dict[
             tuple[str, str], Mapping[str, object]
         ] = {}
-        book_metadata_refreshed_at_by_family: dict[str, datetime] = {}
 
         def _current_book_epoch(probabilities, _at):
             from src.contracts.executable_market_snapshot import (
@@ -7133,6 +7176,7 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if metadata_sink:
                     book_metadata_by_key.update(metadata_sink)
+                    refreshed_family_keys = []
                     for family_key, witness in bound_probabilities.items():
                         rows = [
                             metadata_sink.get((binding.condition_id, token_id))
@@ -7149,9 +7193,12 @@ def event_bound_live_adapter_from_trade_conn(
                             and row.get("_global_current_gamma") is True
                             for row in rows
                         ):
-                            book_metadata_refreshed_at_by_family[
-                                str(family_key)
-                            ] = refresh_started_at
+                            refreshed_family_keys.append(str(family_key))
+                    _record_global_book_metadata_refresh_hwm(
+                        trade_conn,
+                        refreshed_family_keys,
+                        refreshed_at=refresh_started_at,
+                    )
                 return bound_probabilities
 
             def _prefetch_books(
@@ -7341,8 +7388,8 @@ def event_bound_live_adapter_from_trade_conn(
                     trade_conn,
                     probabilities,
                     checked_at=cache_checked_at,
-                    refreshed_at_by_family=(
-                        book_metadata_refreshed_at_by_family
+                    refreshed_at_by_family=_global_book_metadata_refresh_hwm(
+                        trade_conn
                     ),
                 )
             )
