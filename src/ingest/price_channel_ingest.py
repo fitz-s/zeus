@@ -2090,6 +2090,126 @@ def _edli_order_token_ids_by_feasibility_age(
     )
 
 
+def _edli_market_channel_generation_cut(
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> datetime | None:
+    """Return the connected generation start for a current local WS proof."""
+
+    if checked_at.tzinfo is None or max_age <= timedelta(0):
+        return None
+    try:
+        from src.config import state_path
+
+        proof = json.loads(
+            state_path(MARKET_CHANNEL_CONTINUITY_FILENAME).read_text(
+                encoding="utf-8"
+            )
+        )
+        if (
+            not isinstance(proof, dict)
+            or proof.get("schema_version") != 1
+            or proof.get("channel") != "market_channel"
+            or proof.get("connected") is not True
+            or int(proof.get("pid") or 0) != os.getpid()
+        ):
+            return None
+        connected_at = datetime.fromisoformat(
+            str(proof.get("connected_at")).replace("Z", "+00:00")
+        )
+        observed_at = datetime.fromisoformat(
+            str(proof.get("observed_at")).replace("Z", "+00:00")
+        )
+        if connected_at.tzinfo is None or observed_at.tzinfo is None:
+            return None
+        connected_at = connected_at.astimezone(timezone.utc)
+        observed_at = observed_at.astimezone(timezone.utc)
+        checked = checked_at.astimezone(timezone.utc)
+        proof_age = checked - observed_at
+        if (
+            connected_at > observed_at
+            or proof_age < timedelta(0)
+            or proof_age > max_age
+        ):
+            return None
+        return connected_at
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _edli_tokens_requiring_rest_quote_refresh(
+    trade_conn,
+    token_ids,
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> tuple[list[str], int]:
+    """Partition tokens by durable full-depth coverage in the current WS generation."""
+
+    import sqlite3
+
+    tokens = list(
+        dict.fromkeys(
+            str(token_id)
+            for token_id in token_ids
+            if str(token_id or "").strip()
+        )
+    )
+    if not tokens:
+        return [], 0
+    generation_start = _edli_market_channel_generation_cut(
+        checked_at=checked_at,
+        max_age=max_age,
+    )
+    if generation_start is None:
+        return tokens, 0
+
+    covered: set[str] = set()
+    try:
+        if not _edli_table_exists(trade_conn, "execution_feasibility_latest"):
+            return tokens, 0
+        for offset in range(0, len(tokens), 400):
+            chunk = tokens[offset : offset + 400]
+            requested = ",".join("(?)" for _ in chunk)
+            rows = trade_conn.execute(
+                f"""
+                WITH requested(token_id) AS (VALUES {requested})
+                SELECT requested.token_id,
+                       latest.quote_seen_at,
+                       latest.depth_before_json
+                  FROM requested
+                  JOIN execution_feasibility_latest AS latest
+                    ON latest.token_id = requested.token_id
+                   AND latest.direction IN ('buy_yes', 'buy_no')
+                """,
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                token_id = str(row[0] or "").strip()
+                try:
+                    quote_seen_at = datetime.fromisoformat(
+                        str(row[1]).replace("Z", "+00:00")
+                    )
+                    depth = json.loads(str(row[2]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if quote_seen_at.tzinfo is None:
+                    continue
+                quote_seen_at = quote_seen_at.astimezone(timezone.utc)
+                if (
+                    token_id in chunk
+                    and generation_start <= quote_seen_at <= checked_at
+                    and isinstance(depth, dict)
+                    and isinstance(depth.get("bids"), list)
+                    and isinstance(depth.get("asks"), list)
+                ):
+                    covered.add(token_id)
+    except sqlite3.Error:
+        return tokens, 0
+    return [token_id for token_id in tokens if token_id not in covered], len(covered)
+
+
 def _edli_market_channel_seed_first_token_ids(
     *,
     held_priority_token_ids: set[str],
@@ -2181,10 +2301,9 @@ def _edli_refresh_held_position_quote_evidence(
 ) -> dict:
     """Refresh executable quote evidence for currently held exposure.
 
-    The long-lived market-channel WebSocket can be healthy while quiet markets
-    emit no book deltas. Held-position monitor/redecision needs a wall-clock
-    freshness guarantee, so the scheduler performs a bounded REST refresh for
-    open exposure every cycle even when the WS thread is alive.
+    Current-generation full-depth WebSocket evidence already covers quiet books.
+    The scheduler spends REST budget only on missing, invalid, or disconnected
+    generation evidence; submit-time authority still performs its own JIT read.
     """
 
     from src.data.polymarket_client import PolymarketClient
@@ -2219,9 +2338,35 @@ def _edli_refresh_held_position_quote_evidence(
         held_token_ids = _edli_held_position_priority_token_ids(trade_read)
         if not held_token_ids:
             return {"held_priority_token_ids": 0, "held_quote_refresh_events": 0}
+        checked_at = datetime.now(timezone.utc)
+        rest_held_token_ids, ws_covered_tokens = (
+            _edli_tokens_requiring_rest_quote_refresh(
+                trade_read,
+                held_token_ids,
+                checked_at=checked_at,
+                max_age=timedelta(
+                    milliseconds=_edli_bounded_positive_int(
+                        edli_cfg,
+                        "pre_submit_max_quote_age_ms",
+                        default=1000,
+                        maximum=60_000,
+                    )
+                ),
+            )
+        )
+        if not rest_held_token_ids:
+            return {
+                "held_priority_token_ids": len(held_token_ids),
+                "held_token_metadata": 0,
+                "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
+                "held_quote_refresh_selected_tokens": 0,
+                "held_quote_refresh_attempted_tokens": 0,
+                "held_quote_refresh_events": 0,
+                "budget_skipped_tokens": 0,
+            }
         ordered_held_token_ids = _edli_order_token_ids_by_feasibility_age(
             trade_read,
-            held_token_ids,
+            rest_held_token_ids,
         )
         max_tokens = _edli_quote_refresh_max_tokens(
             edli_cfg,
@@ -2266,6 +2411,7 @@ def _edli_refresh_held_position_quote_evidence(
     if not token_metadata:
         return {
             "held_priority_token_ids": len(held_token_ids),
+            "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
             "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
             "held_quote_refresh_metadata_scanned_tokens": len(scanned_held_token_ids),
             "held_quote_refresh_metadata_missing_tokens": len(metadata_missing_token_ids),
@@ -2299,6 +2445,7 @@ def _edli_refresh_held_position_quote_evidence(
             token_metadata=len(token_metadata),
             attempted_tokens=len(ordered_metadata_tokens),
             extra={
+                "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
                 "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
                 "held_quote_refresh_deferred_tokens": max(
                     0,
@@ -2357,6 +2504,7 @@ def _edli_refresh_held_position_quote_evidence(
         result = {
             "held_priority_token_ids": len(held_token_ids),
             "held_token_metadata": len(token_metadata),
+            "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
             "held_quote_refresh_events": int(written),
             "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
             "held_quote_refresh_metadata_scanned_tokens": len(scanned_held_token_ids),
@@ -2391,10 +2539,9 @@ def _edli_refresh_candidate_priority_quote_evidence(
 ) -> dict:
     """Refresh executable quote evidence for recently selected candidate tokens.
 
-    The long-lived market-channel thread captures its token universe at thread
-    start. Candidate tokens can appear minutes later through reactor no-trade
-    receipts, so they need the same bounded REST freshness path as held exposure
-    rather than waiting for the WS universe to restart.
+    Candidate tokens can appear after the market-channel thread captures its
+    universe. Current-generation full-depth rows need no duplicate REST fetch;
+    missing or newly introduced tokens retain the bounded fallback.
     """
 
     from src.data.polymarket_client import PolymarketClient
@@ -2417,6 +2564,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
         world_read.close()
     started_monotonic = time.monotonic()
     requested_budget = max(0.001, float(budget_seconds))
+    edli_cfg = _settings_section("edli_v1", {})
     trade_read = get_trade_connection(write_class=None)
     try:
         held_token_ids = _edli_held_position_priority_token_ids(trade_read)
@@ -2433,12 +2581,41 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 "open_rest_priority_token_ids": 0,
                 "candidate_quote_refresh_events": 0,
             }
+        checked_at = datetime.now(timezone.utc)
+        rest_candidate_token_ids, ws_covered_tokens = (
+            _edli_tokens_requiring_rest_quote_refresh(
+                trade_read,
+                priority_token_ids,
+                checked_at=checked_at,
+                max_age=timedelta(
+                    milliseconds=_edli_bounded_positive_int(
+                        edli_cfg,
+                        "pre_submit_max_quote_age_ms",
+                        default=1000,
+                        maximum=60_000,
+                    )
+                ),
+            )
+        )
+        if not rest_candidate_token_ids:
+            return {
+                "candidate_priority_token_ids": len(candidate_token_ids),
+                "open_rest_priority_token_ids": len(open_rest_token_ids),
+                "held_priority_token_ids": len(held_token_ids),
+                "quote_priority_token_ids": len(priority_token_ids),
+                "candidate_token_metadata": 0,
+                "candidate_quote_refresh_ws_covered_tokens": ws_covered_tokens,
+                "candidate_quote_refresh_selected_tokens": 0,
+                "candidate_quote_refresh_attempted_tokens": 0,
+                "candidate_quote_refresh_events": 0,
+                "budget_skipped_tokens": 0,
+            }
         ordered_candidate_token_ids = _edli_order_token_ids_by_feasibility_age(
             trade_read,
-            priority_token_ids,
+            rest_candidate_token_ids,
         )
         max_tokens = _edli_quote_refresh_max_tokens(
-            _settings_section("edli_v1", {}),
+            edli_cfg,
             "market_channel_candidate_quote_refresh_max_tokens_per_cycle",
             default=MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT,
         )
@@ -2462,6 +2639,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "open_rest_priority_token_ids": len(open_rest_token_ids),
             "held_priority_token_ids": held_priority_count,
             "quote_priority_token_ids": len(priority_token_ids),
+            "candidate_quote_refresh_ws_covered_tokens": ws_covered_tokens,
             "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
             "candidate_quote_refresh_deferred_tokens": max(
                 0,
@@ -2495,6 +2673,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 "open_rest_priority_token_ids": len(open_rest_token_ids),
                 "quote_priority_token_ids": len(priority_token_ids),
                 "held_priority_token_ids": held_priority_count,
+                "candidate_quote_refresh_ws_covered_tokens": ws_covered_tokens,
                 "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
                 "candidate_quote_refresh_deferred_tokens": max(
                     0,
@@ -2553,6 +2732,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "held_priority_token_ids": held_priority_count,
             "quote_priority_token_ids": len(priority_token_ids),
             "candidate_token_metadata": len(token_metadata),
+            "candidate_quote_refresh_ws_covered_tokens": ws_covered_tokens,
             "candidate_quote_refresh_events": int(written),
             "candidate_quote_refresh_selected_tokens": len(selected_candidate_token_ids),
             "candidate_quote_refresh_deferred_tokens": max(

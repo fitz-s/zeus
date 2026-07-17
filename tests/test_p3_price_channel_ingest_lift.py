@@ -1414,6 +1414,184 @@ def test_feasibility_age_reads_latest_state_without_append_scan():
     assert append_reads == []
 
 
+def test_rest_quote_refresh_reuses_only_current_generation_full_depth(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    checked_at = datetime.fromisoformat("2026-07-17T05:00:10+00:00")
+    generation_start = datetime.fromisoformat("2026-07-17T05:00:00+00:00")
+    monkeypatch.setattr(
+        lane,
+        "_edli_market_channel_generation_cut",
+        lambda *, checked_at, max_age: generation_start,
+    )
+    conn.executemany(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+            quote_seen_at, depth_before_json, created_at, schema_version
+        ) VALUES (?, 'buy_yes', ?, ?, 'cond', 'YES', ?, ?, ?, 1)
+        """,
+        [
+            (
+                "fresh-depth",
+                "e-fresh",
+                "event-fresh",
+                "2026-07-17T05:00:01+00:00",
+                '{"bids": [], "asks": []}',
+                "2026-07-17T05:00:01+00:00",
+            ),
+            (
+                "prior-generation",
+                "e-old",
+                "event-old",
+                "2026-07-17T04:59:59+00:00",
+                '{"bids": [], "asks": []}',
+                "2026-07-17T04:59:59+00:00",
+            ),
+            (
+                "bba-only",
+                "e-bba",
+                "event-bba",
+                "2026-07-17T05:00:02+00:00",
+                None,
+                "2026-07-17T05:00:02+00:00",
+            ),
+            (
+                "future-depth",
+                "e-future",
+                "event-future",
+                "2026-07-17T05:00:11+00:00",
+                '{"bids": [], "asks": []}',
+                "2026-07-17T05:00:11+00:00",
+            ),
+        ],
+    )
+
+    required, covered = lane._edli_tokens_requiring_rest_quote_refresh(
+        conn,
+        [
+            "fresh-depth",
+            "prior-generation",
+            "bba-only",
+            "future-depth",
+            "missing",
+        ],
+        checked_at=checked_at,
+        max_age=timedelta(seconds=1),
+    )
+
+    assert covered == 1
+    assert required == [
+        "prior-generation",
+        "bba-only",
+        "future-depth",
+        "missing",
+    ]
+
+
+def test_held_quote_refresh_skips_rest_when_ws_generation_covers_all(monkeypatch):
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_held_position_priority_token_ids",
+        lambda conn: {"yes-token", "no-token"},
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_tokens_requiring_rest_quote_refresh",
+        lambda conn, token_ids, **kwargs: ([], len(token_ids)),
+    )
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata and REST lane must remain unopened")
+        ),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+
+    result = lane._edli_refresh_held_position_quote_evidence()
+    failed, reason = lane._price_channel_quote_refresh_failed(
+        result,
+        token_key="held_token_metadata",
+        event_key="held_quote_refresh_events",
+    )
+
+    assert result["held_quote_refresh_ws_covered_tokens"] == 2
+    assert result["held_quote_refresh_attempted_tokens"] == 0
+    assert failed is False
+    assert reason is None
+
+
+def test_candidate_quote_refresh_skips_rest_when_ws_generation_covers_all(monkeypatch):
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_candidate_priority_token_ids",
+        lambda conn, *, limit: ["candidate-token"],
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_held_position_priority_token_ids",
+        lambda conn: set(),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_open_rest_priority_token_ids",
+        lambda conn: {"rest-token"},
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_tokens_requiring_rest_quote_refresh",
+        lambda conn, token_ids, **kwargs: ([], len(token_ids)),
+    )
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata and REST lane must remain unopened")
+        ),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection",
+        lambda *, write_class=None: sqlite3.connect(":memory:"),
+    )
+
+    result = lane._edli_refresh_candidate_priority_quote_evidence(
+        limit=4,
+        budget_seconds=10.0,
+    )
+    failed, reason = lane._price_channel_quote_refresh_failed(
+        result,
+        token_key="candidate_token_metadata",
+        event_key="candidate_quote_refresh_events",
+    )
+
+    assert result["candidate_quote_refresh_ws_covered_tokens"] == 2
+    assert result["candidate_quote_refresh_attempted_tokens"] == 0
+    assert failed is False
+    assert reason is None
+
+
 def test_pre_submit_book_reader_prefers_latest_without_append_scan():
     from src.events.reactor import _edli_latest_pre_submit_book_row
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table
