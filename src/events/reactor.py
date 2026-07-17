@@ -233,7 +233,7 @@ def _snapshot_block_retry_delay_seconds(*, attempt_count: int = 1) -> float:
     return min(max_delay, base_delay * multiplier)
 
 
-def _runtime_authority_retry_delay_seconds() -> float:
+def _runtime_authority_retry_delay_seconds(reason: str | None = None) -> float:
     """Retry floor for runtime authority blocks that cannot clear intra-cycle.
 
     Entry pauses and live-health entry-authority gaps are control/runtime state,
@@ -251,7 +251,10 @@ def _runtime_authority_retry_delay_seconds() -> float:
             delay = float(raw)
         except (TypeError, ValueError):
             delay = DEFAULT_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS
-    return max(30.0, min(900.0, delay))
+    bounded = max(30.0, min(900.0, delay))
+    if _is_current_wealth_retry_reason(reason):
+        return min(60.0, bounded)
+    return bounded
 
 
 DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
@@ -2357,7 +2360,9 @@ class OpportunityEventReactor:
                 elif _is_runtime_authority_retry_reason(last_reason):
                     retry_not_before = (
                         decision_time.astimezone(UTC)
-                        + timedelta(seconds=_runtime_authority_retry_delay_seconds())
+                        + timedelta(
+                            seconds=_runtime_authority_retry_delay_seconds(last_reason)
+                        )
                     ).isoformat()
                 self._note_transient_requeue(event)
                 processing_error = (
@@ -4088,9 +4093,22 @@ def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
         return False
     segments = [seg.strip() for seg in str(reason).split(":")]
     return any(
-        seg in {"entries_paused", "live_health_entry_authority"}
+        seg
+        in {
+            "entries_paused",
+            "live_health_entry_authority",
+            "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
+        }
         for seg in segments
     )
+
+
+def _is_current_wealth_retry_reason(reason: str | None) -> bool:
+    if not reason:
+        return False
+    return "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS" in {
+        seg.strip() for seg in str(reason).split(":")
+    }
 
 
 def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
@@ -5181,6 +5199,14 @@ def run_edli_event_reactor_cycle(
         and bool(forecast_wake_families)
     )
     producer_fast_path = committed_event_wake or targeted_forecast_wake
+    from src.runtime.reactor_wake import reactor_urgent_wake_revision
+
+    maintenance_urgent_revision = reactor_urgent_wake_revision()
+
+    def _urgent_wake_pending() -> bool:
+        current = reactor_urgent_wake_revision()
+        return current is not None and current != maintenance_urgent_revision
+
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return False
     if _defer_for_held_position_monitor("edli_event_reactor"):
@@ -5207,6 +5233,9 @@ def run_edli_event_reactor_cycle(
 
     if not active_lock.acquire(blocking=False):
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
+        return False
+    if not producer_fast_path and _urgent_wake_pending():
+        active_lock.release()
         return False
     if _defer_for_held_position_monitor("edli_event_reactor"):
         active_lock.release()
@@ -5345,6 +5374,7 @@ def run_edli_event_reactor_cycle(
                     store,
                     decision_time=now,
                     day0_family_admission=_day0_family_admission,
+                    urgent_wake_pending=_urgent_wake_pending,
                 )
                 conn.commit()
             finally:
@@ -5361,6 +5391,11 @@ def run_edli_event_reactor_cycle(
                 "before processing fresh fact"
             )
         _log_stage("pending_prune")
+        if not producer_fast_path and _urgent_wake_pending():
+            _log.info(
+                "EDLI reactor maintenance preempted after prune by urgent producer wake"
+            )
+            return False
         _fsr_events = []
         if (
             not committed_event_wake
@@ -5382,6 +5417,7 @@ def run_edli_event_reactor_cycle(
                             if _pending_key_budget_s > 0
                             else None
                         ),
+                        cancelled=_urgent_wake_pending,
                     )
                 _fsr_events = _edli_build_forecast_snapshot_events(
                     conn,
@@ -5395,6 +5431,7 @@ def run_edli_event_reactor_cycle(
                     restrict_to_families=(
                         forecast_wake_families if targeted_forecast_wake else None
                     ),
+                    cancelled=_urgent_wake_pending,
                 )
                 if targeted_forecast_wake:
                     _fsr_events = _rank_forecast_wake_events(
@@ -5411,6 +5448,12 @@ def run_edli_event_reactor_cycle(
                     )
                 else:
                     raise
+        if not producer_fast_path and _urgent_wake_pending():
+            _log.info(
+                "EDLI reactor maintenance preempted after forecast discovery "
+                "by urgent producer wake"
+            )
+            return False
         # EDLI live contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
@@ -5482,6 +5525,7 @@ def run_edli_event_reactor_cycle(
                                 ),
                                 budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
                                 family_admission=_day0_family_admission,
+                                urgent_wake_pending=_urgent_wake_pending,
                             )
                             _log_stage("day0_emit")
                         except sqlite3.OperationalError as _day0_emit_lock_exc:
@@ -5518,6 +5562,11 @@ def run_edli_event_reactor_cycle(
                 len(targeted_event_ids),
             )
             _log_stage("committed_event_fast_path")
+        if not producer_fast_path and _urgent_wake_pending():
+            _log.info(
+                "EDLI reactor maintenance preempted after emit by urgent producer wake"
+            )
+            return False
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
         # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
         # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
@@ -6232,6 +6281,7 @@ def _edli_prune_pending_working_set(
     *,
     decision_time: datetime,
     day0_family_admission: _Day0LiveFamilyAdmission | None = None,
+    urgent_wake_pending: Callable[[], bool] | None = None,
 ) -> None:
     """Prune stale/superseded rows before snapshotting the redecision skip set.
 
@@ -6300,9 +6350,20 @@ def _edli_prune_pending_working_set(
         saved_busy_timeout_ms = None
 
     prune_deadline = (prune_started + budget_s) if budget_s > 0 else None
-    _edli_install_sqlite_deadline(store.conn, deadline_monotonic=prune_deadline)
+    _edli_install_sqlite_deadline(
+        store.conn,
+        deadline_monotonic=prune_deadline,
+        cancelled=urgent_wake_pending,
+    )
 
     def _budget_exhausted(next_step: str) -> bool:
+        if urgent_wake_pending is not None and urgent_wake_pending():
+            _log.info(
+                "EDLI reactor prune preempted before %s by urgent producer wake",
+                next_step,
+            )
+            _restore_busy_timeout()
+            return True
         if budget_s <= 0:
             return False
         elapsed = time.monotonic() - prune_started
@@ -6724,6 +6785,7 @@ def _edli_emit_day0_extreme_events(
     day0_is_tradeable: bool = True,
     budget_seconds: float | None = None,
     family_admission: _Day0LiveFamilyAdmission | None = None,
+    urgent_wake_pending: Callable[[], bool] | None = None,
 ) -> int:
     """Emit DB-only Day0 catch-up events.
 
@@ -6753,8 +6815,16 @@ def _edli_emit_day0_extreme_events(
     saved_trade_busy_timeout_ms = _edli_sqlite_busy_timeout_ms(trade_conn)
     _edli_set_sqlite_busy_timeout_ms(world_conn, day0_busy_timeout_ms)
     _edli_set_sqlite_busy_timeout_ms(trade_conn, day0_busy_timeout_ms)
-    _edli_install_sqlite_deadline(world_conn, deadline_monotonic=deadline_monotonic)
-    _edli_install_sqlite_deadline(trade_conn, deadline_monotonic=deadline_monotonic)
+    _edli_install_sqlite_deadline(
+        world_conn,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=urgent_wake_pending,
+    )
+    _edli_install_sqlite_deadline(
+        trade_conn,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=urgent_wake_pending,
+    )
     try:
         trigger = Day0ExtremeUpdatedTrigger(
             EventWriter(world_conn),
@@ -6785,11 +6855,14 @@ def _edli_emit_day0_extreme_events(
         return len(authority_results) + len(observation_results)
     except sqlite3.OperationalError as exc:
         if "interrupted" in str(exc).lower():
-            _log.warning(
-                "EDLI day0 emit budget exhausted after %.3fs; skipping remaining "
-                "Day0 catch-up this cycle and draining already-queued candidates.",
-                float(budget_seconds or 0.0),
-            )
+            if urgent_wake_pending is not None and urgent_wake_pending():
+                _log.info("EDLI day0 catch-up preempted by urgent producer wake")
+            else:
+                _log.warning(
+                    "EDLI day0 emit budget exhausted after %.3fs; skipping remaining "
+                    "Day0 catch-up this cycle and draining already-queued candidates.",
+                    float(budget_seconds or 0.0),
+                )
             return 0
         raise
     finally:

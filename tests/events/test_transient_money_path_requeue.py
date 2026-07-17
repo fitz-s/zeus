@@ -173,6 +173,12 @@ def test_runtime_authority_retry_floor_is_bounded(monkeypatch):
     monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "1200")
     assert _runtime_authority_retry_delay_seconds() == 900.0
 
+    reason = (
+        "GLOBAL_AUCTION_FAILED:ValueError:"
+        "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS"
+    )
+    assert _runtime_authority_retry_delay_seconds(reason) == 60.0
+
 
 def test_empty_reason_not_transient():
     assert not _is_transient_money_path_reason(None)
@@ -346,6 +352,26 @@ def test_entries_paused_requeue_sets_runtime_authority_retry_floor(monkeypatch):
     assert _status(conn, event.event_id) == "pending"
     assert _claimed_at(conn, event.event_id) == (
         _DT + timedelta(seconds=120)
+    ).isoformat()
+
+
+def test_current_wealth_ambiguity_requeue_waits_for_recovery_cadence(monkeypatch):
+    monkeypatch.delenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", raising=False)
+    conn, store = _store()
+    event = _event("snap-current-wealth-floor")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        "GLOBAL_AUCTION_FAILED:ValueError:CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
+    )
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert _claimed_at(conn, event.event_id) == (
+        _DT + timedelta(seconds=60)
     ).isoformat()
 
 
