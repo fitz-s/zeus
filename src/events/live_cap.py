@@ -78,9 +78,15 @@ class LiveCapError(ValueError):
 
 
 class LiveCapLedger:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        schema_initialized: bool = False,
+    ) -> None:
         self.conn = conn
-        ensure_table(conn)
+        if not schema_initialized:
+            ensure_table(conn)
 
     def reserve(
         self,

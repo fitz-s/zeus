@@ -966,6 +966,7 @@ class OpportunityEventReactor:
         day0_hourly_refresher: "Callable[..., bool] | None" = None,
         held_family_provider: "Callable[[], frozenset[tuple[str, str, str]]] | None" = None,
         family_market_absence_provider: "Callable[..., bool] | None" = None,
+        world_schema_initialized: bool = False,
     ) -> None:
         self._store = store
         self._source_truth_gate = source_truth_gate
@@ -1053,9 +1054,16 @@ class OpportunityEventReactor:
 
         self._no_submit_receipt_ledger = EdliNoSubmitReceiptLedger(store.conn)
         self._decision_compiler = DecisionCompiler()
-        self._decision_certificate_ledger = DecisionCertificateLedger(store.conn)
-        self._decision_certificate_ledger.ensure_schema()
-        self._live_cap_ledger = LiveCapLedger(store.conn)
+        self._decision_certificate_ledger = DecisionCertificateLedger(
+            store.conn,
+            schema_initialized=world_schema_initialized,
+        )
+        if not world_schema_initialized:
+            self._decision_certificate_ledger.ensure_schema()
+        self._live_cap_ledger = LiveCapLedger(
+            store.conn,
+            schema_initialized=world_schema_initialized,
+        )
 
     def process_pending(
         self,
@@ -5841,6 +5849,10 @@ def run_edli_event_reactor_cycle(
             # Current Gamma-empty/no-listed-market proof terminalizes only the blocked event; a
             # future event for the same family can still process if the venue lists later.
             family_market_absence_provider=_reactor_family_market_absence_provider,
+            # Startup already ran the authoritative world schema gate. Re-running
+            # CREATE/INDEX DDL here can wait two full SQLite busy-timeouts while a
+            # fresh forecast or observation is waiting to enter the decision path.
+            world_schema_initialized=True,
             config=ReactorConfig(
                 reactor_mode=reactor_mode,
                 real_order_submit_enabled=real_order_submit_enabled,

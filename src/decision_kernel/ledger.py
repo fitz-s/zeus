@@ -48,9 +48,14 @@ class CompileFailure:
 
 
 class DecisionCertificateLedger:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        schema_initialized: bool = False,
+    ) -> None:
         self.conn = conn
-        self._schema_ready = False
+        self._schema_ready = schema_initialized
 
     def ensure_schema(self) -> None:
         from src.state.schema.decision_certificates_schema import ensure_tables

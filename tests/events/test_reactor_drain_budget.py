@@ -1,5 +1,5 @@
 # Created: 2026-06-16
-# Last audited: 2026-06-16
+# Last reused/audited: 2026-07-17
 # Authority basis: GOAL #83 continuous-fills limiter (docs/evidence/qkernel_rebuild/
 #   fix_reactor_drain_budget_2026-06-16.md). The end-of-cycle substrate-refresh drain
 #   (_drain_substrate_refreshes / _drain_one_bucket) refreshed EVERY blocked family with no
@@ -55,6 +55,33 @@ def _reactor(store, *, refresher=None, held_family_provider=None, day0_hourly_re
         day0_hourly_refresher=day0_hourly_refresher,
         held_family_provider=held_family_provider,
     )
+
+
+def test_runtime_schema_capability_skips_reactor_constructor_ddl(monkeypatch):
+    conn, store = _store()
+
+    def _unexpected_schema_ensure(*_args, **_kwargs):
+        raise AssertionError("runtime reactor must not execute schema DDL")
+
+    monkeypatch.setattr(
+        "src.decision_kernel.ledger.DecisionCertificateLedger.ensure_schema",
+        _unexpected_schema_ensure,
+    )
+    monkeypatch.setattr(
+        "src.events.live_cap.ensure_table",
+        _unexpected_schema_ensure,
+    )
+
+    OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: False,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=lambda _e, _dt: None,
+        reject=lambda *_a: None,
+        world_schema_initialized=True,
+    )
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
