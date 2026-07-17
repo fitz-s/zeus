@@ -3741,11 +3741,26 @@ def _edli_reactor_wake_poll_once() -> bool:
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
     day0_wake = wake.reason == "day0_extreme_event_committed"
+    substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
     if _held_position_monitor_active.is_set():
         return False
-    if not day0_wake and _edli_reactor_active_lock.locked():
+    if substrate_refresh_wake:
+        if (
+            _edli_reactor_active_lock.locked()
+            or _edli_redecision_screen_lock.locked()
+        ):
+            return False
+        _edli_continuous_redecision_screen_cycle()
+        ran = True
+    else:
+        ran = False
+    if (
+        not substrate_refresh_wake
+        and not day0_wake
+        and _edli_reactor_active_lock.locked()
+    ):
         return False
-    if day0_wake:
+    if day0_wake and not substrate_refresh_wake:
         try:
             monitor_ran = _exit_monitor_cycle(
                 target_families=_day0_wake_target_families(wake.event_ids)
@@ -3758,11 +3773,12 @@ def _edli_reactor_wake_poll_once() -> bool:
             return False
         if monitor_ran is not True:
             return False
-    ran = _edli_event_reactor_cycle(
-        producer_wake_reason=wake.reason,
-        producer_wake_event_ids=wake.event_ids,
-        producer_wake_families=wake.forecast_families,
-    )
+    if not substrate_refresh_wake:
+        ran = _edli_event_reactor_cycle(
+            producer_wake_reason=wake.reason,
+            producer_wake_event_ids=wake.event_ids,
+            producer_wake_families=wake.forecast_families,
+        )
     if ran is not True:
         return False
     if not acknowledge_reactor_wake(wake):

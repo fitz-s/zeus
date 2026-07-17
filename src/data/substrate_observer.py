@@ -1064,11 +1064,44 @@ def _substrate_priority_receipt(
     request: dict | None,
     summary: dict | None,
 ) -> None:
+    now = datetime.now(timezone.utc)
     record_money_path_substrate_priority_receipt(
         request=request,
         summary=summary,
-        now=datetime.now(timezone.utc),
+        now=now,
     )
+    if (
+        not isinstance(request, dict)
+        or not isinstance(summary, dict)
+        or str(summary.get("status") or "") != "refreshed"
+        or summary.get("scheduler_failed") is True
+    ):
+        return
+    families = []
+    for raw in request.get("families", ()):
+        if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+            continue
+        family = (
+            str(raw[0] or "").strip(),
+            str(raw[1] or "").strip(),
+            str(raw[2] or "").strip().lower(),
+        )
+        if all(family) and family[2] in {"high", "low"}:
+            families.append(family)
+    try:
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        publish_reactor_wake(
+            source="substrate_observer",
+            reason="money_path_substrate_refreshed",
+            published_at=now,
+            forecast_families=tuple(families),
+        )
+    except Exception:
+        logger.warning(
+            "substrate priority refresh committed but redecision wake publish failed",
+            exc_info=True,
+        )
 
 
 def _substrate_warm_failed_summary(

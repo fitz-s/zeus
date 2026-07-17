@@ -8358,7 +8358,6 @@ def _edli_families_with_fresh_scoped_executable_substrate(
 def _edli_refresh_continuous_money_path_families(
     families: set[tuple[str, str, str]],
     *,
-    now_utc: datetime,
     priority_condition_ids: Iterable[str] | None = None,
 ) -> dict:
     """Prioritize current continuous-money-path families before redecision emit.
@@ -8386,15 +8385,10 @@ def _edli_refresh_continuous_money_path_families(
     }
     if not clean_families:
         return {"status": "no_families", "families_requested": 0}
-    lock_timeout_s = max(
-        0.0,
-        float(os.environ.get("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS", "25.0")),
-    )
-    if not _edli_redecision_confirm_refresh_lock.acquire(timeout=lock_timeout_s):
+    if not _edli_redecision_confirm_refresh_lock.acquire(blocking=False):
         return {
             "status": "skipped_lock_busy",
             "families_requested": len(clean_families),
-            "lock_timeout_seconds": lock_timeout_s,
             "lock": "edli_redecision_confirm_refresh",
         }
     try:
@@ -8420,157 +8414,20 @@ def _edli_refresh_continuous_money_path_families(
         request_id = ""
         if isinstance(request, dict):
             request_id = str(request.get("request_id") or "").strip()
-        receipt = _edli_wait_for_substrate_priority_receipt(
-            request_id=request_id,
-            now_utc=now_utc,
-            families=clean_families,
-            condition_ids=priority_conditions,
-        )
-        if isinstance(receipt, dict):
-            receipt_summary = dict(receipt.get("summary") or {})
-            return {
-                **receipt_summary,
-                "families_requested": len(clean_families),
-                "priority_condition_count": len(priority_conditions),
-                "priority_request_id": request_id,
-                "priority_receipt_request_id": str(receipt.get("request_id") or ""),
-                "priority_receipt_serviced_at": str(receipt.get("serviced_at") or ""),
-                "priority_receipt_matched": True,
-                "priority_receipt_match_mode": str(receipt.get("_match_mode") or "request_id"),
-            }
         return {
             "status": "priority_marked",
             "families_requested": len(clean_families),
             "priority_condition_count": len(priority_conditions),
             "executable_substrate_coverage_status": "READ_FILTER_REQUIRED",
-            "marked_at": now_utc.astimezone(timezone.utc).isoformat(),
             "priority_request_id": request_id,
-            "priority_receipt_matched": False,
         }
     finally:
         try:
             _edli_redecision_confirm_refresh_lock.release()
         except RuntimeError:
             pass
-def _edli_redecision_confirm_receipt_wait_seconds() -> float:
-    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "45.0")
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = 45.0
-    return max(0.0, min(value, 60.0))
 
 
-def _edli_redecision_confirm_receipt_poll_seconds() -> float:
-    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_RECEIPT_POLL_SECONDS", "0.5")
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = 0.5
-    return max(0.05, min(value, 2.0))
-
-
-def _edli_priority_receipt_family_set(raw_families: Iterable[object] | None):
-    out: set[tuple[str, str, str]] = set()
-    for raw in raw_families or ():
-        if not isinstance(raw, (list, tuple)) or len(raw) != 3:
-            continue
-        family = tuple(str(part or "").strip() for part in raw)
-        if all(family) and family[2] in {"high", "low"}:
-            out.add(family)  # type: ignore[arg-type]
-    return out
-
-
-def _edli_priority_receipt_condition_set(raw_condition_ids: Iterable[object] | None):
-    return {
-        str(condition_id or "").strip()
-        for condition_id in (raw_condition_ids or ())
-        if str(condition_id or "").strip()
-    }
-
-
-def _edli_priority_receipt_covers_request_scope(
-    receipt: dict,
-    *,
-    families: Iterable[tuple[str, str, str]],
-    condition_ids: Iterable[str],
-    serviced_after: datetime,
-) -> bool:
-    try:
-        serviced_at = datetime.fromisoformat(str(receipt.get("serviced_at") or ""))
-    except (TypeError, ValueError):
-        return False
-    if serviced_at.tzinfo is None:
-        serviced_at = serviced_at.replace(tzinfo=timezone.utc)
-    if serviced_at.astimezone(timezone.utc) < serviced_after.astimezone(timezone.utc):
-        return False
-    requested_families = _edli_priority_receipt_family_set(families)
-    requested_conditions = _edli_priority_receipt_condition_set(condition_ids)
-    receipt_families = _edli_priority_receipt_family_set(receipt.get("families") or [])
-    receipt_conditions = _edli_priority_receipt_condition_set(receipt.get("condition_ids") or [])
-    if requested_families and not requested_families.issubset(receipt_families):
-        return False
-    if requested_conditions and not requested_conditions.issubset(receipt_conditions):
-        return False
-    return bool(requested_families or requested_conditions)
-
-
-def _edli_wait_for_substrate_priority_receipt(
-    *,
-    request_id: str,
-    now_utc: datetime,
-    families: Iterable[tuple[str, str, str]] | None = None,
-    condition_ids: Iterable[str] | None = None,
-) -> dict | None:
-    import logging as _logging
-
-    _log = _logging.getLogger("zeus.events.reactor")
-
-    request_id = str(request_id or "").strip()
-    wait_s = _edli_redecision_confirm_receipt_wait_seconds()
-    if not request_id or wait_s <= 0.0:
-        return None
-    poll_s = _edli_redecision_confirm_receipt_poll_seconds()
-    deadline = time.monotonic() + wait_s
-    max_age_s = wait_s + 10.0
-    from src.data.substrate_priority import money_path_substrate_priority_receipt
-
-    while True:
-        current = datetime.now(timezone.utc)
-        receipt = money_path_substrate_priority_receipt(
-            request_id=request_id,
-            now=current,
-            max_age_seconds=max_age_s,
-        )
-        if isinstance(receipt, dict):
-            out = dict(receipt)
-            out["_match_mode"] = "request_id"
-            return out
-        superseding_receipt = money_path_substrate_priority_receipt(
-            request_id=None,
-            now=current,
-            max_age_seconds=max_age_s,
-        )
-        if isinstance(superseding_receipt, dict) and _edli_priority_receipt_covers_request_scope(
-            superseding_receipt,
-            families=families or (),
-            condition_ids=condition_ids or (),
-            serviced_after=now_utc,
-        ):
-            out = dict(superseding_receipt)
-            out["_match_mode"] = "scope_superset"
-            return out
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            _log.info(
-                "edli_redecision_screen: sidecar priority receipt wait timed out "
-                "request_id=%s waited=%.3fs since=%s",
-                request_id,
-                wait_s,
-                now_utc.astimezone(timezone.utc).isoformat(),
-            )
-            return None
-        time.sleep(min(poll_s, remaining))
 def _edli_redecision_priority_condition_limit() -> int:
     raw = os.environ.get(
         "ZEUS_REDECISION_PRIORITY_CONDITION_LIMIT",
@@ -8634,37 +8491,6 @@ def _edli_confirm_priority_condition_ids(
             break
         _add_scope(scope)
     return ordered
-
-
-def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
-    if not isinstance(summary, dict):
-        return True
-    status = str(summary.get("status") or "")
-    if status == "skipped_lock_busy" or status.startswith("error"):
-        return True
-    return False
-
-
-def _edli_confirmation_refresh_needs_scoped_freshness_filter(summary: dict | None) -> bool:
-    # Incomplete coverage routes to scoped freshness admission — including when SOME
-    # families hit a transient `database is locked` or the batch-prefetch cycle
-    # inserts zero rows while prior quotes are still fresh. The scoped filter
-    # (_edli_families_with_fresh_scoped_executable_substrate) does an INDEPENDENT fresh read of
-    # the money-path conditions' executable substrate, so a lock that left current
-    # rests/candidates/held legs stale cannot admit them; it only excludes them.
-    # Forcing a full-tick drop on any lock hit
-    # (the prior `and not _has_sqlite_lock_failures`) discarded EVERY candidate + reprice
-    # on the tick — even families with complete fresh substrate — which (with ~757 lock
-    # hits/run of WAL contention) was the dominant reason the candidate pipeline emitted
-    # for only ~2 families instead of the full universe (2026-06-23 candidate-pipeline fix).
-    if not isinstance(summary, dict):
-        return False
-    if str(summary.get("status") or "") == "priority_marked":
-        return True
-    return (
-        str(summary.get("status") or "") == "refreshed"
-        and str(summary.get("executable_substrate_coverage_status") or "") in {"NONE", "PARTIAL"}
-    )
 
 
 def _edli_reemittable_forecast_family_keys(
@@ -9306,57 +9132,68 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         confirmed_held_scope = set(held_reemit_families)
         held_refresh_families = set(held_condition_scope)
         confirm_families = set(all_families) | held_refresh_families | entry_refresh_families
-        priority_condition_ids = _edli_confirm_priority_condition_ids(
-            rest_condition_scope=rest_condition_scope,
-            held_condition_scope=held_condition_scope,
-            entry_condition_scope=entry_condition_scope,
-            entry_refresh_condition_scope=entry_refresh_condition_scope,
-            open_rest_condition_scope=open_rest_condition_scope,
-            full_family_refresh_families=held_reemit_families,
+        fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
+            _edli_merge_condition_scopes(
+                entry_condition_scope,
+                entry_refresh_condition_scope,
+            ),
+            now_utc=now,
+        )
+        fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
+            rest_condition_scope,
+            now_utc=now,
+        )
+        fresh_held_scope = _edli_families_with_fresh_scoped_executable_substrate(
+            held_condition_scope,
+            now_utc=now,
+        )
+        fresh_confirmed_families = (
+            fresh_entry_scope | fresh_rest_scope | fresh_held_scope
+        )
+        requested_confirm_families = set(confirm_families)
+        missing_confirm_families = (
+            requested_confirm_families - fresh_confirmed_families
         )
         confirm_refresh_summary: dict = {}
-        if confirm_families:
+        if missing_confirm_families:
+            def _missing_scope(scope):
+                return {
+                    family: condition_ids
+                    for family, condition_ids in scope.items()
+                    if family in missing_confirm_families
+                }
+
+            priority_condition_ids = _edli_confirm_priority_condition_ids(
+                rest_condition_scope=_missing_scope(rest_condition_scope),
+                held_condition_scope=_missing_scope(held_condition_scope),
+                entry_condition_scope=_missing_scope(entry_condition_scope),
+                entry_refresh_condition_scope=_missing_scope(
+                    entry_refresh_condition_scope
+                ),
+                open_rest_condition_scope=_missing_scope(open_rest_condition_scope),
+                full_family_refresh_families=(
+                    held_reemit_families & missing_confirm_families
+                ),
+            )
             confirm_refresh_summary = _edli_refresh_continuous_money_path_families(
-                confirm_families,
-                now_utc=now,
+                missing_confirm_families,
                 priority_condition_ids=priority_condition_ids,
             )
-            confirm_status = str(confirm_refresh_summary.get("status") or "")
-            if _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
-                _log.info(
-                    "edli_redecision_screen: confirmation refresh not available; "
-                    "skipping emit this tick rather than queueing stale redecision "
-                    "families=%d status=%s coverage=%s summary=%r",
-                    len(confirm_families),
-                    confirm_status,
-                    confirm_refresh_summary.get("executable_substrate_coverage_status"),
-                    confirm_refresh_summary,
-                )
-                return
-            fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
-                _edli_merge_condition_scopes(
-                    entry_condition_scope,
-                    entry_refresh_condition_scope,
-                ),
-                now_utc=now,
-            )
-            fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
-                rest_condition_scope,
-                now_utc=now,
-            )
-            fresh_held_scope = _edli_families_with_fresh_scoped_executable_substrate(
-                held_condition_scope,
-                now_utc=now,
-            )
-            fresh_confirmed_families = fresh_entry_scope | fresh_rest_scope | fresh_held_scope
+        elif requested_confirm_families:
+            confirm_refresh_summary = {
+                "status": "already_fresh",
+                "families_requested": 0,
+                "executable_substrate_coverage_status": "FULL",
+            }
+        if requested_confirm_families:
             confirmed_entry_scope &= fresh_entry_scope
             confirmed_rest_scope &= fresh_rest_scope
             confirmed_held_scope &= fresh_held_scope
             confirm_families &= fresh_confirmed_families
             scoped_filter_reason = (
-                "incomplete_confirmation_refresh"
-                if _edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary)
-                else "confirmation_refresh_verified"
+                "async_confirmation_requested"
+                if missing_confirm_families
+                else "current_substrate_verified"
             )
             _log.info(
                 "edli_redecision_screen: %s admitted fresh scoped families=%d/%d "
@@ -9364,7 +9201,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 "rest_conditions=%d held_conditions=%d summary=%r",
                 scoped_filter_reason,
                 len(fresh_confirmed_families),
-                len(set(all_families) | held_refresh_families | entry_refresh_families),
+                len(requested_confirm_families),
                 len(confirmed_entry_scope),
                 len(confirmed_rest_scope),
                 len(confirmed_held_scope),

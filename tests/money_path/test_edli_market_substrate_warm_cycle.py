@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-17
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -715,23 +715,22 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "probe_acted_state = dict(_edli_redecision_acted_state)" in screen_src
     assert "acted_state=probe_acted_state" in screen_src
     assert "_edli_refresh_continuous_money_path_families(" in screen_src
-    assert "skipping emit this tick rather than queueing stale redecision" in screen_src
+    assert "missing_confirm_families" in screen_src
+    assert "async_confirmation_requested" in screen_src
     assert "confirmed_entry_scope = set(family_keys)" in screen_src
     assert "family_keys &= confirmed_entry_scope" in screen_src
     assert "rest_pull_families &= confirmed_rest_scope" in screen_src
     assert "open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, all_beliefs)" in screen_src
-    assert "open_rest_condition_scope," in screen_src
-    assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS" in confirm_src
+    assert "_missing_scope(open_rest_condition_scope)" in screen_src
     assert "_edli_redecision_confirm_refresh_lock" in confirm_src
+    assert "acquire(blocking=False)" in confirm_src
     assert "_market_substrate_refresh_lock" not in confirm_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert "_refresh_pending_family_snapshots(" not in confirm_src
     assert "READ_FILTER_REQUIRED" in confirm_src
-    assert "_edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary)" in screen_src
     assert "_edli_families_with_fresh_scoped_executable_substrate(" in screen_src
     assert "confirmed_entry_scope &= fresh_entry_scope" in screen_src
     assert "confirmed_rest_scope &= fresh_rest_scope" in screen_src
-    assert "_edli_confirmation_refresh_unavailable(confirm_refresh_summary)" in screen_src
 
 
 def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
@@ -1407,7 +1406,7 @@ def test_substrate_open_rest_scope_resolves_before_position_projection():
 
 
 def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(monkeypatch):
-    """The live daemon must not race the substrate sidecar for snapshot writes."""
+    """The consumer marks work and never waits for the substrate producer."""
 
     import src.data.substrate_priority as substrate_priority
 
@@ -1415,17 +1414,25 @@ def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(mon
 
     def _mark(**kwargs):
         marked.append(kwargs)
+        return {"request_id": "req-confirm-1"}
 
     monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
+    monkeypatch.setattr(
+        substrate_priority,
+        "money_path_substrate_priority_receipt",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("consumer must not poll producer receipt")
+        ),
+    )
     monkeypatch.setattr(main_module.time, "sleep", lambda _delay: (_ for _ in ()).throw(AssertionError("no retry sleeps")))
 
     result = reactor._edli_refresh_continuous_money_path_families(
         {("Paris", "2026-06-20", "low")},
-        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
         priority_condition_ids={"cond-1", "cond-2"},
     )
 
     assert result["status"] == "priority_marked"
+    assert result["priority_request_id"] == "req-confirm-1"
     assert result["executable_substrate_coverage_status"] == "READ_FILTER_REQUIRED"
     assert result["families_requested"] == 1
     assert result["priority_condition_count"] == 2
@@ -1439,186 +1446,81 @@ def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(mon
     ]
 
 
-def test_continuous_redecision_confirm_refresh_uses_matching_sidecar_receipt(monkeypatch):
-    import src.data.substrate_priority as substrate_priority
+def test_substrate_priority_receipt_wakes_redecision_after_durable_refresh(monkeypatch):
+    from src.runtime import reactor_wake
 
-    def _mark(**_kwargs):
-        return {
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: calls.append(("receipt", kwargs)),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: calls.append(("wake", kwargs)),
+    )
+
+    substrate_observer._substrate_priority_receipt(
+        request={
             "request_id": "req-confirm-1",
             "families": [("Paris", "2026-06-20", "low")],
-            "condition_ids": ["cond-1"],
-        }
-
-    def _receipt(**kwargs):
-        assert kwargs["request_id"] == "req-confirm-1"
-        return {
-            "request_id": "req-confirm-1",
-            "serviced_at": "2026-06-19T12:00:01+00:00",
-            "summary": {
-                "status": "refreshed",
-                "executable_substrate_coverage_status": "PARTIAL",
-                "attempted": 1,
-                "inserted": 1,
-            },
-        }
-
-    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
-    monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
-    monkeypatch.setattr(main_module.time, "sleep", lambda _delay: (_ for _ in ()).throw(AssertionError("receipt was immediate")))
-
-    result = reactor._edli_refresh_continuous_money_path_families(
-        {("Paris", "2026-06-20", "low")},
-        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
-        priority_condition_ids={"cond-1"},
+        },
+        summary={"status": "refreshed", "scheduler_failed": False},
     )
 
-    assert result["status"] == "refreshed"
-    assert result["priority_request_id"] == "req-confirm-1"
-    assert result["priority_receipt_matched"] is True
-    assert result["priority_receipt_match_mode"] == "request_id"
-    assert result["attempted"] == 1
-    assert result["inserted"] == 1
+    assert [kind for kind, _payload in calls] == ["receipt", "wake"]
+    assert calls[1][1]["reason"] == "money_path_substrate_refreshed"
+    assert calls[1][1]["forecast_families"] == (
+        ("Paris", "2026-06-20", "low"),
+    )
 
 
-def test_continuous_redecision_confirm_refresh_accepts_superseding_scope_receipt(monkeypatch):
-    import src.data.substrate_priority as substrate_priority
+def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
+    from src.runtime import reactor_wake
 
-    family = ("Paris", "2026-06-20", "low")
+    wake = reactor_wake.ReactorWake(
+        "wake-substrate",
+        "2026-07-17T01:00:00+00:00",
+        "substrate_observer",
+        "money_path_substrate_refreshed",
+        forecast_families=(("Paris", "2026-06-20", "low"),),
+    )
 
-    def _mark(**_kwargs):
-        return {
-            "request_id": "req-old",
-            "families": [family],
-            "condition_ids": ["cond-1"],
-        }
+    class _Lock:
+        def locked(self) -> bool:
+            return False
 
-    def _receipt(**kwargs):
-        if kwargs.get("request_id") == "req-old":
-            return None
-        assert kwargs.get("request_id") is None
-        return {
-            "request_id": "req-new",
-            "serviced_at": "2026-06-19T12:00:02+00:00",
-            "families": [family, ("Shanghai", "2026-06-20", "high")],
-            "condition_ids": ["cond-1", "cond-extra"],
-            "summary": {"status": "refreshed", "attempted": 2, "inserted": 2},
-        }
+    class _Held:
+        def is_set(self) -> bool:
+            return False
 
-    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
-    monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
+    calls: list[str] = []
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
     monkeypatch.setattr(
-        main_module.time,
-        "sleep",
-        lambda _delay: (_ for _ in ()).throw(AssertionError("receipt was immediate")),
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: calls.append("ack") or True,
     )
-
-    result = reactor._edli_refresh_continuous_money_path_families(
-        {family},
-        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
-        priority_condition_ids={"cond-1"},
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main_module, "_edli_redecision_screen_lock", _Lock())
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main_module,
+        "_edli_continuous_redecision_screen_cycle",
+        lambda: calls.append("screen"),
     )
-
-    assert result["status"] == "refreshed"
-    assert result["priority_request_id"] == "req-old"
-    assert result["priority_receipt_request_id"] == "req-new"
-    assert result["priority_receipt_matched"] is True
-    assert result["priority_receipt_match_mode"] == "scope_superset"
-    assert result["attempted"] == 2
-
-
-def test_continuous_redecision_confirm_refresh_rejects_stale_scope_receipt(monkeypatch):
-    import src.data.substrate_priority as substrate_priority
-
-    family = ("Paris", "2026-06-20", "low")
-
-    def _mark(**_kwargs):
-        return {
-            "request_id": "req-stale",
-            "families": [family],
-            "condition_ids": ["cond-1"],
-        }
-
-    def _receipt(**kwargs):
-        if kwargs.get("request_id") == "req-stale":
-            return None
-        assert kwargs.get("request_id") is None
-        return {
-            "request_id": "req-old-scope",
-            "serviced_at": "2026-06-19T11:59:59+00:00",
-            "families": [family],
-            "condition_ids": ["cond-1"],
-            "summary": {"status": "refreshed", "attempted": 1, "inserted": 1},
-        }
-
-    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "0.05")
-    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_RECEIPT_POLL_SECONDS", "0.05")
-    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
-    monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
-    monkeypatch.setattr(main_module.time, "sleep", lambda _delay: None)
-
-    result = reactor._edli_refresh_continuous_money_path_families(
-        {family},
-        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
-        priority_condition_ids={"cond-1"},
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("substrate wake must not run the full reactor")
+        ),
     )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
 
-    assert result["status"] == "priority_marked"
-    assert result["priority_request_id"] == "req-stale"
-    assert result["priority_receipt_matched"] is False
-    assert result["executable_substrate_coverage_status"] == "READ_FILTER_REQUIRED"
-
-
-@pytest.mark.parametrize(
-    "receipt_families,receipt_condition_ids",
-    [
-        ([("Shanghai", "2026-06-20", "high")], ["cond-1"]),
-        ([("Paris", "2026-06-20", "low")], ["cond-other"]),
-    ],
-)
-def test_continuous_redecision_confirm_refresh_rejects_partial_scope_receipt(
-    monkeypatch,
-    receipt_families,
-    receipt_condition_ids,
-):
-    import src.data.substrate_priority as substrate_priority
-
-    family = ("Paris", "2026-06-20", "low")
-
-    def _mark(**_kwargs):
-        return {
-            "request_id": "req-partial",
-            "families": [family],
-            "condition_ids": ["cond-1"],
-        }
-
-    def _receipt(**kwargs):
-        if kwargs.get("request_id") == "req-partial":
-            return None
-        assert kwargs.get("request_id") is None
-        return {
-            "request_id": "req-partial-scope",
-            "serviced_at": "2026-06-19T12:00:02+00:00",
-            "families": receipt_families,
-            "condition_ids": receipt_condition_ids,
-            "summary": {"status": "refreshed", "attempted": 1, "inserted": 1},
-        }
-
-    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_RECEIPT_WAIT_SECONDS", "0.05")
-    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_RECEIPT_POLL_SECONDS", "0.05")
-    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
-    monkeypatch.setattr(substrate_priority, "money_path_substrate_priority_receipt", _receipt)
-    monkeypatch.setattr(main_module.time, "sleep", lambda _delay: None)
-
-    result = reactor._edli_refresh_continuous_money_path_families(
-        {family},
-        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
-        priority_condition_ids={"cond-1"},
-    )
-
-    assert result["status"] == "priority_marked"
-    assert result["priority_request_id"] == "req-partial"
-    assert result["priority_receipt_matched"] is False
-    assert result["executable_substrate_coverage_status"] == "READ_FILTER_REQUIRED"
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert calls == ["screen", "ack"]
 
 
 def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypatch):
@@ -1677,54 +1579,6 @@ def test_continuous_redecision_confirm_refresh_does_not_wait_on_substrate_proces
     assert "get_forecasts_connection_read_only" not in confirm_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_PROCESS_LOCK_RETRY_SECONDS" not in confirm_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS" not in confirm_src
-
-
-def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
-    """The refresh summary is not live authority for PARTIAL/NONE coverage.
-
-    A PARTIAL capture is not globally sufficient, but it must be resolved by
-    scoped condition freshness proof instead of freezing every current family.
-    """
-
-    assert reactor._edli_confirmation_refresh_unavailable(
-        {
-            "status": "skipped_lock_busy",
-            "executable_substrate_coverage_status": "FULL",
-            "failure_samples": [{"error": "database is locked"}],
-        }
-    )
-    assert reactor._edli_confirmation_refresh_unavailable(
-        {"status": "error_refresh_failed", "executable_substrate_coverage_status": "PARTIAL"}
-    )
-    assert not reactor._edli_confirmation_refresh_unavailable(
-        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
-    )
-    assert not reactor._edli_confirmation_refresh_unavailable(
-        {
-            "status": "refreshed",
-            "executable_substrate_coverage_status": "PARTIAL",
-            "failure_samples": [{"error": "database is locked"}],
-        }
-    )
-    assert not reactor._edli_confirmation_refresh_unavailable(
-        {"status": "refreshed", "executable_substrate_coverage_status": "NONE"}
-    )
-    assert reactor._edli_confirmation_refresh_needs_scoped_freshness_filter(
-        {"status": "refreshed", "executable_substrate_coverage_status": "NONE"}
-    )
-    assert reactor._edli_confirmation_refresh_needs_scoped_freshness_filter(
-        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
-    )
-    assert reactor._edli_confirmation_refresh_needs_scoped_freshness_filter(
-        {
-            "status": "refreshed",
-            "executable_substrate_coverage_status": "PARTIAL",
-            "failure_samples": [{"error": "database is locked"}],
-        }
-    )
-    assert not reactor._edli_confirmation_refresh_unavailable(
-        {"status": "refreshed", "executable_substrate_coverage_status": "FULL"}
-    )
 
 
 def test_continuous_redecision_partial_refresh_filters_to_fresh_families(monkeypatch):
