@@ -5016,6 +5016,23 @@ def _recapture_fresh_entry_snapshot_if_needed(
             return legacy_intent
     if fresh.selected_outcome_token_id != final_intent.selected_token_id:
         raise ValueError("recaptured executable snapshot selected token mismatch")
+    fak_prefix_authorized = bool(
+        str(getattr(final_intent, "order_type", "") or "").upper() == "FAK"
+        and qkernel_global_buy_fak_prefix_rejection_reason(
+            getattr(final_intent, "qkernel_execution_economics", None),
+            direction=str(getattr(final_intent, "direction", "") or ""),
+        )
+        is None
+    )
+    if (
+        fak_prefix_authorized
+        and Decimal(str(final_intent.final_limit_price))
+        < Decimal(str(fresh.min_tick_size))
+    ):
+        raise ValueError(
+            "recaptured FAK fresh tick cannot express prefix-certified limit: "
+            f"intent={final_intent.final_limit_price} tick={fresh.min_tick_size}"
+        )
     fresh_limit_price = _align_buy_limit_price_to_tick(
         final_intent.final_limit_price,
         fresh.min_tick_size,
@@ -5051,14 +5068,6 @@ def _recapture_fresh_entry_snapshot_if_needed(
                 f"post_only limit {fresh_limit_price} would cross fresh ask {fresh_ask}"
             )
     else:
-        fak_prefix_authorized = bool(
-            str(getattr(final_intent, "order_type", "") or "").upper() == "FAK"
-            and qkernel_global_buy_fak_prefix_rejection_reason(
-                getattr(final_intent, "qkernel_execution_economics", None),
-                direction=str(getattr(final_intent, "direction", "") or ""),
-            )
-            is None
-        )
         if fak_prefix_authorized:
             certified_limit = Decimal(
                 str(

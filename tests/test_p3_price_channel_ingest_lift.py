@@ -375,16 +375,17 @@ def test_no_regression_order_runtime_still_reads_feasibility_evidence():
 
     A WS outage surfaces to P1 ONLY as stale/absent execution_feasibility_evidence rows —
     so the order runtime must still consume that table (the DB-mediated seam), independent
-    of where the WS producer lives. The retained reader is
-    src.main._edli_latest_pre_submit_book_row (the pre-submit book witness).
+    of where the WS producer lives. The retained reader now lives with the
+    global auction adapter after price-channel redecision was decoupled from
+    ``src.main``.
     """
-    import src.main as main_mod
+    from src.engine import event_reactor_adapter as adapter
 
-    assert hasattr(main_mod, "_edli_latest_pre_submit_book_row"), (
+    assert hasattr(adapter, "_latest_market_channel_book_rows"), (
         "the order runtime must keep its pre-submit feasibility reader "
-        "(_edli_latest_pre_submit_book_row) — the DB-mediated I2 read side P1 keeps."
+        "(_latest_market_channel_book_rows) — the DB-mediated I2 read side P1 keeps."
     )
-    reader_src = inspect.getsource(main_mod._edli_latest_pre_submit_book_row)
+    reader_src = inspect.getsource(adapter._latest_market_channel_book_rows)
     assert "execution_feasibility_evidence" in reader_src, (
         "the order runtime's pre-submit witness must still SELECT "
         "execution_feasibility_evidence — the DB-mediated I2 read side P1 keeps."
