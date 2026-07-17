@@ -357,4 +357,12 @@ def load_manifest_with_path(path: Path | str) -> RawForecastArtifactManifest:
 def write_seed(path: Path | str, seed: Mapping[str, object]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(dict(seed), sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    temp = target.with_name(f".{target.name}.{os.getpid()}.{id(seed)}.tmp")
+    try:
+        temp.write_text(
+            json.dumps(dict(seed), sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)

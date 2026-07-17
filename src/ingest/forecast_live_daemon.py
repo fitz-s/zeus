@@ -117,6 +117,7 @@ FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 # lanes. The functions themselves are live-authority gated (no-op when trade authority is off).
 REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
 REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_live_materialize"
+REPLACEMENT_FORECAST_DISCOVERY_JOB_ID = "replacement_forecast_live_discovery"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
@@ -131,7 +132,6 @@ REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 # the materialize keeps its own worker and refreshes readiness every interval regardless of
 # download duration.
 REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE = "replacement_download"
-_replacement_forecast_last_discovery_monotonic = 0.0
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
@@ -1105,9 +1105,7 @@ def _replacement_forecast_queue_pending(
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
-    """Drain source-committed work before running periodic discovery."""
-
-    global _replacement_forecast_last_discovery_monotonic
+    """Drain only source-committed work; global discovery has its own lane."""
 
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
@@ -1116,11 +1114,6 @@ def _replacement_forecast_materialize_poll_job() -> None:
     cfg = _replacement_forecast_live_materialization_queue_config()
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
-    now = time.monotonic()
-    discovery_due = (
-        now - _replacement_forecast_last_discovery_monotonic
-        >= 60.0 * _replacement_forecast_materialize_interval_minutes()
-    )
     batch_limit = int(cfg["poll_batch_limit"])
     if requests_pending:
         _replacement_forecast_materialize_job(
@@ -1134,13 +1127,30 @@ def _replacement_forecast_materialize_poll_job() -> None:
             limit=batch_limit,
             seed_limit=1,
         )
-    elif discovery_due:
-        _replacement_forecast_last_discovery_monotonic = now
-        _replacement_forecast_materialize_job(
-            discover=True,
-            limit=batch_limit,
-            seed_limit=1,
-        )
+
+
+@_scheduler_job(REPLACEMENT_FORECAST_DISCOVERY_JOB_ID)
+def _replacement_forecast_discovery_job() -> None:
+    """Run global recovery discovery without occupying the hot materialization lane."""
+
+    if not _replacement_forecast_live_runtime_enabled():
+        return
+    from src.data.replacement_forecast_production import (
+        _replacement_forecast_live_materialization_queue_config,
+    )
+    from src.data.replacement_forecast_seed_discovery import (
+        discover_replacement_forecast_materialization_seeds,
+    )
+
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=cfg["forecast_db"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        seed_dir=cfg["seed_dir"],
+        limit=min(int(cfg["seed_discovery_limit"]), int(cfg["poll_batch_limit"])),
+    )
+    if report.status != "NO_ELIGIBLE_TARGETS":
+        logger.info("replacement forecast recovery discovery: %s", report.as_dict())
 
 
 def _publish_replacement_forecast_boot_wake() -> object | None:
@@ -1229,6 +1239,16 @@ def _register_replacement_forecast_production_jobs(
         seconds=materialize_poll_seconds,
         id=REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
         executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _replacement_forecast_discovery_job,
+        "interval",
+        minutes=materialize_minutes,
+        id=REPLACEMENT_FORECAST_DISCOVERY_JOB_ID,
+        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
         max_instances=1,
         coalesce=True,
         misfire_grace_time=120,

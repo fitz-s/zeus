@@ -224,15 +224,9 @@ def test_replacement_materialize_poll_bounds_pending_seed_work(monkeypatch, tmp_
             (discover, limit, seed_limit)
         ),
     )
-    monkeypatch.setattr(
-        daemon, "_replacement_forecast_last_discovery_monotonic", 90.0
-    )
-    monkeypatch.setattr(daemon.time, "monotonic", lambda: 100.0)
-
     daemon._replacement_forecast_materialize_poll_job()
 
     assert calls == [(False, 3, 1)]
-    assert daemon._replacement_forecast_last_discovery_monotonic == 90.0
 
 
 def test_replacement_materialize_poll_prioritizes_requests_over_seeds(
@@ -290,23 +284,18 @@ def test_replacement_materialize_pending_queue_preempts_due_discovery(
             (discover, limit, seed_limit)
         ),
     )
-    monkeypatch.setattr(
-        daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
-    )
-    monkeypatch.setattr(daemon.time, "monotonic", lambda: 1000.0)
-
     daemon._replacement_forecast_materialize_poll_job()
 
     assert calls == [(False, 3, 1)]
-    assert daemon._replacement_forecast_last_discovery_monotonic == 0.0
 
 
-def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_path) -> None:
+def test_replacement_discovery_runs_outside_materialization_queue(monkeypatch, tmp_path) -> None:
     import src.data.replacement_forecast_production as production
+    import src.data.replacement_forecast_seed_discovery as discovery
     import src.ingest.forecast_live_daemon as daemon
 
     cfg = _materialization_queue_cfg(tmp_path)
-    calls: list[tuple[bool, int | None, int | None]] = []
+    calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         production,
         "_replacement_forecast_live_materialization_queue_config",
@@ -314,19 +303,26 @@ def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_p
     )
     monkeypatch.setattr(
         daemon,
-        "_replacement_forecast_materialize_job",
-        lambda *, discover=True, limit=None, seed_limit=None: calls.append(
-            (discover, limit, seed_limit)
-        ),
+        "_replacement_forecast_live_runtime_enabled",
+        lambda: True,
     )
     monkeypatch.setattr(
-        daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
+        discovery,
+        "discover_replacement_forecast_materialization_seeds",
+        lambda **kwargs: calls.append(kwargs)
+        or SimpleNamespace(status="NO_ELIGIBLE_TARGETS", as_dict=lambda: {}),
     )
 
-    daemon._replacement_forecast_materialize_poll_job()
+    daemon._replacement_forecast_discovery_job.__wrapped__()
 
-    assert calls == [(True, 3, 1)]
-    assert daemon._replacement_forecast_last_discovery_monotonic > 0.0
+    assert calls == [
+        {
+            "forecast_db": cfg["forecast_db"],
+            "raw_manifest_dir": cfg["raw_manifest_dir"],
+            "seed_dir": cfg["seed_dir"],
+            "limit": 1,
+        }
+    ]
 
 
 def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> None:
@@ -364,6 +360,18 @@ def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> 
     assert trigger == "interval"
     assert kwargs["seconds"] == 1
     assert "minutes" not in kwargs
+    discovery_fn, discovery_trigger, discovery_kwargs = next(
+        job
+        for job in scheduler.jobs
+        if job[2].get("id") == daemon.REPLACEMENT_FORECAST_DISCOVERY_JOB_ID
+    )
+    assert discovery_fn is daemon._replacement_forecast_discovery_job
+    assert discovery_trigger == "interval"
+    assert discovery_kwargs["minutes"] == 1
+    assert (
+        discovery_kwargs["executor"]
+        == daemon.REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE
+    )
     job_ids = {job[2].get("id") for job in scheduler.jobs}
     assert daemon.REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID not in job_ids
     assert daemon.REPLACEMENT_FORECAST_STARTUP_JOB_ID not in job_ids

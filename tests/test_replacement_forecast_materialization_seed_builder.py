@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-07
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07
+# Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Protect automatic replacement materialization seed generation from market/source context.
 # Reuse: Run before changing replacement shadow queue input generation.
 # Authority basis: Replacement materialization must be grounded in real market bins and source-run coverage, not hand-built seed JSON.
@@ -23,10 +23,23 @@ from src.data.replacement_forecast_materialization_seed_builder import (
     latest_baseline_coverage_for_replacement_seed,
     load_manifest_with_path,
     market_bins_for_replacement_seed,
+    write_seed,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_write_seed_commits_complete_json_atomically(tmp_path: Path) -> None:
+    target = tmp_path / "queue" / "scope.json"
+
+    write_seed(target, {"city": "Paris", "probability": 1.0})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "city": "Paris",
+        "probability": 1.0,
+    }
+    assert tuple(target.parent.glob(".*.tmp")) == ()
 
 
 def _artifact(tmp_path: Path, name: str) -> Path:
