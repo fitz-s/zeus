@@ -1725,11 +1725,37 @@ def process_current_global_batch(
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
         scope_at = current_time()
         held_families = _current_held_weather_families(trade_conn)
+        restricted_families = None
+        if restrict_to_family_keys is not None:
+            restricted_families = frozenset(
+                (
+                    str(payload.get("city") or "").strip(),
+                    str(payload.get("target_date") or "").strip(),
+                    str(payload.get("metric") or "").strip().lower(),
+                )
+                for event in event_tuple
+                for payload in (payload_reader(event),)
+                if _family_key(event, payload) in restrict_to_family_keys
+            )
+            if (
+                not restricted_families
+                or frozenset(
+                    weather_family_id(
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                    )
+                    for city, target_date, metric in restricted_families
+                )
+                != restrict_to_family_keys
+            ):
+                return reject("GLOBAL_AUCTION_RESTRICTED_CARRIER_MISSING")
         full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
             held_families=held_families,
+            restrict_to_families=restricted_families,
         )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         if cancelled("scope_scan"):

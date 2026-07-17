@@ -5490,6 +5490,42 @@ def test_current_day0_query_uses_utc_window_and_target_date_index(monkeypatch):
     assert "USE TEMP B-TREE" not in plan
 
 
+def test_current_day0_query_restricts_result_to_requested_family(monkeypatch):
+    import src.config as config
+
+    decision_at = _dt.datetime(2026, 7, 10, 11, 30, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(
+        config,
+        "runtime_cities_by_name",
+        lambda: {
+            "Alpha": SimpleNamespace(timezone="UTC"),
+            "Beta": SimpleNamespace(timezone="UTC"),
+        },
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_opportunity_events_table(conn)
+    for city in ("Alpha", "Beta"):
+        _insert_event(
+            conn,
+            _current_day0_scope_event(
+                city=city,
+                target_date="2026-07-10",
+                available_at="2026-07-10T11:00:00+00:00",
+            ),
+        )
+
+    events = _current_day0_events(
+        conn,
+        decision_at_utc=decision_at,
+        restrict_to_families=(("Alpha", "2026-07-10", "high"),),
+    )
+
+    assert [json.loads(event.payload_json)["city"] for event in events] == [
+        "Alpha"
+    ]
+
+
 def test_current_day0_scope_keeps_completed_family_only_when_still_held(
     monkeypatch,
 ):
@@ -5574,6 +5610,63 @@ def test_global_scope_refuses_a_held_family_without_probability_carrier(
     assert calls[0]["phase_filter_exempt_families"] == {
         ("Held", "2026-07-08", "high")
     }
+
+
+def test_global_scope_pushes_family_restriction_to_carrier_readers(monkeypatch):
+    trigger_calls = []
+    day0_calls = []
+    event = _global_scope_event(city="Alpha", source_run_id="run-alpha")
+
+    class RestrictedTrigger:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def build_committed_snapshot_events(self, **kwargs):
+            trigger_calls.append(kwargs)
+            return (event,)
+
+    def current_day0(*_args, **kwargs):
+        day0_calls.append(kwargs)
+        return ()
+
+    monkeypatch.setattr(
+        universe,
+        "ForecastSnapshotReadyTrigger",
+        RestrictedTrigger,
+    )
+    monkeypatch.setattr(
+        universe,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(universe, "_current_day0_events", current_day0)
+
+    scope = universe.scan_current_global_auction_scope(
+        world_conn=object(),
+        forecasts_conn=object(),
+        decision_at_utc=_dt.datetime(
+            2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+        ),
+        held_families=(
+            ("Alpha", "2026-07-11", "high"),
+            ("Beta", "2026-07-11", "high"),
+        ),
+        restrict_to_families=(("Alpha", "2026-07-11", "high"),),
+    )
+
+    assert scope.events == (event,)
+    assert trigger_calls[0]["restrict_to_families"] == {
+        ("Alpha", "2026-07-11", "high")
+    }
+    assert trigger_calls[0]["phase_filter_exempt_families"] == {
+        ("Alpha", "2026-07-11", "high")
+    }
+    assert day0_calls[0]["restrict_to_families"] == frozenset(
+        {("Alpha", "2026-07-11", "high")}
+    )
+    assert day0_calls[0]["held_families"] == (
+        ("Alpha", "2026-07-11", "high"),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -9022,10 +9115,16 @@ def test_global_batch_restricts_urgent_scope_to_changed_families(monkeypatch):
     )
     prepared_events = []
     selected_scopes = []
+    scan_calls = []
+
+    def scan(**kwargs):
+        scan_calls.append(kwargs)
+        return scope
+
     monkeypatch.setattr(
         global_batch_runtime,
         "scan_current_global_auction_scope",
-        lambda **_: scope,
+        scan,
     )
     monkeypatch.setattr(
         global_batch_runtime,
@@ -9110,6 +9209,9 @@ def test_global_batch_restricts_urgent_scope_to_changed_families(monkeypatch):
     )
 
     assert prepared_events == [event_a.event_id]
+    assert scan_calls[0]["restrict_to_families"] == frozenset(
+        {("Alpha", "2026-07-11", "high")}
+    )
     assert len(selected_scopes) == 1
     assert selected_scopes[0].family_keys == (scope.family_keys[0],)
     assert result.receipts[event_a.event_id].reason == (

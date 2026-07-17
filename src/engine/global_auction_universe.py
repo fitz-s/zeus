@@ -1824,6 +1824,7 @@ def _current_day0_events(
     *,
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
+    restrict_to_families: Sequence[tuple[str, str, str]] | None = None,
 ) -> tuple[OpportunityEvent, ...]:
     if not _table_exists(world_conn, "opportunity_events"):
         return ()
@@ -1839,11 +1840,31 @@ def _current_day0_events(
         )
         for city, target_date, metric in held_families
     )
+    restricted = (
+        frozenset(
+            (
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                str(metric or "").strip().lower(),
+            )
+            for city, target_date, metric in restrict_to_families
+        )
+        if restrict_to_families is not None
+        else None
+    )
     if any(
         not city or not target_date or metric not in {"high", "low"}
         for city, target_date, metric in held
     ):
         raise ValueError("GLOBAL_HELD_FAMILY_IDENTITY_INVALID")
+    if restricted is not None and (
+        not restricted
+        or any(
+            not city or not target_date or metric not in {"high", "low"}
+            for city, target_date, metric in restricted
+        )
+    ):
+        raise ValueError("GLOBAL_DAY0_RESTRICTED_FAMILY_IDENTITY_INVALID")
     utc_date = decision_at_utc.astimezone(timezone.utc).date()
     target_floor = (utc_date - timedelta(days=1)).isoformat()
     target_ceiling = (utc_date + timedelta(days=1)).isoformat()
@@ -1910,6 +1931,8 @@ def _current_day0_events(
             str(_value(raw, "_day0_metric") or "").strip().lower(),
         )
         if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+            continue
+        if restricted is not None and family not in restricted:
             continue
         if not (
             _value(raw, "_day0_source_match") == "MATCH"
@@ -1986,8 +2009,9 @@ def scan_current_global_auction_scope(
     forecasts_conn: sqlite3.Connection,
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
+    restrict_to_families: Sequence[tuple[str, str, str]] | None = None,
 ) -> CurrentGlobalAuctionScope:
-    """Read every current family and every held-family probability obligation."""
+    """Read the current decision scope and its held-family obligations."""
 
     if decision_at_utc.tzinfo is None:
         raise ValueError("decision_at_utc must be timezone-aware")
@@ -2003,6 +2027,31 @@ def scan_current_global_auction_scope(
             }
         )
     )
+    restricted = (
+        frozenset(
+            (
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                str(metric or "").strip().lower(),
+            )
+            for city, target_date, metric in restrict_to_families
+        )
+        if restrict_to_families is not None
+        else None
+    )
+    if restricted is not None and (
+        not restricted
+        or any(
+            not city or not target_date or metric not in {"high", "low"}
+            for city, target_date, metric in restricted
+        )
+    ):
+        raise ValueError("GLOBAL_AUCTION_RESTRICTED_FAMILY_INVALID")
+    scope_held = (
+        held
+        if restricted is None
+        else tuple(family for family in held if family in restricted)
+    )
     trigger = ForecastSnapshotReadyTrigger(
         EventWriter(world_conn),
         live_eligibility_reader=executable_forecast_live_eligible_reader(
@@ -2015,18 +2064,22 @@ def scan_current_global_auction_scope(
         received_at=decision_at_utc.isoformat(),
         limit=None,
         source="global-auction-current-scope",
-        phase_filter_exempt_families=set(held),
+        phase_filter_exempt_families=set(scope_held),
+        restrict_to_families=(
+            set(restricted) if restricted is not None else None
+        ),
     )
     events = current_global_scope_events_with_day0(
         forecast_events,
         _current_day0_events(
             world_conn,
             decision_at_utc=decision_at_utc,
-            held_families=held,
+            held_families=scope_held,
+            restrict_to_families=restricted,
         ),
     )
     covered = {_event_family(event) for event in events}
-    missing = sorted(set(held) - covered)
+    missing = sorted(set(scope_held) - covered)
     if missing:
         detail = ",".join("|".join(family) for family in missing)
         raise ValueError(
