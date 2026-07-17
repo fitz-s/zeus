@@ -65,6 +65,15 @@ MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT = 10
 MONITOR_DAY0_SEMANTIC_SAMPLE_LIMIT = 10
 SUB_MIN_PARTIAL_POSITION_SAMPLE_LIMIT = 10
 PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
+POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT = 12.0
+# Threshold rationale (2026-07-17, config/settings.json ops._posterior_staleness_alert_hours_rationale):
+# 12h = one full provider refresh interval; the 30h forecast_posteriors TTL
+# (expires_at) is the hard cliff after which entries silently starve. Alerting
+# at 12h leaves an 18h repair window before that cliff. Incident proof: the
+# 2026-07-13 08:15 CONUS live-posterior blackout onset would have alerted at
+# 20:15 under this threshold, instead of running dark until the silent TTL
+# expiry at 2026-07-14T06:00+.
+POSTERIOR_STARVATION_REASON_MAX_CHARS = 300
 LIVE_DAEMON_PROCESS_CODE_PATHS = (
     "src/main.py",
     "src/control/cutover_guard.py",
@@ -5310,6 +5319,205 @@ def _add_day0_trace_counts_from_db(
         conn.close()
 
 
+def _posterior_staleness_alert_hours() -> float:
+    """Config-driven alert threshold (ops.posterior_staleness_alert_hours)."""
+
+    try:
+        from src.config import settings
+
+        data = getattr(settings, "_data", None)
+        ops_cfg = data.get("ops") if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 - config read must never block the alert.
+        ops_cfg = None
+    if not isinstance(ops_cfg, dict):
+        return POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT
+    try:
+        value = float(
+            ops_cfg.get(
+                "posterior_staleness_alert_hours",
+                POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT,
+            )
+        )
+    except (TypeError, ValueError):
+        return POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT
+    return value if value > 0.0 else POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT
+
+
+def _posterior_starvation_newest_blocked_reason(
+    state_dir: Path,
+    city: str,
+    target_date: str,
+    metric: str,
+) -> str | None:
+    """Best-effort newest replacement-forecast-live failure reason for this scope.
+
+    Cheap directory scan of the existing failed-materialization sidecar
+    (config ``replacement_forecast_live.failed_dir``); never raises and never
+    blocks the alert on a filesystem hiccup — this is enrichment, not the gate.
+    """
+
+    try:
+        failed_dir = state_dir / "replacement_forecast_live" / "failed"
+        if not failed_dir.is_dir():
+            return None
+        prefix = f"{city}.{target_date}.{metric}."
+        candidates = sorted(
+            (p.name for p in failed_dir.glob(f"{prefix}*.receipt.json")),
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        payload = _read_json(failed_dir / candidates[0])
+        if not isinstance(payload, dict):
+            return None
+        reason = payload.get("stderr") or payload.get("error")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()[:POSTERIOR_STARVATION_REASON_MAX_CHARS]
+        return None
+    except Exception:  # noqa: BLE001 - best-effort sidecar; never blocks the alert.
+        return None
+
+
+def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
+    """Alert (log-only) on a live-tradeable family with no fresh live posterior.
+
+    Incident (2026-07-13/14): all CONUS live posteriors went dark 30-37h with
+    NO operator signal. Existing watchdogs (heartbeat_supervisor, riskguard,
+    the monitor-cadence watchdog in src.execution.exit_lifecycle) cover
+    process heartbeat, position reference, and monitor-cadence staleness —
+    none covers "a family with a live market has no fresh live posterior".
+    This surface closes that gap.
+
+    Deliberately excluded from
+    ``src.engine.event_reactor_adapter._ENTRY_LIVE_HEALTH_REQUIRED_SURFACES``:
+    this is an ALERT, not a new gate. The existing freshness gates already
+    fail closed on the money path; this is the operator-visibility layer.
+
+    Emits one structured ``ZEUS_POSTERIOR_STARVATION`` ERROR log line per
+    starved (city, target_date, metric) scope per watchdog pass, in addition
+    to the ``ok``/``issue`` fields used by the generic composite DEGRADED
+    warning.
+    """
+
+    forecast_db = state_dir / "zeus-forecasts.db"
+    threshold_hours = _posterior_staleness_alert_hours()
+
+    market_columns, market_err = _sqlite_ro_table_columns(forecast_db, "market_events")
+    required_market_columns = {
+        "city",
+        "target_date",
+        "temperature_metric",
+        "token_id",
+        "created_at",
+    }
+    if market_err or not required_market_columns.issubset(market_columns):
+        return {
+            "ok": True,
+            "issue": None,
+            "evaluated": False,
+            "skip_reason": market_err or "MARKET_EVENTS_COLUMNS_MISSING",
+        }
+
+    posterior_columns, posterior_err = _sqlite_ro_table_columns(
+        forecast_db, "forecast_posteriors"
+    )
+    required_posterior_columns = {
+        "city",
+        "target_date",
+        "temperature_metric",
+        "runtime_layer",
+        "computed_at",
+    }
+    if posterior_err or not required_posterior_columns.issubset(posterior_columns):
+        return {
+            "ok": True,
+            "issue": None,
+            "evaluated": False,
+            "skip_reason": posterior_err or "FORECAST_POSTERIORS_COLUMNS_MISSING",
+        }
+
+    today_utc = now.astimezone(timezone.utc).date().isoformat()
+    family_rows, family_err = _sqlite_ro_rows(
+        forecast_db,
+        """
+        SELECT me.city AS city,
+               me.target_date AS target_date,
+               me.temperature_metric AS metric,
+               MIN(me.created_at) AS earliest_seen_at,
+               MAX(fp.computed_at) AS newest_live_posterior_at
+          FROM market_events me
+          LEFT JOIN forecast_posteriors fp
+            ON fp.city = me.city
+           AND fp.target_date = me.target_date
+           AND fp.temperature_metric = me.temperature_metric
+           AND fp.runtime_layer = 'live'
+         WHERE me.token_id IS NOT NULL AND TRIM(me.token_id) != ''
+           AND me.target_date >= ?
+         GROUP BY me.city, me.target_date, me.temperature_metric
+        """,
+        (today_utc,),
+    )
+    if family_err:
+        return {
+            "ok": True,
+            "issue": None,
+            "evaluated": False,
+            "skip_reason": f"POSTERIOR_STARVATION_READ_UNAVAILABLE:{family_err}",
+        }
+
+    now_utc = now.astimezone(timezone.utc)
+    starved: list[dict] = []
+    for row in family_rows:
+        city = str(row.get("city") or "")
+        target_date = str(row.get("target_date") or "")
+        metric = str(row.get("metric") or "")
+        newest_posterior_at = _parse_iso_utc(row.get("newest_live_posterior_at"))
+        if newest_posterior_at is not None:
+            age_h = max(0.0, (now_utc - newest_posterior_at).total_seconds() / 3600.0)
+            has_posterior = True
+        else:
+            earliest_seen_at = _parse_iso_utc(row.get("earliest_seen_at"))
+            if earliest_seen_at is None:
+                continue
+            age_h = max(0.0, (now_utc - earliest_seen_at).total_seconds() / 3600.0)
+            has_posterior = False
+        if age_h <= threshold_hours:
+            continue
+        reason = _posterior_starvation_newest_blocked_reason(
+            state_dir, city, target_date, metric
+        )
+        logger.error(
+            "ZEUS_POSTERIOR_STARVATION city=%s target=%s metric=%s age_h=%.2f "
+            "newest_blocked_reason=%s",
+            city,
+            target_date,
+            metric,
+            age_h,
+            reason or "unknown",
+        )
+        starved.append(
+            {
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+                "age_h": age_h,
+                "has_posterior": has_posterior,
+                "newest_blocked_reason": reason,
+            }
+        )
+
+    detail = {
+        "evaluated": True,
+        "threshold_hours": threshold_hours,
+        "checked_family_count": len(family_rows),
+        "starved_count": len(starved),
+        "starved_sample": starved,
+    }
+    if starved:
+        return {"ok": False, "issue": f"POSTERIOR_STARVATION:n={len(starved)}", **detail}
+    return {"ok": True, "issue": None, **detail}
+
+
 def compute_composite_live_health(
     *,
     state_dir: Optional[Path] = None,
@@ -5317,7 +5525,7 @@ def compute_composite_live_health(
 ) -> dict:
     """Compute and persist composite live-health status.
 
-    Consults nineteen surfaces:
+    Consults twenty surfaces:
       1. heartbeat — daemon-heartbeat.json (alive + fresh timestamp)
       2. venue_heartbeat — external CLOB heartbeat/order-safety keeper
       3. runtime_code — loaded_sha.json vs current git HEAD
@@ -5337,6 +5545,8 @@ def compute_composite_live_health(
       17. high_yes_edge — high-confidence YES edge has action/rejection evidence
       18. status_summary — status_summary.json top-level timestamp freshness
       19. execution_capability — entry/exit side-effect gate
+      20. posterior_starvation — live-tradeable family with no fresh live posterior
+          (log-only alert, not a gate; see _posterior_starvation_surface)
 
     Writes state/live_health_composite.json atomically.
 
@@ -5674,6 +5884,16 @@ def compute_composite_live_health(
             "live_health_composite DEGRADED: failing_surface=%s reason=%s",
             "execution_capability",
             execution_surface["issue"],
+        )
+
+    posterior_starvation_surface = _posterior_starvation_surface(sd, now)
+    surfaces["posterior_starvation"] = posterior_starvation_surface
+    if not posterior_starvation_surface["ok"]:
+        failing.append("posterior_starvation")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "posterior_starvation",
+            posterior_starvation_surface["issue"],
         )
 
     # ------------------------------------------------------------------ #

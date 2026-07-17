@@ -882,6 +882,7 @@ test_trust_policy:
     tests/data/test_blocked_attempt_fingerprint_cycle_scope.py: {created: "2026-07-17", last_used: "2026-07-17", note: "Incident 2026-07-13 antibody: blocked-attempt fingerprint scoped to the request source_cycle_time — an unrelated new raw row at a DIFFERENT cycle no longer churns the fingerprint (suppression works); a new row at the SAME cycle still retries."}
     tests/forecast/test_method_unify_representativeness_parity.py: {created: "2026-06-21", last_used: "2026-06-28", note: "Option C METHOD-UNIFY parity antibody: spine ENTRY (walk_forward_model_weights via RawModelMember.representativeness_m2_native) == materializer EXIT (raw_precision_center repr_m2_by_model) on weights AND center, incl. low-n, cold-start, and an outlier (Huber-vs-Sigma-wz divergence) fixture. Threading repr at one seam only (re-opening #135) turns it RED."}
     tests/probability/test_representativeness_no_kelly_variance_double_count.py: {created: "2026-06-21", last_used: "2026-06-21", note: "Option C Kelly-no-double-count BLOCKER guard: repr enters the RAW MEAN weights ONLY; predictive_sigma_c (fused.sd^2 + sigma_resid^2) and anchor_sigma_c (fused.sd) never reference the repr channel, the repr dict is never fed to fuse_bayes_precision_posterior, and apply_grid_representativeness (the WIDTH double-count switch) stays default-False. Feeding repr into the width path turns it RED."}
+    tests/test_posterior_starvation_alert.py: {created: "2026-07-17", last_used: "2026-07-17", note: "P1 observability antibody (2026-07-13/14 CONUS 30-37h dark-posterior incident): a live-tradeable (city,target_date,metric) family with no fresh runtime_layer='live' forecast_posteriors emits one ZEUS_POSTERIOR_STARVATION ERROR log per scope per watchdog pass; fresh posterior and no-market cases stay silent. Log-only alert, not a new gate: locks src/control/live_health.py::_posterior_starvation_surface's deliberate absence from event_reactor_adapter._ENTRY_LIVE_HEALTH_REQUIRED_SURFACES."}
 
 categories:
   core_law_antibody:
@@ -1145,6 +1146,8 @@ categories:
     # PR-209 — 5th-iter Karachi: REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
     # codereview-may19-2.md relationship F — composite live-health surfaces run_mode failure
     - tests/test_run_mode_failure_surfaces.py
+    # P1 observability fix (2026-07-17) — composite live-health alerts on live-market posterior starvation.
+    - tests/test_posterior_starvation_alert.py
     # codereview-may19-2 P1-1: ACK facts durable post-SDK-submit (unconditional commit in _live_order).
     - tests/test_live_order_ack_durability.py
     # EDLI e2e gate-unblock W0-W3 (2026-06-03) — RED->GREEN relationship antibodies.
@@ -2948,6 +2951,39 @@ test_metadata:
       src/main.py surfaces composite to state/live_health_composite.json each cycle.
     created: 2026-05-19
     last_reused_or_audited: 2026-07-15
+
+  tests/test_posterior_starvation_alert.py:
+    modules: [control]
+    category: core_law_antibody
+    kind: antibody
+    profile: p1_posterior_starvation_alert
+    blocks_commit: true
+    asserted_invariants:
+      - POSTERIOR_STARVATION_STALE_LIVE_POSTERIOR_EMITS_ERROR
+      - POSTERIOR_STARVATION_FRESH_POSTERIOR_IS_SILENT
+      - POSTERIOR_STARVATION_NO_LIVE_MARKET_IS_SILENT
+      - POSTERIOR_STARVATION_IS_NOT_AN_ENTRY_GATE_SURFACE
+    source_under_test:
+      - src/control/live_health.py
+    law_dependencies:
+      - 2026-07-13/14 CONUS live-posterior blackout incident (30-37h dark, no operator signal)
+    notes: >
+      P1 observability fix: closes the "live market, no fresh live posterior"
+      alerting gap. Existing watchdogs (heartbeat_supervisor, riskguard, the
+      monitor-cadence watchdog in src.execution.exit_lifecycle) cover process
+      heartbeat, position reference, and monitor-cadence staleness, but none
+      covered a family with a live market going dark on its live posterior.
+      _posterior_starvation_surface (20th surface of
+      compute_composite_live_health) emits one structured
+      ZEUS_POSTERIOR_STARVATION ERROR log per starved (city, target_date,
+      metric) scope per watchdog pass when age exceeds
+      config/settings.json ops.posterior_staleness_alert_hours (default 12h;
+      the 30h forecast_posteriors TTL is the hard cliff). Log-only: this
+      surface name is deliberately absent from
+      event_reactor_adapter._ENTRY_LIVE_HEALTH_REQUIRED_SURFACES, so a starved
+      family alerts operators without becoming a new trading gate.
+    created: 2026-07-17
+    last_reused_or_audited: 2026-07-17
 
   tests/test_repair_active_entry_q_versions.py:
     modules: [scripts, control, state]

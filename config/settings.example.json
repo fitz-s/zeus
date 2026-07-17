@@ -209,5 +209,9 @@
     "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF.",
     "settlement_coverage_hierarchy_enabled": false,
     "_settlement_coverage_hierarchy_enabled_note": "F1: hierarchical settlement-coverage calibrator (src/calibration/settlement_coverage_hierarchy.py). Default OFF = byte-identical current behavior."
+  },
+  "ops": {
+    "posterior_staleness_alert_hours": 12.0,
+    "_posterior_staleness_alert_hours_rationale_2026_07_17": "12h = one full provider refresh interval; the 30h forecast_posteriors TTL (expires_at) is the hard cliff after which entries silently starve. Alerting at 12h leaves an 18h repair window before that cliff. Incident proof: the 2026-07-13 08:15 CONUS live-posterior blackout onset would have alerted at 20:15 under this threshold, instead of running dark until the silent TTL expiry at 2026-07-14T06:00+. See src/control/live_health.py::_posterior_starvation_surface."
   }
 }
