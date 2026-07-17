@@ -2558,14 +2558,17 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         },
     )
 
+    observed_extreme = {"value": 71.0}
+
     def current_observation_payload(*_args, **kwargs):
         base_identity = kwargs["probability_base_identity"]
+        rounded = observed_extreme["value"]
         return {
             "observation_time": "2026-07-11T17:00:00+00:00",
             "observation_available_at": "2026-07-11T17:05:00+00:00",
-            "raw_value": 72.0,
-            "rounded_value": 72,
-            "high_so_far": 72.0,
+            "raw_value": rounded,
+            "rounded_value": rounded,
+            "high_so_far": rounded,
             "sample_count": 5,
             "station_id": "KDFW",
             "settlement_source": "wu_icao_history",
@@ -2582,6 +2585,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
                 "city": "Dallas",
                 "target_date": "2026-07-11",
                 "metric": "high",
+                "rounded_value": rounded,
                 "probability_base_identity": base_identity,
             },
         }
@@ -2592,7 +2596,11 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         current_observation_payload,
     )
 
+    remaining_day_calls = 0
+
     def remaining_day_components(*_args, **kwargs):
+        nonlocal remaining_day_calls
+        remaining_day_calls += 1
         payload = kwargs["payload"]
         payload.update(
             {
@@ -2605,23 +2613,22 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
                 "_edli_day0_finite_evidence_hits_by_condition": {
                     "c0": 0,
                     "c1": 0,
-                    "c2": 3,
+                    "c2": 2,
                 },
                 "_edli_day0_finite_evidence_yes_ucb_by_condition": {
                     "c0": 0.1,
                     "c1": 0.1,
-                    "c2": 1.0,
+                    "c2": 0.8,
                 },
                 "_edli_day0_finite_evidence_absorbing_no_conditions": [
                     "c0",
-                    "c1",
                 ],
             }
         )
-        matrix = np.asarray([[0.0, 0.0, 1.0]] * 400, dtype=float)
+        matrix = np.asarray([[0.0, 0.2, 0.8]] * 400, dtype=float)
         return (
             matrix,
-            np.asarray([0.0, 0.0, 1.0], dtype=float),
+            np.asarray([0.0, 0.2, 0.8], dtype=float),
             "current_coherent_day0_remaining_finite_evidence_v2",
         )
 
@@ -2649,6 +2656,32 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     assert witness.posterior_identity_hash
     assert binding["probability_base_identity"]
     assert "posterior_id" not in binding
+    assert remaining_day_calls == 1
+
+    observed_extreme["value"] = 72.0
+    exact_payload: dict[str, object] = {}
+    exact = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(2026, 7, 11, 18, 0, 1, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=exact_payload,
+    )
+
+    assert remaining_day_calls == 1
+    assert exact.probability_witness.band_basis == (
+        "day0_absorbing_observation_exact_settlement_simplex_v1"
+    )
+    assert np.all(
+        exact.probability_witness.yes_q_samples
+        == np.asarray([0.0, 0.0, 1.0])
+    )
+    assert exact_payload["probability_authority"] == (
+        "day0_absorbing_observation_exact_global_probability_v1"
+    )
+    assert exact_payload["q_source"] == "day0_absorbing_exact"
 
     missing_observations = sqlite3.connect(":memory:")
     with pytest.raises(ValueError, match="GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE"):

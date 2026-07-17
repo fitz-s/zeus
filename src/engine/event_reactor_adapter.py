@@ -26683,6 +26683,9 @@ _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
 _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "final_daily_observation_exact_settlement_simplex_v1"
 )
+_GLOBAL_DAY0_ABSORBING_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
+    "day0_absorbing_observation_exact_settlement_simplex_v1"
+)
 _GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA = 0.05
 
 
@@ -26714,6 +26717,53 @@ def _final_daily_exact_probability_components(
         np.ascontiguousarray(samples, dtype=np.float64),
         np.ascontiguousarray(point_q, dtype=np.float64),
         _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+    )
+
+
+def _day0_absorbing_exact_probability_components(
+    *,
+    omega: object,
+    family: object,
+    payload: dict[str, object],
+) -> tuple[np.ndarray, np.ndarray, str] | None:
+    """Return exact q when a running extreme has entered an absorbing shoulder."""
+
+    rounded = _optional_float(payload.get("rounded_value"))
+    metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
+    candidates = tuple(getattr(family, "candidates", ()) or ())
+    outcomes = tuple(getattr(omega, "bins", ()) or ())
+    if rounded is None or len(candidates) != len(outcomes) or len(candidates) < 2:
+        return None
+    mask = _day0_absorbing_mask(payload=payload, family=family)
+    alive = np.flatnonzero(mask > 0.0)
+    if alive.size != 1:
+        return None
+    winner = int(alive[0])
+    bin_value = candidates[winner].bin
+    locked = (
+        metric == "high"
+        and bin_value.high is None
+        and bin_value.low is not None
+        and rounded >= float(bin_value.low)
+    ) or (
+        metric == "low"
+        and bin_value.low is None
+        and bin_value.high is not None
+        and rounded <= float(bin_value.high)
+    )
+    if not locked:
+        return None
+    point_q = np.zeros(len(outcomes), dtype=np.float64)
+    point_q[winner] = 1.0
+    samples = np.repeat(
+        point_q.reshape(1, -1),
+        max(2, int(edge_n_bootstrap())),
+        axis=0,
+    )
+    return (
+        np.ascontiguousarray(samples, dtype=np.float64),
+        np.ascontiguousarray(point_q, dtype=np.float64),
+        _GLOBAL_DAY0_ABSORBING_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
     )
 
 
@@ -27256,16 +27306,36 @@ def _prepare_current_global_probability_family(
             "final_daily_observation_exact_global_probability_v1"
         )
     elif current_day0_payload is not None:
-        components = _day0_remaining_global_probability_components(
-            event,
-            forecast_conn=forecast_conn,
-            calibration_conn=day0_observation_conn,
+        components = _day0_absorbing_exact_probability_components(
+            omega=omega,
             family=family,
             payload=payload,
-            decision_time=decision_time,
-            snapshot=day0_snapshot,
         )
-        probability_authority = "day0_remaining_day_global_probability_v1"
+        if components is not None:
+            probability_authority = (
+                "day0_absorbing_observation_exact_global_probability_v1"
+            )
+            payload["_edli_day0_q_mode"] = "absorbing_exact"
+            payload["_edli_q_source"] = "day0_absorbing_exact"
+            if day0_payload_out is not None:
+                day0_payload_out.update(
+                    {
+                        "probability_authority": probability_authority,
+                        "q_source": "day0_absorbing_exact",
+                        "_edli_day0_q_mode": "absorbing_exact",
+                    }
+                )
+        else:
+            components = _day0_remaining_global_probability_components(
+                event,
+                forecast_conn=forecast_conn,
+                calibration_conn=day0_observation_conn,
+                family=family,
+                payload=payload,
+                decision_time=decision_time,
+                snapshot=day0_snapshot,
+            )
+            probability_authority = "day0_remaining_day_global_probability_v1"
     else:
         if bundle is None:
             raise ValueError("GLOBAL_CURRENT_REPLACEMENT_BUNDLE_MISSING")
