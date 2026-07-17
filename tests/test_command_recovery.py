@@ -49,6 +49,30 @@ def mock_client():
     return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
 
 
+def test_edli_recovery_refs_prefer_world_authority_over_trade_ghosts():
+    from src.execution.command_recovery import (
+        _edli_live_cap_ref,
+        _edli_live_order_events_ref,
+        _edli_live_order_projection_ref,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE edli_live_order_events (id INTEGER)")
+        conn.execute("CREATE TABLE edli_live_order_projection (id INTEGER)")
+        conn.execute("CREATE TABLE edli_live_cap_usage (id INTEGER)")
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute("CREATE TABLE world.edli_live_order_events (id INTEGER)")
+        conn.execute("CREATE TABLE world.edli_live_order_projection (id INTEGER)")
+        conn.execute("CREATE TABLE world.edli_live_cap_usage (id INTEGER)")
+
+        assert _edli_live_order_events_ref(conn) == "world.edli_live_order_events"
+        assert _edli_live_order_projection_ref(conn) == "world.edli_live_order_projection"
+        assert _edli_live_cap_ref(conn, "edli_live_cap_usage") == "world.edli_live_cap_usage"
+    finally:
+        conn.close()
+
+
 # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
 # test_filled_projection_repair_voids_absorbed_chain_only_stub deleted.
 # It exercised command_recovery._void_absorbed_chain_only_projection, which
@@ -1587,6 +1611,150 @@ def _insert_edli_live_order_event(
     )
 
 
+def _seed_edli_absorbed_fill_recovery(
+    conn,
+    *,
+    command_id: str = "cmd-absorbed-fill",
+    proof_mutator=None,
+) -> dict:
+    execution_command_id = f"edli_exec_cmd:{command_id}:intent:no-token:buy_no"
+    final_intent_id = f"edli_intent:{command_id}:no-token"
+    position_id = f"pos-{command_id}"
+    aggregate_id = f"agg-{command_id}"
+    yes_token_id = f"yes-{command_id}"
+    no_token_id = f"no-{command_id}"
+    old_order_id = f"old-order-{command_id}"
+    recovered_order_id = f"recovered-order-{command_id}"
+    recovered_trade_id = f"recovered-trade-{command_id}"
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        decision_id=execution_command_id,
+        token_id=yes_token_id,
+        no_token_id=no_token_id,
+        selected_token_id=no_token_id,
+        outcome_label="NO",
+        size=5.6,
+        price=0.65,
+    )
+    _advance_to_submitting(conn, command_id=command_id)
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="prior-command",
+        order_id=old_order_id,
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active',
+               direction = 'buy_no',
+               token_id = ?,
+               no_token_id = ?,
+               condition_id = 'condition-test',
+               shares = 17.35,
+               cost_basis_usd = 11.16,
+               entry_price = 11.16 / 17.35,
+               size_usd = 11.16,
+               order_status = 'filled',
+               fill_authority = 'venue_confirmed_full',
+               chain_state = 'synced',
+               chain_shares = 17.35,
+               chain_avg_price = 11.16 / 17.35,
+               chain_cost_basis_usd = 11.16,
+               chain_seen_at = '2026-07-17T09:43:10+00:00'
+         WHERE position_id = ?
+        """,
+        (yes_token_id, no_token_id, position_id),
+    )
+    _open_test_entry_obligation(conn, command_id)
+    legs = [
+        {
+            "role": "TAKER",
+            "trade_id": f"prior-trade-{command_id}",
+            "venue_order_id": old_order_id,
+            "price": 0.64,
+            "size": 11.75,
+        },
+        {
+            "role": "TAKER",
+            "trade_id": recovered_trade_id,
+            "venue_order_id": recovered_order_id,
+            "price": 0.65,
+            "size": 5.6,
+        },
+    ]
+    proof = {
+        "schema_version": 1,
+        "source": "authenticated_clob_user_read",
+        "owner_scope": "authenticated_funder",
+        "observed_at": "2026-07-17T09:43:10+00:00",
+        "aggregate_id": aggregate_id,
+        "event_id": f"event-{command_id}",
+        "final_intent_id": final_intent_id,
+        "execution_command_id": execution_command_id,
+        "token_id": no_token_id,
+        "condition_id": "condition-test",
+        "direction": "buy_no",
+        "funder_address": "0xfunder",
+        "limit_price": 0.65,
+        "order_size": 5.6,
+        "case": "CONFIRMED_FILL_ALREADY_ABSORBED",
+        "reconcile_reason": "AUTHENTICATED_CLOB_FILL_ALREADY_ABSORBED_INTO_POSITION",
+        "venue_trade_exists": True,
+        "venue_order_exists": False,
+        "matched_legs": legs,
+        "matched_trade_ids": sorted(leg["trade_id"] for leg in legs),
+        "absorbed_position": {
+            "position_id": position_id,
+            "token_id": yes_token_id,
+            "no_token_id": no_token_id,
+            "direction": "buy_no",
+            "shares": 17.35,
+            "entry_price": 11.16 / 17.35,
+            "phase": "active",
+            "fill_authority": "venue_confirmed_full",
+            "order_id": old_order_id,
+            "condition_id": "condition-test",
+        },
+        "cap_transition": "CONSUMED",
+    }
+    if proof_mutator is not None:
+        proof_mutator(proof)
+        proof["matched_trade_ids"] = sorted(
+            {str(leg["trade_id"]) for leg in proof["matched_legs"]}
+        )
+    proof["proof_hash"] = hashlib.sha256(
+        json.dumps(proof, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="Reconciled",
+        occurred_at="2026-07-17T09:43:10+00:00",
+        payload={
+            "event_id": f"event-{command_id}",
+            "final_intent_id": final_intent_id,
+            "execution_command_id": execution_command_id,
+            "pending_reconcile": False,
+            "venue_order_exists": False,
+            "venue_trade_exists": True,
+            "cap_transition_recommendation": "CONSUMED",
+            "reconcile_reason": "AUTHENTICATED_CLOB_FILL_ALREADY_ABSORBED_INTO_POSITION",
+            "authenticated_resting_absorbed_proof": proof,
+        },
+    )
+    return {
+        "command_id": command_id,
+        "position_id": position_id,
+        "venue_order_id": recovered_order_id,
+        "trade_id": recovered_trade_id,
+        "proof_hash": proof["proof_hash"],
+    }
+
+
 def _seed_abandoned_unsubmitted_edli_ghost(
     conn,
     *,
@@ -2802,6 +2970,144 @@ class TestRecoveryResolutionTable:
         }
         events = [e["event_type"] for e in _get_events(conn, "cmd-001")]
         assert events == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_ACKED", "FILL_CONFIRMED"]
+
+    def test_edli_absorbed_fill_terminalizes_without_reprojecting_position(self, conn):
+        seeded = _seed_edli_absorbed_fill_recovery(conn)
+        from src.execution.command_recovery import (
+            reconcile_edli_confirmed_legacy_command_repairs,
+            reconcile_filled_entry_projection_repairs,
+            reconcile_terminal_entry_exposure_obligations,
+            reconcile_terminal_positive_entry_projection_repairs,
+        )
+
+        position_events_before = conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (seeded["position_id"],),
+        ).fetchone()[0]
+        summary = reconcile_edli_confirmed_legacy_command_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        command = conn.execute(
+            "SELECT state, venue_order_id FROM venue_commands WHERE command_id = ?",
+            (seeded["command_id"],),
+        ).fetchone()
+        assert dict(command) == {
+            "state": "FILLED",
+            "venue_order_id": seeded["venue_order_id"],
+        }
+        events = _get_events(conn, seeded["command_id"])
+        assert [event["event_type"] for event in events] == [
+            "INTENT_CREATED",
+            "SUBMIT_REQUESTED",
+            "SUBMIT_ACKED",
+            "FILL_CONFIRMED",
+        ]
+        fill_payload = json.loads(events[-1]["payload_json"])
+        assert fill_payload["recovered_from"] == "edli_confirmed_fill_already_absorbed"
+        assert fill_payload["proof_hash"] == seeded["proof_hash"]
+        trade = conn.execute(
+            """
+            SELECT venue_order_id, state, filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = ? AND trade_id = ?
+            """,
+            (seeded["command_id"], seeded["trade_id"]),
+        ).fetchone()
+        assert dict(trade) == {
+            "venue_order_id": seeded["venue_order_id"],
+            "state": "CONFIRMED",
+            "filled_size": "5.6",
+            "fill_price": "0.65",
+        }
+
+        assert reconcile_filled_entry_projection_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert reconcile_terminal_positive_entry_projection_repairs(conn) == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        position = conn.execute(
+            """
+            SELECT shares, cost_basis_usd, chain_shares, chain_cost_basis_usd, order_id
+              FROM position_current WHERE position_id = ?
+            """,
+            (seeded["position_id"],),
+        ).fetchone()
+        assert dict(position) == {
+            "shares": pytest.approx(17.35),
+            "cost_basis_usd": pytest.approx(11.16),
+            "chain_shares": pytest.approx(17.35),
+            "chain_cost_basis_usd": pytest.approx(11.16),
+            "order_id": f"old-order-{seeded['command_id']}",
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+            (seeded["position_id"],),
+        ).fetchone()[0] == position_events_before
+        assert reconcile_terminal_entry_exposure_obligations(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        obligation = conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            (seeded["command_id"],),
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+        assert reconcile_edli_confirmed_legacy_command_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
+    def test_edli_absorbed_fill_refuses_ambiguous_matching_leg(self, conn):
+        def duplicate_matching_leg(proof):
+            proof["matched_legs"].append(
+                {
+                    "role": "TAKER",
+                    "trade_id": "second-economics-match",
+                    "venue_order_id": "second-economics-match-order",
+                    "price": 0.65,
+                    "size": 5.6,
+                }
+            )
+
+        seeded = _seed_edli_absorbed_fill_recovery(
+            conn,
+            command_id="cmd-absorbed-ambiguous",
+            proof_mutator=duplicate_matching_leg,
+        )
+        from src.execution.command_recovery import (
+            reconcile_edli_confirmed_legacy_command_repairs,
+        )
+
+        assert reconcile_edli_confirmed_legacy_command_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        command = conn.execute(
+            "SELECT state, venue_order_id FROM venue_commands WHERE command_id = ?",
+            (seeded["command_id"],),
+        ).fetchone()
+        assert dict(command) == {"state": "SUBMITTING", "venue_order_id": None}
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+            (seeded["command_id"],),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+            (seeded["command_id"],),
+        ).fetchone()[0] == "OPEN"
 
     # Case 3: UNKNOWN + venue_order_id + venue finds order u2192 ACKED
     def test_unknown_with_venue_order_resolves_to_acked(self, conn, mock_client):

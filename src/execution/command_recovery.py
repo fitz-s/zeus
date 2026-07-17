@@ -836,31 +836,31 @@ def _maybe_attach_forecasts_for_recovery(conn: sqlite3.Connection) -> None:
 
 def _edli_live_order_events_ref(conn: sqlite3.Connection) -> str | None:
     _maybe_attach_world_for_recovery(conn)
-    if _table_exists(conn, "edli_live_order_events"):
-        return "edli_live_order_events"
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" in attached and _attached_table_exists(conn, "world", "edli_live_order_events"):
         return "world.edli_live_order_events"
+    if _table_exists(conn, "edli_live_order_events"):
+        return "edli_live_order_events"
     return None
 
 
 def _edli_live_order_projection_ref(conn: sqlite3.Connection) -> str | None:
     _maybe_attach_world_for_recovery(conn)
-    if _table_exists(conn, "edli_live_order_projection"):
-        return "edli_live_order_projection"
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" in attached and _attached_table_exists(conn, "world", "edli_live_order_projection"):
         return "world.edli_live_order_projection"
+    if _table_exists(conn, "edli_live_order_projection"):
+        return "edli_live_order_projection"
     return None
 
 
 def _edli_live_cap_ref(conn: sqlite3.Connection, table: str) -> str | None:
     _maybe_attach_world_for_recovery(conn)
-    if _table_exists(conn, table):
-        return table
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" in attached and _attached_table_exists(conn, "world", table):
         return f"world.{table}"
+    if _table_exists(conn, table):
+        return table
     return None
 
 
@@ -4708,8 +4708,8 @@ def _canonical_payload_hash(payload: Mapping[str, object]) -> str:
     ).hexdigest()
 
 
-def _edli_confirmed_legacy_command_candidates(conn: sqlite3.Connection) -> list[dict]:
-    """Find legacy venue_commands stranded before terminalization despite EDLI fill proof."""
+def _edli_confirmed_event_command_candidates(conn: sqlite3.Connection) -> list[dict]:
+    """Find commands with the ordinary EDLI ACK plus confirmed-trade proof."""
 
     events_ref = _edli_live_order_events_ref(conn)
     if events_ref is None or not _table_exists(conn, "venue_commands"):
@@ -4800,6 +4800,346 @@ def _edli_confirmed_legacy_command_candidates(conn: sqlite3.Connection) -> list[
     return [_dict_row(row) for row in conn.execute(sql).fetchall()]
 
 
+_EDLI_ABSORBED_FILL_CASE = "CONFIRMED_FILL_ALREADY_ABSORBED"
+_EDLI_ABSORBED_FILL_REASON = "AUTHENTICATED_CLOB_FILL_ALREADY_ABSORBED_INTO_POSITION"
+_EDLI_ABSORBED_ECONOMICS_TOLERANCE = Decimal("0.000001")
+
+
+def _edli_absorbed_proof_hash(proof: Mapping[str, object]) -> str:
+    unsigned = dict(proof)
+    unsigned.pop("proof_hash", None)
+    return hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, default=str).encode()
+    ).hexdigest()
+
+
+def _edli_absorbed_fill_candidate(row: Mapping[str, object]) -> dict:
+    """Validate one immutable world-ledger already-absorbed fill proof.
+
+    The proof may contain every confirmed venue leg for the token.  The command
+    is terminalizable only when exactly one leg matches its submitted economics
+    and the complete leg aggregate equals the synchronized canonical position.
+    That equality is what proves this command's fill is already in the position
+    and must not be projected a second time.
+    """
+
+    record = dict(row)
+    payload = _json_dict(record.get("reconcile_payload_json"))
+    proof = payload.get("authenticated_resting_absorbed_proof")
+    if not isinstance(proof, Mapping):
+        raise ValueError("missing authenticated_resting_absorbed_proof")
+    proof = dict(proof)
+    absorbed = proof.get("absorbed_position")
+    if not isinstance(absorbed, Mapping):
+        raise ValueError("missing absorbed_position")
+    absorbed = dict(absorbed)
+
+    command_id = str(record.get("command_id") or "")
+    decision_id = str(record.get("decision_id") or "")
+    aggregate_id = str(record.get("aggregate_id") or "")
+    command_token = str(record.get("token_id") or "")
+    command_position_id = str(record.get("position_id") or "")
+    proof_hash = str(proof.get("proof_hash") or "")
+    if not command_id or not decision_id or not aggregate_id or not command_token:
+        raise ValueError("missing command/proof identity")
+    if str(payload.get("execution_command_id") or "") != decision_id:
+        raise ValueError("outer execution_command_id mismatch")
+    if str(proof.get("execution_command_id") or "") != decision_id:
+        raise ValueError("proof execution_command_id mismatch")
+    if str(proof.get("aggregate_id") or "") != aggregate_id:
+        raise ValueError("proof aggregate_id mismatch")
+    final_intent_id = str(proof.get("final_intent_id") or "")
+    if not final_intent_id or str(payload.get("final_intent_id") or "") != final_intent_id:
+        raise ValueError("final_intent_id mismatch")
+    if (
+        str(proof.get("case") or "") != _EDLI_ABSORBED_FILL_CASE
+        or str(proof.get("reconcile_reason") or "") != _EDLI_ABSORBED_FILL_REASON
+        or str(payload.get("reconcile_reason") or "") != _EDLI_ABSORBED_FILL_REASON
+        or proof.get("venue_trade_exists") is not True
+        or proof.get("venue_order_exists") is not False
+        or payload.get("venue_trade_exists") is not True
+        or payload.get("venue_order_exists") is not False
+        or str(proof.get("cap_transition") or "") != "CONSUMED"
+        or str(payload.get("cap_transition_recommendation") or "") != "CONSUMED"
+        or str(proof.get("source") or "") != "authenticated_clob_user_read"
+        or str(proof.get("owner_scope") or "") != "authenticated_funder"
+    ):
+        raise ValueError("proof is not authenticated already-absorbed fill authority")
+    if not proof_hash or proof_hash != _edli_absorbed_proof_hash(proof):
+        raise ValueError("proof_hash mismatch")
+    if str(proof.get("token_id") or "") != command_token:
+        raise ValueError("proof token_id mismatch")
+
+    condition_ids = {
+        str(record.get(key) or "")
+        for key in ("env_condition_id", "snapshot_condition_id")
+        if str(record.get(key) or "")
+    }
+    if len(condition_ids) != 1:
+        raise ValueError("command condition identity is absent or ambiguous")
+    condition_id = next(iter(condition_ids))
+    if (
+        str(proof.get("condition_id") or "") != condition_id
+        or str(absorbed.get("condition_id") or "") != condition_id
+        or str(record.get("position_condition_id") or "") != condition_id
+    ):
+        raise ValueError("condition_id mismatch")
+    for key in ("env_selected_token_id", "snapshot_selected_token_id"):
+        selected_token = str(record.get(key) or "")
+        if selected_token and selected_token != command_token:
+            raise ValueError(f"{key} mismatch")
+
+    outcome_labels = {
+        str(record.get(key) or "").upper()
+        for key in ("env_outcome_label", "snapshot_outcome_label")
+        if str(record.get(key) or "")
+    }
+    if len(outcome_labels) != 1 or next(iter(outcome_labels)) not in {"YES", "NO"}:
+        raise ValueError("command outcome identity is absent or ambiguous")
+    direction = "buy_no" if next(iter(outcome_labels)) == "NO" else "buy_yes"
+    position_token = str(
+        (
+            record.get("position_no_token_id")
+            if direction == "buy_no"
+            else record.get("position_yes_token_id")
+        )
+        or ""
+    )
+    absorbed_token = str(
+        (
+            absorbed.get("no_token_id")
+            if direction == "buy_no"
+            else absorbed.get("token_id")
+        )
+        or ""
+    )
+    if (
+        str(proof.get("direction") or "") != direction
+        or str(absorbed.get("direction") or "") != direction
+        or str(record.get("position_direction") or "") != direction
+        or position_token != command_token
+        or absorbed_token != command_token
+        or str(absorbed.get("position_id") or "") != command_position_id
+        or str(record.get("canonical_position_id") or "") != command_position_id
+        or str(record.get("position_fill_authority") or "") != "venue_confirmed_full"
+        or str(record.get("position_chain_state") or "") != "synced"
+    ):
+        raise ValueError("absorbed position identity mismatch")
+    if str(absorbed.get("fill_authority") or "") != "venue_confirmed_full":
+        raise ValueError("absorbed position lacks venue-confirmed fill authority")
+
+    command_size = _positive_decimal_or_none(record.get("command_size"))
+    command_price = _positive_decimal_or_none(record.get("command_price"))
+    proof_size = _positive_decimal_or_none(proof.get("order_size"))
+    proof_price = _positive_decimal_or_none(proof.get("limit_price"))
+    if None in (command_size, command_price, proof_size, proof_price):
+        raise ValueError("missing command economics")
+    if (
+        abs(command_size - proof_size) > _EDLI_ABSORBED_ECONOMICS_TOLERANCE
+        or abs(command_price - proof_price) > _EDLI_ABSORBED_ECONOMICS_TOLERANCE
+    ):
+        raise ValueError("proof order economics mismatch")
+
+    raw_legs = proof.get("matched_legs")
+    if not isinstance(raw_legs, list) or not raw_legs:
+        raise ValueError("missing matched venue legs")
+    legs: list[tuple[dict, Decimal, Decimal]] = []
+    for raw_leg in raw_legs:
+        if not isinstance(raw_leg, Mapping):
+            raise ValueError("malformed matched venue leg")
+        leg = dict(raw_leg)
+        size = _positive_decimal_or_none(leg.get("size"))
+        price = _positive_decimal_or_none(leg.get("price"))
+        if (
+            size is None
+            or price is None
+            or price >= Decimal("1")
+            or str(leg.get("role") or "") not in {"MAKER", "TAKER"}
+            or not str(leg.get("trade_id") or "")
+            or not str(leg.get("venue_order_id") or "")
+        ):
+            raise ValueError("matched venue leg lacks positive attributable economics")
+        legs.append((leg, size, price))
+    trade_ids = {str(leg[0]["trade_id"]) for leg in legs}
+    if trade_ids != {str(value) for value in proof.get("matched_trade_ids") or []}:
+        raise ValueError("matched_trade_ids do not bind the venue legs")
+    matching = [
+        leg
+        for leg, size, price in legs
+        if abs(size - command_size) <= _EDLI_ABSORBED_ECONOMICS_TOLERANCE
+        and abs(price - command_price) <= _EDLI_ABSORBED_ECONOMICS_TOLERANCE
+    ]
+    if len(matching) != 1:
+        raise ValueError("command economics do not identify exactly one venue leg")
+    absorbed_order_id = str(absorbed.get("order_id") or "")
+    if absorbed_order_id not in {str(leg[0]["venue_order_id"]) for leg in legs}:
+        raise ValueError("absorbed position order_id is not a proved venue leg")
+
+    total_shares = sum((size for _, size, _ in legs), Decimal("0"))
+    total_cost = sum((size * price for _, size, price in legs), Decimal("0"))
+    absorbed_shares = _positive_decimal_or_none(absorbed.get("shares"))
+    position_shares = _positive_decimal_or_none(record.get("position_shares"))
+    chain_shares = _positive_decimal_or_none(record.get("position_chain_shares"))
+    position_cost = _positive_decimal_or_none(record.get("position_cost_basis_usd"))
+    chain_cost = _positive_decimal_or_none(record.get("position_chain_cost_basis_usd"))
+    if None in (absorbed_shares, position_shares, chain_shares, position_cost, chain_cost):
+        raise ValueError("canonical position lacks synchronized positive economics")
+    if any(
+        abs(value - total_shares) > _EDLI_ABSORBED_ECONOMICS_TOLERANCE
+        for value in (absorbed_shares, position_shares, chain_shares)
+    ):
+        raise ValueError("venue leg aggregate is not already absorbed in canonical shares")
+    if any(abs(value - total_cost) > Decimal("0.02") for value in (position_cost, chain_cost)):
+        raise ValueError("venue leg aggregate is not already absorbed in canonical cost")
+
+    leg = matching[0]
+    observed_at = str(proof.get("observed_at") or record.get("reconciled_at") or "")
+    if not observed_at:
+        raise ValueError("absorbed proof lacks observation time")
+    return {
+        **record,
+        "execution_command_id": decision_id,
+        "final_intent_id": final_intent_id,
+        "ack_venue_order_id": str(leg.get("venue_order_id") or ""),
+        "trade_venue_order_id": str(leg.get("venue_order_id") or ""),
+        "recovered_trade_id": str(leg.get("trade_id") or ""),
+        "trade_id": str(leg.get("trade_id") or ""),
+        "trade_status": "CONFIRMED",
+        "filled_size": _decimal_text(command_size),
+        "fill_price": _decimal_text(command_price),
+        "avg_fill_price": _decimal_text(command_price),
+        "acked_at": observed_at,
+        "filled_at": observed_at,
+        "ack_payload_json": payload,
+        "trade_payload_json": {
+            "authenticated_resting_absorbed_proof": proof,
+            "matched_command_leg": leg,
+        },
+        "repair_source": "edli_authenticated_resting_absorbed_reconcile",
+        "recovered_from": "edli_confirmed_fill_already_absorbed",
+        "proof_hash": proof_hash,
+        "absorbed_position_id": command_position_id,
+    }
+
+
+def _edli_absorbed_fill_command_candidates(conn: sqlite3.Connection) -> list[dict]:
+    events_ref = _edli_live_order_events_ref(conn)
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "venue_submission_envelopes",
+        "executable_market_snapshots",
+        "position_current",
+    }
+    if events_ref is None or not all(_table_exists(conn, table) for table in required):
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT cmd.command_id,
+               cmd.state AS command_state,
+               cmd.venue_order_id AS command_venue_order_id,
+               cmd.position_id,
+               cmd.decision_id,
+               cmd.token_id,
+               cmd.size AS command_size,
+               cmd.price AS command_price,
+               event.aggregate_id,
+               event.occurred_at AS reconciled_at,
+               event.payload_json AS reconcile_payload_json,
+               env.condition_id AS env_condition_id,
+               env.selected_outcome_token_id AS env_selected_token_id,
+               env.outcome_label AS env_outcome_label,
+               snap.condition_id AS snapshot_condition_id,
+               snap.selected_outcome_token_id AS snapshot_selected_token_id,
+               snap.outcome_label AS snapshot_outcome_label,
+               pc.position_id AS canonical_position_id,
+               pc.direction AS position_direction,
+               pc.token_id AS position_yes_token_id,
+               pc.no_token_id AS position_no_token_id,
+               pc.condition_id AS position_condition_id,
+               pc.fill_authority AS position_fill_authority,
+               pc.chain_state AS position_chain_state,
+               pc.shares AS position_shares,
+               pc.cost_basis_usd AS position_cost_basis_usd,
+               pc.chain_shares AS position_chain_shares,
+               pc.chain_cost_basis_usd AS position_chain_cost_basis_usd
+          FROM venue_commands cmd
+          JOIN {events_ref} event
+            ON event.event_type = 'Reconciled'
+           AND json_extract(event.payload_json, '$.execution_command_id') = cmd.decision_id
+          JOIN venue_submission_envelopes env
+            ON env.envelope_id = cmd.envelope_id
+          JOIN executable_market_snapshots snap
+            ON snap.snapshot_id = cmd.snapshot_id
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state IN ('SUBMITTING', 'UNKNOWN', 'SUBMIT_UNKNOWN_SIDE_EFFECT', 'ACKED', 'POST_ACKED', 'REVIEW_REQUIRED')
+           AND COALESCE(cmd.venue_order_id, '') = ''
+           AND json_type(event.payload_json, '$.authenticated_resting_absorbed_proof') = 'object'
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM venue_trade_facts fact
+                WHERE fact.command_id = cmd.command_id
+           )
+         ORDER BY event.occurred_at, cmd.command_id, event.event_sequence
+        """
+    ).fetchall()
+    candidates: dict[str, dict] = {}
+    ambiguous: set[str] = set()
+    for raw in rows:
+        row = _dict_row(raw)
+        command_id = str(row.get("command_id") or "")
+        try:
+            candidate = _edli_absorbed_fill_candidate(row)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "recovery: ignored invalid EDLI absorbed-fill proof for command %s: %s",
+                command_id,
+                exc,
+            )
+            continue
+        prior = candidates.get(command_id)
+        if prior is not None and str(prior.get("proof_hash") or "") != str(
+            candidate.get("proof_hash") or ""
+        ):
+            ambiguous.add(command_id)
+            continue
+        candidates[command_id] = candidate
+    for command_id in ambiguous:
+        candidates.pop(command_id, None)
+        logger.warning(
+            "recovery: ignored ambiguous EDLI absorbed-fill proofs for command %s",
+            command_id,
+        )
+    return sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            str(candidate.get("filled_at") or ""),
+            str(candidate.get("command_id") or ""),
+        ),
+    )
+
+
+def _edli_confirmed_legacy_command_candidates(conn: sqlite3.Connection) -> list[dict]:
+    """Find stranded commands backed by either canonical EDLI fill proof."""
+
+    candidates = {
+        str(candidate.get("command_id") or ""): candidate
+        for candidate in _edli_confirmed_event_command_candidates(conn)
+    }
+    for candidate in _edli_absorbed_fill_command_candidates(conn):
+        candidates.setdefault(str(candidate.get("command_id") or ""), candidate)
+    return sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            str(candidate.get("filled_at") or ""),
+            str(candidate.get("command_id") or ""),
+        ),
+    )
+
+
 def _append_edli_confirmed_legacy_command_repair(
     conn: sqlite3.Connection,
     *,
@@ -4815,14 +5155,19 @@ def _append_edli_confirmed_legacy_command_repair(
     if not command_id or not venue_order_id or not trade_id or not filled_size or not fill_price:
         raise ValueError("EDLI confirmed command repair requires command/order/trade/fill identity")
 
+    repair_source = str(candidate.get("repair_source") or "edli_live_order_reconcile")
+    recovered_from = str(candidate.get("recovered_from") or "edli_confirmed_fill")
+    proof_hash = str(candidate.get("proof_hash") or "")
     ack_payload = {
         "venue_order_id": venue_order_id,
         "venue_status": "MATCHED",
-        "source": "edli_live_order_reconcile",
+        "source": repair_source,
         "edli_execution_command_id": candidate.get("execution_command_id"),
         "edli_final_intent_id": candidate.get("final_intent_id"),
         "recovered_trade_id": trade_id,
-        "recovered_from": "edli_confirmed_fill",
+        "recovered_from": recovered_from,
+        "proof_hash": proof_hash or None,
+        "absorbed_position_id": candidate.get("absorbed_position_id"),
     }
     current_state = str(candidate.get("command_state") or "")
     if current_state in {
@@ -4840,7 +5185,7 @@ def _append_edli_confirmed_legacy_command_repair(
         )
 
     order_payload = {
-        "source": "edli_live_order_reconcile",
+        "source": repair_source,
         "venue_order_id": venue_order_id,
         "trade_id": trade_id,
         "ack_payload": _json_dict(candidate.get("ack_payload_json")),
@@ -4860,7 +5205,7 @@ def _append_edli_confirmed_legacy_command_repair(
         raw_payload_json=order_payload,
     )
     trade_payload = {
-        "source": "edli_live_order_reconcile",
+        "source": repair_source,
         "venue_order_id": venue_order_id,
         "trade_id": trade_id,
         "trade_status": candidate.get("trade_status"),
@@ -4896,8 +5241,11 @@ def _append_edli_confirmed_legacy_command_repair(
             "trade_id": trade_id,
             "filled_size": filled_size,
             "fill_price": fill_price,
-            "source": "edli_live_order_reconcile",
+            "source": repair_source,
             "edli_final_intent_id": candidate.get("final_intent_id"),
+            "recovered_from": recovered_from,
+            "proof_hash": proof_hash or None,
+            "absorbed_position_id": candidate.get("absorbed_position_id"),
         },
     )
 
