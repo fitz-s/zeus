@@ -1866,12 +1866,14 @@ def _replacement_availability_poll_tick():
     notified_source_scopes: set[tuple[str, str, str, str]] = set()
     anchor_scopes_attempted: set[tuple[str, str, str]] = set()
     fallback_reseed_published = False
+    scoped_reseed_completed = False
+    scoped_reseed_summary: dict[str, object] = {}
 
     def _publish_committed_source(
         source: str,
         task_report: object,
     ) -> None:
-        nonlocal fallback_reseed_published
+        nonlocal fallback_reseed_published, scoped_reseed_completed
         raw_scopes = (
             task_report.get("committed_families", ())
             if isinstance(task_report, dict)
@@ -1928,6 +1930,24 @@ def _replacement_availability_poll_tick():
         else:
             _attach_reseed_reports(report)
             fallback_reseed_published = True
+        for key in (
+            "anchor_scope_status",
+            "anchor_scope_manifest_count",
+            "fusion_upgrade_status",
+            "cycle_advance_status",
+            "cycle_advance_detail",
+        ):
+            if key in report:
+                scoped_reseed_summary[key] = report[key]
+        for key in (
+            "fusion_upgrade_seeds_enqueued",
+            "cycle_advance_seeds_enqueued",
+        ):
+            if key in report:
+                scoped_reseed_summary[key] = int(
+                    scoped_reseed_summary.get(key) or 0
+                ) + int(report.get(key) or 0)
+        scoped_reseed_completed = True
         logger.info(
             "replacement source-clock committed families published reseeds: %s",
             report,
@@ -1949,6 +1969,7 @@ def _replacement_availability_poll_tick():
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
+    report.update(scoped_reseed_summary)
     # No raw input can land while the provider quota is cooling down. Run one
     # catch-up scan, then suppress identical JSON-heavy reseed scans until the
     # downloader can make progress again.
@@ -1966,9 +1987,17 @@ def _replacement_availability_poll_tick():
             float(report.get("cooldown_seconds") or 0)
         )
     else:
-        # Publish changed-source work before generic current-target maintenance.
-        # The forecast materializer can consume these idempotent seeds immediately.
-        report = _attach_reseed_reports(report)
+        notification_errors = tuple(
+            report.get("source_commit_notification_errors") or ()
+        )
+        if scoped_reseed_completed and not notification_errors:
+            report["reseed_maintenance_status"] = (
+                "SOURCE_COMMIT_RESEEDS_PUBLISHED"
+            )
+        else:
+            # No committed callback completed, or at least one callback failed.
+            # Preserve the broad scan as the authoritative catch-up path.
+            report = _attach_reseed_reports(report)
     cursor_sources = source_clock_scoped_download_cursor_sources(report)
     advanced_sources = (
         advance_source_clock_cursor(source_clock_report, sources=cursor_sources)

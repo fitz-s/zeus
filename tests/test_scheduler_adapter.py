@@ -374,7 +374,6 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
             "scopes": (("Munich", "2026-07-03", "high"),),
             "changed_sources": ("icon_global",),
         },
-        {},
     ]
     assert anchor_calls == [
         {
@@ -384,7 +383,6 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     ]
     assert cycle_calls == [
         {"scopes": (("Munich", "2026-07-03", "high"),)},
-        {},
     ]
     assert call_order == [
         "probe",
@@ -393,10 +391,100 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         "fusion_reseed",
         "cycle_reseed",
         "scoped_download_complete",
-        "fusion_reseed",
-        "cycle_reseed",
         "cursor",
     ]
+    assert result["reseed_maintenance_status"] == (
+        "SOURCE_COMMIT_RESEEDS_PUBLISHED"
+    )
+
+
+def test_replacement_availability_notification_error_keeps_global_reseed(
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    class _Changed:
+        updated_sources = ("icon_global",)
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                "updated_sources": ["icon_global"],
+                "affected_cities": ["Munich"],
+                "error": None,
+            }
+
+    def _scoped_path(_cfg, *, on_source_commit=None, **_kwargs):
+        try:
+            on_source_commit(
+                "icon_global",
+                {
+                    "written_row_count": 1,
+                    "committed_families": (
+                        ("Munich", "2026-07-03", "high"),
+                    ),
+                },
+            )
+        except RuntimeError as exc:
+            errors = (f"icon_global:RuntimeError: {exc}",)
+        else:
+            errors = ()
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "updated_sources": ["icon_global"],
+            "source_commit_notification_errors": errors,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _Changed(),
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "advance_source_clock_cursor",
+        lambda _report, *, sources=None: tuple(sources or ()),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
+        _scoped_path,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("anchor unavailable")
+        ),
+    )
+    fusion_calls: list[dict[str, object]] = []
+    cycle_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, **kwargs: fusion_calls.append(kwargs) or None,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, **kwargs: cycle_calls.append(kwargs) or None,
+    )
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["source_commit_notification_errors"]
+    assert fusion_calls == [{}]
+    assert cycle_calls == [{}]
+    assert result.get("reseed_maintenance_status") != (
+        "SOURCE_COMMIT_RESEEDS_PUBLISHED"
+    )
 
 
 def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
