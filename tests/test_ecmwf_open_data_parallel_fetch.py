@@ -1,5 +1,5 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-07-17
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.4 + §6
 """Unit tests for ECMWF Open Data parallel SDK fetch (Candidate H).
 
@@ -832,7 +832,7 @@ def test_token_bucket_limits_rate():
 
 def test_token_bucket_default_rps():
     """Module-level _fetch_bucket defaults to ZEUS_ECMWF_RPS=4.0 rps."""
-    from src.data.ecmwf_open_data import _DOWNLOAD_RPS, _fetch_bucket
+    from src.data.ecmwf_open_data import _DOWNLOAD_BURST, _DOWNLOAD_RPS, _fetch_bucket
 
     assert _DOWNLOAD_RPS == 4.0, (
         f"Default RPS must be 4.0 (D1 throttle), got {_DOWNLOAD_RPS}"
@@ -841,3 +841,37 @@ def test_token_bucket_default_rps():
     assert _fetch_bucket._rate == _DOWNLOAD_RPS, (
         f"Bucket rate {_fetch_bucket._rate} != _DOWNLOAD_RPS {_DOWNLOAD_RPS}"
     )
+    assert _fetch_bucket._capacity == _DOWNLOAD_BURST == 4.0
+
+
+def test_token_bucket_burst_and_aimd_feedback():
+    """Burst stays bounded while 503 halves and successes recover the rate."""
+    from src.data.ecmwf_open_data import _TokenBucket
+
+    bucket = _TokenBucket(64.0, capacity=8.0)
+
+    assert bucket._tokens == bucket._capacity == 8.0
+    bucket.observe(503)
+    assert bucket._rate == 32.0
+
+    for _ in range(32):
+        bucket.observe(200)
+    assert 32.9 < bucket._rate < 34.0
+
+    bucket.observe(429)
+    assert 16.0 < bucket._rate < 17.0
+
+
+def test_token_bucket_serializes_waiting_threads():
+    """Concurrent waiters cannot all consume the same future token."""
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    from src.data.ecmwf_open_data import _TokenBucket
+
+    bucket = _TokenBucket(40.0, capacity=1.0)
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(lambda _: bucket.acquire(), range(4)))
+
+    assert time.monotonic() - started >= 0.06

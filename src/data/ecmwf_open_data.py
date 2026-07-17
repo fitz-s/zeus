@@ -178,16 +178,12 @@ _DOWNLOAD_SOURCES: tuple[str, ...] = tuple(
 # minute=30 and minute=35 respectively via ingest_main.py, so up to
 # 2 × _DOWNLOAD_MAX_WORKERS fetches can be in flight simultaneously).
 #
-# Primary throttle mechanism: the token bucket caps sustained throughput at
-# ZEUS_ECMWF_RPS requests/sec regardless of worker count. Worker reduction
-# (2 vs 5) reduces BURST, not sustained rate — it is secondary.
-#
-# DO NOT revert workers to 1: 2 workers + 4 rps bucket is the tested and
-# operator-approved operating point. The prior revert to 1 was a linter
-# misread of the antibody comment. See architect D1 and commit message.
+# The token bucket caps sustained throughput at ZEUS_ECMWF_RPS regardless of
+# worker count. ZEUS_ECMWF_BURST bounds the startup burst independently, while
+# 429/503 responses reduce the live rate and successful responses recover it.
 
 class _TokenBucket:
-    """Simple token-bucket rate limiter (thread-safe).
+    """Adaptive token-bucket rate limiter (thread-safe).
 
     Fills at ``rate`` tokens/sec; each ``acquire()`` consumes one token,
     sleeping until a token is available.  Implemented as a leaky-bucket
@@ -195,43 +191,59 @@ class _TokenBucket:
     daemon thread to manage across fork/test boundaries.
     """
 
-    def __init__(self, rate: float) -> None:
-        self._rate = rate  # tokens per second
+    def __init__(self, rate: float, *, capacity: float | None = None) -> None:
+        if rate <= 0:
+            raise ValueError("rate must be positive")
+        if capacity is not None and capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self._max_rate = float(rate)
+        self._min_rate = min(1.0, self._max_rate)
+        self._rate = self._max_rate
+        self._capacity = max(1.0, float(capacity if capacity is not None else rate))
         self._lock = threading.Lock()
-        self._tokens: float = rate  # start full so first request is instant
+        self._tokens = self._capacity
         self._last_refill: float = time.monotonic()
+
+    def _refill_locked(self, now: float) -> None:
+        elapsed = now - self._last_refill
+        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+        self._last_refill = now
 
     def acquire(self) -> None:
         """Block until one token is available, then consume it."""
+        while True:
+            with self._lock:
+                self._refill_locked(time.monotonic())
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
+
+    def observe(self, status_code: int) -> None:
+        """Apply AIMD feedback from a completed provider request."""
         with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
-            self._last_refill = now
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return
-            wait = (1.0 - self._tokens) / self._rate
-        time.sleep(wait)
-        with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
-            self._last_refill = now
-            self._tokens = max(0.0, self._tokens - 1.0)
+            self._refill_locked(time.monotonic())
+            if status_code in {429, 503}:
+                self._rate = max(self._min_rate, self._rate * 0.5)
+            elif status_code < 500 and self._rate < self._max_rate:
+                self._rate = min(
+                    self._max_rate,
+                    self._rate + 1.0 / max(self._rate, 1.0),
+                )
 
 
 _DOWNLOAD_RPS: float = float(os.environ.get("ZEUS_ECMWF_RPS", "4.0"))
-_fetch_bucket: _TokenBucket = _TokenBucket(_DOWNLOAD_RPS)
+_DOWNLOAD_BURST: float = float(
+    os.environ.get("ZEUS_ECMWF_BURST", str(min(8.0, _DOWNLOAD_RPS)))
+)
+_fetch_bucket: _TokenBucket = _TokenBucket(_DOWNLOAD_RPS, capacity=_DOWNLOAD_BURST)
 
 # ---------------------------------------------------------------------------
 # Parallel-fetch constants (antibody-style: no call-site kwargs).
 # Single-writer antibody: SQLite writes are PROHIBITED inside worker threads —
 # HTTP fetch only; all DB writes happen on the main thread after futures complete.
 # ---------------------------------------------------------------------------
-# Workers=2 (not 1, not 5): 2 workers reduces concurrency burst while keeping
-# pipeline throughput reasonable. The token bucket (_fetch_bucket, 4 rps) is
-# the PRIMARY throttle against AWS S3 503 Slow Down; worker count is secondary.
 # Env override: ZEUS_ECMWF_MAX_WORKERS (operator-set; survives linter audits).
 _DOWNLOAD_MAX_WORKERS: int = int(os.environ.get("ZEUS_ECMWF_MAX_WORKERS", "2"))
 _PER_STEP_TIMEOUT_SECONDS: int = int(os.environ.get("ZEUS_ECMWF_STEP_TIMEOUT_SECONDS", "180"))
@@ -253,9 +265,13 @@ class _RateLimitedSession(requests.Session):
     """requests.Session that rate-limits ECMWF download HEAD/GET calls."""
 
     def request(self, method: str, url: str, *args, **kwargs):  # type: ignore[override]
-        if method.upper() in {"GET", "HEAD"} and _is_ecmwf_download_url(str(url)):
+        limited = method.upper() in {"GET", "HEAD"} and _is_ecmwf_download_url(str(url))
+        if limited:
             _fetch_bucket.acquire()
-        return super().request(method, url, *args, **kwargs)
+        response = super().request(method, url, *args, **kwargs)
+        if limited:
+            _fetch_bucket.observe(response.status_code)
+        return response
 
 
 def _part_offset_length(part: Any) -> tuple[int, int]:

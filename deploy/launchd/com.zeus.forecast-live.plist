@@ -41,6 +41,8 @@
 		<key>ZEUS_ECMWF_MAX_WORKERS</key>
 		<string>8</string>
 		<key>ZEUS_ECMWF_RPS</key>
+		<string>64.0</string>
+		<key>ZEUS_ECMWF_BURST</key>
 		<string>8.0</string>
 		<key>ZEUS_ECMWF_SOURCES</key>
 		<string>aws,google</string>
