@@ -101,6 +101,7 @@ _HARVESTER_LIVE_DATA_VERSION = {
     "noaa": "ogimet_metar",
     "cwa_station": "cwa_no_collector",
 }
+_SETTLEMENT_TRUTH_REVISION = 1
 
 _SOURCE_TYPE_MAP = {
     "wu_icao": "WU",
@@ -201,13 +202,14 @@ def _lookup_settlement_obs(
     target_date: str,
     *,
     temperature_metric: str = "high",
+    column_names: Optional[list[str]] = None,
 ) -> Optional[dict]:
     """Look up source-family-correct observation for the harvester write path."""
     metric_identity = _metric_identity_for(temperature_metric)
     st = city.settlement_source_type
     if st == "cwa_station":
         return None
-    column_names = _table_column_names(conn, "observations")
+    column_names = column_names or _table_column_names(conn, "observations")
     columns = set(column_names)
     if not columns:
         return None
@@ -244,6 +246,91 @@ def _lookup_settlement_obs(
             "observed_temp": observed_temp,
         }
     return None
+
+
+def _values_equal(left, right) -> bool:
+    if left in (None, "") or right in (None, ""):
+        return left in (None, "") and right in (None, "")
+    if isinstance(right, float):
+        try:
+            return abs(float(left) - right) < 1e-12
+        except (TypeError, ValueError):
+            return False
+    return str(left) == str(right)
+
+
+def _row_matches(row, fields: tuple[str, ...], expected: tuple[object, ...]) -> bool:
+    if row is None:
+        return False
+    return all(
+        _values_equal(_row_value(row, field), value)
+        for field, value in zip(fields, expected)
+    )
+
+
+def _stable_settlement_truth_matches(
+    conn,
+    *,
+    city: City,
+    target_date: str,
+    metric_identity: MetricIdentity,
+    event_slug: str,
+    winning_bin: Optional[str],
+    settlement_value: Optional[float],
+    settled_at: Optional[str],
+    authority: str,
+    pm_bin_lo: Optional[float],
+    pm_bin_hi: Optional[float],
+    db_source_type: str,
+    data_version: str,
+) -> bool:
+    key = (city.name, target_date, metric_identity.temperature_metric)
+    settlement_fields = (
+        "market_slug", "winning_bin", "settlement_value", "settlement_source",
+        "settled_at", "authority", "pm_bin_lo", "pm_bin_hi", "unit",
+        "settlement_source_type", "physical_quantity", "observation_field",
+        "data_version",
+    )
+    settlement_expected = (
+        event_slug or None, winning_bin, settlement_value, city.settlement_source,
+        settled_at, authority, pm_bin_lo, pm_bin_hi, city.settlement_unit,
+        db_source_type, metric_identity.physical_quantity,
+        metric_identity.observation_field, data_version,
+    )
+    try:
+        settlement_row = conn.execute(
+            f"SELECT {', '.join(settlement_fields)}, provenance_json FROM settlements "
+            "WHERE city = ? AND target_date = ? AND temperature_metric = ?",
+            key,
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if not _row_matches(settlement_row, settlement_fields, settlement_expected):
+        return False
+    try:
+        prior_provenance = json.loads(_row_value(settlement_row, "provenance_json") or "{}")
+    except (TypeError, ValueError):
+        return False
+    if prior_provenance.get("truth_revision") != _SETTLEMENT_TRUTH_REVISION:
+        return False
+
+    outcome_fields = (
+        "market_slug", "winning_bin", "settlement_value", "settlement_source",
+        "settled_at", "authority", "settlement_unit",
+    )
+    outcome_expected = (
+        event_slug or None, winning_bin, settlement_value, city.settlement_source,
+        settled_at, authority, city.settlement_unit,
+    )
+    try:
+        outcome_row = conn.execute(
+            f"SELECT {', '.join(outcome_fields)} FROM settlement_outcomes "
+            "WHERE city = ? AND target_date = ? AND temperature_metric = ?",
+            key,
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return _row_matches(outcome_row, outcome_fields, outcome_expected)
 
 
 def _fetch_open_settling_markets() -> list[dict]:
@@ -570,9 +657,66 @@ def _write_settlement_truth(
         winning_bin = None
         reason = "harvester_truth_no_settlement_time"
 
+    settlement_unchanged = _stable_settlement_truth_matches(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric_identity=metric_identity,
+        event_slug=event_slug,
+        winning_bin=winning_bin,
+        settlement_value=settlement_value,
+        settled_at=settled_at,
+        authority=authority,
+        pm_bin_lo=pm_bin_lo,
+        pm_bin_hi=pm_bin_hi,
+        db_source_type=db_source_type,
+        data_version=data_version,
+    )
+    if settlement_unchanged:
+        if authority == "VERIFIED" and resolved_market_outcomes:
+            market_events_result = log_market_event_outcomes(
+                conn,
+                market_slug=event_slug or None,
+                city=city.name,
+                target_date=target_date,
+                temperature_metric=metric_identity.temperature_metric,
+                outcomes=[
+                    {
+                        "condition_id": outcome["condition_id"],
+                        "token_id": outcome["yes_token_id"],
+                        "outcome": "YES" if outcome["yes_won"] else "NO",
+                    }
+                    for outcome in resolved_market_outcomes
+                ],
+            )
+        elif resolved_market_outcomes:
+            market_events_result = {
+                "status": "skipped_unverified_settlement",
+                "table": "market_events",
+                "authority": authority,
+            }
+        else:
+            market_events_result = {
+                "status": "skipped_no_resolved_market_identity",
+                "table": "market_events",
+            }
+        changed = market_events_result.get("status") == "written"
+        return {
+            "status": "written" if changed else "unchanged",
+            "changed": changed,
+            "settlement_changed": False,
+            "authority": authority,
+            "settlement_value": settlement_value,
+            "winning_bin": winning_bin,
+            "reason": reason,
+            "settlement_result": {"status": "unchanged", "table": "settlement_outcomes"},
+            "market_events": market_events_result,
+        }
+
     provenance = {
         "writer": "harvester_truth_writer_dr33",
         "writer_script": "src/ingest/harvester_truth_writer.py",
+        "truth_revision": _SETTLEMENT_TRUTH_REVISION,
         "source_family": db_source_type,
         "obs_source": obs_row.get("source") if obs_row else None,
         "obs_id": obs_row.get("id") if obs_row else None,
@@ -701,6 +845,9 @@ def _write_settlement_truth(
         raise
 
     return {
+        "status": "written",
+        "changed": True,
+        "settlement_changed": True,
         "authority": authority,
         "settlement_value": settlement_value,
         "winning_bin": winning_bin,
@@ -755,7 +902,10 @@ def write_settlement_truth_for_open_markets(
 
     markets_resolved = 0
     settlements_written = 0
+    settlements_unchanged = 0
+    market_event_outcomes_written = 0
     errors = 0
+    observation_columns = _table_column_names(forecasts_conn, "observations")
 
     for event in settled_events:
         try:
@@ -807,7 +957,11 @@ def write_settlement_truth_for_open_markets(
                 continue
 
             obs_row = _lookup_settlement_obs(
-                forecasts_conn, city, target_date, temperature_metric=temperature_metric,
+                forecasts_conn,
+                city,
+                target_date,
+                temperature_metric=temperature_metric,
+                column_names=observation_columns,
             )
             if obs_row is None:
                 logger.debug(
@@ -831,7 +985,7 @@ def write_settlement_truth_for_open_markets(
             # _write_settlement_truth converts F->C when units mismatch (fix #262).
             winning_bin_unit = _detect_bin_unit(winning.get("range_label", ""))
 
-            _write_settlement_truth(
+            write_result = _write_settlement_truth(
                 forecasts_conn, city, target_date, pm_bin_lo, pm_bin_hi,
                 event_slug=event.get("slug", ""),
                 obs_row=obs_row,
@@ -839,6 +993,11 @@ def write_settlement_truth_for_open_markets(
                 temperature_metric=temperature_metric,
                 pm_bin_unit=winning_bin_unit,
             )
+            settlement_changed = write_result.get("settlement_changed", True)
+            if not settlement_changed:
+                settlements_unchanged += 1
+            if not write_result.get("changed", True):
+                continue
             # Commit per-event: release the forecasts WAL write lock between events.
             # Holding the lock across the full batch caused a "database is locked"
             # flood contending with forecast-live daemon during startup catch-up
@@ -852,7 +1011,10 @@ def write_settlement_truth_for_open_markets(
                 )
                 errors += 1
                 continue
-            settlements_written += 1
+            settlements_written += int(settlement_changed)
+            market_event_outcomes_written += int(
+                write_result.get("market_events", {}).get("written", 0)
+            )
 
         except Exception as exc:
             logger.error(
@@ -862,17 +1024,19 @@ def write_settlement_truth_for_open_markets(
             errors += 1
 
     if not dry_run:
-        # Final flush/no-op safety: harmless if nothing pending.
-        try:
-            forecasts_conn.commit()
-        except Exception as exc:
-            logger.error("harvester_truth_writer: final commit flush failed: %s", exc)
-            errors += 1
+        if forecasts_conn.in_transaction:
+            try:
+                forecasts_conn.commit()
+            except Exception as exc:
+                logger.error("harvester_truth_writer: final commit flush failed: %s", exc)
+                errors += 1
 
     return {
         "status": "ok",
         "markets_resolved": markets_resolved,
         "settlements_written": settlements_written,
+        "settlements_unchanged": settlements_unchanged,
+        "market_event_outcomes_written": market_event_outcomes_written,
         "errors": errors,
         "dry_run": dry_run,
     }

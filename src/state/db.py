@@ -8186,7 +8186,7 @@ def _prepare_market_event_outcome_update(
     try:
         row = conn.execute(
             """
-            SELECT city, target_date, temperature_metric, token_id, outcome
+            SELECT city, target_date, temperature_metric, token_id, range_label, outcome
             FROM market_events
             WHERE market_slug = ? AND condition_id = ?
             """,
@@ -8207,7 +8207,12 @@ def _prepare_market_event_outcome_update(
             "condition_id": clean_condition_id,
         }
 
-    existing = dict(zip(("city", "target_date", "temperature_metric", "token_id", "outcome"), tuple(row)))
+    existing = dict(
+        zip(
+            ("city", "target_date", "temperature_metric", "token_id", "range_label", "outcome"),
+            tuple(row),
+        )
+    )
     mismatches = tuple(
         field
         for field, expected in (
@@ -8226,7 +8231,8 @@ def _prepare_market_event_outcome_update(
         }
 
     existing_outcome = _forward_clean_str(existing.get("outcome"))
-    if existing_outcome is not None:
+    range_label = _forward_clean_str(existing.get("range_label"))
+    if existing_outcome is not None and existing_outcome != range_label:
         existing_outcome = existing_outcome.upper()
         if existing_outcome == clean_outcome:
             return {"status": "unchanged", "table": table}

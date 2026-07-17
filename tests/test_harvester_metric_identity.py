@@ -530,6 +530,7 @@ def test_harvester_verified_settlement_updates_market_events_by_identity(harvest
         range_label="65-69°F",
         range_low=65.0,
         range_high=69.0,
+        outcome="65-69°F",
     )
     _insert_market_event_v2(
         harvester_conn,
@@ -540,8 +541,34 @@ def test_harvester_verified_settlement_updates_market_events_by_identity(harvest
         range_label="70-75°F",
         range_low=70.0,
         range_high=75.0,
+        outcome="70-75°F",
     )
 
+    obs_row = {
+        "high_temp": 72.0,
+        "source": "wu_icao_history",
+        "id": 401,
+        "fetched_at": "2026-04-24T12:00:00Z",
+        "observation_local_time": "2026-04-24T23:59:00Z",
+    }
+    resolved_outcomes = [
+        harvester_mod.ResolvedMarketOutcome(
+            condition_id="cond-loser",
+            yes_token_id="yes-loser",
+            range_label="65-69°F",
+            range_low=65.0,
+            range_high=69.0,
+            yes_won=False,
+        ),
+        harvester_mod.ResolvedMarketOutcome(
+            condition_id="cond-winner",
+            yes_token_id="yes-winner",
+            range_label="70-75°F",
+            range_low=70.0,
+            range_high=75.0,
+            yes_won=True,
+        ),
+    ]
     result = harvester_mod._write_settlement_truth(
         harvester_conn,
         city,
@@ -549,31 +576,8 @@ def test_harvester_verified_settlement_updates_market_events_by_identity(harvest
         pm_bin_lo=70.0,
         pm_bin_hi=75.0,
         event_slug=market_slug,
-        obs_row={
-            "high_temp": 72.0,
-            "source": "wu_icao_history",
-            "id": 401,
-            "fetched_at": "2026-04-24T12:00:00Z",
-            "observation_local_time": "2026-04-24T23:59:00Z",
-        },
-        resolved_market_outcomes=[
-            harvester_mod.ResolvedMarketOutcome(
-                condition_id="cond-loser",
-                yes_token_id="yes-loser",
-                range_label="65-69°F",
-                range_low=65.0,
-                range_high=69.0,
-                yes_won=False,
-            ),
-            harvester_mod.ResolvedMarketOutcome(
-                condition_id="cond-winner",
-                yes_token_id="yes-winner",
-                range_label="70-75°F",
-                range_low=70.0,
-                range_high=75.0,
-                yes_won=True,
-            ),
-        ],
+        obs_row=obs_row,
+        resolved_market_outcomes=resolved_outcomes,
     )
 
     assert result["authority"] == "VERIFIED"

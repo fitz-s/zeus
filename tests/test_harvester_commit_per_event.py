@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS settlement_outcomes (
     winning_bin TEXT, settlement_value REAL, settlement_source TEXT,
     settled_at TEXT, authority TEXT NOT NULL DEFAULT 'UNVERIFIED',
     provenance_json TEXT NOT NULL DEFAULT '{}',
-    recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    settlement_unit TEXT,
+    UNIQUE(city, target_date, temperature_metric)
 );
 CREATE TABLE IF NOT EXISTS market_events (
     event_id INTEGER PRIMARY KEY,
@@ -52,7 +54,8 @@ CREATE TABLE IF NOT EXISTS market_events (
     target_date TEXT NOT NULL, temperature_metric TEXT NOT NULL,
     condition_id TEXT, token_id TEXT, range_label TEXT,
     range_low REAL, range_high REAL, outcome TEXT,
-    created_at TEXT, recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT, recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(market_slug, condition_id)
 );
 CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -346,3 +349,62 @@ def test_dry_run_never_commits(monkeypatch):
     )
     assert result["settlements_written"] == 3
     assert result["dry_run"] is True
+
+
+def test_identical_settlement_tick_is_read_only(monkeypatch):
+    """A repeated settled fact must not reacquire the forecasts writer lock."""
+    monkeypatch.setenv("ZEUS_HARVESTER_LIVE_ENABLED", "1")
+
+    from src.config import City
+    from src.ingest.harvester_truth_writer import write_settlement_truth_for_open_markets
+
+    _, real_conn = _make_forecasts_db()
+    proxy = _CommitCounterConn(real_conn)
+    event = _minimal_event("stable-event")
+    london = City(
+        name="London", lat=51.47, lon=-0.45, timezone="Europe/London",
+        settlement_unit="C", cluster="London", wu_station="EGLC",
+        country_code="GB", settlement_source_type="wu_icao",
+    )
+    obs_row = {
+        "id": 1, "source": "wu_icao_history", "high_temp": 17.0,
+        "low_temp": None, "unit": "C", "fetched_at": "2026-06-01T12:00:00Z",
+        "station_id": "EGLC", "authority": "VERIFIED",
+        "observation_field": "high_temp", "observed_temp": 17.0,
+    }
+    resolved = [{
+        "yes_won": True,
+        "range_low": 17.0,
+        "range_high": 17.0,
+        "range_label": "17°C",
+        "condition_id": "cond-stable",
+        "yes_token_id": "tok-stable",
+    }]
+
+    with patch(
+        "src.ingest.harvester_truth_writer._fetch_open_settling_markets",
+        return_value=[event],
+    ), patch(
+        "src.data.market_scanner._match_city", return_value=london,
+    ), patch(
+        "src.data.market_scanner.infer_temperature_metric", return_value="high",
+    ), patch(
+        "src.data.market_scanner._parse_target_date", return_value="2026-06-01",
+    ), patch(
+        "src.ingest.harvester_truth_writer._lookup_settlement_obs", return_value=obs_row,
+    ), patch(
+        "src.ingest.harvester_truth_writer._extract_resolved_market_outcomes",
+        return_value=resolved,
+    ), patch(
+        "src.ingest.harvester_truth_writer._detect_bin_unit", return_value="C",
+    ):
+        first = write_settlement_truth_for_open_markets(proxy)
+        commits_after_first = proxy.commit_count
+        second = write_settlement_truth_for_open_markets(proxy)
+
+    real_conn.close()
+
+    assert first["settlements_written"] == 1
+    assert second["settlements_written"] == 0
+    assert second["settlements_unchanged"] == 1
+    assert proxy.commit_count == commits_after_first
