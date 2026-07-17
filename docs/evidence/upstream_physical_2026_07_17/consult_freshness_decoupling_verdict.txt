@@ -1,0 +1,118 @@
+Verdict — 0.94 confidence: decouple the fresh center from the ENS shape immediately; define forecast quality at the actual decision timestamp; select the smallest availability-aware basket that clears a predeclared practical-gain threshold; and treat Open-Meteo as a new ENS product unless strict transport equivalence is proved.
+
+[BLOCKER] architecture — src/data/replacement_forecast_materializer.py:112-128,206-241,613-649,2703-2710 — The present two-leg barrier makes normal ENS dissemination latency look like a system failure, so a usable fresh center can wait 7.5 hours for shape evidence that already exists from the preceding ENS cycle — Revising my prior same-cycle recommendation: same-cycle coherence is required within an ENS shape, not between the center and ENS legs; create immutable CenterState and ShapeState artifacts and assemble a posterior whenever either advances. The commit-pinned request makes the baseline a mandatory dependency, computes posterior availability as the maximum availability of its legs, and requires both identities before writing, which explains the measured barrier behavior. GitHub+1
+
+CenterState(city,target,metric,center_generation,mu,inputs,available_at) should update event-by-event whenever a newer capturable instrument arrives—not merely on a six-hour timer. ShapeState(city,target,metric,shape_generation,ens_cycle,member_extrema,ens_mean,spread,n_eff,available_at,product_version) should contain one internally coherent ENS cycle. The assembler always joins the newest center to the newest available licensed shape.
+
+Use a two-component monotonicity rule. A transaction may advance active posterior (center_generation, shape_generation) to (c′,s′) only when c′≥c, s′≥s, and at least one comparison is strict. This componentwise compare-and-swap prevents a delayed shape job from overwriting a newer center and prevents a delayed center job from regressing shape. Store both leg ages and cycles; never collapse them into one synthetic source cycle.
+
+Precompute ShapeState for every city, metric, and target date within the tradable horizon as soon as an ENS cycle arrives—before target discovery. Consequently, opening a new target does not create an ENS dependency. A target outside the model horizon is ineligible by domain definition, not “waiting.” The 30-hour bound remains a catastrophic all-transports-out guard; it should never fire because of the routine 00/12Z publication schedule.
+
+Migration is additive: create the two component tables, backfill them from active posterior provenance, deploy the component writer, then atomically switch the serving pointer. Rollback switches the pointer back; do not overwrite or delete the prior active generation. Exact source/product allowlists, response hashes, model-cycle validation, and immutable identities prevent an unregistered source or malformed response from advancing either component.
+
+verify locally: pytest -q tests/test_center_shape_decoupling.py tests/test_posterior_componentwise_monotonicity.py tests/test_target_prepositioning.py.
+
+[HIGH] statistical correctness — src/data/replacement_forecast_materializer.py:2716-2798; src/forecast/ens_shape.py:new — Reusing a stale but coherent ENS shape is statistically valid only as a location-shape transport model; carrying forward its raw center disagreement as squared uncertainty double-counts the new center — For ENS cycle eee, compute each member’s settlement-operator daily extreme Xj,eX_{j,e}Xj,e​, ensemble center Xˉe\bar X_eXˉe​, and anomaly Aj,e=Xj,e−XˉeA_{j,e}=X_{j,e}-\bar X_eAj,e​=Xj,e​−Xˉe​. At fresh instrument time ttt, construct translated members
+
+Xj,t′=μt+Aj,e.X'_{j,t}=\mu_t+A_{j,e}.Xj,t′​=μt​+Aj,e​.
+
+Use Xj,t′X'_{j,t}Xj,t′​ to recompute integer-preimage hits. The live point distribution may remain Normal with center μt\mu_tμt​, but use an EMOS-like scale
+
+σt2=max⁡{σmin⁡2,  ag+bgSe2+γg ae/6},\sigma_t^2=\max\{\sigma_{\min}^2,\;a_g+b_gS_e^2+\gamma_g\,a_e/6\},σt2​=max{σmin2​,ag​+bg​Se2​+γg​ae​/6},
+
+where Se2S_e^2Se2​ is the coherent ENS anomaly variance, aea_eae​ is shape age in hours, and ggg is a pooled metric-by-lead group. Fit ag,bg,γg≥0a_g,b_g,\gamma_g\ge0ag​,bg​,γg​≥0 strictly walk-forward from the exact historical hybrid available at each decision time.
+
+Yes, center updates between ENS cycles are licensed under these conditions:
+
+Every Xj,eX_{j,e}Xj,e​ uses one ENS cycle, consistent member identities, field/product, grid operator, units, local-day window, extrema operator, and missing-step policy.
+
+ENS anomalies are approximately location-transportable conditional on city, metric, lead, season/regime, and shape age.
+
+Calibration is performed on “fresh center plus then-available shape,” using actual availability timestamps rather than retrospectively pairing both newest cycles.
+
+Scale and coverage are calibrated jointly; independence between spread error, shape age, and center error is not assumed.
+
+Translated-member CRPS, PIT/rank behavior, interval coverage, and bin calibration remain acceptable by shape-age bucket.
+
+The newest available complete ENS cycle is always used; members from different cycles are never mixed.
+
+Recompute raw Dt=μt−XˉeD_t=\mu_t-\bar X_eDt​=μt​−Xˉe​ for provenance and possible regime-discordance research only. After translation, the ENS center is μt\mu_tμt​, so the operational recentered delta is zero. Do not retain delta_ens_center². A fitted cDt2cD_t^2cDt2​ term may enter later only if nested walk-forward proper scores improve. The measured deterministic-model staleness slopes do not themselves estimate ENS-shape staleness; γg\gamma_gγg​ must be fitted from hybrid shape experiments.
+
+verify locally: availability-replay fresh centers against successively older shapes and require no material deterioration through the permitted age range in CRPS, bin calibration, and 90% interval coverage.
+
+[HIGH] availability-aware selection — scripts/evaluate_availability_aware_baskets.py:new; src/strategy/live_inference/source_clock_city_weights.py — Nominal-cycle MAE ignores whether a forecast was actually available when capital was committed, so it can prefer an accurate source that routinely arrives after the useful decision window — Yes, cycle timing is a legitimate per-city criterion, but encode it through available-at-decision loss, not a manually assigned “publishes before local day” bonus.
+
+For every historical decision timestamp τ\tauτ, select for each model only the newest run satisfying source_available_at <= τ, then score that forecast against settlement. Replay an exogenous decision schedule matching the strategy’s intended reaction cadence; do not weight timestamps using market prices, fills, or realized profitability. The resulting risk
+
+Rm(c,k)=E[L(fm,latest⁡≤τ,Y)∣c,k]R_m(c,k)=E[L(f_{m,\operatorname{latest}\le\tau},Y)\mid c,k]Rm​(c,k)=E[L(fm,latest≤τ​,Y)∣c,k]
+
+automatically incorporates publication timing, tail latency, cycle staleness, local timezone, and lead. The new significant staleness slopes confirm that this is load-bearing rather than cosmetic.
+
+Do not create separate clock-specific baskets initially. Choose one city-by-metric basket over the city’s actual decision-time distribution, then adjust weights at serving using each source’s observed age penalty. A selected source that has not arrived is omitted and remaining weights are recomputed; basket membership must never be a readiness requirement. MAE governs center accuracy, but activate only after the complete posterior is non-inferior under a proper distributional score such as CRPS. Proper scores evaluate the predictive distribution rather than only its center. Statistical Analysis at UW
+
+[HIGH] basket governance — scripts/select_city_source_baskets.py:new; config/forecast_baskets_v2.json:new — Taking the raw minimum among 108 greedy paths will select sampling noise and unstable source combinations — Convert the experiments into baskets with this exact rule:
+
+For candidate source mmm added to current basket BBB, define paired daily loss difference
+
+di=∣eB∪m,i∣−∣eB,i∣,d_i=\left|e_{B\cup m,i}\right|-\left|e_{B,i}\right|,di​=∣eB∪m,i​∣−∣eB,i​∣,
+
+so negative is beneficial. Estimate its SE by target-date clustering or a seven-day moving-block bootstrap; when pooling cities, resample the same target dates jointly.
+
+Fit the empirical-Bayes model
+
+Δ^c,m∣B∼N(Δc,m∣B,SEc,m∣B2),Δc,m∣B∼N(αm,metric,lead,τm,metric,lead2).\widehat\Delta_{c,m\mid B}\sim N(\Delta_{c,m\mid B},SE_{c,m\mid B}^2),\qquad
+\Delta_{c,m\mid B}\sim N(\alpha_{m,\text{metric},\text{lead}},\tau_{m,\text{metric},\text{lead}}^2).Δc,m∣B​∼N(Δc,m∣B​,SEc,m∣B2​),Δc,m∣B​∼N(αm,metric,lead​,τm,metric,lead2​).
+
+Keep 108 serving baskets; include lead as a fixed calibration covariate rather than multiplying the number of city baskets.
+
+Set the practical-gain margin
+
+ϵc=max⁡(0.05∘C,  0.03 MAEB).\epsilon_c=\max(0.05^\circ\mathrm C,\;0.03\,MAE_B).ϵc​=max(0.05∘C,0.03MAEB​).
+
+Start from the best availability-aware single source. Add the candidate with the lowest shrunken delta only when
+
+P(Δc,m∣B<−ϵc)≥0.95.P(\Delta_{c,m\mid B}<-\epsilon_c)\ge0.95.P(Δc,m∣B​<−ϵc​)≥0.95.
+
+Stop when no candidate passes. Then select the smallest basket whose outer rolling-origin MAE is within max⁡(ϵc,1 SE)\max(\epsilon_c,1\,SE)max(ϵc​,1SE) of the best basket on the greedy path. Raw leave-one-out and greedy results are screening evidence; activation must use an outer rolling-origin evaluation in which the basket was fitted only on earlier settlements. Reject the chosen basket if the one-sided 95% upper confidence bound for final-posterior CRPS degradation exceeds 0.02∘C0.02^\circ\mathrm C0.02∘C.
+
+Require at least 60 paired settled dates for a city-specific inclusion or exclusion. At 30–59 dates, use the shrunken source-by-metric pooled basket with no city exception. Below 30, use the global metric core basket. A pooled source decision requires at least 300 city-date pairs, 20 cities, and 30 distinct target dates.
+
+Recompute membership only after 28 new settled target dates and no more frequently than monthly; freeze each basket artifact for at least 28 days. Refit age penalties and weights weekly within the fixed basket. Product or extraction-version changes create a new source identity with zero inherited weight. Artifact fields must include exact model IDs, calibration cutoff, extraction versions, settlement source, hashes, and predecessor ID for atomic rollback. The conservatism is warranted because estimated “optimal” combination weights can underperform simple combinations through finite-sample estimation error. Wiley Online Library+1
+
+verify locally: the actual winning baskets are unknown until the running leave-one-out/greedy results are passed through this nested rule; do not activate from raw deltas alone.
+
+[MEDIUM] data-type priority — src/data/day0_hourly_vectors.py; src/data/station_mos.py:new; src/calibration/station_grid_bias.py:new — Several direct or station-specific signals should outrank costly remote-sensing feature construction for integer daily extrema — Rank by expected MAE reduction per engineering unit:
+
+Hourly settlement-station observation assimilation. This is first by a wide margin on Day0 because it converts part of the daily extreme from forecast to fact and the feed already exists. For each member, replace elapsed forecast hours with observations and compute
+
+Xj′=max⁡(Omax⁡,≤t,Fj,max⁡,>t)X'_j=\max(O_{\max,\le t},F_{j,\max,>t})Xj′​=max(Omax,≤t​,Fj,max,>t​) for highs and
+
+Xj′=min⁡(Omin⁡,≤t,Fj,min⁡,>t)X'_j=\min(O_{\min,\le t},F_{j,\min,>t})Xj′​=min(Omin,≤t​,Fj,min,>t​) for lows. Recompute spread and preimage hits. Do not merely move the center.
+
+Exact-station MOS/LAMP. Add as a candidate center instrument, not an independent uncertainty vote. Station-specific MOS supplies maximum/minimum temperature guidance and LAMP incorporates current observations, but each product’s valid period must exactly match or be transformed to the market’s local-calendar-day settlement operator. vlab.noaa.gov+2vlab.noaa.gov+2
+
+Per-station reanalysis-derived representativeness bias. Use ERA5-Land or comparable reanalysis only as a hierarchical prior for station-versus-grid effects where direct settlement residuals are sparse. Once enough actual station settlements exist, direct residual calibration dominates; ERA5-Land is an approximately 9 km hourly land reanalysis, not the settlement observation. ECMWF
+
+Radar/satellite nowcast features. Reserve for a later Day0 convective-regime adjustment. They can help cloud, precipitation, and outflow timing over roughly 0–6 hours, but translating those fields into station-level daily temperature extrema requires substantial feature engineering and separate calibration. World Meteorological Organization
+
+Across the full lead-0-to-2 portfolio, station MOS may have broader cumulative impact than observation assimilation, but assimilation remains the best first implementation because it is direct, already available, and mechanically constrains settlement support.
+
+[BLOCKER] ENS source identity — src/data/ensemble_client.py:122-182,407-495; src/data/ecmwf_open_data.py:1-97 — “Same ECMWF members” does not imply the same predictive product when one path uses native accumulated extrema and another uses interpolated instantaneous temperature, spatial downscaling, or different grid-cell selection — Do not alias Open-Meteo responses to the existing ecmwf_open_data product ID. The Open-Meteo Ensemble API documents 51 ECMWF IFS members, underlying three-hourly resolution interpolated to one-hourly output, default elevation adjustment, and default land-cell selection; it also now advertises three-hourly minimum/maximum temperature variables. Prefer those three-hour extrema variables if a conformance probe confirms they map to the native ECMWF extrema fields; that is superior to deriving daily extrema from hourly-interpolated instantaneous temperature_2m. Disable elevation downscaling and explicitly match the current spatial extraction operator rather than accepting API defaults. Open Meteo+2GitHub+2
+
+Licence the faster transport in two stages:
+
+Transport equivalence: capture at least 60 paired 00/12Z cycles over 30 consecutive days across all cities, both metrics, and leads 0–2. Match cycle, member/control identity, target window, units, grid operator, and extrema operator. Cluster inference by cycle/date—not by the thousands of correlated city-member rows. Require 100% unambiguous member mapping; median absolute member-extreme difference at most 0.05∘0.05^\circ0.05∘C; p99 at most 0.25∘0.25^\circ0.25∘C; city-metric-lead mean-bias 95% interval inside ±0.05∘\pm0.05^\circ±0.05∘C; spread ratio interval inside [0.95,1.05]; and recentered bin-probability mean absolute difference at most 0.01 with p99 at most 0.03.
+
+Settlement equivalence: recenter both shapes on the identical fresh center and compare on settled dates using target-date block bootstrap. Require the one-sided 95% upper bound on mirror-minus-OpenData CRPS to be at most 0.03∘0.03^\circ0.03∘C, empirical interval-coverage degradation at most two percentage points, and no systematic shoulder-bin degradation.
+
+If both stages pass, 30 days/60 cycles are sufficient to classify Open-Meteo as a transport-equivalent faster carrier and inherit the shape calibration. If transport thresholds fail, it is a new forecast product: require 90 distinct settled target dates for pooled walk-forward calibration and at least 60 paired settlements before any city-specific parameters; do not inherit OpenData age, spread, or effective-member calibration.
+
+Write complete cycles immutably under (product_id,cycle,response_hash), switch via one atomic source pointer, and fall back by whole cycle—never mix OpenData and Open-Meteo members. Pin the commercial endpoint, exact model, units, grid settings, and cycle metadata. Open-Meteo documents eventual consistency across servers and recommends waiting ten minutes after reported availability; enforce a single cycle across all responses before promotion. Open Meteo
+
+verify locally: python -m scripts.compare_ens_transports --days 30 --cities all --metrics high,low --leads 0,1,2 --cluster-by cycle.
+
+Strongest alternative considered: fit one joint availability-aware distributional stacking/EMOS model over all deterministic sources and ENS members, with source age as covariates. It is statistically cleaner because center and shape dependence are learned jointly, but it requires much more settlement history and introduces materially more parameter and migration risk. The two-artifact location-shape model captures the dominant freshness gain with substantially less machinery.
+
+The strongest counterargument is that matching center and ENS cycle preserves physical joint dependence. That is true, but the supplied evidence shows its cost: routine publication latency discarded a fresh center for 7.5 hours. The smallest fact that would reverse the decoupling call is an availability-aware settlement replay showing that recentered stale-shape posteriors lose more CRPS or calibration than the fresh-center update gains, consistently within the proposed age range.
+
+Sources used: the supplied live-DB measurements as ground truth; the commit-pinned materializer, authority document, ENS client, and ECMWF OpenData extractor; current Open-Meteo documentation; NOAA MOS/LAMP documentation; ECMWF ERA5-Land documentation; and primary forecast-verification literature. I could not inspect Claude Code’s unpushed local changes, so file/line references identify the public pinned snapshot and should be remapped where the local refactor moved code. Load-bearing assumptions are trustworthy availability timestamps, stable settlement-station identity, no market-price inputs in fitting, and enough archived runs to reconstruct the exact forecast available at each historical decision time.

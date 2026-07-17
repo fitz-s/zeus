@@ -1,0 +1,82 @@
+Verdict — high confidence (0.90): redesign around serve-last-good, release-aware execution quarantine, vintage-aware precision, and versioned settlement refits. The two outages are not reasons to loosen freshness; they show that optional evidence and candidate construction were allowed to mutate serving availability. The current center also has an authority/serving split: the authority specifies de-bias plus T2/Ledoit–Wolf fusion, while the commit-pinned serving helper explicitly uses raw diagonal inverse-second-moment weights; your live DB then shows a later third law—51/54 frozen vectors. That is model risk and operational risk in one interface. GitHub+2GitHub+2
+
+(a) Issuance shock
+
+Ranked:
+
+Post-release fast lane: mandatory. On first detection of a newer public model cycle, atomically mark the old posterior RELEASE_STALE, cancel all resting entry orders for affected cities within one reactor tick, and route the new cycle through a bounded release-priority queue. Resume entries only after a validated posterior generation becomes active. Target source-detected-to-active p95 below two minutes; the present 25-minute average and 11.7-hour tail are economically unacceptable given supplied q-TV p90 0.206. Public-information latency races transfer value from stale liquidity providers to faster takers; this is the stale-quote mechanism to eliminate. Bank for International Settlements
+
+Pre-positioning: sound for machinery, not directional inventory. Pre-create target scopes, load static artifacts, reserve workers, increase polling near each model’s empirical publication hazard, and prepare cancel sets. Do not open positions because a release is expected.
+
+Pre-release sigma widening: reject literally. Issuance risk is not settlement uncertainty, so injecting it into meteorological sigma smears bin probabilities and can create false edge. The minimal substitute is an execution state: near a tightly scheduled release, stop adding passive maker exposure; once the release is actually seen, quarantine entries immediately. Do not create a broad pre-release pause around sources with multi-hour publication tails.
+
+Jump distribution as calibration evidence: reject. Cycle-to-cycle jumps describe information arrival, not forecast-to-settlement error. Use their TV distribution to size cancel urgency, queue capacity, and maximum stale-fill exposure—not to fit q.
+
+(b) Mixed-cycle fusion
+
+Do not require all providers to share one cycle; asynchronous schedules would recreate the outage. Do not apply an arbitrary exponential age haircut either. Use measured error variance.
+
+For instrument mmm, let Δm\Delta_mΔm​ be its cycle lag behind the freshest eligible cycle. From strictly prior settlements, estimate excess MSE vm(Δm,actual lead,metric)v_m(\Delta_m,\text{actual lead},\text{metric})vm​(Δm​,actual lead,metric), pooled by model family when sparse. At serve time use
+
+Mt=Mbase+diag⁡(v1,…,vK),wt=arg⁡min⁡w≥0,  1⊤w=1w⊤Mtw.M_t=M_{\text{base}}+\operatorname{diag}(v_1,\ldots,v_K),\qquad
+w_t=\arg\min_{w\ge0,\;1^\top w=1} w^\top M_t w.Mt​=Mbase​+diag(v1​,…,vK​),wt​=argw≥0,1⊤w=1min​w⊤Mt​w.
+
+This is age decay expressed in the correct unit—error variance—and handles 6–18-hour vintage gaps without pretending old data are current.
+
+Separate location from shape. Compute ENS anomalies only within one coherent ENS cycle, recenter those anomalies on the fused center, and replace raw delta_ens_center² with a settlement-fitted center/ENS vintage-gap penalty. Compute sigma_between only across the freshest coherent cohort—same nominal synoptic cycle, with perhaps a three-hour timestamp tolerance. Older providers may affect the center through MtM_tMt​, but must not also contaminate “between-model spread.” Require same-cycle coherence only for an ENS member set and its own ENS mean, not across every provider.
+
+(c) Frozen weights and correlation
+
+Refit from settlement grades nightly, but activate a new immutable artifact weekly or after at least seven newly settled target dates, whichever is later. Use a 120-day rolling window with a 60-day half-life; keep strict target_date < artifact_as_of. Key weights by exact model ID, city/metric/lead family, model version, and input-set version—never array position.
+
+Fit three candidates walk-forward: equal weight, diagonal second-moment precision, and nonnegative Ledoit–Wolf fusion. For the correlated candidate use M=ΣLW+b^b^⊤M=\Sigma_{\rm LW}+\hat b\hat b^\topM=ΣLW​+b^b^⊤, then the simplex optimization above; this prices residual correlation and any remaining out-of-fold bias without unstable negative weights. Activate the simplest candidate that materially wins out-of-sample settlement CRPS, with log score as a tail guardrail. Ledoit–Wolf improves conditioning, but it does not guarantee superior forecast-combination weights; estimated optimal weights can lose to simple averages through estimation error. ScienceDirect+1
+
+Therefore correlation should re-enter the served center as a walk-forward-tested candidate, not as doctrine. If it does not beat diagonal/equal, keep it discarded for that cell family. An unregistered new model has active weight zero until at least 25 strictly prior settlements and inclusion in a newly checksummed/versioned artifact; it is optional meanwhile and can never inherit a positional weight such as 0.766.
+
+(d) Degrade ladder
+
+Use two clocks: absolute source-cycle age AAA, and whether a newer public cycle has been detected but not activated.
+
+GREEN: A≤18A\le18A≤18h; no pending newer cycle; at least two independent provider families; coherent ENS coverage-effective count ncov≥30n_{\rm cov}\ge30ncov​≥30; local-day time coverage at least 7/8 three-hour steps with no shared gap over six hours.
+
+AMBER—trade with fitted sigma inflation: A≤24A\le24A≤24h; at least one valid current center plus current ENS shape; ncov≥20n_{\rm cov}\ge20ncov​≥20; coverage at least 7/8; no shared gap over six hours; center/ENS cycle gap at most 12h. Missing providers, partial members, and vintage gaps add settlement-fitted variance terms. One provider plus a sound ENS may trade AMBER; “two providers” is not a structural law.
+
+RED—no new entries, cancel makers, monitor/exit only: any newer public cycle is detected but not yet active; A>24A>24A>24h; ncov<20n_{\rm cov}<20ncov​<20; no valid current center or current uncertainty shape; shared time gap over six hours; or center/ENS gap over 12h.
+
+EXPIRED: A≥30A\ge30A≥30h. Keep provenance for monitoring, but the posterior is ineligible for any trade. The repository already treats 30h as the anti-staleness hard bound; 24h creates a six-hour recovery margin rather than trading into the cliff. GitHub
+
+For partial ENS, do not null a member for one missing step. If both neighbours exist, interpolate that step, tag the member partial, and add a leave-one-timestep-out settlement penalty; otherwise retain its observed extreme with a larger learned penalty. Use
+
+ncov=(∑jaj)2∑jaj2,n_{\rm cov}=\frac{(\sum_j a_j)^2}{\sum_j a_j^2},ncov​=∑j​aj2​(∑j​aj​)2​,
+
+with coverage weights aja_jaj​. A gap shared by all members is a separate structural coverage test—51 nominal members do not cure a missing time slice.
+
+(e) The common flaw and preventing invariant
+
+Yes: both incidents violate the same invariant:
+
+Adding, discovering, or failing optional evidence may create or fail a candidate, but may never reduce availability of the last validated active posterior. Only an atomically validated candidate may advance the active pointer.
+
+Implement candidates under (city,target,metric,base_cycle,input_set_version,generation). Snapshot the required input set from the active policy artifact. Build side-effect-free; commit posterior, readiness, and provenance together; then compare-and-swap the active pointer only if cycle/generation ordering is non-regressing. A failed candidate leaves the active row untouched and lets only the age ladder degrade it. This extends the repository’s existing monotone-cycle intent and same-cycle expansion machinery without allowing expansion to become a hard dependency. GitHub+2GitHub+2
+
+Make ingest status cell-granular: COMPLETE, COMPLETE_WITH_GAPS, or RETRYABLE, with missing member/time cells retryable even when the run is complete. Coalesce duplicate requests; lock per city-target-metric rather than globally; give release work bounded priority so one CONUS expansion cannot starve every city. Exact model-ID allowlisting, artifact checksums, and schema/version validation prevent accidental or malicious source-ID insertion from acquiring a weight.
+
+Migration needs no shadow mode: add candidate/active-pointer and artifact-version fields, backfill pointers to current last-good rows, offline settlement-grade the new artifacts, then cut over in one transaction. Rollback is an atomic pointer/artifact reversion; never destructively overwrite the prior posterior.
+
+verify locally: an integration/chaos test should inject (1) an unknown new instrument, (2) one missing ENS step in several members, and (3) a failed same-cycle upgrade while concurrent newer-cycle work runs; assert active q never becomes null, cycle/generation never regresses, retries remain cell-local, and unrelated cities continue serving.
+
+(f) Executable band and missed adverse selection
+
+The architecture—current-evidence-only, fail closed on structurally absent current shape, one executable distribution, conservative q bounds—is right. The statistical claim of exactness is not. Clopper–Pearson is an exact interval for a binomial sampling model; treating 51 operational ensemble members as 51 independent Bernoulli trials is generally unjustified. Estimate settlement-graded overdispersion and use a beta-binomial bound, or conservatively substitute a statistical effective sample size before CP. Cantelli is valid for true moments but should remain an independent worst-case backstop; plug-in moments from partial or mixed-cycle data first require the variance penalties above. Bare Stats
+
+Also, if serving chooses the tighter of CP and Cantelli bounds, its advertised coverage requires an explicit simultaneous-coverage construction—such as alpha allocation or a union-bound argument. Naïvely taking the tighter bound does not preserve each method’s marginal coverage.
+
+verify locally: inspect the CP/Cantelli composition for simultaneous-coverage accounting and confirm no branch hard-codes nominal ensemble size 51 after partial-member weighting.
+
+Keep the single Normal until a challenger wins settlement-only walk-forward scoring. There is no uniformly dominating alternative. The strongest challenger is a re-centered, kernel-dressed ENS/Bayesian-model-averaging mixture with Student-t kernels: it can represent split regimes and heavy tails that one Normal cannot. BMA explicitly combines calibrated component densities, while Gaussian EMOS supports the current simpler bias/spread-calibration baseline and CRPS fitting. American Meteorological Society Journals+1
+
+The missed adverse-selection states are: stale maker orders after public release; toxic half-updated mixed-cycle posteriors; fills racing cancellation acknowledgements; all-city queue head-of-line blocking; same-cycle ABA revisions where q changes but cycle ID does not; and treating a market move caused by the release as forecast calibration evidence. Every order should carry posterior_generation_id; after a release-triggered cancel, late fills are classified as stale-generation fills and must not trigger immediate requoting.
+
+Strongest counterargument considered: same-cycle-only plus equal weights and hard fail-closed maximizes provenance purity and avoids weight-estimation error. It is compelling for ENS shape coherence and remains a candidate for center weights, but as a universal rule it is dominated operationally by your asynchronous publication evidence and recreates city-wide darkness. The smallest fact that would change the 18/24/30h ladder is settlement-graded error versus source age showing no deterioration through 30h for a model-specific cadence; then the AMBER/RED boundary should move, while release-stale quarantine should remain.
+
+Sources and assumptions: I used PR #431’s stale-evidence-latch/current-regime principle, the commit-pinned authority, center.py, bayes_precision_fusion.py, the materializer, and the fusion-upgrade trigger, plus Ledoit–Wolf, Smith–Wallis, EMOS, BMA, Clopper–Pearson, and public-information latency-arbitrage literature. PR #431 explicitly documents that stale evidence can permanently gate a new regime and should age out/self-heal. GitHub I could not inspect the live DB; I treated the supplied measurements as ground truth. Load-bearing assumptions are that core cycles are expected at least every 12 hours, settlement identity remains stable, ENS anomalies are usable after recentering, and no market prices enter fitting.
