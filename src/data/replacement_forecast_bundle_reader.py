@@ -17,6 +17,10 @@ from src.data.replacement_forecast_cycle_policy import (
     cycle_age_exceeds_bound,
     replacement_source_cycle_max_age_hours,
 )
+from src.data.staleness_degrade_ladder import (
+    StalenessBand,
+    classify_posterior_staleness,
+)
 from src.data.replacement_forecast_readiness import (
     HIGH_DATA_VERSION,
     LIVE_RUNTIME_LAYER,
@@ -624,6 +628,22 @@ def read_replacement_forecast_bundle(
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
             "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
+        )
+    # §4a staleness DEGRADE LADDER (authority doc, 2026-07-17): between the fresh band
+    # and the EXPIRED wall handled just above, an aged carrier is GRADED. RED (age > 24h,
+    # derived boundary) isolates ENTRY ONLY — this bundle read feeds entry-decision
+    # authority, so withholding it blocks new entries for the family while the
+    # held-position monitor/exit lanes (src/engine/position_belief.py, Position.
+    # evaluate_exit) read their OWN paths and stay fully active. GREEN/AMBER serve the
+    # bundle unchanged here; AMBER's fitted sigma inflation is applied at the admission
+    # sigma seam, never by withholding the belief. UNKNOWN (unparseable cycle) falls
+    # through to the binary law already enforced above — the ladder adds no NEW block on
+    # a classification failure (fail-open to today's behavior).
+    _ladder = classify_posterior_staleness(decision_utc, _source_cycle_utc)
+    if _ladder.band is StalenessBand.RED:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED",
         )
 
     dependency_json = _json_mapping(row_map["dependency_source_run_ids_json"], field_name="dependency_source_run_ids_json")

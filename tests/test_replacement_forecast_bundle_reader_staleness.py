@@ -289,6 +289,68 @@ def test_bundle_reader_rejects_forged_soft_anchor_dependency(
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
 
 
+def test_bundle_reader_blocks_red_staleness_entry() -> None:
+    """§1e degrade ladder: an aged carrier in the RED band (24h < age < 30h EXPIRED
+    wall) isolates NEW ENTRIES — the bundle read (entry authority) fails closed, while
+    the held-position monitor/exit lanes read their own paths and stay active."""
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(5, 11),   # 25h before the 06-06 12:00 decision -> RED
+        source_available_at=_dt(5, 12),
+        computed_at=_dt(5, 12, 30),
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 11),
+        expires_at=_dt(6, 23),          # NOT expired by wall clock or the 30h bound
+        decision_time=_dt(6, 11),
+    )
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=readiness,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+    )
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED"
+
+
+def test_bundle_reader_amber_still_binds() -> None:
+    """AMBER (18h < age <= 24h) keeps trading — the bundle binds; the fitted sigma
+    inflation is applied at the admission sigma seam, never by withholding the belief."""
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(5, 16),   # 20h before the 06-06 12:00 decision -> AMBER
+        source_available_at=_dt(5, 17),
+        computed_at=_dt(5, 17, 30),
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 11),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 11),
+    )
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=readiness,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+    )
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+    assert result.bundle is not None
+
+
 def test_bundle_reader_accepts_fresh_readiness() -> None:
     """Fresh forecast (not expired, recent SYNOPTIC cycle) still binds — gate is not over-broad.
 

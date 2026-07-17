@@ -26442,6 +26442,50 @@ def _replacement_predictive_sigma_c(replacement_bundle: object) -> float | None:
         return None
 
 
+def _amber_inflated_predictive_sigma_c(
+    replacement_bundle: object,
+    *,
+    family,
+    decision_time: datetime,
+) -> float | None:
+    """Predictive sigma (°C) with the §4a AMBER staleness-band variance folded in.
+
+    Staleness DEGRADE LADDER (authority doc §4a, 2026-07-17): when the served
+    posterior's age (decision_time − source_cycle_time) lands in the AMBER band
+    (18h < age ≤ 24h), the admission-side directional uncertainty is widened by a
+    settlement-FITTED age-band VARIANCE increment v (degC², src/forecast/
+    posterior_age_inflation.py): sigma' = sqrt(sigma² + v). GREEN returns the base
+    sigma unchanged; RED never reaches here (the bundle read isolates entry first);
+    EXPIRED is already fail-closed upstream. Fail-open: an absent artifact, unknown
+    band, or missing source_cycle_time leaves the base sigma untouched (v=0.0) — the
+    ladder never widens beyond what the fit measures.
+
+    NOTE (no double-count with staleness_variance.py): that term prices per-model
+    INSTRUMENT cycle-lag inside the fused center at materialization; THIS term prices
+    the whole POSTERIOR's age at admission. Different seams — see the loader docstring.
+    """
+    base = _replacement_predictive_sigma_c(replacement_bundle)
+    if base is None:
+        return None
+    source_cycle_time = _parse_utc(
+        getattr(replacement_bundle, "source_cycle_time", None)
+    )
+    from src.data.staleness_degrade_ladder import (  # noqa: PLC0415
+        StalenessBand,
+        classify_posterior_staleness,
+    )
+
+    ladder = classify_posterior_staleness(decision_time, source_cycle_time)
+    if ladder.band is not StalenessBand.AMBER or ladder.age_hours is None:
+        return base
+    from src.forecast.posterior_age_inflation import v_for  # noqa: PLC0415
+
+    v = v_for(str(getattr(family, "metric", "")), float(ladder.age_hours))
+    if not (isinstance(v, float) and math.isfinite(v) and v > 0.0):
+        return base
+    return math.sqrt(base * base + v)
+
+
 def _replacement_yes_lcb_for_bin(
     replacement_bundle: object,
     *,
@@ -28115,7 +28159,12 @@ def _replacement_authority_probability_and_fdr_proof(
         # UNCONDITIONALLY (not gated by the sigma-floor flag): the law needs the
         # center whenever fusion provenance carries one.
         "forecast_mu_c": _replacement_anchor_mu_c(replacement_bundle),
-        "forecast_predictive_sigma_c": _replacement_predictive_sigma_c(replacement_bundle),
+        # §4a AMBER staleness inflation: aged (18h<age≤24h) posteriors widen the
+        # admission directional sigma by the settlement-fitted age-band variance.
+        # GREEN unchanged; RED already isolated at the bundle read; fail-open to base.
+        "forecast_predictive_sigma_c": _amber_inflated_predictive_sigma_c(
+            replacement_bundle, family=family, decision_time=decision_time
+        ),
         "posterior_id": str(replacement_bundle.posterior_id),
         "posterior_identity_hash": posterior_identity_hash,
         "replacement_no_bound_authority": replacement_no_bound_authority,
