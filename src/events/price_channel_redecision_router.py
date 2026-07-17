@@ -573,13 +573,6 @@ def _edli_price_channel_redecision_events_for_events(
         )
         resting_families.intersection_update(unresolved_families)
     families = held_families | entry_families | resting_families
-    (logger.info if families else logger.debug)(
-        "EDLI price-channel redecision buckets held=%d screened=%d resting=%d union=%d",
-        len(held_families),
-        len(entry_families),
-        len(resting_families),
-        len(families),
-    )
     if not families:
         return []
     from src.events.triggers.forecast_snapshot_ready import (
@@ -601,6 +594,16 @@ def _edli_price_channel_redecision_events_for_events(
         already_pending_keys=pending_entity_keys,
         event_type="EDLI_REDECISION_PENDING",
         restrict_to_families=families,
+        phase_filter_exempt_families=held_families | resting_families,
+    )
+    (logger.info if events_to_emit else logger.debug)(
+        "EDLI price-channel redecision buckets held=%d screened=%d resting=%d "
+        "union=%d events=%d",
+        len(held_families),
+        len(entry_families),
+        len(resting_families),
+        len(families),
+        len(events_to_emit),
     )
     return [
         _edli_redecision_event_with_origin(

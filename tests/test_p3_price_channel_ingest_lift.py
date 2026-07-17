@@ -1032,6 +1032,7 @@ def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
     assert src.index("resting_families = _edli_resting_family_keys_for_tokens") < src.index(
         "trigger.build_committed_snapshot_events"
     )
+    assert "phase_filter_exempt_families=held_families | resting_families" in src
     # Resting bucket is resolved AFTER (independently of) the entry screen call,
     # never fed as one of its inputs.
     assert src.index("entry_families = _edli_screened_entry_family_keys_for_price_channel") < src.index(
@@ -1590,7 +1591,9 @@ def test_price_channel_resting_order_family_emits_and_debounces_on_second_tick(m
         trade_conn,
         forecasts_conn,
         events,
-        received_at="2026-06-20T05:00:00+00:00",
+        # Denver is well into settlement day. Held/resting capital must still
+        # re-decide from a price move after forecast-only intake has closed.
+        received_at="2026-06-20T20:00:00+00:00",
     )
     assert first_emitted == 1
     assert (
@@ -1622,7 +1625,7 @@ def test_price_channel_resting_order_family_emits_and_debounces_on_second_tick(m
         trade_conn,
         forecasts_conn,
         events,
-        received_at="2026-06-20T05:05:00+00:00",
+        received_at="2026-06-20T20:05:00+00:00",
     )
     assert second_emitted == 0
     assert (
