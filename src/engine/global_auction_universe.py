@@ -599,6 +599,17 @@ def _global_book_metadata_is_executable(
         checked_at_utc=checked_at_utc,
     ):
         return False
+    return _global_book_metadata_tradeability(metadata) is True
+
+
+def _global_book_metadata_tradeability(
+    metadata: Mapping[str, object],
+) -> bool | None:
+    """Return payload tradeability without asserting metadata freshness."""
+
+    required = ("enable_orderbook", "active", "closed", "accepting_orders")
+    if any(key not in metadata for key in required):
+        return None
     try:
         tradeability = json.loads(
             str(metadata.get("tradeability_status_json") or "{}")

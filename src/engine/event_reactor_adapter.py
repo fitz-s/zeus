@@ -816,6 +816,33 @@ def _global_current_executable_prefetch_tokens(
     return tuple(tokens)
 
 
+def _global_speculative_executable_prefetch_tokens(
+    probabilities: Mapping[str, object],
+    metadata_by_key: Mapping[tuple[str, str], Mapping[str, object]],
+) -> tuple[str, ...] | None:
+    """Use prior tradeability only to prune speculative book I/O."""
+
+    topology = _global_book_topology_signature(probabilities)
+    if topology is None:
+        return None
+    from src.engine.global_auction_universe import (
+        _global_book_metadata_tradeability,
+    )
+
+    tokens: list[str] = []
+    for _, _, condition_id, yes_token_id, no_token_id in topology:
+        for token_id in (yes_token_id, no_token_id):
+            metadata = metadata_by_key.get((condition_id, token_id))
+            if metadata is None:
+                return None
+            tradeable = _global_book_metadata_tradeability(metadata)
+            if tradeable is None:
+                return None
+            if tradeable:
+                tokens.append(token_id)
+    return tuple(tokens)
+
+
 def _global_candidate_correlation_key(candidate: object) -> str:
     """Return the terminal-risk identity shared by every sibling bin."""
 
@@ -1979,6 +2006,25 @@ def _cached_global_book_metadata(
         if current_identity(checked_at.astimezone(UTC)) is None:
             return {}
     except (TypeError, ValueError):
+        return {}
+    return {
+        (str(key[0]), str(key[1])): dict(metadata)
+        for key, metadata in entry.metadata_by_key
+        if metadata.get("_global_current_gamma") is True
+    }
+
+
+def _cached_global_book_speculative_metadata(
+    trade_conn: sqlite3.Connection,
+) -> dict[tuple[str, str], Mapping[str, object]]:
+    """Return prior Gamma payloads for I/O pruning, never authorization."""
+
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    if namespace is None:
+        return {}
+    with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        entry = _GLOBAL_BOOK_EPOCH_CACHE
+    if entry is None or entry.namespace != namespace:
         return {}
     return {
         (str(key[0]), str(key[1])): dict(metadata)
@@ -7206,6 +7252,10 @@ def event_bound_live_adapter_from_trade_conn(
             trade_conn,
             checked_at=datetime.now(UTC),
         )
+        speculative_book_metadata_by_key = (
+            dict(book_metadata_by_key)
+            or _cached_global_book_speculative_metadata(trade_conn)
+        )
 
         def _current_book_epoch(probabilities, _at):
             import httpx
@@ -7591,6 +7641,52 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 return epoch
 
+            def _complete_current_prefetch(
+                probability_slice,
+                prefetched,
+                *,
+                mode,
+            ):
+                exact_tokens = _global_current_executable_prefetch_tokens(
+                    probability_slice,
+                    book_metadata_by_key,
+                    checked_at=datetime.now(UTC),
+                )
+                if exact_tokens is None:
+                    full_tokens = _global_book_prefetch_tokens(probability_slice)
+                    return (
+                        prefetched
+                        if prefetched is not None
+                        and prefetched[0] == full_tokens
+                        else None
+                    )
+                if prefetched is None:
+                    return _prefetch_books(
+                        probability_slice,
+                        mode=mode,
+                        token_override=exact_tokens,
+                    )
+                _, prefetched_books, prefetched_at = prefetched
+                missing_tokens = tuple(
+                    token
+                    for token in exact_tokens
+                    if token not in prefetched_books
+                )
+                books = dict(prefetched_books)
+                epoch_at = prefetched_at
+                if missing_tokens:
+                    supplement = _prefetch_books(
+                        probability_slice,
+                        mode=mode,
+                        token_override=missing_tokens,
+                    )
+                    if supplement is None:
+                        return None
+                    _, supplement_books, supplement_at = supplement
+                    books.update(supplement_books)
+                    epoch_at = min(epoch_at, supplement_at)
+                return exact_tokens, books, epoch_at
+
             # Current Gamma tradeability is refreshed only for the family delta
             # that can change this decision. Untouched families keep fresh q while
             # reusing the token identity already validated by the current epoch.
@@ -7950,6 +8046,14 @@ def event_bound_live_adapter_from_trade_conn(
                 # Invalidated local metadata is not authority for speculative
                 # book I/O. Current Gamma must replace it first.
                 prefetch_slice = None
+            speculative_prefetch_tokens = (
+                _global_speculative_executable_prefetch_tokens(
+                    prefetch_slice,
+                    speculative_book_metadata_by_key,
+                )
+                if prefetch_slice is not None
+                else None
+            )
             prefetched = None
             if not bind_slice:
                 if prefetch_slice is not None and not day0_urgent_batch:
@@ -7957,6 +8061,7 @@ def event_bound_live_adapter_from_trade_conn(
                         prefetch_slice,
                         mode=prefetch_mode,
                         token_hint=prefetch_token_hint,
+                        token_override=speculative_prefetch_tokens,
                     )
             elif prefetch_slice is None:
                 rebound_probabilities.update(
@@ -7989,8 +8094,10 @@ def event_bound_live_adapter_from_trade_conn(
                 from concurrent.futures import ThreadPoolExecutor
 
                 projection_at = datetime.now(UTC)
-                projection_tokens = _global_book_prefetch_tokens(
-                    prefetch_slice
+                projection_tokens = (
+                    speculative_prefetch_tokens
+                    if speculative_prefetch_tokens is not None
+                    else _global_book_prefetch_tokens(prefetch_slice)
                 )
                 if projection_tokens is None:
                     projection_tokens = prefetch_token_hint
@@ -8013,6 +8120,7 @@ def event_bound_live_adapter_from_trade_conn(
                         prefetch_slice,
                         mode=prefetch_mode,
                         token_hint=prefetch_token_hint,
+                        token_override=speculative_prefetch_tokens,
                         projected=projected,
                         captured_at=projection_at,
                     )
@@ -8071,6 +8179,11 @@ def event_bound_live_adapter_from_trade_conn(
                     probability_delta
                 )
                 bound_probabilities.update(probability_delta)
+                prefetched = _complete_current_prefetch(
+                    probability_delta,
+                    prefetched,
+                    mode="family_delta_exact_books",
+                )
                 delta_epoch = _capture_bound(
                     probability_delta,
                     mode="family_delta_books",
@@ -8139,6 +8252,11 @@ def event_bound_live_adapter_from_trade_conn(
 
             bound_probabilities = _refresh_capture_metadata(
                 bound_probabilities
+            )
+            prefetched = _complete_current_prefetch(
+                bound_probabilities,
+                prefetched,
+                mode="full_exact_books",
             )
             epoch = _capture_bound(
                 bound_probabilities,

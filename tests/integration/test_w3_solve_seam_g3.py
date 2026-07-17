@@ -1184,6 +1184,48 @@ def test_current_gamma_market_fetch_returns_at_total_deadline():
     assert worker_finished.wait(timeout=1.0)
 
 
+def test_speculative_book_prefetch_prunes_only_complete_prior_tradeability():
+    probability = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            ),
+        )
+    }
+    executable = {
+        "enable_orderbook": True,
+        "active": True,
+        "closed": False,
+        "accepting_orders": True,
+        "tradeability_status_json": "{}",
+    }
+    closed = {**executable, "closed": True, "accepting_orders": False}
+
+    assert era._global_speculative_executable_prefetch_tokens(
+        probability,
+        {
+            ("condition", "yes-token"): executable,
+            ("condition", "no-token"): closed,
+        },
+    ) == ("yes-token",)
+    assert (
+        era._global_speculative_executable_prefetch_tokens(
+            probability,
+            {
+                ("condition", "yes-token"): executable,
+                ("condition", "no-token"): {"closed": True},
+            },
+        )
+        is None
+    )
+
+
 _SPINE_DECISION_AT = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
 
 
@@ -4540,7 +4582,14 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
                                 "freshness_deadline": "2020-01-01T00:01:00+00:00",
                             }
                             if expire_miami and family_key == miami
-                            else {"_global_current_gamma": True}
+                            else {
+                                "_global_current_gamma": True,
+                                "enable_orderbook": True,
+                                "active": True,
+                                "closed": False,
+                                "accepting_orders": True,
+                                "tradeability_status_json": "{}",
+                            }
                         )
         if expire_miami:
             expire_next_full_metadata["value"] = False
