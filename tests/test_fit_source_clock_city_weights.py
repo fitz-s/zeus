@@ -175,7 +175,7 @@ def test_data_availability_tiers_select_expected_basket_source(tmp_path: Path) -
     conn, cities_path, frozen_csv_path = _basic_setup(tmp_path)
     artifact = fscw.build_artifact(
         conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
-        frozen_csv_path=frozen_csv_path, git_sha="FIXED",
+        frozen_csv_path=frozen_csv_path, git_sha="FIXED", servable=None,
     )
     cities = artifact["cities"]
     assert cities["CitySpecific"]["high"]["basket_provenance"]["tier"] == "CITY_SPECIFIC"
@@ -192,7 +192,7 @@ def test_determinism_same_db_state_and_as_of_byte_identical(tmp_path: Path) -> N
     def _run() -> str:
         artifact = fscw.build_artifact(
             conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
-            frozen_csv_path=frozen_csv_path, git_sha="FIXED",
+            frozen_csv_path=frozen_csv_path, git_sha="FIXED", servable=None,
         )
         return json.dumps(artifact, sort_keys=True, indent=2)
 
@@ -205,9 +205,30 @@ def test_weights_keyed_by_exact_model_id_never_positional(tmp_path: Path) -> Non
     conn, cities_path, frozen_csv_path = _basic_setup(tmp_path)
     artifact = fscw.build_artifact(
         conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
-        frozen_csv_path=frozen_csv_path, git_sha="FIXED",
+        frozen_csv_path=frozen_csv_path, git_sha="FIXED", servable=None,
     )
     models = artifact["cities"]["CitySpecific"]["high"]["models"]
     assert set(models) <= {"A", "B"}
     assert all(isinstance(k, str) for k in models)
     assert abs(sum(models.values()) - 1.0) < 1e-6
+
+
+def test_default_servable_filter_excludes_retired_archive_models(tmp_path: Path) -> None:
+    """A retired archive-only model (e.g. gfs_global, dropped from the live fetch
+    2026-06-17) must never enter a basket: a basket naming it would be permanently
+    unservable at decision time and, if single-model, would blank the city at the
+    serving renormalizer's PRESENT_WEIGHT_FLOOR — the incident class this artifact
+    exists to prevent."""
+    conn, cities_path, frozen_csv_path = _basic_setup(tmp_path)
+    loaded = fscw.load_walk_forward_rows(
+        conn, as_of="2026-12-31", servable=frozenset({"A"})
+    )
+    for by_date in loaded["obs"].values():
+        for models in by_date.values():
+            assert set(models) <= {"A"}
+    assert "gfs_global" in ("gfs_global",)  # retired set documented in LIVE_SERVABLE_MODELS comment
+    assert "gfs_global" not in fscw.LIVE_SERVABLE_MODELS
+    assert "gem_global" not in fscw.LIVE_SERVABLE_MODELS
+    assert "jma_seamless" not in fscw.LIVE_SERVABLE_MODELS
+    assert "icon_seamless" not in fscw.LIVE_SERVABLE_MODELS
+    assert "ecmwf_ifs" in fscw.LIVE_SERVABLE_MODELS

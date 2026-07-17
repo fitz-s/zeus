@@ -85,6 +85,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.forecast.center import MIN_SETTLED_N, raw_second_moment_weights  # noqa: E402
+from src.forecast.model_selection import (  # noqa: E402
+    ANCHOR_MODEL,
+    GLOBAL_LIKELIHOOD_MODELS,
+    REGIONAL_MODELS,
+)
 from src.strategy.live_inference.source_clock_city_weights import (  # noqa: E402
     DEFAULT_CITY_ONE_SCHEME_PATH,
     fixed_weight_center_from_values,
@@ -95,6 +100,16 @@ CITIES_DEFAULT = ROOT / "config" / "cities.json"
 OUT_DIR_DEFAULT = ROOT / "state" / "source_clock_weights"
 METRICS = ("high", "low")
 GLOBAL_CORE_BASKET = ("icon_global", "ecmwf_ifs", "ukmo_global_deterministic_10km")
+# Candidate universe = models the live pipeline actually fetches (anchor + globals +
+# regionals, src/forecast/model_selection.py). The previous_runs archive also carries
+# retired models (gfs_global/gem_global/jma_seamless/icon_seamless, dropped 2026-06-17);
+# a basket naming one would be permanently unservable at decision time — the serving
+# renormalizer would silently degrade it, and a single-model retired basket would fall
+# below PRESENT_WEIGHT_FLOOR and blank the city (the exact incident class this whole
+# artifact exists to prevent).
+LIVE_SERVABLE_MODELS = frozenset(
+    (ANCHOR_MODEL,) + GLOBAL_LIKELIHOOD_MODELS + REGIONAL_MODELS
+)
 TIER1_MIN_N = 60      # city-specific greedy basket
 TIER2_MIN_N = 30      # region-pooled basket (below TIER1_MIN_N, at/above this)
 BASKET_CAP = 4
@@ -142,7 +157,12 @@ def _region_for_city(cfg: Mapping[str, object]) -> str:
     return "OTHER"
 
 
-def load_walk_forward_rows(conn: sqlite3.Connection, *, as_of: str) -> dict[str, dict]:
+def load_walk_forward_rows(
+    conn: sqlite3.Connection,
+    *,
+    as_of: str,
+    servable: frozenset[str] | None = None,
+) -> dict[str, dict]:
     """Returns ``{"obs": {(city, metric): {target_date: {model: forecast_c}}},
     "settle": {(city, metric): {target_date: settlement_c}}}``.
 
@@ -168,6 +188,8 @@ def load_walk_forward_rows(conn: sqlite3.Connection, *, as_of: str) -> dict[str,
                 )
             except (TypeError, ValueError):
                 continue
+        if servable is not None and model not in servable:
+            continue  # archive-only/retired model: unservable at decision time
         cell = (city, metric, model, target_date)
         if cell in seen_cells:
             continue  # a costlier lead for a cell already captured at a smaller lead
@@ -362,11 +384,12 @@ def build_artifact(
     cities_path: Path,
     frozen_csv_path: Path,
     git_sha: str,
+    servable: frozenset[str] | None = LIVE_SERVABLE_MODELS,
 ) -> dict[str, object]:
     cities_cfg = json.loads(cities_path.read_text(encoding="utf-8"))["cities"]
     region_by_city = {str(c["name"]): _region_for_city(c) for c in cities_cfg}
 
-    loaded = load_walk_forward_rows(conn, as_of=as_of)
+    loaded = load_walk_forward_rows(conn, as_of=as_of, servable=servable)
     obs_all: Mapping[tuple[str, str], Mapping[str, Mapping[str, float]]] = loaded["obs"]
     settle_all: Mapping[tuple[str, str], Mapping[str, float]] = loaded["settle"]
     settlement_rows_used = sum(len(v) for v in settle_all.values())
