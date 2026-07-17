@@ -1600,18 +1600,25 @@ def _replacement_forecast_download_cycle() -> None:
     station_report = _ingest_station_forecasts_live(cfg)
     if station_report:
         logger.info("station-forecast live ingest wrote rows: %s", station_report)
-    catchup_report = _run_replacement_forecast_live_materialization_queue_once(cfg)
-    catchup_payload = catchup_report.as_dict()
-    if (
-        catchup_report.processed_count
-        or catchup_report.seed_processed_count
-        or catchup_report.failed_count
-        or catchup_report.seed_failed_count
-    ):
-        logger.info(
-            "replacement forecast live materialization download-catchup: %s",
-            catchup_payload,
+    # The download lane already enqueues exact cycle-advance/fusion-upgrade seeds.
+    # Materialize those known changes before paying for the global discovery backstop.
+    for discover in (False, True):
+        catchup_report = _run_replacement_forecast_live_materialization_queue_once(
+            cfg,
+            discover=discover,
         )
+        if (
+            catchup_report.processed_count
+            or catchup_report.seed_processed_count
+            or catchup_report.failed_count
+            or catchup_report.seed_failed_count
+        ):
+            logger.info(
+                "replacement forecast live materialization download-catchup "
+                "discover=%s: %s",
+                discover,
+                catchup_report.as_dict(),
+            )
 
 
 @_scheduler_job("replacement_forecast_live_materialize")

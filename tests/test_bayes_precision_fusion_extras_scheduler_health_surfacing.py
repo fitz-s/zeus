@@ -210,3 +210,33 @@ def test_extras_flag_off_no_health_entry():
 
     bayes_precision_fusion_calls = [c for c in health_calls if c["job_name"] == "bayes_precision_fusion_capture"]
     assert not bayes_precision_fusion_calls, "Flag-off (None return) must NOT write bayes_precision_fusion_capture health entry"
+
+
+def test_download_cycle_drains_known_work_before_global_discovery():
+    """Fresh-input reseeds materialize before the global discovery backstop."""
+
+    report = types.SimpleNamespace(
+        processed_count=0,
+        seed_processed_count=0,
+        failed_count=0,
+        seed_failed_count=0,
+        as_dict=lambda: {},
+    )
+    queue = MagicMock(side_effect=(report, report))
+
+    with _patch_env(None):
+        with patch.multiple(
+            "src.data.replacement_forecast_production",
+            _ingest_station_forecasts_live=MagicMock(return_value=None),
+            _run_replacement_forecast_live_materialization_queue_once=queue,
+        ):
+            with patch(
+                "src.data.source_clock_update_probe.probe_openmeteo_source_clock_updates"
+            ):
+                fn = _get_download_cycle_fn()
+                fn()
+
+    assert queue.call_args_list == [
+        call(_BASE_CFG, discover=False),
+        call(_BASE_CFG, discover=True),
+    ]
