@@ -271,7 +271,12 @@ def test_materializer_blocks_non_live_posterior_before_execution_authority_table
     result = materialize_replacement_forecast_live(conn, _request())
 
     assert result.ok is False
-    assert result.reason_codes == (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
+    # Catch-all reason stays first (byte-identical prefix for existing consumers);
+    # a typed sub-reason is appended so the operator sees WHICH requirement failed
+    # (2026-07-13/14 incident: the catch-all alone told 277 receipts nothing).
+    assert result.reason_codes[0] == REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET
+    assert len(result.reason_codes) > 1
+    assert any(code.startswith("Q_MODE:") for code in result.reason_codes)
     assert result.posterior_id is None
     assert result.anchor_id is not None
     assert result.readiness_id is None
@@ -295,6 +300,33 @@ def test_materializer_writes_authorized_06z_cycle_as_live_layer(monkeypatch: pyt
     provenance = json.loads(row["provenance_json"])
     assert row["runtime_layer"] == LIVE_RUNTIME_LAYER
     assert provenance["cycle_phase"] == "synoptic"
+
+
+def test_materializer_surfaces_bounds_missing_sub_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-07-13/14 incident fix: a fused-q bounds-build failure must surface the
+    Q_MODE:FUSED_NORMAL_BOUNDS_MISSING sub-reason, not just the catch-all code — so
+    a BLOCKED receipt tells the operator WHICH requirement failed without opening a
+    subprocess log."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    monkeypatch.setattr(
+        materializer_mod,
+        "_build_fused_q_bounds",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bootstrap exploded")),
+    )
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12)),
+    )
+
+    assert result.ok is False
+    assert result.reason_codes[0] == REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET
+    assert "Q_MODE:FUSED_NORMAL_BOUNDS_MISSING" in result.reason_codes
+    assert result.posterior_id is None
+    # Shadow accrual still happens: a row is NOT written for the live-blocked mode,
+    # but the anchor row is (unchanged prior contract).
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
 
 def test_runtime_layer_requires_live_flags_and_bootstrap_bounds(monkeypatch: pytest.MonkeyPatch) -> None:

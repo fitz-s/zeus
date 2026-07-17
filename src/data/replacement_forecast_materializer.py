@@ -1533,6 +1533,28 @@ class _PosteriorComputeResult:
     provenance_payload: dict[str, object] | None
 
 
+def _posterior_block_sub_reason_codes(result: "_PosteriorComputeResult") -> tuple[str, ...]:
+    """Typed sub-reasons for a not-``live_eligible`` posterior compute.
+
+    2026-07-13/14 incident: every failed materialization surfaced ONLY the
+    catch-all ``REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET`` — 277 receipts
+    across ~30h, none saying WHICH requirement failed (the real cause lived in a
+    subprocess ``logging.warning`` no operator saw). These sub-codes derive
+    exclusively from fields the compute ALREADY carries on ``_PosteriorComputeResult``
+    (no new computation, no new DB read) so the queue receipt sidecar picks them up
+    for free via ``reason_codes``.
+    """
+    codes: list[str] = [f"Q_MODE:{result.replacement_q_mode}"]
+    codes.append(f"CAPTURE:{result.capture_status}")
+    if result.predictive_sigma_c is None:
+        codes.append("PREDICTIVE_SIGMA:MISSING")
+    if result.q_lcb_map is None:
+        codes.append("Q_LCB:MISSING")
+    if result.q_ucb_map is None:
+        codes.append("Q_UCB:MISSING")
+    return tuple(codes)
+
+
 def _read_persisted_current_capture(
     conn: "sqlite3.Connection",
     *,
@@ -4159,6 +4181,23 @@ def _insert_posterior(
     result = _compute_posterior_payload(conn, request, metric=metric, anchor_id=anchor_id)
     if not result.live_eligible:
         return None
+    return _write_posterior_row(conn, request, metric=metric, anchor_id=anchor_id, result=result)
+
+
+def _write_posterior_row(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    anchor_id: int,
+    result: "_PosteriorComputeResult",
+) -> int:
+    """INSERT a live-eligible ``_PosteriorComputeResult`` into ``forecast_posteriors``.
+
+    Extracted from ``_insert_posterior`` so ``materialize_replacement_forecast_live``
+    can hold the compute ``result`` (needed for typed BLOCKED sub-reasons) without
+    computing it twice. Caller MUST have already checked ``result.live_eligible``.
+    """
     target_date = _date_text(request.target_date)
     data_version = result.data_version
     source_cycle_time = result.source_cycle_time
@@ -4451,15 +4490,21 @@ def materialize_replacement_forecast_live(
             readiness_id=None,
         )
     anchor_id = _insert_anchor(conn, request, metric=metric)
-    posterior_id = _insert_posterior(conn, request, metric=metric, anchor_id=anchor_id)
-    if posterior_id is None:
+    posterior_result = _compute_posterior_payload(conn, request, metric=metric, anchor_id=anchor_id)
+    if not posterior_result.live_eligible:
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
-            reason_codes=(REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,),
+            reason_codes=(
+                (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
+                + _posterior_block_sub_reason_codes(posterior_result)
+            ),
             posterior_id=None,
             anchor_id=anchor_id,
             readiness_id=None,
         )
+    posterior_id = _write_posterior_row(
+        conn, request, metric=metric, anchor_id=anchor_id, result=posterior_result
+    )
     readiness = _build_readiness(request, metric=metric, posterior_id=posterior_id, anchor_id=anchor_id)
     expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
     write_readiness_state(
