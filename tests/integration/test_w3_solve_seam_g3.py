@@ -3317,6 +3317,15 @@ def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(
 
     adapter().process_global_batch((scope_event,), at_0 + _dt.timedelta(seconds=3))
     callbacks[-1](scope_event, at_0 + _dt.timedelta(seconds=3))
+    assert len(prepare_calls) == 2
+
+    new_scope_event = _global_scope_event(
+        city="Dallas", source_run_id="run-dallas-new"
+    )
+    adapter().process_global_batch(
+        (new_scope_event,), at_0 + _dt.timedelta(seconds=4)
+    )
+    callbacks[-1](new_scope_event, at_0 + _dt.timedelta(seconds=4))
     assert len(prepare_calls) == 3
 
 
@@ -10014,7 +10023,8 @@ def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
 
     assert prepared == [held_event]
     assert result.receipts[held_event.event_id].reason == (
-        "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY"
+        "GLOBAL_FAMILY_INELIGIBLE:"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:test"
     )
 
 
@@ -10977,6 +10987,45 @@ def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
     assert {receipt.reason for receipt in result.receipts.values()} == {
         "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY"
     }
+
+
+def test_global_batch_preserves_single_family_current_q_failure(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    reason = (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "EVENT_BOUND_MARKET_TOPOLOGY_MISSING"
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            reason=reason,
+        ),
+        actuate_winner=lambda *_: pytest.fail("ineligible family must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert result.receipts[event.event_id].reason == (
+        f"GLOBAL_FAMILY_INELIGIBLE:{reason}"
+    )
 
 
 def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch):

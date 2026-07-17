@@ -2434,6 +2434,7 @@ class OpportunityEventReactor:
                 if _money_path_reason_base(last_reason or "") in {
                     "EXECUTABLE_SNAPSHOT_BLOCKED",
                     "EXECUTABLE_SNAPSHOT_STALE",
+                    "GLOBAL_FAMILY_INELIGIBLE",
                 } or _is_day0_hourly_refresh_reason(last_reason):
                     try:
                         snapshot_block_attempts = self._store.attempt_count(event.event_id)
@@ -4256,6 +4257,7 @@ def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
         in {
             "EXECUTABLE_SNAPSHOT_BLOCKED",
             "EXECUTABLE_SNAPSHOT_STALE",
+            "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
             "SUBMIT_ABORTED_PRICE_MOVED",
             "SUBMIT_ABORTED_MODE_FLIPPED",
             "LIVE_DEPTH_AUTHORITY_MISSING",

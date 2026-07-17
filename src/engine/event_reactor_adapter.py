@@ -6919,6 +6919,18 @@ def event_bound_live_adapter_from_trade_conn(
                 or family_key in probability_refresh_family_keys
             )
             if force_refresh:
+                cached_ineligible = (
+                    _probe_global_probability_family_ineligible_cache(
+                        probability_cache_namespace,
+                        family_key=family_key,
+                        event_id=event.event_id,
+                        causal_snapshot_id=event.causal_snapshot_id,
+                        revision=probability_cache_revision,
+                    )
+                )
+                if cached_ineligible is not None:
+                    probability_cache_stats["ineligible_hit"] += 1
+                    return cached_ineligible
                 probability_cache_stats["refresh"] += 1
                 _evict_global_probability_family_cache(
                     probability_cache_namespace,

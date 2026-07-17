@@ -2034,6 +2034,10 @@ def process_current_global_batch(
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         log_stage("prepare_families", families=len(prepared_by_event))
         if not prepared_by_event:
+            if len(event_tuple) == 1 and ineligible_by_event:
+                reason = ineligible_by_event.get(event_tuple[0].event_id)
+                if reason:
+                    return reject(f"GLOBAL_FAMILY_INELIGIBLE:{reason}")
             return reject("GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY")
 
         eligible_family_keys = frozenset(

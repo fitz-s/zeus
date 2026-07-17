@@ -163,6 +163,34 @@ def test_snapshot_block_retry_floor_backs_off_without_attempt_cap(monkeypatch):
     assert _snapshot_block_retry_delay_seconds(attempt_count=33) == 600.0
 
 
+def test_global_topology_ineligible_refreshes_family_and_uses_retry_floor():
+    conn, store = _store()
+    event = _event("snap-global-topology-missing")
+    store.insert_or_ignore(event)
+    refreshed = []
+    reason = (
+        "GLOBAL_FAMILY_INELIGIBLE:"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "EVENT_BOUND_MARKET_TOPOLOGY_MISSING"
+    )
+
+    def refresh(*, city, target_date, metric):
+        refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = _reactor_with_reason(conn, store, reason)
+    reactor._family_snapshot_refresher = refresh
+    result = reactor.process_pending(decision_time=_DT, limit=1)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 1
+    assert refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
+    assert datetime.fromisoformat(_claimed_at(conn, event.event_id)) >= (
+        _DT + timedelta(seconds=60)
+    )
+
+
 def test_runtime_authority_retry_floor_is_bounded(monkeypatch):
     monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "120")
     assert _runtime_authority_retry_delay_seconds() == 120.0
