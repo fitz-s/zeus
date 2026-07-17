@@ -895,7 +895,10 @@ def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
         router._edli_screened_entry_family_keys_for_price_channel
     )
     assert "set(families) - set(held_families)" in src
+    assert "held_families.intersection_update(families)" in src
     assert "resting_families = _edli_resting_family_keys_for_tokens" in src
+    assert "if unresolved_families:" in src
+    assert "resting_families.intersection_update(unresolved_families)" in src
     assert "families = held_families | entry_families | resting_families" in src
     assert src.index("families = held_families | entry_families") < src.index(
         "trigger.build_committed_snapshot_events"

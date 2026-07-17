@@ -241,18 +241,22 @@ def _edli_own_resting_order_token_ids(
         rows = trade_conn.execute(
             f"""
             SELECT DISTINCT vc.token_id
-             FROM {trade_prefix}venue_commands vc
-             JOIN {trade_prefix}venue_order_facts vof ON vof.command_id = vc.command_id
+              FROM {trade_prefix}venue_commands vc
              WHERE vc.token_id IN ({token_placeholders})
-               AND vof.state IN ({open_state_placeholders})
                AND upper(COALESCE(vc.state, '')) NOT IN (
                      'CANCELLED', 'CANCELED', 'EXPIRED', 'REJECTED',
                      'SUBMIT_REJECTED', 'FILLED'
                )
-               AND vof.local_sequence = (
-                     SELECT MAX(vof2.local_sequence)
-                       FROM {trade_prefix}venue_order_facts vof2
-                      WHERE vof2.command_id = vof.command_id
+               AND EXISTS (
+                     SELECT 1
+                       FROM {trade_prefix}venue_order_facts vof
+                      WHERE vof.command_id = vc.command_id
+                        AND vof.state IN ({open_state_placeholders})
+                        AND vof.local_sequence = (
+                              SELECT MAX(vof2.local_sequence)
+                                FROM {trade_prefix}venue_order_facts vof2
+                               WHERE vof2.command_id = vc.command_id
+                        )
                )
             """,
             (*tuple(tokens), *sorted(OPEN_ORDER_FACT_STATES)),
@@ -521,6 +525,7 @@ def _edli_price_channel_redecision_events_for_events(
         tokens,
         trade_schema=trade_schema,
     )
+    held_families.intersection_update(families)
     entry_families = _edli_screened_entry_family_keys_for_price_channel(
         world_conn,
         trade_conn,
@@ -535,12 +540,16 @@ def _edli_price_channel_redecision_events_for_events(
     # anyway. No new cap is added for this bucket: the entity-key debounce in
     # _edli_pending_redecision_entity_keys (consumer edli_reactor_v1) already
     # bounds the lane to one pending row per family by construction.
-    resting_families = _edli_resting_family_keys_for_tokens(
-        trade_conn,
-        forecasts_conn,
-        tokens,
-        trade_schema=trade_schema,
-    )
+    unresolved_families = families - held_families - entry_families
+    resting_families = set()
+    if unresolved_families:
+        resting_families = _edli_resting_family_keys_for_tokens(
+            trade_conn,
+            forecasts_conn,
+            tokens,
+            trade_schema=trade_schema,
+        )
+        resting_families.intersection_update(unresolved_families)
     families = held_families | entry_families | resting_families
     (logger.info if families else logger.debug)(
         "EDLI price-channel redecision buckets held=%d screened=%d resting=%d union=%d",
