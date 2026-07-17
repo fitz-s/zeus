@@ -324,6 +324,88 @@ def test_current_evidence_shape_accepts_ens_cycle_within_staleness_bound() -> No
     assert shape is not None
 
 
+def _seed_current_ens_with_members(conn, *, request, members: list[float | None]) -> None:
+    """Seed the current-evidence ENS carrier row with an explicit members list, some entries
+    possibly None (boundary-quarantined members persisted as null per the leakage law even
+    on snapshots the majority rule already marks contributes_to_target_extrema=1)."""
+
+    req = request
+    cyc = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat()
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            city, target_date, temperature_metric, physical_quantity,
+            observation_field, issue_time, valid_time, available_at,
+            fetch_time, lead_hours, members_json, model_version, dataset_id,
+            source_id, source_cycle_time, source_available_at,
+            forecast_window_attribution_status, contributes_to_target_extrema,
+            causality_status, boundary_ambiguous, authority, members_unit
+        ) VALUES (?, ?, 'high', 'temperature', 'high_temp', ?, ?, ?, ?, 24.0,
+                  ?, 'ecmwf_ens', 'test-current-ens', 'ecmwf_open_data', ?, ?,
+                  'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'VERIFIED', 'degC')
+        """,
+        (
+            req.city,
+            mod._date_text(req.target_date),
+            cyc,
+            datetime(2026, 6, 7, 12, tzinfo=UTC).isoformat(),
+            _dt(3).isoformat(),
+            _dt(3, 30).isoformat(),
+            json.dumps(members),
+            cyc,
+            _dt(3).isoformat(),
+        ),
+    )
+
+
+def test_current_evidence_shape_skips_null_quarantined_members_above_floor() -> None:
+    """Coordination fix (impl-lowens P0, ingest_grib_to_snapshots.py boundary-quarantine):
+    once contributes_to_target_extrema=1 becomes achievable for minority-ambiguous ENS
+    snapshots that still carry null entries for boundary-quarantined members, the reader
+    must skip the nulls (leakage law forbids their value entering extrema) rather than let
+    float(None) raise and get silently swallowed as "no evidence". 45 finite + 6 null
+    members clears the >=20-finite floor, so a shape IS returned with member_count=45."""
+
+    conn = _conn()
+    req = _request()
+    members: list[float | None] = [24.0 + (index - 25) * 0.02 for index in range(45)] + [None] * 6
+    _seed_current_ens_with_members(conn, request=req, members=members)
+
+    shape = mod._read_current_evidence_shape(
+        conn,
+        req,
+        metric="high",
+        provider_values_c={"ecmwf_ifs": 24.0, "icon_global": 25.0},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        center_c=24.5,
+    )
+
+    assert shape is not None
+    assert shape.member_count == 45
+
+
+def test_current_evidence_shape_fails_closed_when_finite_members_below_floor() -> None:
+    """Counterpart: if quarantine nulls leave fewer than 20 finite members, the existing
+    `len(members) < 20` floor in _current_evidence_shape_from_values must still fail closed
+    (shape=None), not fabricate a shape from too few finite members."""
+
+    conn = _conn()
+    req = _request()
+    members: list[float | None] = [24.0 + (index - 9) * 0.02 for index in range(19)] + [None] * 32
+    _seed_current_ens_with_members(conn, request=req, members=members)
+
+    shape = mod._read_current_evidence_shape(
+        conn,
+        req,
+        metric="high",
+        provider_values_c={"ecmwf_ifs": 24.0, "icon_global": 25.0},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        center_c=24.5,
+    )
+
+    assert shape is None
+
+
 def _enable_flag(monkeypatch):
     import src.config as cfg
     monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_enabled", True)

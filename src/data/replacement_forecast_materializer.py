@@ -1381,7 +1381,15 @@ def _read_current_evidence_shape(
         ).fetchone()
         if row is None:
             return None
-        values = tuple(float(value) for value in json.loads(row[1]))
+        # Boundary-quarantined members are persisted as null (leakage law: their boundary
+        # value must never enter extrema) even on snapshots where the majority rule already
+        # allows contributes_to_target_extrema=1. Skip nulls rather than let float(None)
+        # raise — the existing `len(members) < 20` floor in
+        # _current_evidence_shape_from_values is the correct fail-closed gate on the
+        # resulting (possibly reduced) member count, not a blanket exception swallow.
+        values = tuple(
+            float(value) for value in json.loads(row[1]) if value is not None
+        )
         members_unit = str(row[4] or "").strip().lower()
         if members_unit in {"degf", "f", "°f"}:
             values = tuple((value - 32.0) * 5.0 / 9.0 for value in values)
