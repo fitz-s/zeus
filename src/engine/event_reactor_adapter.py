@@ -6182,6 +6182,12 @@ def event_bound_live_adapter_from_trade_conn(
         projected_book_refresh_tokens = _global_projected_book_refresh_tokens(
             events
         )
+        entry_submit_suppression_reason = _entry_global_submit_suppression_reason()
+        if entry_submit_suppression_reason is not None:
+            logging.getLogger(__name__).info(
+                "global batch suppressing BUY candidates before selection: reason=%s",
+                entry_submit_suppression_reason,
+            )
 
         def _epoch_superseded() -> bool:
             current = reactor_urgent_wake_revision()
@@ -7100,6 +7106,8 @@ def event_bound_live_adapter_from_trade_conn(
             ).strip().upper()
             if action == "SELL":
                 return None
+            if entry_submit_suppression_reason is not None:
+                return entry_submit_suppression_reason
             family_key = str(getattr(candidate, "family_key", "") or "").strip()
             owner = _global_entry_policy_by_family.get(family_key)
             side = str(getattr(candidate, "side", "") or "").strip().upper()
@@ -7165,9 +7173,8 @@ def event_bound_live_adapter_from_trade_conn(
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
                 current_capital_limit_resolver=_current_entry_capital_limit,
-                # Operator pause and transient submit authority govern actuation,
-                # not economics. Keep the complete BUY/SELL/HOLD/CASH comparison
-                # observable while preflight and executor independently block BUY.
+                # Apply the same configured submit authority before expensive
+                # preflight. SELL remains eligible in reduce-only operation.
                 candidate_policy_rejection_resolver=(
                     _current_entry_candidate_policy
                 ),

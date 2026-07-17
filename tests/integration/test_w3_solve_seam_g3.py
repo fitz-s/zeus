@@ -2681,11 +2681,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         family_key="family-dallas",
         side="YES",
     )
-    assert policy(low_price) == (
-        "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
-        "strategy=forecast_qkernel_entry:side=YES:best_ask=0.004:floor=0.1"
-    )
-    assert policy(live_floor) is None
+    assert policy(low_price) == "entries_paused:test_containment"
+    assert policy(live_floor) == "entries_paused:test_containment"
     assert policy(reduce_only) is None
     metadata_calls = []
     bind_calls = []
