@@ -5001,6 +5001,47 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
     assert replacement is superseded.global_jit_candidate
     assert reason == superseded.reason
 
+    replacement_actuation = SimpleNamespace(
+        winner_event_id=event.event_id,
+        decision=SimpleNamespace(
+            candidate=superseded.global_jit_candidate,
+            limit_price=Decimal("0.004"),
+            shares=Decimal("190"),
+        ),
+    )
+    replacement_captured_at = superseded.global_jit_candidate.book_captured_at_utc
+    reused = era._global_preflight_entry_jit_receipt(
+        event,
+        receipt,
+        global_actuation=replacement_actuation,
+        book_quote_provider=lambda _token_id: pytest.fail(
+            "exact JIT re-auction witness should not be fetched again"
+        ),
+        current_candidate_override=superseded.global_jit_candidate,
+        checked_at_utc=replacement_captured_at + _dt.timedelta(seconds=1),
+    )
+    assert reused is receipt
+
+    stale_calls = []
+    stale = era._global_preflight_entry_jit_receipt(
+        event,
+        receipt,
+        global_actuation=replacement_actuation,
+        book_quote_provider=lambda token_id: (
+            stale_calls.append(token_id)
+            or {
+                "asset_id": token_id,
+                "hash": "fresh-after-expiry",
+                "bids": [{"price": "0.003", "size": "100"}],
+                "asks": [{"price": "0.004", "size": "217.68"}],
+            }
+        ),
+        current_candidate_override=superseded.global_jit_candidate,
+        checked_at_utc=replacement_captured_at + _dt.timedelta(seconds=31),
+    )
+    assert stale_calls == ["token-a"]
+    assert stale is receipt
+
     stable = era._global_preflight_entry_jit_receipt(
         event,
         receipt,

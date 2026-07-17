@@ -6732,7 +6732,12 @@ def event_bound_live_adapter_from_trade_conn(
                 real_order_submit_enabled=real_order_submit_enabled,
             )
 
+        pending_preflight_jit_candidate: object | None = None
+
         def _preflight(event, actuation, at, authority):
+            nonlocal pending_preflight_jit_candidate
+            jit_candidate = pending_preflight_jit_candidate
+            pending_preflight_jit_candidate = None
             receipt = _submit_inner(
                 event,
                 at,
@@ -6750,7 +6755,11 @@ def event_bound_live_adapter_from_trade_conn(
                 receipt,
                 global_actuation=actuation,
                 book_quote_provider=pre_submit_book_quote_provider,
+                current_candidate_override=jit_candidate,
+                checked_at_utc=datetime.now(UTC),
             )
+            if receipt.global_jit_candidate is not None:
+                pending_preflight_jit_candidate = receipt.global_jit_candidate
             reason = str(receipt.reason or "")
             if receipt.proof_accepted is True and (
                 receipt.decision_proof_bundle is not None
@@ -9725,6 +9734,8 @@ def _global_preflight_entry_jit_receipt(
     *,
     global_actuation: object,
     book_quote_provider: Callable[[str], Mapping[str, object]] | None,
+    current_candidate_override: object | None = None,
+    checked_at_utc: datetime | None = None,
 ) -> EventSubmissionReceipt:
     """Bind selected BUY to the full JIT curve before any persistence."""
 
@@ -9754,39 +9765,47 @@ def _global_preflight_entry_jit_receipt(
     try:
         from src.events.reactor import _edli_pre_submit_book_from_jit_fetch
 
-        raw_book: dict[str, object] = {}
-
-        def capture_book(token_id: str):
-            if book_quote_provider is None:
-                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
-            consume_last = getattr(book_quote_provider, "consume_last", None)
-            response = (
-                consume_last(token_id)
-                if callable(consume_last)
-                else None
-            )
-            if response is None:
-                response = book_quote_provider(token_id)
-                if callable(consume_last):
-                    consume_last(token_id)
-            current = dict(response[0] if isinstance(response, tuple) else response)
-            raw_book.clear()
-            raw_book.update(current)
-            return response
-
-        jit = _edli_pre_submit_book_from_jit_fetch(
-            capture_book,
-            token_id=str(getattr(candidate, "token_id", "") or ""),
-            side="BUY",
-            post_only=False,
-        )
-        if jit is None:
-            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
-        current_candidate = _global_buy_candidate_from_raw_book(
+        current_candidate = _reusable_global_preflight_jit_candidate(
             candidate,
-            raw_book,
-            captured_at_utc=jit[3],
+            current_candidate_override,
+            checked_at_utc=checked_at_utc,
         )
+        if current_candidate is None:
+            raw_book: dict[str, object] = {}
+
+            def capture_book(token_id: str):
+                if book_quote_provider is None:
+                    raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+                consume_last = getattr(book_quote_provider, "consume_last", None)
+                response = (
+                    consume_last(token_id)
+                    if callable(consume_last)
+                    else None
+                )
+                if response is None:
+                    response = book_quote_provider(token_id)
+                    if callable(consume_last):
+                        consume_last(token_id)
+                current = dict(
+                    response[0] if isinstance(response, tuple) else response
+                )
+                raw_book.clear()
+                raw_book.update(current)
+                return response
+
+            jit = _edli_pre_submit_book_from_jit_fetch(
+                capture_book,
+                token_id=str(getattr(candidate, "token_id", "") or ""),
+                side="BUY",
+                post_only=False,
+            )
+            if jit is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+            current_candidate = _global_buy_candidate_from_raw_book(
+                candidate,
+                raw_book,
+                captured_at_utc=jit[3],
+            )
         drift = _global_selected_order_economics_drift(
             decision=decision,
             current_candidate=current_candidate,
@@ -9830,6 +9849,81 @@ def _global_preflight_entry_jit_receipt(
             proof_accepted=False,
         )
     return receipt
+
+
+def _reusable_global_preflight_jit_candidate(
+    selected_candidate: object,
+    current_candidate: object | None,
+    *,
+    checked_at_utc: datetime | None,
+) -> object | None:
+    """Reuse the exact JIT curve consumed by the immediately prior re-auction."""
+
+    if (
+        current_candidate is None
+        or checked_at_utc is None
+        or checked_at_utc.tzinfo is None
+    ):
+        return None
+    identity_fields = (
+        "family_key",
+        "bin_id",
+        "condition_id",
+        "side",
+        "token_id",
+        "probability_witness_identity",
+        "resolution_identity",
+        "ledger_snapshot_id",
+        "book_snapshot_id",
+        "execution_curve_identity",
+    )
+    if any(
+        str(getattr(current_candidate, field, "") or "")
+        != str(getattr(selected_candidate, field, "") or "")
+        for field in identity_fields
+    ):
+        return None
+    if (
+        str(getattr(current_candidate, "action", "BUY") or "BUY") != "BUY"
+        or str(getattr(selected_candidate, "action", "BUY") or "BUY") != "BUY"
+    ):
+        return None
+    from src.solve.solver import executable_curve_identity
+
+    curve = getattr(current_candidate, "executable_cost_curve", None)
+    selected_curve = getattr(selected_candidate, "executable_cost_curve", None)
+    captured_at = getattr(current_candidate, "book_captured_at_utc", None)
+    selected_captured_at = getattr(selected_candidate, "book_captured_at_utc", None)
+    curve_identity = str(
+        getattr(current_candidate, "execution_curve_identity", "") or ""
+    )
+    if (
+        curve is None
+        or selected_curve is None
+        or not isinstance(captured_at, datetime)
+        or captured_at.tzinfo is None
+        or not isinstance(selected_captured_at, datetime)
+        or selected_captured_at.tzinfo is None
+        or str(getattr(curve, "token_id", "") or "")
+        != str(getattr(current_candidate, "token_id", "") or "")
+        or str(getattr(curve, "side", "") or "")
+        != str(getattr(current_candidate, "side", "") or "")
+        or str(getattr(curve, "snapshot_id", "") or "")
+        != str(getattr(current_candidate, "book_snapshot_id", "") or "")
+        or executable_curve_identity(curve) != curve_identity
+        or executable_curve_identity(selected_curve) != curve_identity
+    ):
+        return None
+    captured_at = captured_at.astimezone(UTC)
+    selected_captured_at = selected_captured_at.astimezone(UTC)
+    checked_at_utc = checked_at_utc.astimezone(UTC)
+    if (
+        selected_captured_at != captured_at
+        or checked_at_utc < captured_at
+        or checked_at_utc > captured_at + curve.quote_ttl
+    ):
+        return None
+    return current_candidate
 
 
 def _global_current_state_execution_economics(
