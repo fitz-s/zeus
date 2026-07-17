@@ -1823,6 +1823,25 @@ def _global_book_prefetch_epoch_at(
     return epoch_at if finished - epoch_at <= max_age else None
 
 
+def _global_book_prefetch_is_consumable(
+    prefetched_at: datetime | None,
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> bool:
+    """Reserve one second of the freshness window for local capture work."""
+
+    if (
+        prefetched_at is None
+        or prefetched_at.tzinfo is None
+        or checked_at.tzinfo is None
+        or max_age <= timedelta(seconds=1)
+    ):
+        return False
+    age = checked_at.astimezone(timezone.utc) - prefetched_at.astimezone(timezone.utc)
+    return timedelta(0) <= age <= max_age - timedelta(seconds=1)
+
+
 def _fresh_projected_global_books(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
@@ -7378,6 +7397,11 @@ def event_bound_live_adapter_from_trade_conn(
                 matching_prefetch = (
                     prefetched
                     if prefetched is not None
+                    and _global_book_prefetch_is_consumable(
+                        prefetched[2],
+                        checked_at=datetime.now(UTC),
+                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    )
                     and (
                         _global_book_prefetch_tokens(bound_probabilities)
                         == prefetched_tokens

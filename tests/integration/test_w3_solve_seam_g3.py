@@ -3587,6 +3587,32 @@ def test_live_adapter_day0_binds_tradeability_before_fetching_executable_books(
     world.close()
 
 
+def test_global_book_prefetch_reserves_capture_freshness_budget():
+    checked_at = _dt.datetime(2026, 7, 17, 12, tzinfo=_dt.timezone.utc)
+    max_age = _dt.timedelta(minutes=3)
+
+    assert era._global_book_prefetch_is_consumable(
+        checked_at - max_age + _dt.timedelta(seconds=2),
+        checked_at=checked_at,
+        max_age=max_age,
+    )
+    assert not era._global_book_prefetch_is_consumable(
+        checked_at - max_age + _dt.timedelta(milliseconds=500),
+        checked_at=checked_at,
+        max_age=max_age,
+    )
+    assert not era._global_book_prefetch_is_consumable(
+        checked_at + _dt.timedelta(milliseconds=1),
+        checked_at=checked_at,
+        max_age=max_age,
+    )
+    assert not era._global_book_prefetch_is_consumable(
+        checked_at.replace(tzinfo=None),
+        checked_at=checked_at,
+        max_age=max_age,
+    )
+
+
 @pytest.mark.parametrize("projection_survives", [True, False])
 def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     monkeypatch,
