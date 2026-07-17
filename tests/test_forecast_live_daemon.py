@@ -228,7 +228,7 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
     assert daemon._replacement_forecast_last_discovery_monotonic == 90.0
 
 
-def test_replacement_materialize_due_discovery_preempts_pending_queue(
+def test_replacement_materialize_pending_queue_preempts_due_discovery(
     monkeypatch, tmp_path
 ) -> None:
     import src.data.replacement_forecast_production as production
@@ -257,8 +257,8 @@ def test_replacement_materialize_due_discovery_preempts_pending_queue(
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(True, 3)]
-    assert daemon._replacement_forecast_last_discovery_monotonic == 1000.0
+    assert calls == [(False, 3)]
+    assert daemon._replacement_forecast_last_discovery_monotonic == 0.0
 
 
 def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_path) -> None:

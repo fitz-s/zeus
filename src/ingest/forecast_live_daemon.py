@@ -1102,7 +1102,7 @@ def _replacement_forecast_queue_pending(cfg: dict[str, object]) -> bool:
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
-    """Run one preemptible batch, prioritizing due source discovery over old debt."""
+    """Drain source-committed work before running periodic discovery."""
 
     global _replacement_forecast_last_discovery_monotonic
 
@@ -1118,15 +1118,15 @@ def _replacement_forecast_materialize_poll_job() -> None:
         >= 60.0 * _replacement_forecast_materialize_interval_minutes()
     )
     batch_limit = int(cfg["poll_batch_limit"])
-    if discovery_due:
+    if pending:
+        _replacement_forecast_materialize_job(
+            discover=False,
+            limit=batch_limit,
+        )
+    elif discovery_due:
         _replacement_forecast_last_discovery_monotonic = now
         _replacement_forecast_materialize_job(
             discover=True,
-            limit=batch_limit,
-        )
-    elif pending:
-        _replacement_forecast_materialize_job(
-            discover=False,
             limit=batch_limit,
         )
 
