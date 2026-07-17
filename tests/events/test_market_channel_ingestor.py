@@ -2068,6 +2068,77 @@ def test_active_weather_token_ids_from_executable_snapshots():
     assert metadata["no-1"].min_order_size == "5"
 
 
+def test_active_weather_metadata_reads_latest_projection_not_snapshot_history():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            min_tick_size TEXT,
+            min_order_size TEXT,
+            neg_risk INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            snapshot_id TEXT,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            (
+                "old",
+                "condition",
+                "weather-old",
+                "yes-old",
+                "no-old",
+                "0.01",
+                "5",
+                0,
+                1,
+                0,
+                "2026-07-17T00:00:00+00:00",
+            ),
+            (
+                "current",
+                "condition",
+                "weather-current",
+                "yes-current",
+                "no-current",
+                "0.001",
+                "10",
+                1,
+                1,
+                0,
+                "2026-07-17T01:00:00+00:00",
+            ),
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?)",
+        (
+            ("condition", "yes-current", "current"),
+            ("condition", "no-current", "current"),
+        ),
+    )
+
+    metadata = active_weather_token_metadata_from_snapshots(conn)
+
+    assert set(metadata) == {"yes-current", "no-current"}
+    assert metadata["yes-current"].min_tick_size == "0.001"
+    assert metadata["no-current"].min_order_size == "10"
+
+
 def test_min_order_size_enforced():
     book = quote_book_from_depth_json(
         yes_depth_json='{"asks":[{"price":"0.52","size":"10"}],"bids":[]}',

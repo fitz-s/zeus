@@ -777,13 +777,28 @@ def active_weather_token_metadata_from_snapshots(
     if not required <= columns:
         return {}
     has_captured_at = "captured_at" in columns
+    latest_table = "executable_market_snapshot_latest"
+    latest_columns = (
+        _table_columns(conn, latest_table)
+        if _table_exists(conn, latest_table)
+        else set()
+    )
+    use_latest_projection = (
+        {"condition_id", "snapshot_id"} <= latest_columns
+        and conn.execute(f"SELECT 1 FROM {latest_table} LIMIT 1").fetchone()
+        is not None
+    )
+    prefix = "snapshot." if use_latest_projection else ""
     predicates = []
     if "active" in columns:
-        predicates.append("COALESCE(active, 0) = 1")
+        predicates.append(f"COALESCE({prefix}active, 0) = 1")
     if "closed" in columns:
-        predicates.append("COALESCE(closed, 0) = 0")
+        predicates.append(f"COALESCE({prefix}closed, 0) = 0")
     if "event_slug" in columns:
-        predicates.append("(LOWER(COALESCE(event_slug, '')) LIKE '%weather%' OR LOWER(COALESCE(event_slug, '')) LIKE '%temperature%')")
+        predicates.append(
+            f"(LOWER(COALESCE({prefix}event_slug, '')) LIKE '%weather%' "
+            f"OR LOWER(COALESCE({prefix}event_slug, '')) LIKE '%temperature%')"
+        )
     # SETTLED-EXCLUSION (2026-06-04 candidate-flow root): EMS active/closed lifecycle
     # flags are never maintained (live rows all show active=1/closed=0), so the two
     # predicates above exclude nothing — settled weather markets stay in the universe.
@@ -806,19 +821,45 @@ def active_weather_token_metadata_from_snapshots(
     # SETTLEMENT_DAY markets (day0/exit); only POST_TRADING is excluded.
     if "market_end_at" in columns:
         now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-        predicates.append(f"(market_end_at IS NULL OR market_end_at > '{now_iso}')")
-    market_end_expr = "market_end_at" if "market_end_at" in columns else "NULL AS market_end_at"
+        predicates.append(
+            f"({prefix}market_end_at IS NULL OR {prefix}market_end_at > '{now_iso}')"
+        )
+    market_end_expr = (
+        f"{prefix}market_end_at"
+        if "market_end_at" in columns
+        else "NULL AS market_end_at"
+    )
     where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
-    # Latest snapshot per market (condition_id). Without a captured_at column we
-    # cannot rank temporally, so fall back to one row per condition by rowid.
-    order_expr = "captured_at DESC, rowid DESC" if has_captured_at else "rowid DESC"
+    # The current projection bounds this ranking to O(current markets). The
+    # append-only fallback preserves fixtures and recovery databases that have
+    # not materialized the projection yet.
+    source = (
+        f"""
+        FROM {latest_table} AS latest
+        JOIN executable_market_snapshots AS snapshot
+          ON snapshot.snapshot_id = latest.snapshot_id
+        """
+        if use_latest_projection
+        else "FROM executable_market_snapshots"
+    )
+    order_expr = (
+        f"{prefix}captured_at DESC, {prefix}rowid DESC"
+        if has_captured_at
+        else f"{prefix}rowid DESC"
+    )
     latest_per_condition = f"""
-        SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-               min_tick_size, min_order_size, neg_risk, {market_end_expr},
+        SELECT {prefix}snapshot_id AS snapshot_id,
+               {prefix}condition_id AS condition_id,
+               {prefix}yes_token_id AS yes_token_id,
+               {prefix}no_token_id AS no_token_id,
+               {prefix}min_tick_size AS min_tick_size,
+               {prefix}min_order_size AS min_order_size,
+               {prefix}neg_risk AS neg_risk,
+               {market_end_expr},
                ROW_NUMBER() OVER (
-                   PARTITION BY condition_id ORDER BY {order_expr}
+                   PARTITION BY {prefix}condition_id ORDER BY {order_expr}
                ) AS _rn
-        FROM executable_market_snapshots
+        {source}
         {where_clause}
     """
     rows = conn.execute(
