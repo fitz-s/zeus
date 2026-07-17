@@ -1986,8 +1986,9 @@ def scan_current_global_auction_scope(
     forecasts_conn: sqlite3.Connection,
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
+    restrict_to_families: set[tuple[str, str, str]] | None = None,
 ) -> CurrentGlobalAuctionScope:
-    """Read every current family and every held-family probability obligation."""
+    """Read the requested current families plus every held-family obligation."""
 
     if decision_at_utc.tzinfo is None:
         raise ValueError("decision_at_utc must be timezone-aware")
@@ -2003,6 +2004,22 @@ def scan_current_global_auction_scope(
             }
         )
     )
+    restricted = None
+    if restrict_to_families is not None:
+        requested = {
+            (
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                str(metric or "").strip().lower(),
+            )
+            for city, target_date, metric in restrict_to_families
+        }
+        restricted = requested | set(held)
+        if not requested or any(
+            not city or not target_date or metric not in {"high", "low"}
+            for city, target_date, metric in restricted
+        ):
+            raise ValueError("GLOBAL_AUCTION_RESTRICTED_FAMILY_IDENTITY_INVALID")
     trigger = ForecastSnapshotReadyTrigger(
         EventWriter(world_conn),
         live_eligibility_reader=executable_forecast_live_eligible_reader(
@@ -2015,6 +2032,7 @@ def scan_current_global_auction_scope(
         received_at=decision_at_utc.isoformat(),
         limit=None,
         source="global-auction-current-scope",
+        restrict_to_families=restricted,
         phase_filter_exempt_families=set(held),
     )
     events = current_global_scope_events_with_day0(
@@ -2025,6 +2043,10 @@ def scan_current_global_auction_scope(
             held_families=held,
         ),
     )
+    if restricted is not None:
+        events = tuple(
+            event for event in events if _event_family(event) in restricted
+        )
     covered = {_event_family(event) for event in events}
     missing = sorted(set(held) - covered)
     if missing:
