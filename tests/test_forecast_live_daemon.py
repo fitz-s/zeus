@@ -186,15 +186,15 @@ def test_replacement_materialize_job_calls_undecorated_production_inner(monkeypa
     def _outer_wrapper() -> None:
         calls.append("outer")
 
-    def _inner_job(*, discover: bool = True) -> None:
-        calls.append(f"inner:{discover}")
+    def _inner_job(*, discover: bool = True, limit: int | None = None) -> None:
+        calls.append(f"inner:{discover}:{limit}")
 
     _outer_wrapper.__wrapped__ = _inner_job  # type: ignore[attr-defined]
     monkeypatch.setattr(production, "_replacement_forecast_live_materialize_cycle", _outer_wrapper)
 
     _replacement_forecast_materialize_job.__wrapped__()
 
-    assert calls == ["inner:True"]
+    assert calls == ["inner:True:None"]
 
 
 def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tmp_path) -> None:
@@ -205,7 +205,7 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
     seed_dir = Path(cfg["seed_dir"])
     seed_dir.mkdir(parents=True)
     (seed_dir / "urgent.json").write_text("{}\n", encoding="utf-8")
-    calls: list[bool] = []
+    calls: list[tuple[bool, int | None]] = []
 
     monkeypatch.setattr(
         production,
@@ -215,7 +215,7 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
     monkeypatch.setattr(
         daemon,
         "_replacement_forecast_materialize_job",
-        lambda *, discover=True: calls.append(discover),
+        lambda *, discover=True, limit=None: calls.append((discover, limit)),
     )
     monkeypatch.setattr(
         daemon, "_replacement_forecast_last_discovery_monotonic", 90.0
@@ -224,11 +224,11 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [False]
+    assert calls == [(False, 3)]
     assert daemon._replacement_forecast_last_discovery_monotonic == 90.0
 
 
-def test_replacement_materialize_pending_queue_drains_before_due_discovery(
+def test_replacement_materialize_due_discovery_preempts_pending_queue(
     monkeypatch, tmp_path
 ) -> None:
     import src.data.replacement_forecast_production as production
@@ -238,7 +238,7 @@ def test_replacement_materialize_pending_queue_drains_before_due_discovery(
     seed_dir = Path(cfg["seed_dir"])
     seed_dir.mkdir(parents=True)
     (seed_dir / "urgent.json").write_text("{}\n", encoding="utf-8")
-    calls: list[bool] = []
+    calls: list[tuple[bool, int | None]] = []
 
     monkeypatch.setattr(
         production,
@@ -248,7 +248,7 @@ def test_replacement_materialize_pending_queue_drains_before_due_discovery(
     monkeypatch.setattr(
         daemon,
         "_replacement_forecast_materialize_job",
-        lambda *, discover=True: calls.append(discover),
+        lambda *, discover=True, limit=None: calls.append((discover, limit)),
     )
     monkeypatch.setattr(
         daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
@@ -257,7 +257,7 @@ def test_replacement_materialize_pending_queue_drains_before_due_discovery(
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [False, True]
+    assert calls == [(True, 3)]
     assert daemon._replacement_forecast_last_discovery_monotonic == 1000.0
 
 
@@ -266,7 +266,7 @@ def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_p
     import src.ingest.forecast_live_daemon as daemon
 
     cfg = _materialization_queue_cfg(tmp_path)
-    calls: list[bool] = []
+    calls: list[tuple[bool, int | None]] = []
     monkeypatch.setattr(
         production,
         "_replacement_forecast_live_materialization_queue_config",
@@ -275,7 +275,7 @@ def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_p
     monkeypatch.setattr(
         daemon,
         "_replacement_forecast_materialize_job",
-        lambda *, discover=True: calls.append(discover),
+        lambda *, discover=True, limit=None: calls.append((discover, limit)),
     )
     monkeypatch.setattr(
         daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
@@ -283,7 +283,7 @@ def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_p
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [True]
+    assert calls == [(True, 3)]
     assert daemon._replacement_forecast_last_discovery_monotonic > 0.0
 
 
@@ -348,6 +348,7 @@ def _materialization_queue_cfg(tmp_path) -> dict[str, object]:
         "seed_discovery_limit": 1,
         "seed_limit": 1,
         "limit": 1,
+        "poll_batch_limit": 3,
     }
 
 
@@ -393,11 +394,12 @@ def test_materialization_queue_publishes_wake_after_posterior_advance(
     )
 
     result = production._run_replacement_forecast_live_materialization_queue_once(
-        _materialization_queue_cfg(tmp_path), discover=False
+        _materialization_queue_cfg(tmp_path), discover=False, limit=3
     )
 
     assert result is report
     assert queue_calls[0]["discover"] is False
+    assert queue_calls[0]["limit"] == 3
     assert published == [
         (
             "replacement_forecast_production",
@@ -1063,6 +1065,7 @@ def test_reactor_wake_poll_coalesces_targeted_events_into_one_cycle(monkeypatch)
         or True,
     )
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _IdleLock())
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
     monkeypatch.setattr(
         main,
         "_edli_event_reactor_cycle",
@@ -1126,6 +1129,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     )
     monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
     monkeypatch.setattr(
@@ -1197,6 +1201,7 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
         lambda: ("wake-day0-newer", "day0_extreme_event_committed"),
     )
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
     monkeypatch.setattr(
@@ -1302,6 +1307,7 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
     )
     monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
     monkeypatch.setattr(

@@ -96,6 +96,14 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
     base_dir = STATE_DIR / "replacement_forecast_live"
     raw_manifest_dir = cfg.get("raw_manifest_dir")
     forecast_db = cfg.get("forecast_db")
+    materialization_limit = int(cfg.get("materialization_limit_per_cycle") or 80)
+    poll_batch_limit = max(
+        1,
+        min(
+            materialization_limit,
+            int(cfg.get("materialization_poll_batch_limit") or 8),
+        ),
+    )
 
     def _rooted_path(value, fallback: Path | None = None) -> Path | None:
         raw = value if value not in (None, "") else fallback
@@ -119,7 +127,8 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "processed_dir": _rooted_path(cfg.get("processed_dir"), base_dir / "processed"),
         "failed_dir": _rooted_path(cfg.get("failed_dir"), base_dir / "failed"),
         "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),
-        "limit": int(cfg.get("materialization_limit_per_cycle") or 80),
+        "limit": materialization_limit,
+        "poll_batch_limit": poll_batch_limit,
         "download_current_targets_enabled": bool(cfg.get("download_current_targets_enabled", False)),
         "download_output_dir": _rooted_path(cfg.get("download_output_dir"), _rooted_path(raw_manifest_dir, base_dir / "raw_manifests")),
         "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
@@ -1721,40 +1730,41 @@ def _replacement_forecast_download_cycle() -> None:
     station_report = _ingest_station_forecasts_live(cfg)
     if station_report:
         logger.info("station-forecast live ingest wrote rows: %s", station_report)
-    # The download lane already enqueues exact cycle-advance/fusion-upgrade seeds.
-    # Materialize those known changes before paying for the global discovery backstop.
-    for discover in (False, True):
-        catchup_report = _run_replacement_forecast_live_materialization_queue_once(
-            cfg,
-            discover=discover,
+    # Release the queue lock after one micro-batch so a newly arrived source can
+    # preempt old catch-up debt on the 1s poll lane. Discovery consumes existing
+    # explicit requests and newly discovered seeds in the same priority sort.
+    catchup_report = _run_replacement_forecast_live_materialization_queue_once(
+        cfg,
+        discover=True,
+        limit=int(cfg["poll_batch_limit"]),
+    )
+    if (
+        catchup_report.processed_count
+        or catchup_report.seed_processed_count
+        or catchup_report.failed_count
+        or catchup_report.seed_failed_count
+    ):
+        logger.info(
+            "replacement forecast live materialization download-catchup: %s",
+            catchup_report.as_dict(),
         )
-        if (
-            catchup_report.processed_count
-            or catchup_report.seed_processed_count
-            or catchup_report.failed_count
-            or catchup_report.seed_failed_count
-        ):
-            logger.info(
-                "replacement forecast live materialization download-catchup "
-                "discover=%s: %s",
-                discover,
-                catchup_report.as_dict(),
-            )
 
 
 @_scheduler_job("replacement_forecast_live_materialize")
-def _replacement_forecast_live_materialize_cycle(*, discover: bool = True) -> None:
+def _replacement_forecast_live_materialize_cycle(
+    *, discover: bool = True, limit: int | None = None
+) -> None:
     if not _replacement_forecast_live_materialization_enabled():
         return
     cfg = _replacement_forecast_live_materialization_queue_config()
     report = _run_replacement_forecast_live_materialization_queue_once(
-        cfg, discover=discover
+        cfg, discover=discover, limit=limit
     )
     _log_replacement_forecast_materialization_report(report)
 
 
 def _run_replacement_forecast_live_materialization_queue_once(
-    cfg: dict[str, object], *, discover: bool = True
+    cfg: dict[str, object], *, discover: bool = True, limit: int | None = None
 ):
     from src.data.replacement_forecast_live_materialization_queue import (
         process_replacement_forecast_live_materialization_queue,
@@ -1772,7 +1782,7 @@ def _run_replacement_forecast_live_materialization_queue_once(
         raw_manifest_dir=cfg["raw_manifest_dir"],
         seed_discovery_limit=int(cfg["seed_discovery_limit"]),
         seed_limit=int(cfg["seed_limit"]),
-        limit=int(cfg["limit"]),
+        limit=int(cfg["limit"] if limit is None else limit),
         discover=discover,
     )
     revision_after = _forecast_posterior_revision(cfg)

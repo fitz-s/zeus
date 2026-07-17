@@ -222,6 +222,7 @@ def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) 
     assert cfg["seed_discovery_limit"] == 80
     assert cfg["seed_limit"] == 80
     assert cfg["limit"] == 80
+    assert cfg["poll_batch_limit"] == 8
     assert cfg["limit"] >= cfg["seed_limit"]
 
 

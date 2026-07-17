@@ -1073,7 +1073,9 @@ def _replacement_cycle_availability_poll_job() -> None:
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID)
-def _replacement_forecast_materialize_job(*, discover: bool = True) -> None:
+def _replacement_forecast_materialize_job(
+    *, discover: bool = True, limit: int | None = None
+) -> None:
     """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
 
     Interval-driven; delegates to the shared production function, which is live-authority gated and
@@ -1085,7 +1087,10 @@ def _replacement_forecast_materialize_job(*, discover: bool = True) -> None:
     # Single health writer: the forecast-live scheduler wrapper owns this job's
     # health entry. Calling the production wrapper would swallow exceptions and
     # then let this outer wrapper overwrite FAILED with OK.
-    _replacement_forecast_live_materialize_cycle.__wrapped__(discover=discover)
+    _replacement_forecast_live_materialize_cycle.__wrapped__(
+        discover=discover,
+        limit=limit,
+    )
 
 
 def _replacement_forecast_queue_pending(cfg: dict[str, object]) -> bool:
@@ -1097,7 +1102,7 @@ def _replacement_forecast_queue_pending(cfg: dict[str, object]) -> bool:
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
-    """Drain explicit work promptly; run global discovery only on its slower cadence."""
+    """Run one preemptible batch, prioritizing due source discovery over old debt."""
 
     global _replacement_forecast_last_discovery_monotonic
 
@@ -1112,11 +1117,18 @@ def _replacement_forecast_materialize_poll_job() -> None:
         now - _replacement_forecast_last_discovery_monotonic
         >= 60.0 * _replacement_forecast_materialize_interval_minutes()
     )
-    if pending:
-        _replacement_forecast_materialize_job(discover=False)
+    batch_limit = int(cfg["poll_batch_limit"])
     if discovery_due:
         _replacement_forecast_last_discovery_monotonic = now
-        _replacement_forecast_materialize_job(discover=True)
+        _replacement_forecast_materialize_job(
+            discover=True,
+            limit=batch_limit,
+        )
+    elif pending:
+        _replacement_forecast_materialize_job(
+            discover=False,
+            limit=batch_limit,
+        )
 
 
 def _publish_replacement_forecast_boot_wake() -> object | None:
