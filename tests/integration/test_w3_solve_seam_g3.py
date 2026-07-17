@@ -4622,7 +4622,7 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
     )
     forecast_provider = captured["current_book_epoch_provider"]
-    bound_forecast_subset, _ = forecast_provider(
+    bound_forecast_subset, forecast_subset_epoch = forecast_provider(
         {miami: unrelated_drift[miami]},
         _dt.datetime.now(_dt.timezone.utc),
     )
@@ -4676,12 +4676,12 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     assert rebound_after_add == unrelated_drift
     assert bound_after_expiry == unrelated_drift
     # q changed, but the condition/token topology did not. Reuse the still-current
-    # cached bindings while refreshing only the triggered family's live books.
+    # cached bindings and exact scoped subset while refreshing only a triggered
+    # price family's live books.
     # A rebuilt adapter has no closure-local metadata, so any full capture first
     # certifies current metadata for that capture's complete family scope.
     assert bind_calls == [
         ("metadata", (dallas, miami)),
-        ("metadata", (miami,)),
         ("metadata", (dallas,)),
         ("metadata", (dallas, miami)),
         ("metadata", (miami,)),
@@ -4696,7 +4696,6 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         (dallas, miami),
         (dallas,),
         (dallas,),
-        (miami,),
         (dallas,),
         (dallas, miami),
     ]
@@ -4709,7 +4708,6 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         ),
         ("no-token-dallas", "yes-token-dallas"),
         ("no-token-dallas", "yes-token-dallas"),
-        ("no-token-miami", "yes-token-miami"),
         ("no-token-dallas", "yes-token-dallas"),
         (
             "no-token-dallas",
@@ -4719,6 +4717,7 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         ),
     ]
     assert epoch_again.captured_at_utc == epoch.captured_at_utc
+    assert forecast_subset_epoch.captured_at_utc == epoch.captured_at_utc
     assert len(epoch_again.asset_states) == 4
     assert epoch_again.witness_identity != epoch.witness_identity
     assert len(epoch_after_removal.asset_states) == 2
@@ -4893,6 +4892,62 @@ def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
     )
     assert cached is epoch
     assert reason == "hit"
+    conn.close()
+
+
+def test_global_book_epoch_cache_serves_exact_scoped_subset(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    def probability(family, token_suffix):
+        return SimpleNamespace(
+            family_key=family,
+            witness_identity=f"probability-{family}",
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family}",
+                    condition_id=f"condition-{family}",
+                    yes_token_id=f"yes-{token_suffix}",
+                    no_token_id=f"no-{token_suffix}",
+                ),
+            ),
+        )
+
+    broad = {
+        "family-a": probability("family-a", "a"),
+        "family-b": probability("family-b", "b"),
+    }
+    epoch = SimpleNamespace(
+        witness_identity="book-current",
+        current_identity=lambda _checked_at: "book-current",
+    )
+    assert era._store_global_book_epoch(
+        conn,
+        broad,
+        epoch,
+        checked_at=at,
+    ) == "stored"
+
+    scoped = {"family-a": probability("family-a", "a")}
+    cached, reason = era._probe_global_book_epoch_cache(
+        conn,
+        scoped,
+        checked_at=at,
+        allowed=True,
+    )
+    assert cached is epoch
+    assert reason == "hit_subset"
+
+    changed = {"family-a": probability("family-a", "changed")}
+    cached, reason = era._probe_global_book_epoch_cache(
+        conn,
+        changed,
+        checked_at=at,
+        allowed=True,
+    )
+    assert cached is None
+    assert reason.startswith("topology_changed:")
     conn.close()
 
 

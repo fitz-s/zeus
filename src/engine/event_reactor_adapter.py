@@ -1896,6 +1896,8 @@ def _probe_global_book_cache_entry(
         return None, "namespace_changed"
     hit_reason = "hit"
     if entry.topology != topology:
+        if set(topology) < set(entry.topology):
+            return entry, "hit_subset"
         mutable = frozenset(mutable_family_keys or ())
         cached_stable = tuple(
             row for row in entry.topology if row[0] not in mutable
