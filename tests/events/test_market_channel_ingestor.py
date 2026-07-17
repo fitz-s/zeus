@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src.events.event_coalescer import EventCoalescer
 from src.events.event_writer import EventWriter
 from src.events.triggers.market_channel_ingestor import (
     MarketChannelAction,
@@ -1148,6 +1149,154 @@ def test_websocket_routes_quote_and_world_events_to_independent_write_lanes(
         "SELECT COUNT(*) FROM opportunity_events "
         "WHERE event_type='NEW_MARKET_DISCOVERED'"
     ).fetchone()[0] == 1
+
+
+def test_coalesced_quote_commit_failure_requeues_without_false_dedupe():
+    conn, writer = _conn_writer()
+    seen: list[str] = []
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        coalescer=coalescer,
+        market_event_sink=lambda events: seen.extend(event.event_id for event in events),
+        market_event_sink_independently_coordinated=True,
+    )
+    message = {
+        "event_type": "book",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+        "hash": "retry-hash",
+        "timestamp": "1766789469958",
+    }
+    assert ingestor.handle_message(
+        message,
+        received_at="2026-05-24T10:00:00+00:00",
+    ) is None
+
+    def fail_commit() -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    with ingestor.defer_market_event_sink():
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            ingestor.flush_coalesced(
+                market_budget=1,
+                commit=fail_commit,
+                rollback=conn.rollback,
+            )
+
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 0
+    assert seen == []
+
+    with ingestor.defer_market_event_sink():
+        results = ingestor.flush_coalesced(
+            market_budget=1,
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    ingestor.flush_deferred_market_event_sink()
+
+    assert len(results) == 1
+    assert results[0].inserted is True
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 0}
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 2
+    assert seen == [results[0].event_id]
+
+
+def test_quote_write_backpressure_retains_websocket_and_latest_event(monkeypatch):
+    import websockets
+
+    conn, writer = _conn_writer()
+    stop = asyncio.Event()
+    proofs: list[dict[str, object]] = []
+
+    class FlakyQuoteGate:
+        def __init__(self) -> None:
+            self.enters = 0
+
+        def __enter__(self):
+            self.enters += 1
+            if self.enters == 2:
+                raise TimeoutError("trade quote writer busy")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+    class FakeWebSocket:
+        emitted = 0
+
+        async def send(self, _payload):  # noqa: ANN001
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.emitted == 2:
+                stop.set()
+                raise StopAsyncIteration
+            self.emitted += 1
+            return json.dumps(
+                {
+                    "event_type": "book",
+                    "asset_id": "token-1",
+                    "market": "0xcondition",
+                    "bids": [{"price": "0.48", "size": "10"}],
+                    "asks": [{"price": "0.52", "size": "10"}],
+                    "hash": f"quote-hash-{self.emitted}",
+                    "timestamp": str(1766789469958 + self.emitted * 1000),
+                }
+            )
+
+    class FakeConnect:
+        async def __aenter__(self):
+            return FakeWebSocket()
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+    monkeypatch.setattr(websockets, "connect", lambda *_args, **_kwargs: FakeConnect())
+    gate = FlakyQuoteGate()
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+            coalescer=EventCoalescer(max_market_keys=8),
+        ),
+        continuity_sink=proofs.append,
+    )
+
+    asyncio.run(
+        service.run_websocket_forever(
+            stop_event=stop,
+            reconnect_delay_seconds=0,
+            quote_write_gate=gate,
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    )
+
+    assert gate.enters == 3
+    assert conn.execute(
+        "SELECT book_hash_before FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()[0] == "quote-hash-2"
+    assert conn.execute(
+        "SELECT transition FROM market_channel_connectivity_events "
+        "ORDER BY occurred_at"
+    ).fetchall() == [("connected",)]
+    assert len(proofs) == 2
+    assert all(proof["connected"] is True for proof in proofs)
 
 
 def test_disconnect_transition_commits_after_rollback(monkeypatch):
