@@ -1,6 +1,6 @@
 # Created: 2026-05-15
-# Lifecycle: created=2026-05-15; last_reviewed=2026-05-20; last_reused=2026-05-20
-# Last reused/audited: 2026-05-20
+# Lifecycle: created=2026-05-15; last_reviewed=2026-07-18; last_reused=2026-07-18
+# Last reused/audited: 2026-07-18
 # Purpose: Live data-pipeline verifier relationship tests.
 # Reuse: Run when forecast owner, data-pipeline E2E checks, or ingest daemon shutdown health relationships change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md live verifier process-ownership gate.
@@ -119,6 +119,39 @@ def test_ingest_sigterm_second_scheduler_shutdown_is_clean_exit() -> None:
     ingest_main._shutdown_scheduler_if_running(scheduler, wait=True)
 
     assert scheduler.shutdown_calls == 1
+
+
+def test_ingest_sigterm_closes_day0_emitter_once_after_scheduler(monkeypatch) -> None:
+    """The live data-ingest owner must release its Day0 worker pools even
+    though SIGTERM also re-enters main's SystemExit shutdown path."""
+    from src import ingest_main
+
+    calls: list[str] = []
+
+    class Emitter:
+        def close(self) -> None:
+            calls.append("emitter_close")
+
+    monkeypatch.setattr(ingest_main, "_DAY0_METAR_EMITTER", Emitter())
+    monkeypatch.setattr(
+        ingest_main,
+        "_shutdown_scheduler_if_running",
+        lambda _scheduler, *, wait: calls.append("scheduler_shutdown"),
+    )
+
+    try:
+        ingest_main._graceful_shutdown(None, None)
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("SIGTERM handler must exit cleanly")
+
+    # The later main() except path can call the helper again without closing
+    # the already-released emitter or recreating a worker pool.
+    ingest_main._close_day0_metar_emitter()
+
+    assert calls == ["scheduler_shutdown", "emitter_close"]
+    assert ingest_main._DAY0_METAR_EMITTER is None
 
 
 def test_candidate_snapshot_uses_live_eligible_coverage_not_first_snapshot() -> None:

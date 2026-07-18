@@ -38,6 +38,7 @@ C-settled cities consume whole-C reports exactly.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -460,6 +461,11 @@ class NoaaMetarStationCursor:
     )
     _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _last_successful_stations: frozenset[str] = field(
+        default_factory=frozenset,
+        init=False,
+        repr=False,
+    )
 
     def _fetch(
         self,
@@ -581,10 +587,13 @@ class NoaaMetarStationCursor:
 
         reports: list[MetarReport] = []
         source_ok = False
+        successful_stations: set[str] = set()
         for station, future in ready.items():
             station_reports, station_ok = self._consume(station, future)
             reports.extend(station_reports)
             source_ok = source_ok or station_ok
+            if station_ok:
+                successful_stations.add(station)
 
         deadline = time.monotonic() + max(0.0, float(budget_s))
         while pending:
@@ -606,6 +615,10 @@ class NoaaMetarStationCursor:
                 station_reports, station_ok = self._consume(station, future)
                 reports.extend(station_reports)
                 source_ok = source_ok or station_ok
+                if station_ok:
+                    successful_stations.add(station)
+        with self._lock:
+            self._last_successful_stations = frozenset(successful_stations)
         return reports, source_ok
 
     def close(self) -> None:
@@ -1074,6 +1087,9 @@ class FastObsPrefetch:
     # that construct FastObsPrefetch directly; those callers request the legacy
     # full-report append behavior. Production prefetches always set a tuple.
     ledger_reports: tuple | None = None
+    # HTTP-phase authority is station-scoped: a fresh priority station may not
+    # authorize an unrelated station retained in the global cache.
+    station_statuses: tuple[tuple[str, str, Optional[float]], ...] = ()
 
 
 def _report_publication_key(report: MetarReport) -> tuple[str, str, float] | None:
@@ -1295,7 +1311,97 @@ class Day0FastObsEmitter:
     _ledger_report_keys_loaded: bool = field(default=False, init=False)
     _ledger_cursor_id: int = field(default=0, init=False)
     _anomaly_cursor: int = field(default=0, init=False)
+    # Per-station source-clock timestamps.  The legacy aggregate cache clock
+    # remains for fetch-window sizing only; it must not make one priority poll
+    # authorize a different station's retained report.
+    _station_cache_fetched_monotonic: dict[str, float] = field(
+        default_factory=dict,
+        init=False,
+    )
+    _station_authority_initialized: bool = field(default=False, init=False)
+    _last_fetch_fresh_stations: frozenset[str] = field(
+        default_factory=frozenset,
+        init=False,
+    )
+    _last_fetch_had_source_failure: bool = field(default=False, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
+    def _station_statuses(
+        self,
+        stations: Iterable[str],
+        *,
+        now: float | None = None,
+    ) -> tuple[tuple[str, str, Optional[float]], ...]:
+        """Snapshot station-scoped current-evidence authority for one emit."""
+
+        checked_at = time.monotonic() if now is None else now
+        with self._lock:
+            authority_initialized = self._station_authority_initialized
+            cache_clock = self._cache_fetched_monotonic
+            cached = bool(self._cached_reports)
+            fresh = self._last_fetch_fresh_stations
+            clocks = dict(self._station_cache_fetched_monotonic)
+        statuses: list[tuple[str, str, Optional[float]]] = []
+        for raw in stations:
+            station = str(raw).strip().upper()
+            if not station:
+                continue
+            if station in fresh:
+                statuses.append((station, FETCH_FRESH, 0.0))
+                continue
+            clock = clocks.get(station)
+            # A pre-existing manual/ledger cache has no station map. Preserve
+            # that compatibility only until a scoped transport result exists.
+            if clock is None and not authority_initialized and cached:
+                clock = cache_clock
+            if clock is None:
+                statuses.append((station, FETCH_NO_DATA, None))
+                continue
+            age = max(0.0, checked_at - clock)
+            status = (
+                FETCH_CACHE_HIT
+                if age <= FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+                else FETCH_STALE_AFTER_FAILURE
+            )
+            statuses.append((station, status, age))
+        return tuple(statuses)
+
+    def _station_is_current(
+        self,
+        station: str,
+        statuses: dict[str, tuple[str, Optional[float]]],
+    ) -> bool:
+        status, age = statuses.get(
+            str(station).strip().upper(),
+            (FETCH_NO_DATA, None),
+        )
+        return status in (FETCH_FRESH, FETCH_CACHE_HIT) and (
+            age is None or age <= FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+        )
+
+    def close(self) -> None:
+        """Stop owned worker pools and close transport clients at teardown."""
+
+        with self._lock:
+            executor = self._global_fetch_executor
+            self._global_fetch_executor = None
+            self._global_fetch_future = None
+            clients = tuple(
+                client
+                for client in (self._http_client, self._priority_http_client)
+                if client is not None
+            )
+            self._http_client = None
+            self._priority_http_client = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        self._station_cursor.close()
+        seen_client_ids: set[int] = set()
+        for client in clients:
+            if id(client) in seen_client_ids:
+                continue
+            seen_client_ids.add(id(client))
+            client.close()
 
     def ledger_report_keys_loaded(self) -> bool:
         with self._lock:
@@ -1856,6 +1962,7 @@ class Day0FastObsEmitter:
         with self._lock:
             cache_age = (now - self._cache_fetched_monotonic) if self._cached_reports else None
             if (now - self._last_attempt_monotonic) < self.min_fetch_interval_s:
+                self._last_fetch_fresh_stations = frozenset()
                 if self._cached_reports:
                     status = (
                         FETCH_CACHE_HIT
@@ -1879,6 +1986,7 @@ class Day0FastObsEmitter:
         reports: list[MetarReport] = []
         source_ok = False
         history_loaded = False
+        fresh_stations: set[str] = set()
         if self.fetcher is fetch_metar_reports:
             with self._lock:
                 if self._http_client is None:
@@ -1909,6 +2017,13 @@ class Day0FastObsEmitter:
             )
             reports.extend(priority_reports)
             source_ok = source_ok or priority_ok
+            if priority_ok:
+                exact_priority_success = getattr(
+                    self._station_cursor,
+                    "_last_successful_stations",
+                    frozenset(priority_station_ids),
+                )
+                fresh_stations.update(exact_priority_success)
             if priority_station_ids:
                 global_result = self._poll_global_sources_in_background(
                     client=client,
@@ -1923,6 +2038,11 @@ class Day0FastObsEmitter:
                     reports.extend(global_reports)
                     source_ok = source_ok or global_ok
                     history_loaded = history_loaded or global_history_loaded
+                    if global_ok:
+                        fresh_stations.update(
+                            str(report.station_id).strip().upper()
+                            for report in global_reports
+                        )
             else:
                 global_reports, global_ok, global_history_loaded = (
                     self._fetch_global_sources(
@@ -1937,11 +2057,20 @@ class Day0FastObsEmitter:
                 reports.extend(global_reports)
                 source_ok = source_ok or global_ok
                 history_loaded = history_loaded or global_history_loaded
+                if global_ok:
+                    fresh_stations.update(
+                        str(report.station_id).strip().upper()
+                        for report in global_reports
+                    )
         else:
             try:
                 reports = self.fetcher(stations, hours=fetch_hours)
                 source_ok = bool(reports)
                 history_loaded = bool(reports)
+                fresh_stations.update(
+                    str(report.station_id).strip().upper()
+                    for report in reports
+                )
             except Exception as exc:  # noqa: BLE001 - injected fetcher contract
                 logger.warning(
                     "DAY0_FAST_OBS_FETCH_RAISED exc=%s: %s",
@@ -1949,6 +2078,12 @@ class Day0FastObsEmitter:
                     exc,
                 )
         with self._lock:
+            self._last_fetch_fresh_stations = frozenset(fresh_stations)
+            self._last_fetch_had_source_failure = not source_ok
+            if fresh_stations:
+                self._station_authority_initialized = True
+                for station in fresh_stations:
+                    self._station_cache_fetched_monotonic[station] = now
             if reports:
                 previous = {
                     _report_observation_key(report): report
@@ -2090,14 +2225,15 @@ class Day0FastObsEmitter:
             return None
         with self._lock:
             reports = list(self._cached_reports)
-            cache_monotonic = self._cache_fetched_monotonic
         if not reports:
             return None
-        # Freshness gate: cache must be ≤ FAST_LANE_ENTRY_MAX_CACHE_AGE_S old.
-        # Stale caches must not serve the entry gate (kills are staleness-safe;
-        # entries are not — see plan §4.2 "Freshness contract").
-        cache_age_s = time.monotonic() - cache_monotonic
-        if cache_age_s > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+        statuses = {
+            station: (status, age)
+            for station, status, age in self._station_statuses((source.station_id,))
+        }
+        # Freshness is station-scoped: an unrelated priority poll never makes
+        # this city's retained global report current for an entry decision.
+        if not self._station_is_current(source.station_id, statuses):
             return None
         effective_as_of = (as_of or datetime.now(UTC)).astimezone(UTC)
         try:
@@ -2135,11 +2271,13 @@ class Day0FastObsEmitter:
             return None
         with self._lock:
             reports = list(self._cached_reports)
-            cache_monotonic = self._cache_fetched_monotonic
         if not reports:
             return None
-        cache_age_s = time.monotonic() - cache_monotonic
-        if cache_age_s > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+        statuses = {
+            station: (status, age)
+            for station, status, age in self._station_statuses((source.station_id,))
+        }
+        if not self._station_is_current(source.station_id, statuses):
             return None
         effective_as_of = (as_of or datetime.now(UTC)).astimezone(UTC)
         try:
@@ -2188,25 +2326,27 @@ class Day0FastObsEmitter:
         if not eligible or max_cities <= 0:
             return ()
 
-        now = time.monotonic()
         with self._lock:
             reports = list(self._cached_reports)
-            cache_age = (
-                now - self._cache_fetched_monotonic
-                if reports
-                else None
-            )
-            cache_current = (
-                bool(reports)
-                and self._cache_fetched_monotonic >= self._last_attempt_monotonic
-                and cache_age is not None
-                and cache_age <= FAST_LANE_ENTRY_MAX_CACHE_AGE_S
-            )
             cursor = self._anomaly_cursor % len(eligible)
-        if not cache_current:
+        station_statuses = {
+            station: (status, age)
+            for station, status, age in self._station_statuses(
+                source.station_id for _city, source, _target_date in eligible
+            )
+        }
+        with self._lock:
+            source_failed = self._last_fetch_had_source_failure
+        if not reports or source_failed:
             return ()
 
-        rotated = eligible[cursor:] + eligible[:cursor]
+        rotated = [
+            item
+            for item in eligible[cursor:] + eligible[:cursor]
+            if self._station_is_current(item[1].station_id, station_statuses)
+        ]
+        if not rotated:
+            return ()
         actions: list[Any] = []
         visited = 0
         checked = 0
@@ -2279,6 +2419,13 @@ class Day0FastObsEmitter:
                 in priority_scope_set
             ),
         )
+        station_statuses = self._station_statuses(
+            [source.station_id for _, source, _ in eligible],
+        )
+        station_status_map = {
+            station: (station_status, station_age)
+            for station, station_status, station_age in station_statuses
+        }
         with self._lock:
             ledger_reports = tuple(self._pending_ledger_reports.values())
         # ANOMALY-CHECK FRESHNESS GATE (PR#404 round-2 P0-2A): the WU-vs-METAR
@@ -2287,14 +2434,21 @@ class Day0FastObsEmitter:
         # pause the family (the pause gates entry q, hard-fact exits, AND the
         # cancel sweep). Only a fresh fetch or an in-interval cache hit may
         # feed the detector; stale/no-data passes are loudly skipped.
-        anomaly_input_ok = status in (FETCH_FRESH, FETCH_CACHE_HIT)
-        if reports and anomaly_check is not None and not anomaly_input_ok:
+        anomaly_eligible = tuple(
+            item
+            for item in eligible
+            if (
+                status in (FETCH_FRESH, FETCH_CACHE_HIT)
+                and self._station_is_current(item[1].station_id, station_status_map)
+            )
+        )
+        if reports and anomaly_check is not None and not anomaly_eligible:
             logger.warning(
                 "DAY0_ORACLE_ANOMALY_CHECK_SKIPPED_METAR_CACHE_STALE status=%s cache_age_s=%s "
                 "(divergence cannot be concluded from a stale METAR window)",
                 status, cache_age,
             )
-        if reports and anomaly_check is not None and anomaly_input_ok:
+        if reports and anomaly_check is not None and anomaly_eligible:
             anomaly_actions = []
             checks_started = 0
             budget_s = (
@@ -2308,7 +2462,7 @@ class Day0FastObsEmitter:
                 else max(0, anomaly_check_max_cities)
             )
             started_monotonic = time.monotonic()
-            for city, _source, target_date in eligible:
+            for city, _source, target_date in anomaly_eligible:
                 if max_checks <= 0:
                     logger.warning(
                         "DAY0_FAST_OBS_ANOMALY_CHECK_SKIPPED_BUDGET max_checks=%d budget_s=%.3f",
@@ -2368,6 +2522,7 @@ class Day0FastObsEmitter:
                 decision_time,
                 tuple(anomaly_actions),
                 ledger_reports,
+                station_statuses,
             )
         return FastObsPrefetch(
             tuple(eligible),
@@ -2377,6 +2532,7 @@ class Day0FastObsEmitter:
             decision_time,
             (),
             ledger_reports,
+            station_statuses,
         )
 
     def emit_prefetched(
@@ -2430,6 +2586,21 @@ class Day0FastObsEmitter:
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
         emission_eligible = prefetch.eligible
+        station_statuses = {
+            station: (status, age)
+            for station, status, age in prefetch.station_statuses
+        }
+        if not station_statuses:
+            # Directly-constructed test/recovery prefetches predate the
+            # station snapshot. Preserve their explicit authority contract;
+            # production prefetches always carry the scoped map above.
+            station_statuses = {
+                str(source.station_id).strip().upper(): (
+                    prefetch.freshness_status,
+                    prefetch.cache_age_s,
+                )
+                for _city, source, _target_date in prefetch.eligible
+            }
         if prefetch.ledger_reports is not None:
             changed_stations = {
                 str(report.station_id).strip().upper()
@@ -2510,6 +2681,7 @@ class Day0FastObsEmitter:
                 if extremes.sample_count == 0:
                     continue
                 city_name = str(getattr(city, "name", ""))
+                station_current = self._station_is_current(station, station_statuses)
                 stale_blocked = False
                 if prefetch.freshness_status == FETCH_STALE_AFTER_FAILURE:
                     budget_s = staleness_budget_minutes(city_name) * 60.0
@@ -2546,6 +2718,7 @@ class Day0FastObsEmitter:
                     live_ok = (
                         observation["live_authority_status"] == "live"
                         and not stale_blocked
+                        and station_current
                     )
                     kill_update = rounded if memo_safe and kill_moved else None
                     if not live_ok:
@@ -2785,3 +2958,15 @@ def get_fast_obs_emitter() -> Day0FastObsEmitter:
         if _EMITTER_SINGLETON is None:
             _EMITTER_SINGLETON = Day0FastObsEmitter()
         return _EMITTER_SINGLETON
+
+
+def _close_fast_obs_emitter_at_exit() -> None:
+    """Release the singleton's bounded worker pools on normal daemon exit."""
+
+    with _EMITTER_LOCK:
+        emitter = _EMITTER_SINGLETON
+    if emitter is not None:
+        emitter.close()
+
+
+atexit.register(_close_fast_obs_emitter_at_exit)

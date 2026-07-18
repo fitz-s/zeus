@@ -124,6 +124,25 @@ def _day0_metar_emitter():
     return _DAY0_METAR_EMITTER
 
 
+def _close_day0_metar_emitter() -> None:
+    """Release the ingest-owned Day0 worker pools exactly once at shutdown."""
+
+    global _DAY0_METAR_EMITTER
+    with _DAY0_METAR_COMMIT_LOCK:
+        emitter = _DAY0_METAR_EMITTER
+        _DAY0_METAR_EMITTER = None
+    if emitter is None:
+        return
+    try:
+        emitter.close()
+    except Exception as exc:  # noqa: BLE001 - teardown must retain clean exit
+        logger.warning(
+            "DAY0_METAR_EMITTER_CLOSE_FAILED exc=%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _day0_priority_scopes() -> frozenset[tuple[str, str]]:
     """Current exposure scopes whose station files deserve the fastest lane."""
 
@@ -673,6 +692,8 @@ def _graceful_shutdown(signum, frame) -> None:
         _shutdown_scheduler_if_running(_scheduler, wait=True)
     except Exception as exc:
         logger.warning("Scheduler shutdown error: %s", exc)
+    finally:
+        _close_day0_metar_emitter()
     sys.exit(0)
 
 
@@ -3296,7 +3317,10 @@ def main() -> None:
         _scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus data-ingest daemon shutting down")
-        _shutdown_scheduler_if_running(_scheduler, wait=True)
+        try:
+            _shutdown_scheduler_if_running(_scheduler, wait=True)
+        finally:
+            _close_day0_metar_emitter()
 
 
 if __name__ == "__main__":

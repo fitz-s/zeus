@@ -459,6 +459,158 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
             if emitter._global_fetch_executor is not None:
                 emitter._global_fetch_executor.shutdown(wait=True)
 
+    def test_priority_success_cannot_authorize_stale_global_station_cache(self):
+        """A KORD priority success must not emit an hour-old LFPB report while
+        the shared global poll is still pending."""
+        import src.data.day0_fast_obs as fast_obs
+
+        conn = _world_conn()
+        decision_time = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+        chicago = SimpleNamespace(
+            name="Chicago", timezone="America/Chicago", settlement_unit="C",
+            wu_station="KORD", settlement_source_type="wu_icao",
+        )
+        paris = SimpleNamespace(
+            name="Paris", timezone="Europe/Paris", settlement_unit="C",
+            wu_station="LFPB", settlement_source_type="wu_icao",
+        )
+        kord = _report("KORD", decision_time - timedelta(minutes=4), 28.0, t_group=False)
+        lfpb = _report("LFPB", decision_time - timedelta(minutes=5), 30.0, t_group=False)
+        release_global = threading.Event()
+
+        class _StationCursor:
+            def poll(self, **_kwargs):
+                return [kord], True
+
+            def close(self):
+                pass
+
+        class _CycleCursor:
+            def poll(self, **_kwargs):
+                release_global.wait(1.0)
+                return [], True
+
+        emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+        emitter._station_cursor = _StationCursor()
+        emitter._cycle_cursor = _CycleCursor()
+        emitter._full_window_loaded = True
+        emitter._cached_reports = [lfpb]
+        emitter._station_authority_initialized = True
+        emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
+
+        try:
+            prefetch = emitter.prefetch(
+                cities=[chicago, paris],
+                decision_time=decision_time,
+                priority_scopes=(("Chicago", "2026-07-18"),),
+            )
+            statuses = dict(
+                (station, status)
+                for station, status, _age in prefetch.station_statuses
+            )
+            assert statuses == {"KORD": fast_obs.FETCH_FRESH, "LFPB": fast_obs.FETCH_STALE_AFTER_FAILURE}
+            assert emitter.emit_prefetched(
+                world_conn=conn,
+                prefetch=prefetch,
+                received_at=decision_time.isoformat(),
+            ) == 2
+            cities = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT json_extract(payload_json, '$.city') FROM opportunity_events"
+                )
+            }
+            assert cities == {"Chicago"}
+        finally:
+            release_global.set()
+            emitter.close()
+
+    def test_empty_global_success_does_not_refresh_absent_station_cache(self):
+        """A successful cursor transport with no LFPB row is not current
+        evidence for the old LFPB cache."""
+        import src.data.day0_fast_obs as fast_obs
+
+        decision_time = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+        paris = SimpleNamespace(
+            name="Paris", timezone="Europe/Paris", settlement_unit="C",
+            wu_station="LFPB", settlement_source_type="wu_icao",
+        )
+        lfpb = _report("LFPB", decision_time - timedelta(minutes=5), 30.0, t_group=False)
+
+        class _CycleCursor:
+            def poll(self, **_kwargs):
+                return [], True
+
+        emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+        emitter._cycle_cursor = _CycleCursor()
+        emitter._full_window_loaded = True
+        emitter._cached_reports = [lfpb]
+        emitter._station_authority_initialized = True
+        emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
+
+        try:
+            prefetch = emitter.prefetch(cities=[paris], decision_time=decision_time)
+            assert prefetch.freshness_status == fast_obs.FETCH_CACHE_HIT
+            assert prefetch.station_statuses == (
+                ("LFPB", fast_obs.FETCH_STALE_AFTER_FAILURE, pytest.approx(3600.0, abs=1.0)),
+            )
+        finally:
+            emitter.close()
+
+    def test_subset_global_success_refreshes_only_reported_station(self):
+        """A current KORD row may be fresh while an absent old LFPB row stays
+        stale in the same global poll."""
+        import src.data.day0_fast_obs as fast_obs
+
+        decision_time = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+        chicago = SimpleNamespace(
+            name="Chicago", timezone="America/Chicago", settlement_unit="C",
+            wu_station="KORD", settlement_source_type="wu_icao",
+        )
+        paris = SimpleNamespace(
+            name="Paris", timezone="Europe/Paris", settlement_unit="C",
+            wu_station="LFPB", settlement_source_type="wu_icao",
+        )
+        kord = _report("KORD", decision_time - timedelta(minutes=4), 28.0, t_group=False)
+        lfpb = _report("LFPB", decision_time - timedelta(minutes=5), 30.0, t_group=False)
+
+        class _CycleCursor:
+            def poll(self, **_kwargs):
+                return [kord], True
+
+        emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+        emitter._cycle_cursor = _CycleCursor()
+        emitter._full_window_loaded = True
+        emitter._cached_reports = [lfpb]
+        emitter._station_authority_initialized = True
+        emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
+
+        try:
+            prefetch = emitter.prefetch(cities=[chicago, paris], decision_time=decision_time)
+            statuses = {
+                station: status
+                for station, status, _age in prefetch.station_statuses
+            }
+            assert statuses == {
+                "KORD": fast_obs.FETCH_FRESH,
+                "LFPB": fast_obs.FETCH_STALE_AFTER_FAILURE,
+            }
+        finally:
+            emitter.close()
+
+    def test_emitter_close_shuts_down_global_executor(self):
+        import src.data.day0_fast_obs as fast_obs
+
+        emitter = fast_obs.Day0FastObsEmitter()
+        executor = fast_obs.ThreadPoolExecutor(max_workers=1)
+        emitter._global_fetch_executor = executor
+        emitter._global_fetch_future = executor.submit(lambda: None)
+
+        emitter.close()
+
+        assert emitter._global_fetch_executor is None
+        assert executor._shutdown is True
+
     def test_awc_history_fetch_is_not_repeated_each_source_clock_poll(
         self,
         monkeypatch,
@@ -2454,6 +2606,7 @@ class TestAnomalyFreshnessGates:
 
         plan["fail"] = True
         emitter._cache_fetched_monotonic = _time.monotonic() - 600.0
+        emitter._station_cache_fetched_monotonic["RJTT"] = _time.monotonic() - 600.0
         pf2 = emitter.prefetch(
             cities=[_tokyo()], decision_time=t0 + timedelta(minutes=10), anomaly_check=check,
         )
