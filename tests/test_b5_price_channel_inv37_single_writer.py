@@ -1,6 +1,6 @@
 # Created: 2026-06-20
-# Last audited: 2026-07-17
-# Last reused/audited: 2026-07-17
+# Last audited: 2026-07-18
+# Last reused/audited: 2026-07-18
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
 #   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
 #   through independently coordinated lanes. TRADE quote refresh must never acquire
