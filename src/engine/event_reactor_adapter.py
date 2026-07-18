@@ -1913,6 +1913,28 @@ def _global_book_prefetch_is_consumable(
     return timedelta(0) <= age <= max_age - timedelta(seconds=1)
 
 
+def _global_book_projection_has_fetch_headroom(
+    projected_at: datetime | None,
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+    fetch_timeout_seconds: float,
+) -> bool:
+    """Admit a projected cut only when it can survive the missing-book fetch."""
+
+    if (
+        projected_at is None
+        or projected_at.tzinfo is None
+        or checked_at.tzinfo is None
+        or max_age <= timedelta(seconds=1)
+        or fetch_timeout_seconds <= 0.0
+    ):
+        return False
+    age = checked_at.astimezone(timezone.utc) - projected_at.astimezone(timezone.utc)
+    required = timedelta(seconds=fetch_timeout_seconds + 1.0)
+    return required < max_age and timedelta(0) <= age <= max_age - required
+
+
 def _fresh_projected_global_books(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
@@ -7536,6 +7558,19 @@ def event_bound_live_adapter_from_trade_conn(
                 missing_tokens = tuple(
                     token for token in tokens if token not in projected_books
                 )
+                projection_discarded = 0
+                if missing_tokens and projected_books and not (
+                    _global_book_projection_has_fetch_headroom(
+                        projected_at,
+                        checked_at=captured_at,
+                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                        fetch_timeout_seconds=timeout,
+                    )
+                ):
+                    projection_discarded = len(projected_books)
+                    projected_books = {}
+                    projected_at = None
+                    missing_tokens = tuple(tokens)
                 if not missing_tokens:
                     logging.getLogger(__name__).info(
                         "global book epoch stage completed: mode=%s "
@@ -7598,7 +7633,8 @@ def event_bound_live_adapter_from_trade_conn(
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
                     "book_prefetch elapsed_s=%.3f tokens=%d books=%d "
-                    "projected=%d fetched=%d projection_refetched=%d",
+                    "projected=%d fetched=%d projection_refetched=%d "
+                    "projection_discarded=%d",
                     mode,
                     _time.monotonic() - fetch_started,
                     len(tokens),
@@ -7606,6 +7642,7 @@ def event_bound_live_adapter_from_trade_conn(
                     len(projected_books),
                     len(fetched_books),
                     projection_refetched,
+                    projection_discarded,
                 )
                 return tokens, books, epoch_at
 

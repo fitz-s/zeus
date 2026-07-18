@@ -4103,10 +4103,31 @@ def test_global_book_prefetch_cut_reserves_capture_freshness_budget():
     ) is None
 
 
-@pytest.mark.parametrize("projection_survives", [True, False])
+def test_global_book_projection_reserves_fetch_timeout_before_mixed_prefetch():
+    checked_at = _dt.datetime(2026, 7, 17, 12, tzinfo=_dt.timezone.utc)
+    max_age = _dt.timedelta(seconds=180)
+
+    assert era._global_book_projection_has_fetch_headroom(
+        checked_at - _dt.timedelta(seconds=171),
+        checked_at=checked_at,
+        max_age=max_age,
+        fetch_timeout_seconds=8.0,
+    )
+    assert not era._global_book_projection_has_fetch_headroom(
+        checked_at - _dt.timedelta(seconds=171, milliseconds=1),
+        checked_at=checked_at,
+        max_age=max_age,
+        fetch_timeout_seconds=8.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "projection_mode",
+    ["survives", "expires_after_fetch", "insufficient_headroom"],
+)
 def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     monkeypatch,
-    projection_survives,
+    projection_mode,
 ):
     trade = sqlite3.connect(":memory:")
     trade.executescript(
@@ -4308,7 +4329,7 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
             "asset_id": "yes-token-a",
             "hash": "hash-yes-token-a",
         }
-        if projection_survives:
+        if projection_mode == "survives":
             expected_yes.update(
                 {
                     "tick_size": "0.01",
@@ -4336,11 +4357,17 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
         "src.data.polymarket_client.PolymarketClient",
         FakeClient,
     )
-    if not projection_survives:
+    if projection_mode == "expires_after_fetch":
         monkeypatch.setattr(
             era,
             "_global_book_prefetch_epoch_at",
             lambda **_: None,
+        )
+    elif projection_mode == "insufficient_headroom":
+        monkeypatch.setattr(
+            era,
+            "_global_book_projection_has_fetch_headroom",
+            lambda *_args, **_kwargs: False,
         )
 
     bound, epoch = captured["current_book_epoch_provider"](
@@ -4352,11 +4379,11 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     assert bound["family"].bindings[0].no_token_id == "no-token-a"
     assert epoch.witness_identity == "book-current"
     assert len(capture_calls) == 1
-    assert book_calls == (
-        [("no-token-a",)]
-        if projection_survives
-        else [("no-token-a",), ("yes-token-a",)]
-    )
+    assert book_calls == {
+        "survives": [("no-token-a",)],
+        "expires_after_fetch": [("no-token-a",), ("yes-token-a",)],
+        "insufficient_headroom": [("yes-token-a", "no-token-a")],
+    }[projection_mode]
     trade.close()
     forecast.close()
     topology.close()
