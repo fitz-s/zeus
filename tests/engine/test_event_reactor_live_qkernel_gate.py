@@ -549,6 +549,59 @@ def test_day0_submit_gate_allows_maker_range_with_fresh_observation() -> None:
     assert reason is None
 
 
+def test_day0_submit_gate_blocks_bin_dead_at_submit_time(monkeypatch) -> None:
+    """H-2: a bin the running extreme killed in the select→submit window is
+    refused at the final seam with its own first-class reason — BEFORE the
+    fragility/maker gates get a say."""
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.day0_entry_bin_still_alive",
+        lambda **kwargs: False,
+    )
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be between 32-33°C on July 2?"
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="MAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+    assert reason == "DAY0_SUBMIT_TIME_BIN_DEAD"
+
+
+def test_day0_submit_gate_hard_fact_recheck_receives_submit_context(monkeypatch) -> None:
+    """The re-check runs on the SELECTED bin/direction/date at decision_time —
+    submit-time truth, not the selection snapshot."""
+    seen: dict[str, object] = {}
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.day0_entry_bin_still_alive", _spy
+    )
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be between 32-33°C on July 2?",
+            direction="buy_no",
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="MAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+    # alive verdict (spy True) does NOT admit by itself — the later gates still
+    # run (this buy_no fails one-bin stress), proving the re-check only ADDS a veto.
+    assert reason == "DAY0_ONE_BIN_EDGE_FRAGILE"
+    assert seen["metric"] == "high"
+    assert seen["direction"] == "buy_no"
+    assert seen["target_date"] == "2026-07-02"
+    assert float(seen["bin_low"]) == 32.0 and float(seen["bin_high"]) == 33.0
+    assert getattr(seen["city"], "name", "") == "Manila"
+    assert seen["now"] == datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
+
+
 @pytest.mark.parametrize(
     ("metric", "bin_label", "observed", "yes_survives"),
     (

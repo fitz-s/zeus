@@ -41,6 +41,7 @@ from src.execution.day0_hard_fact_exit import (
     _final_daily_observation_extreme,
     _reset_wu_memo_for_tests,
     cancel_day0_dead_bin_resting_entries,
+    day0_entry_bin_still_alive,
     evaluate_hard_fact_exit,
     final_observed_bin_verdict,
     hard_fact_bin_verdict,
@@ -837,6 +838,51 @@ class TestRestingOrderCancel:
         )
         assert n == 1
         assert clob.cancelled == ["o1"]
+
+    def test_entry_bin_still_alive_verdicts(self, monkeypatch):
+        """H-2 (Day0 first-principles audit 2026-07-18): the submit-time re-check.
+        A selected Day0 bin whose survival edge the running extreme has crossed in
+        the select→submit window must be refused at submit (False); an alive bin,
+        a missing extreme (fail-soft), and a paused family (anomaly lane owns it)
+        all return True (no NEW authority to block on)."""
+        _set_metar_memo(monkeypatch, 26)
+        # dead: extreme 26 beyond 25-point bin for buy_yes
+        assert day0_entry_bin_still_alive(
+            city=_tokyo(), target_date="2026-06-10", metric="high",
+            direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
+        ) is False
+        # NO side on the killed bin is a structural WIN: never blocked
+        assert day0_entry_bin_still_alive(
+            city=_tokyo(), target_date="2026-06-10", metric="high",
+            direction="buy_no", bin_low=25.0, bin_high=25.0, now=NOW,
+        ) is True
+        # alive: extreme inside the bin (not beyond) -> no hard fact
+        assert day0_entry_bin_still_alive(
+            city=_tokyo(), target_date="2026-06-10", metric="high",
+            direction="buy_yes", bin_low=26.0, bin_high=27.0, now=NOW,
+        ) is True
+        # shoulder entered: buy_no on '26 or higher' is structurally dead
+        assert day0_entry_bin_still_alive(
+            city=_tokyo(), target_date="2026-06-10", metric="high",
+            direction="buy_no", bin_low=26.0, bin_high=None, now=NOW,
+        ) is False
+        # no extreme available: fail-soft True (existing gates own freshness)
+        _set_metar_memo(monkeypatch, None)
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
+            lambda city, target_date, now: (None, None),
+        )
+        assert day0_entry_bin_still_alive(
+            city=_tokyo(), target_date="2026-06-10", metric="high",
+            direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
+        ) is True
+        # paused family: anomaly lane owns the family; this gate abstains
+        _set_metar_memo(monkeypatch, 26)
+        flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="test")
+        assert day0_entry_bin_still_alive(
+            city=_tokyo(), target_date="2026-06-10", metric="high",
+            direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
+        ) is True
 
     def test_cancel_sweep_consults_durable_observation_instants_when_memos_cold(self, monkeypatch):
         """H-1 (Day0 first-principles audit 2026-07-18): after a restart the WU-API

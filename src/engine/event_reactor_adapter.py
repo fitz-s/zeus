@@ -15708,15 +15708,52 @@ def _day0_live_submit_admission_rejection_reason(
         or event_payload.get("settlement_source")
         or ""
     ).strip().lower()
+    # H-2 (Day0 first-principles audit 2026-07-18): submit-time hard-fact re-check.
+    # Selection-time truth != submit-time truth — between selection and this final
+    # seam the running extreme can cross the selected bin's survival edge, and the
+    # S6 recapture reuses the selection-time q_lcb (it re-prices the BOOK, not the
+    # OBSERVATION). Re-fetch the settlement-grade extreme NOW and refuse a bin the
+    # absorbing boundary has already killed. Fail-soft inside the helper: only a
+    # positive EXIT_DEAD_BIN verdict blocks; no-extreme / paused / error admit
+    # (freshness + anomaly authority stay with their own gates).
+    _h2_city = str(actionable_payload.get("city") or event_payload.get("city") or "")
+    _h2_metric = str(
+        actionable_payload.get("metric")
+        or actionable_payload.get("temperature_metric")
+        or event_payload.get("metric")
+        or ""
+    )
+    _h2_direction = str(actionable_payload.get("direction") or "").strip().lower()
+    _h2_bin_label = str(actionable_payload.get("bin_label") or "").strip()
+    _h2_city_obj = runtime_cities_by_name().get(_h2_city)
+    if _h2_city_obj is not None and _h2_bin_label and _h2_direction in {"buy_yes", "buy_no"}:
+        try:
+            from src.data.market_scanner import _parse_temp_range
+
+            _h2_low, _h2_high = _parse_temp_range(_h2_bin_label)
+        except Exception:  # noqa: BLE001 — unparseable label: no bounds, no verdict
+            _h2_low, _h2_high = None, None
+        if _h2_low is not None or _h2_high is not None:
+            from src.execution.day0_hard_fact_exit import day0_entry_bin_still_alive
+
+            if not day0_entry_bin_still_alive(
+                city=_h2_city_obj,
+                target_date=str(
+                    actionable_payload.get("target_date")
+                    or event_payload.get("target_date")
+                    or ""
+                ),
+                metric=_h2_metric,
+                direction=_h2_direction,
+                bin_low=_h2_low,
+                bin_high=_h2_high,
+                now=decision_time,
+            ):
+                return "DAY0_SUBMIT_TIME_BIN_DEAD"
     ctx = Day0AdmissionContext(
         event_type=event_type,
-        city=str(actionable_payload.get("city") or event_payload.get("city") or ""),
-        metric=str(
-            actionable_payload.get("metric")
-            or actionable_payload.get("temperature_metric")
-            or event_payload.get("metric")
-            or ""
-        ),
+        city=_h2_city,
+        metric=_h2_metric,
         settlement_source_type=settlement_source_type,
         fast_obs_supported=bool(station_id and observation_available is not None),
         source_health_state=_day0_live_source_health_state(actionable_payload),

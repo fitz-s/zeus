@@ -620,6 +620,50 @@ def settlement_grade_effective_extreme(
     return float(min(wu_value, metar_value)), f"{wu_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
 
 
+def day0_entry_bin_still_alive(
+    *,
+    city: Any,
+    target_date: str,
+    metric: str,
+    direction: str,
+    bin_low: Optional[float],
+    bin_high: Optional[float],
+    now: Optional[datetime] = None,
+    world_conn: Any = None,
+) -> bool:
+    """Submit-time hard-fact re-check for a Day0 ENTRY (H-2, audit 2026-07-18).
+
+    Selection-time truth != submit-time truth: between selection and submit the
+    running extreme can cross the selected bin's survival edge. This asks the SAME
+    settlement-grade extreme + verdict the exit/cancel lanes use whether the entry
+    side is now structurally DEAD. Returns False ONLY on a positive dead verdict
+    (EXIT_DEAD_BIN for this side); True on no-extreme / paused family / any error —
+    freshness and anomaly authority stay with their own gates, this one only adds
+    the absorbing-boundary fact.
+    """
+    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    try:
+        from src.data.day0_oracle_anomaly import is_day0_family_paused
+
+        city_name = str(getattr(city, "name", "") or "")
+        if is_day0_family_paused(city_name, target_date, now=moment):
+            return True
+        effective, _source = settlement_grade_effective_extreme(
+            city=city, target_date=target_date, metric=metric, now=moment,
+            world_conn=world_conn,
+        )
+        if effective is None:
+            return True
+        verdict = hard_fact_bin_verdict(
+            metric=metric, direction=direction,
+            bin_low=bin_low, bin_high=bin_high,
+            effective_extreme=effective,
+        )
+        return verdict is None or verdict.action != "EXIT_DEAD_BIN"
+    except Exception:  # noqa: BLE001 — fail-soft: never block a submit on a lane error
+        return True
+
+
 def evaluate_hard_fact_exit(
     *,
     position: Any,
