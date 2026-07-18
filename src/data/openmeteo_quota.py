@@ -25,13 +25,21 @@ DAILY_HARD_CAP = int(DAILY_LIMIT * HARD_THRESHOLD)
 HOURLY_HARD_CAP = int(HOURLY_LIMIT * HARD_THRESHOLD)
 MINUTE_HARD_CAP = int(MINUTE_LIMIT * HARD_THRESHOLD)
 
-# Maintenance must leave capacity for source-clock captures after a new run lands.
+# Quota has three economic priorities.  Maintenance must leave one tranche for
+# newly published source runs, and source-clock capture must leave another for
+# held Day0 positions whose probability needs a fresh remaining-day path.
+SOURCE_CLOCK_DAILY_RESERVE = 500
+SOURCE_CLOCK_HOURLY_RESERVE = 250
+SOURCE_CLOCK_MINUTE_RESERVE = 60
 CRITICAL_DAILY_RESERVE = 500
 CRITICAL_HOURLY_RESERVE = 250
 CRITICAL_MINUTE_RESERVE = 60
-MAINTENANCE_DAILY_LIMIT = DAILY_HARD_CAP - CRITICAL_DAILY_RESERVE
-MAINTENANCE_HOURLY_LIMIT = HOURLY_HARD_CAP - CRITICAL_HOURLY_RESERVE
-MAINTENANCE_MINUTE_LIMIT = MINUTE_HARD_CAP - CRITICAL_MINUTE_RESERVE
+PRIORITY_DAILY_LIMIT = DAILY_HARD_CAP - CRITICAL_DAILY_RESERVE
+PRIORITY_HOURLY_LIMIT = HOURLY_HARD_CAP - CRITICAL_HOURLY_RESERVE
+PRIORITY_MINUTE_LIMIT = MINUTE_HARD_CAP - CRITICAL_MINUTE_RESERVE
+MAINTENANCE_DAILY_LIMIT = PRIORITY_DAILY_LIMIT - SOURCE_CLOCK_DAILY_RESERVE
+MAINTENANCE_HOURLY_LIMIT = PRIORITY_HOURLY_LIMIT - SOURCE_CLOCK_HOURLY_RESERVE
+MAINTENANCE_MINUTE_LIMIT = PRIORITY_MINUTE_LIMIT - SOURCE_CLOCK_MINUTE_RESERVE
 
 _T = TypeVar("_T")
 
@@ -50,6 +58,7 @@ class OpenMeteoQuotaTracker:
         self._blocked_until: datetime | None = None
         self._lock = threading.Lock()
         self._priority = threading.local()
+        self._critical = threading.local()
         self._state_path = Path(state_path) if state_path is not None else None
 
     @staticmethod
@@ -65,6 +74,9 @@ class OpenMeteoQuotaTracker:
     def _is_priority(self) -> bool:
         return bool(getattr(self._priority, "depth", 0))
 
+    def _is_critical(self) -> bool:
+        return bool(getattr(self._critical, "depth", 0))
+
     @contextlib.contextmanager
     def priority_lane(self):
         """Allow source-clock work to consume the reserved quota tranche."""
@@ -75,6 +87,17 @@ class OpenMeteoQuotaTracker:
             yield
         finally:
             self._priority.depth = depth
+
+    @contextlib.contextmanager
+    def critical_lane(self):
+        """Allow held Day0 probability refresh to consume the final reserve."""
+
+        depth = int(getattr(self._critical, "depth", 0))
+        self._critical.depth = depth + 1
+        try:
+            yield
+        finally:
+            self._critical.depth = depth
 
     @staticmethod
     def _default_state(now: datetime) -> dict[str, object]:
@@ -190,9 +213,11 @@ class OpenMeteoQuotaTracker:
             raise RuntimeError("Open-Meteo shared cooldown timestamp is invalid") from exc
 
     @staticmethod
-    def _limits(priority: bool) -> tuple[int, int, int]:
-        if priority:
+    def _limits(priority: bool, critical: bool = False) -> tuple[int, int, int]:
+        if critical:
             return DAILY_HARD_CAP, HOURLY_HARD_CAP, MINUTE_HARD_CAP
+        if priority:
+            return PRIORITY_DAILY_LIMIT, PRIORITY_HOURLY_LIMIT, PRIORITY_MINUTE_LIMIT
         return (
             MAINTENANCE_DAILY_LIMIT,
             MAINTENANCE_HOURLY_LIMIT,
@@ -206,11 +231,12 @@ class OpenMeteoQuotaTracker:
         now: datetime,
         *,
         priority: bool,
+        critical: bool = False,
     ) -> tuple[bool, str | None]:
         blocked_until = cls._blocked_until_from_state(state)
         if blocked_until is not None and now < blocked_until:
             return False, f"cooldown_until={blocked_until.isoformat()}"
-        limits = cls._limits(priority)
+        limits = cls._limits(priority, critical)
         counts = (
             int(state.get("day_count") or 0),
             int(state.get("hour_count") or 0),
@@ -222,10 +248,16 @@ class OpenMeteoQuotaTracker:
                 return False, f"{label}_limit={count}/{limit}"
         return True, None
 
-    def _local_allows(self, now: datetime, *, priority: bool) -> tuple[bool, str | None]:
+    def _local_allows(
+        self,
+        now: datetime,
+        *,
+        priority: bool,
+        critical: bool = False,
+    ) -> tuple[bool, str | None]:
         if self._blocked_until is not None and now < self._blocked_until:
             return False, f"cooldown_until={self._blocked_until.isoformat()}"
-        limits = self._limits(priority)
+        limits = self._limits(priority, critical)
         counts = (self._count, self._hour_count, self._minute_count)
         labels = ("day", "hour", "minute")
         for label, count, limit in zip(labels, counts, limits, strict=True):
@@ -235,11 +267,17 @@ class OpenMeteoQuotaTracker:
 
     def can_call(self) -> bool:
         priority = self._is_priority()
+        critical = self._is_critical()
         if self._shared_enabled():
             try:
                 allowed, reason = self._shared(
                     lambda state, now: (
-                        self._state_allows(state, now, priority=priority),
+                        self._state_allows(
+                            state,
+                            now,
+                            priority=priority,
+                            critical=critical,
+                        ),
                         False,
                     )
                 )
@@ -252,11 +290,13 @@ class OpenMeteoQuotaTracker:
                 allowed, reason = self._local_allows(
                     datetime.now(timezone.utc),
                     priority=priority,
+                    critical=critical,
                 )
         if not allowed:
             logger.warning(
-                "Open-Meteo quota blocked priority=%s reason=%s",
+                "Open-Meteo quota blocked priority=%s critical=%s reason=%s",
                 priority,
+                critical,
                 reason,
             )
         return allowed
@@ -286,11 +326,17 @@ class OpenMeteoQuotaTracker:
         """Atomically reserve one actual HTTP attempt before it is sent."""
 
         priority = self._is_priority()
+        critical = self._is_critical()
 
         def acquire(
             state: dict[str, object], now: datetime
         ) -> tuple[tuple[bool, str | None, int], bool]:
-            allowed, reason = self._state_allows(state, now, priority=priority)
+            allowed, reason = self._state_allows(
+                state,
+                now,
+                priority=priority,
+                critical=critical,
+            )
             if not allowed:
                 return (False, reason, int(state.get("day_count") or 0)), False
             state["day_count"] = int(state.get("day_count") or 0) + 1
@@ -308,7 +354,11 @@ class OpenMeteoQuotaTracker:
             with self._lock:
                 self._check_reset()
                 now = datetime.now(timezone.utc)
-                allowed, reason = self._local_allows(now, priority=priority)
+                allowed, reason = self._local_allows(
+                    now,
+                    priority=priority,
+                    critical=critical,
+                )
                 if allowed:
                     self._count += 1
                     self._hour_count += 1
@@ -316,14 +366,87 @@ class OpenMeteoQuotaTracker:
                 count = self._count
         if not allowed:
             logger.warning(
-                "Open-Meteo quota reservation blocked%s priority=%s reason=%s",
+                "Open-Meteo quota reservation blocked%s priority=%s critical=%s reason=%s",
                 f" [{endpoint}]" if endpoint else "",
                 priority,
+                critical,
                 reason,
             )
         else:
             self._log_usage(count, endpoint)
         return allowed
+
+    @classmethod
+    def _retry_after_for_counts(
+        cls,
+        *,
+        now: datetime,
+        blocked_until: datetime | None,
+        counts: tuple[int, int, int],
+        priority: bool,
+        critical: bool,
+    ) -> int:
+        waits: list[float] = []
+        if blocked_until is not None and blocked_until > now:
+            waits.append((blocked_until - now).total_seconds())
+        limits = cls._limits(priority, critical)
+        if counts[0] >= limits[0]:
+            next_day = datetime.combine(
+                now.date() + timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+            waits.append((next_day - now).total_seconds())
+        if counts[1] >= limits[1]:
+            next_hour = now.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            ) + timedelta(hours=1)
+            waits.append((next_hour - now).total_seconds())
+        if counts[2] >= limits[2]:
+            next_minute = now.replace(
+                second=0,
+                microsecond=0,
+            ) + timedelta(minutes=1)
+            waits.append((next_minute - now).total_seconds())
+        return max(0, int(max(waits, default=0.0)) + (1 if waits else 0))
+
+    def retry_after_seconds(self) -> int:
+        """Seconds until the active quota lane can make another reservation."""
+
+        priority = self._is_priority()
+        critical = self._is_critical()
+        if self._shared_enabled():
+            try:
+                return self._shared(
+                    lambda state, now: (
+                        self._retry_after_for_counts(
+                            now=now,
+                            blocked_until=self._blocked_until_from_state(state),
+                            counts=(
+                                int(state.get("day_count") or 0),
+                                int(state.get("hour_count") or 0),
+                                int(state.get("minute_count") or 0),
+                            ),
+                            priority=priority,
+                            critical=critical,
+                        ),
+                        False,
+                    )
+                )
+            except RuntimeError:
+                logger.exception("Open-Meteo shared quota retry window read failed")
+                return RATE_LIMIT_COOLDOWN_SECONDS
+        with self._lock:
+            self._check_reset()
+            return self._retry_after_for_counts(
+                now=datetime.now(timezone.utc),
+                blocked_until=self._blocked_until,
+                counts=(self._count, self._hour_count, self._minute_count),
+                priority=priority,
+                critical=critical,
+            )
 
     def note_rate_limited(self, retry_after_seconds: int | float | None = None) -> None:
         cooldown = max(RATE_LIMIT_COOLDOWN_SECONDS, int(retry_after_seconds or 0))

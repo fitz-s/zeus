@@ -48,6 +48,7 @@ from src.data.openmeteo_quota import (
     DAILY_LIMIT,
     HARD_THRESHOLD,
     MAINTENANCE_DAILY_LIMIT,
+    PRIORITY_DAILY_LIMIT,
     OpenMeteoQuotaTracker,
 )
 from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
@@ -11408,6 +11409,17 @@ def test_openmeteo_quota_reserves_capacity_for_source_clock():
     with tracker.priority_lane():
         assert tracker.acquire_call("source_clock") is True
     assert tracker.acquire_call("maintenance") is False
+
+
+def test_openmeteo_quota_reserves_final_tranche_for_held_day0():
+    tracker = OpenMeteoQuotaTracker()
+    tracker._count = PRIORITY_DAILY_LIMIT
+
+    with tracker.priority_lane():
+        assert tracker.acquire_call("source_clock") is False
+        assert tracker.retry_after_seconds() > 0
+    with tracker.critical_lane():
+        assert tracker.acquire_call("held_day0") is True
 
 
 def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch, caplog):

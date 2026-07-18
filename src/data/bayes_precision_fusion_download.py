@@ -502,9 +502,10 @@ def _is_quota_transport_error(message: object) -> bool:
 
 
 def bayes_precision_fusion_quota_cooldown_seconds() -> int:
-    """Return process-local Open-Meteo cooldown seconds for the BPF capture lane."""
+    """Return time until the source-clock quota lane can make another call."""
 
-    return int(_BPF_OPENMETEO_QUOTA_TRACKER.cooldown_remaining_seconds())
+    with _BPF_OPENMETEO_QUOTA_TRACKER.priority_lane():
+        return int(_BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds())
 
 
 def bayes_precision_fusion_source_clock_quota_priority():

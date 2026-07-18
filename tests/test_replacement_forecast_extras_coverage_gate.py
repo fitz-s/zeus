@@ -94,6 +94,110 @@ def _insert_single_runs(db: Path, *, city: str, metric: str, target_date: str, m
         conn.close()
 
 
+def test_source_cycle_full_local_day_geometry_is_timezone_aware() -> None:
+    cycle = datetime(2026, 7, 18, 0, 0, tzinfo=UTC)
+
+    assert prod._source_cycle_can_cover_full_local_day(
+        cycle=cycle,
+        target_date="2026-07-18",
+        timezone_name="Europe/Paris",
+    )
+    assert prod._source_cycle_can_cover_full_local_day(
+        cycle=cycle,
+        target_date="2026-07-18",
+        timezone_name="America/New_York",
+    )
+    assert not prod._source_cycle_can_cover_full_local_day(
+        cycle=cycle,
+        target_date="2026-07-18",
+        timezone_name="Asia/Manila",
+    )
+    assert not prod._source_cycle_can_cover_full_local_day(
+        cycle=cycle,
+        target_date="2026-07-18",
+        timezone_name="Pacific/Auckland",
+    )
+    assert prod._source_cycle_can_cover_full_local_day(
+        cycle=cycle,
+        target_date="2026-07-19",
+        timezone_name="Asia/Manila",
+    )
+
+
+def test_source_clock_does_not_retry_structurally_partial_day0(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_updates as updates
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
+
+    cycle = datetime(2026, 7, 18, 0, 0, tzinfo=UTC)
+
+    class _Report:
+        updated_sources = ("ecmwf_ifs",)
+        affected_cities = ("Manila",)
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+            }
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        updates,
+        "read_model_updates_jsonl",
+        lambda _path: (
+            updates.OpenMeteoModelUpdate(
+                model="ecmwf_ifs",
+                last_run_initialisation_time=cycle,
+                last_run_availability_time=cycle,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: (
+            target_plan.ReplacementForecastTargetKey(
+                "Manila", "2026-07-18", "high"
+            ),
+        ),
+    )
+    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: {"Manila"},
+    )
+    monkeypatch.setattr(
+        dl,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("partial Day0 must not consume source-clock quota")
+        ),
+    )
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {"forecast_db": str(_make_forecast_db(tmp_path))},
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert report["status"] == "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS"
+    assert report["missing_target_count"] == 1
+    assert report["actionable_missing_target_count"] == 0
+    assert report["structurally_unservable_target_count"] == 1
+    assert report["structurally_unservable_by_source"] == {"ecmwf_ifs": 1}
+
+
 # Near-day (lead=0) scope: target_date == cycle date. Six cities -> a "full" near-day leg.
 _NEAR_DAY = "2026-06-16"
 _LEAD1 = "2026-06-17"

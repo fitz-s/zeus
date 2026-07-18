@@ -674,7 +674,7 @@ def maybe_refresh_day0_hourly_vectors(
                     skipped_throttle += 1
                     continue
             quota_context = (
-                quota_tracker.priority_lane()
+                quota_tracker.critical_lane()
                 if city_index < max(0, int(quota_priority_cities))
                 else nullcontext()
             )

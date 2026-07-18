@@ -31,10 +31,11 @@ import math
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Event
 from typing import Callable, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from src.config import settings
 
@@ -45,6 +46,31 @@ logger = logging.getLogger("zeus.replacement_forecast_production")
 # appears or a quota window reopens, one round trip should advance many market
 # families instead of an arbitrary alphabetical city.
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
+
+
+def _source_cycle_can_cover_full_local_day(
+    *,
+    cycle: datetime,
+    target_date: str,
+    timezone_name: str,
+) -> bool:
+    """Whether a run can geometrically contain the target's whole local day.
+
+    The full-day raw-input parser requires a sample no later than local 03:xx.
+    A run initialized after that boundary cannot ever satisfy the contract, so
+    retrying it on every source-clock poll only consumes provider quota.  Day0
+    remaining-day probability is a separate observed-so-far + future-vector
+    carrier and does not depend on pretending this partial day is complete.
+    """
+
+    try:
+        target = date.fromisoformat(str(target_date))
+        local_cycle = cycle.astimezone(ZoneInfo(str(timezone_name)))
+    except (TypeError, ValueError, KeyError):
+        return True
+    if local_cycle.date() != target:
+        return local_cycle.date() < target
+    return local_cycle.hour <= 3
 
 
 def _settings_section(name: str, default=None):
@@ -633,6 +659,32 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             pass
         missing_target_count = sum(len(rows) for rows in target_keys_by_source.values())
 
+        structurally_unservable_by_source: dict[str, int] = {}
+        coverable_target_keys: dict[str, list[object]] = {}
+        for source, rows in target_keys_by_source.items():
+            cycle = source_cycles[source]
+            coverable: list[object] = []
+            unservable = 0
+            for row in rows:
+                city_cfg = cities_by_name.get(row.city)
+                if city_cfg is None or _source_cycle_can_cover_full_local_day(
+                    cycle=cycle,
+                    target_date=row.target_date,
+                    timezone_name=str(city_cfg.timezone),
+                ):
+                    coverable.append(row)
+                else:
+                    unservable += 1
+            coverable_target_keys[source] = coverable
+            structurally_unservable_by_source[source] = unservable
+        target_keys_by_source = coverable_target_keys
+        structurally_unservable_target_count = sum(
+            structurally_unservable_by_source.values()
+        )
+        actionable_missing_target_count = sum(
+            len(rows) for rows in target_keys_by_source.values()
+        )
+
         targets_by_source: dict[str, list[BayesPrecisionFusionDownloadTarget]] = {}
         for source, target_keys in target_keys_by_source.items():
             cycle = source_cycles[source]
@@ -673,6 +725,11 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 "planned_target_count": planned_target_count,
                 "covered_target_count": covered_target_count,
                 "missing_target_count": missing_target_count,
+                "actionable_missing_target_count": actionable_missing_target_count,
+                "structurally_unservable_target_count": (
+                    structurally_unservable_target_count
+                ),
+                "structurally_unservable_by_source": structurally_unservable_by_source,
                 "coverage_probe_status": coverage_probe_status,
             }
 
@@ -1005,6 +1062,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             "planned_target_count": planned_target_count,
             "covered_target_count": covered_target_count,
             "missing_target_count": missing_target_count,
+            "actionable_missing_target_count": actionable_missing_target_count,
+            "structurally_unservable_target_count": structurally_unservable_target_count,
+            "structurally_unservable_by_source": structurally_unservable_by_source,
             "coverage_probe_status": coverage_probe_status,
             "candidate_row_count": sum(
                 int(item.get("candidate_row_count") or 0) for item in reports
