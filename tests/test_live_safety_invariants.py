@@ -5232,8 +5232,20 @@ def test_held_monitor_prefetch_clears_prior_cycle_when_batch_fetch_fails():
     )
 
     class FailingBatchClob:
+        def __init__(self):
+            self.market_calls = 0
+            self.orderbook_calls = 0
+
         def get_orderbook_snapshots(self, _token_ids):
             raise RuntimeError("current batch unavailable")
+
+        def get_clob_market_info(self, _condition_id):
+            self.market_calls += 1
+            raise AssertionError("failed batch must not fan out into market reads")
+
+        def get_orderbook(self, _token_id):
+            self.orderbook_calls += 1
+            raise AssertionError("failed batch must not fan out into singular reads")
 
     clob = FailingBatchClob()
     monitor_refresh.install_monitor_orderbook_prefetch(
@@ -5263,6 +5275,14 @@ def test_held_monitor_prefetch_clears_prior_cycle_when_batch_fetch_fails():
     )
 
     assert monitor_refresh.prefetched_monitor_orderbook(clob, "token-stale") is None
+    assert monitor_refresh.monitor_orderbook_prefetch_attempted(
+        clob,
+        "token-stale",
+    )
+    assert cycle_runtime._closed_non_accepting_market_info(clob, pos) is None
+    assert monitor_refresh.monitor_quote_refresh(None, clob, pos) is None
+    assert clob.market_calls == 0
+    assert clob.orderbook_calls == 0
     assert summary["held_monitor_orderbooks_prefetched"] == 0
     assert summary["held_monitor_orderbook_prefetch_error"] == "current batch unavailable"
     assert len(warnings) == 1

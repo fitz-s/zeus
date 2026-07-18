@@ -91,6 +91,9 @@ _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR = "_day0_zero_probability_exit_author
 _GLOBAL_MONITOR_SAMPLES_ATTR = "_current_global_held_probability_samples"
 _GLOBAL_MONITOR_ALPHA_ATTR = "_current_global_probability_band_alpha"
 _MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
+_MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
+    "_zeus_monitor_prefetch_attempted_tokens"
+)
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
@@ -110,7 +113,12 @@ _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
 _nowcast_consecutive_write_failures = 0
 
 
-def install_monitor_orderbook_prefetch(clob, books: dict[str, dict]) -> bool:
+def install_monitor_orderbook_prefetch(
+    clob,
+    books: dict[str, dict],
+    *,
+    attempted_token_ids=(),
+) -> bool:
     """Attach one-cycle batch books to the cycle-scoped CLOB client."""
 
     clean = {
@@ -118,8 +126,14 @@ def install_monitor_orderbook_prefetch(clob, books: dict[str, dict]) -> bool:
         for token_id, book in books.items()
         if str(token_id).strip() and isinstance(book, dict) and book
     }
+    attempted = frozenset(
+        token_id
+        for value in attempted_token_ids
+        if (token_id := str(value).strip())
+    )
     try:
         setattr(clob, _MONITOR_PREFETCHED_ORDERBOOKS_ATTR, clean)
+        setattr(clob, _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR, attempted)
     except (AttributeError, TypeError):
         return False
     return True
@@ -131,6 +145,13 @@ def prefetched_monitor_orderbook(clob, token_id: str) -> dict | None:
         return None
     book = books.get(str(token_id))
     return book if isinstance(book, dict) and book else None
+
+
+def monitor_orderbook_prefetch_attempted(clob, token_id: str) -> bool:
+    attempted = getattr(clob, "__dict__", {}).get(
+        _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR
+    )
+    return isinstance(attempted, frozenset) and str(token_id) in attempted
 
 
 def _monitor_receipt_float(value) -> float | None:
@@ -2581,7 +2602,13 @@ def _day0_one_sided_monitor_quote(
         return None
 
 
-def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTokenMonitorQuote | None:
+def monitor_quote_refresh(
+    conn,
+    clob: PolymarketClient,
+    pos: Position,
+    *,
+    retry_after_prefetch: bool = False,
+) -> HeldTokenMonitorQuote | None:
     """Refresh held-token executable quote without opening a DB write."""
 
     tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -2589,6 +2616,12 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
         return None
 
     book = prefetched_monitor_orderbook(clob, tid)
+    if (
+        book is None
+        and monitor_orderbook_prefetch_attempted(clob, tid)
+        and not retry_after_prefetch
+    ):
+        return None
     get_orderbook = getattr(clob, "get_orderbook", None)
     try:
         if book is None:
@@ -2634,15 +2667,16 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
             source_timestamp=source_timestamp,
         )
     except Exception as e:
-        one_sided_quote = _day0_one_sided_monitor_quote(
-            conn,
-            clob,
-            pos,
-            tid,
-            book=book,
-        )
-        if one_sided_quote is not None:
-            return one_sided_quote
+        if book is not None:
+            one_sided_quote = _day0_one_sided_monitor_quote(
+                conn,
+                clob,
+                pos,
+                tid,
+                book=book,
+            )
+            if one_sided_quote is not None:
+                return one_sided_quote
         logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
         return None
 
@@ -4639,7 +4673,12 @@ def refresh_exact_zero_position(
         if pos.last_monitor_market_price is not None
         else pos.entry_price
     )
-    quote = monitor_quote_refresh(conn, clob, pos)
+    quote = monitor_quote_refresh(
+        conn,
+        clob,
+        pos,
+        retry_after_prefetch=True,
+    )
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask

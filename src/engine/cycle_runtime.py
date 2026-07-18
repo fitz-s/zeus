@@ -4449,10 +4449,19 @@ def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: da
         or getattr(pos, "market_id", None)
         or ""
     ).strip()
-    from src.engine.monitor_refresh import prefetched_monitor_orderbook
+    from src.engine.monitor_refresh import (
+        monitor_orderbook_prefetch_attempted,
+        prefetched_monitor_orderbook,
+    )
 
-    held_book = prefetched_monitor_orderbook(clob, _position_held_token_id(pos))
+    held_token_id = _position_held_token_id(pos)
+    held_book = prefetched_monitor_orderbook(clob, held_token_id)
     if held_book is not None and any(held_book.get(side) for side in ("bids", "asks")):
+        return static_closed
+    if held_book is None and monitor_orderbook_prefetch_attempted(
+        clob,
+        held_token_id,
+    ):
         return static_closed
 
     get_market_info = getattr(clob, "get_clob_market_info", None)
@@ -4609,19 +4618,27 @@ def _prefetch_held_monitor_orderbooks(
         network_books = getter(missing_token_ids)
         if not isinstance(network_books, dict):
             raise TypeError("batch orderbook response must be a mapping")
-    except Exception as exc:  # noqa: BLE001 - singular reads remain the fallback.
+    except Exception as exc:  # noqa: BLE001 - defer ordinary quotes after one batch attempt.
         summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
-        installed = install_monitor_orderbook_prefetch(clob, local_books)
+        installed = install_monitor_orderbook_prefetch(
+            clob,
+            local_books,
+            attempted_token_ids=missing_token_ids,
+        )
         summary["held_monitor_orderbooks_prefetched"] = (
             len(local_books) if installed else 0
         )
         deps.logger.warning(
-            "held monitor batch orderbook prefetch failed; using singular fallback: %s",
+            "held monitor batch orderbook prefetch failed; deferring ordinary quote reads: %s",
             exc,
         )
         return
     books = {**local_books, **network_books}
-    installed = install_monitor_orderbook_prefetch(clob, books)
+    installed = install_monitor_orderbook_prefetch(
+        clob,
+        books,
+        attempted_token_ids=missing_token_ids,
+    )
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
 
 

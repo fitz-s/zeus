@@ -552,6 +552,49 @@ def test_monitor_quote_refresh_consumes_batch_prefetch_without_singular_get(monk
     assert clob.best_bid_ask_calls == 0
 
 
+def test_monitor_quote_refresh_does_not_repeat_failed_singular_day0_read():
+    from src.engine import monitor_refresh
+
+    class FailingClob:
+        def __init__(self):
+            self.calls = 0
+
+        def get_orderbook(self, _token_id):
+            self.calls += 1
+            raise TimeoutError("book unavailable")
+
+    pos = _position()
+    pos.state = "day0_window"
+    clob = FailingClob()
+
+    assert monitor_refresh.monitor_quote_refresh(None, clob, pos) is None
+    assert clob.calls == 1
+
+
+def test_exact_zero_quote_allows_one_retry_after_failed_batch(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    clob = _TwoSidedMonitorBookClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+
+    assert monitor_refresh.monitor_quote_refresh(None, clob, _position()) is None
+    assert clob.orderbook_calls == 0
+
+    quote = monitor_refresh.monitor_quote_refresh(
+        None,
+        clob,
+        _position(),
+        retry_after_prefetch=True,
+    )
+    assert quote is not None
+    assert clob.orderbook_calls == 1
+
+
 def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_path):
     from src.engine import cycle_runtime, monitor_refresh
 
