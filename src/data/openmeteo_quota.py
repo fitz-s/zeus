@@ -7,6 +7,8 @@ import fcntl
 import json
 import logging
 import os
+import random
+import secrets
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +22,12 @@ MINUTE_LIMIT = 600
 WARN_THRESHOLD = 0.80
 HARD_THRESHOLD = 0.95
 RATE_LIMIT_COOLDOWN_SECONDS = 60
+REQUEST_STATE_SCHEMA_VERSION = 2
+MAX_REQUEST_STATES = 512
+REQUEST_STATE_TTL = timedelta(hours=24)
+REQUEST_RETRY_BASE_SECONDS = 2.0
+REQUEST_RETRY_MAX_SECONDS = 300.0
+REQUEST_LEASE_SECONDS = 45.0
 
 DAILY_HARD_CAP = int(DAILY_LIMIT * HARD_THRESHOLD)
 HOURLY_HARD_CAP = int(HOURLY_LIMIT * HARD_THRESHOLD)
@@ -56,6 +64,7 @@ class OpenMeteoQuotaTracker:
         self._minute_key = now.strftime("%Y-%m-%dT%H:%M")
         self._minute_count = 0
         self._blocked_until: datetime | None = None
+        self._request_states: dict[str, object] = {}
         self._lock = threading.Lock()
         self._priority = threading.local()
         self._critical = threading.local()
@@ -102,7 +111,7 @@ class OpenMeteoQuotaTracker:
     @staticmethod
     def _default_state(now: datetime) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": REQUEST_STATE_SCHEMA_VERSION,
             "day": now.date().isoformat(),
             "day_count": 0,
             "hour": now.strftime("%Y-%m-%dT%H"),
@@ -110,6 +119,7 @@ class OpenMeteoQuotaTracker:
             "minute": now.strftime("%Y-%m-%dT%H:%M"),
             "minute_count": 0,
             "blocked_until": None,
+            "requests": {},
         }
 
     @classmethod
@@ -120,7 +130,12 @@ class OpenMeteoQuotaTracker:
     ) -> bool:
         changed = False
         defaults = cls._default_state(now)
-        if int(state.get("schema_version") or 0) != 1:
+        schema_version = int(state.get("schema_version") or 0)
+        if schema_version == 1:
+            state["schema_version"] = REQUEST_STATE_SCHEMA_VERSION
+            state["requests"] = {}
+            changed = True
+        elif schema_version != REQUEST_STATE_SCHEMA_VERSION:
             state.clear()
             state.update(defaults)
             return True
@@ -143,7 +158,193 @@ class OpenMeteoQuotaTracker:
             state["minute"] = minute
             state["minute_count"] = 0
             changed = True
+        if cls._prune_request_states(state, now):
+            changed = True
         return changed
+
+    @staticmethod
+    def _request_priority(priority: bool, critical: bool) -> str:
+        if critical:
+            return "critical"
+        if priority:
+            return "priority"
+        return "maintenance"
+
+    @staticmethod
+    def _bounded_text(value: str, *, limit: int = 160) -> str:
+        return str(value).strip()[:limit]
+
+    @staticmethod
+    def _parse_timestamp(raw: object) -> datetime | None:
+        if raw is None or not str(raw).strip():
+            return None
+        try:
+            return datetime.fromisoformat(str(raw)).astimezone(timezone.utc)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _request_entries(cls, state: dict[str, object]) -> dict[str, object]:
+        entries = state.get("requests")
+        if not isinstance(entries, dict):
+            entries = {}
+            state["requests"] = entries
+        return entries
+
+    @classmethod
+    def _prune_request_states(cls, state: dict[str, object], now: datetime) -> bool:
+        entries = cls._request_entries(state)
+        changed = False
+        for request_id, entry in list(entries.items()):
+            if not isinstance(request_id, str) or not isinstance(entry, dict):
+                del entries[request_id]
+                changed = True
+                continue
+            updated_at = cls._parse_timestamp(entry.get("updated_at"))
+            next_retry_at = cls._parse_timestamp(entry.get("next_retry_at"))
+            in_flight_until = cls._parse_timestamp(entry.get("in_flight_until"))
+            if updated_at is None or (
+                updated_at + REQUEST_STATE_TTL <= now
+                and (next_retry_at is None or next_retry_at <= now)
+                and (in_flight_until is None or in_flight_until <= now)
+            ):
+                del entries[request_id]
+                changed = True
+        if len(entries) > MAX_REQUEST_STATES:
+            oldest = sorted(
+                (
+                    request_id
+                    for request_id, entry in entries.items()
+                    if (
+                        cls._parse_timestamp(entry.get("next_retry_at")) is None
+                        or cls._parse_timestamp(entry.get("next_retry_at")) <= now
+                    )
+                    and (
+                        cls._parse_timestamp(entry.get("in_flight_until")) is None
+                        or cls._parse_timestamp(entry.get("in_flight_until")) <= now
+                    )
+                ),
+                key=lambda request_id: (
+                    cls._parse_timestamp(
+                        entries[request_id].get("updated_at")
+                    )
+                    or datetime.min.replace(tzinfo=timezone.utc),
+                    request_id,
+                ),
+            )
+            for request_id in oldest[: max(0, len(entries) - MAX_REQUEST_STATES)]:
+                del entries[request_id]
+                changed = True
+        return changed
+
+    @classmethod
+    def _request_retry_after(
+        cls,
+        state: dict[str, object],
+        request_id: str,
+        now: datetime,
+    ) -> tuple[int, str | None]:
+        entry = cls._request_entries(state).get(request_id)
+        if not isinstance(entry, dict):
+            return 0, None
+        retry_at = cls._parse_timestamp(entry.get("next_retry_at"))
+        if retry_at is None or retry_at <= now:
+            return 0, None
+        return max(1, int((retry_at - now).total_seconds()) + 1), retry_at.isoformat()
+
+    @classmethod
+    def _request_in_flight_until(
+        cls,
+        state: dict[str, object],
+        request_id: str,
+        now: datetime,
+    ) -> str | None:
+        entry = cls._request_entries(state).get(request_id)
+        if not isinstance(entry, dict):
+            return None
+        in_flight_until = cls._parse_timestamp(entry.get("in_flight_until"))
+        if in_flight_until is None or in_flight_until <= now:
+            return None
+        return in_flight_until.isoformat()
+
+    @classmethod
+    def _request_state_has_capacity(
+        cls,
+        state: dict[str, object],
+        request_id: str,
+        now: datetime,
+    ) -> bool:
+        entries = cls._request_entries(state)
+        if request_id in entries:
+            return True
+        cls._prune_request_states(state, now)
+        if len(entries) < MAX_REQUEST_STATES:
+            return True
+        inactive = sorted(
+            (
+                candidate
+                for candidate, entry in entries.items()
+                if (
+                    cls._parse_timestamp(entry.get("next_retry_at")) is None
+                    or cls._parse_timestamp(entry.get("next_retry_at")) <= now
+                )
+                and (
+                    cls._parse_timestamp(entry.get("in_flight_until")) is None
+                    or cls._parse_timestamp(entry.get("in_flight_until")) <= now
+                )
+            ),
+            key=lambda candidate: (
+                cls._parse_timestamp(entries[candidate].get("updated_at"))
+                or datetime.min.replace(tzinfo=timezone.utc),
+                candidate,
+            ),
+        )
+        if not inactive:
+            return False
+        del entries[inactive[0]]
+        return True
+
+    @classmethod
+    def _record_request(
+        cls,
+        state: dict[str, object],
+        now: datetime,
+        *,
+        request_id: str,
+        endpoint: str,
+        job: str,
+        priority: str,
+        outcome: str,
+        failure_count: int | None = None,
+        next_retry_at: datetime | None = None,
+        lease_id: str | None = None,
+        in_flight_until: datetime | None = None,
+    ) -> None:
+        entries = cls._request_entries(state)
+        old = entries.get(request_id)
+        prior_attempts = int(old.get("attempts") or 0) if isinstance(old, dict) else 0
+        prior_failures = int(old.get("failure_count") or 0) if isinstance(old, dict) else 0
+        entry: dict[str, object] = {
+            "endpoint": cls._bounded_text(endpoint),
+            "job": cls._bounded_text(job),
+            "priority": priority,
+            "outcome": outcome,
+            "attempts": prior_attempts + (1 if outcome == "attempt" else 0),
+            "failure_count": max(
+                0,
+                prior_failures if failure_count is None else int(failure_count),
+            ),
+            "next_retry_at": next_retry_at.isoformat() if next_retry_at else None,
+            "lease_id": lease_id,
+            "in_flight_until": (
+                in_flight_until.isoformat() if in_flight_until else None
+            ),
+            "owner_pid": os.getpid(),
+            "quota_cost": 1,
+            "updated_at": now.isoformat(),
+        }
+        entries[request_id] = entry
+        cls._prune_request_states(state, now)
 
     def _shared(self, operation: Callable[[dict[str, object], datetime], tuple[_T, bool]]) -> _T:
         path = self._state_path
@@ -375,6 +576,261 @@ class OpenMeteoQuotaTracker:
         else:
             self._log_usage(count, endpoint)
         return allowed
+
+    def acquire_request(
+        self,
+        request_id: str,
+        *,
+        endpoint: str = "",
+        job: str = "",
+        lease_seconds: float = REQUEST_LEASE_SECONDS,
+    ) -> tuple[bool, str | None, str | None]:
+        """Atomically reserve one quota unit and one request-scoped attempt lease."""
+
+        priority = self._is_priority()
+        critical = self._is_critical()
+        priority_name = self._request_priority(priority, critical)
+        lease_id = secrets.token_hex(16)
+        lease_seconds = max(1.0, min(float(lease_seconds), REQUEST_RETRY_MAX_SECONDS))
+
+        def acquire(
+            state: dict[str, object], now: datetime
+        ) -> tuple[tuple[bool, str | None, str | None, int], bool]:
+            retry_after, retry_at = self._request_retry_after(state, request_id, now)
+            if retry_after:
+                return (
+                    False,
+                    f"request_retry_until={retry_at}",
+                    None,
+                    int(state.get("day_count") or 0),
+                ), False
+            in_flight_until = self._request_in_flight_until(state, request_id, now)
+            if in_flight_until is not None:
+                return (
+                    False,
+                    f"request_in_flight_until={in_flight_until}",
+                    None,
+                    int(state.get("day_count") or 0),
+                ), False
+            if not self._request_state_has_capacity(state, request_id, now):
+                return (
+                    False,
+                    f"request_state_capacity={MAX_REQUEST_STATES}",
+                    None,
+                    int(state.get("day_count") or 0),
+                ), False
+            allowed, reason = self._state_allows(
+                state,
+                now,
+                priority=priority,
+                critical=critical,
+            )
+            if not allowed:
+                return (
+                    False,
+                    reason,
+                    None,
+                    int(state.get("day_count") or 0),
+                ), False
+            state["day_count"] = int(state.get("day_count") or 0) + 1
+            state["hour_count"] = int(state.get("hour_count") or 0) + 1
+            state["minute_count"] = int(state.get("minute_count") or 0) + 1
+            self._record_request(
+                state,
+                now,
+                request_id=request_id,
+                endpoint=endpoint,
+                job=job,
+                priority=priority_name,
+                outcome="attempt",
+                lease_id=lease_id,
+                in_flight_until=now + timedelta(seconds=lease_seconds),
+            )
+            return (True, None, lease_id, int(state["day_count"])), True
+
+        if self._shared_enabled():
+            try:
+                allowed, reason, acquired_lease_id, count = self._shared(acquire)
+            except RuntimeError:
+                logger.exception("Open-Meteo shared request reservation failed closed")
+                return False, "shared_quota_unavailable", None
+        else:
+            with self._lock:
+                self._check_reset()
+                now = datetime.now(timezone.utc)
+                local_state: dict[str, object] = {"requests": self._request_states}
+                self._prune_request_states(local_state, now)
+                retry_after, retry_at = self._request_retry_after(
+                    local_state, request_id, now
+                )
+                if retry_after:
+                    allowed = False
+                    reason = f"request_retry_until={retry_at}"
+                elif (
+                    in_flight_until := self._request_in_flight_until(
+                        local_state, request_id, now
+                    )
+                ) is not None:
+                    allowed = False
+                    reason = f"request_in_flight_until={in_flight_until}"
+                elif not self._request_state_has_capacity(
+                    local_state, request_id, now
+                ):
+                    allowed = False
+                    reason = f"request_state_capacity={MAX_REQUEST_STATES}"
+                else:
+                    allowed, reason = self._local_allows(
+                        now,
+                        priority=priority,
+                        critical=critical,
+                    )
+                if allowed:
+                    self._count += 1
+                    self._hour_count += 1
+                    self._minute_count += 1
+                    self._record_request(
+                        local_state,
+                        now,
+                        request_id=request_id,
+                        endpoint=endpoint,
+                        job=job,
+                        priority=priority_name,
+                        outcome="attempt",
+                        lease_id=lease_id,
+                        in_flight_until=now + timedelta(seconds=lease_seconds),
+                    )
+                    acquired_lease_id = lease_id
+                else:
+                    acquired_lease_id = None
+                count = self._count
+        if allowed:
+            self._log_usage(count, endpoint)
+        else:
+            logger.warning(
+                "Open-Meteo request reservation blocked [%s] priority=%s reason=%s",
+                endpoint or request_id,
+                priority_name,
+                reason,
+            )
+        return allowed, reason, acquired_lease_id
+
+    @classmethod
+    def _lease_matches(
+        cls,
+        state: dict[str, object],
+        request_id: str,
+        lease_id: str | None,
+        now: datetime,
+    ) -> bool:
+        entry = cls._request_entries(state).get(request_id)
+        if not isinstance(entry, dict):
+            return lease_id is None
+        current = entry.get("lease_id")
+        in_flight_until = cls._parse_timestamp(entry.get("in_flight_until"))
+        if lease_id is not None:
+            return (
+                current == lease_id
+                and in_flight_until is not None
+                and in_flight_until > now
+            )
+        return current is None or in_flight_until is None or in_flight_until <= now
+
+    def record_request_success(
+        self,
+        request_id: str,
+        *,
+        endpoint: str = "",
+        job: str = "",
+        lease_id: str | None = None,
+    ) -> bool:
+        """Record a fresh response and clear only this request's retry embargo."""
+
+        priority = self._request_priority(self._is_priority(), self._is_critical())
+
+        def record(state: dict[str, object], now: datetime) -> tuple[bool, bool]:
+            if not self._lease_matches(state, request_id, lease_id, now):
+                return False, False
+            if not self._request_state_has_capacity(state, request_id, now):
+                return False, False
+            self._record_request(
+                state,
+                now,
+                request_id=request_id,
+                endpoint=endpoint,
+                job=job,
+                priority=priority,
+                outcome="success",
+                failure_count=0,
+            )
+            return True, True
+
+        if self._shared_enabled():
+            return self._shared(record)
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            state = {"requests": self._request_states}
+            if not self._lease_matches(state, request_id, lease_id, now):
+                return False
+            if not self._request_state_has_capacity(state, request_id, now):
+                return False
+            self._record_request(
+                state,
+                now,
+                request_id=request_id,
+                endpoint=endpoint,
+                job=job,
+                priority=priority,
+                outcome="success",
+                failure_count=0,
+            )
+            return True
+
+    def record_request_retry(
+        self,
+        request_id: str,
+        *,
+        endpoint: str = "",
+        job: str = "",
+        retry_after_seconds: float | None = None,
+        lease_id: str | None = None,
+    ) -> int:
+        """Persist a bounded full-jitter embargo after a failed request."""
+
+        priority = self._request_priority(self._is_priority(), self._is_critical())
+
+        def record(state: dict[str, object], now: datetime) -> tuple[int, bool]:
+            if not self._lease_matches(state, request_id, lease_id, now):
+                return 0, False
+            if not self._request_state_has_capacity(state, request_id, now):
+                return 0, False
+            old = self._request_entries(state).get(request_id)
+            prior_failures = int(old.get("failure_count") or 0) if isinstance(old, dict) else 0
+            failures = min(prior_failures + 1, 16)
+            cap = min(
+                REQUEST_RETRY_MAX_SECONDS,
+                REQUEST_RETRY_BASE_SECONDS * (2 ** (failures - 1)),
+            )
+            delay = min(cap, max(0.001, random.uniform(0.0, cap)))
+            if retry_after_seconds is not None:
+                delay = max(delay, float(retry_after_seconds))
+            retry_at = now + timedelta(seconds=delay)
+            self._record_request(
+                state,
+                now,
+                request_id=request_id,
+                endpoint=endpoint,
+                job=job,
+                priority=priority,
+                outcome="rate_limited" if retry_after_seconds is not None else "transport_error",
+                failure_count=failures,
+                next_retry_at=retry_at,
+            )
+            return max(1, int(delay) + 1), True
+
+        if self._shared_enabled():
+            return self._shared(record)
+        with self._lock:
+            return record({"requests": self._request_states}, datetime.now(timezone.utc))[0]
 
     @classmethod
     def _retry_after_for_counts(

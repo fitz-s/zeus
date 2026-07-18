@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-17; last_reused=2026-07-18
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-18
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -18,6 +18,7 @@ import logging
 import sqlite3
 import sys
 import tempfile
+import threading
 
 import numpy as np
 import pytest
@@ -25,6 +26,7 @@ import httpx
 
 import src.data.ensemble_client as ensemble_client
 import src.data.openmeteo_client as openmeteo_client
+import src.data.openmeteo_quota as openmeteo_quota
 import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
@@ -47,6 +49,7 @@ from src.data.calibration_transfer_policy import (
 from src.data.openmeteo_quota import (
     DAILY_LIMIT,
     HARD_THRESHOLD,
+    MAX_REQUEST_STATES,
     MAINTENANCE_DAILY_LIMIT,
     PRIORITY_DAILY_LIMIT,
     OpenMeteoQuotaTracker,
@@ -11444,6 +11447,345 @@ def test_openmeteo_quota_is_shared_across_process_trackers(monkeypatch, tmp_path
     assert first.acquire_call("blocked") is False
 
 
+def test_openmeteo_request_embargo_is_shared_and_attributed(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    first = OpenMeteoQuotaTracker(state_path=path)
+    second = OpenMeteoQuotaTracker(state_path=path)
+
+    first.record_request_retry(
+        "request-a",
+        endpoint="api.open-meteo.com/v1/forecast",
+        job="source-clock",
+    )
+
+    allowed, reason, _lease_id = second.acquire_request(
+        "request-a",
+        endpoint="api.open-meteo.com/v1/forecast",
+        job="source-clock",
+    )
+    assert allowed is False
+    assert reason is not None and reason.startswith("request_retry_until=")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    entry = payload["requests"]["request-a"]
+    assert payload["schema_version"] == 2
+    assert entry["endpoint"] == "api.open-meteo.com/v1/forecast"
+    assert entry["job"] == "source-clock"
+    assert entry["priority"] == "maintenance"
+    assert entry["outcome"] == "transport_error"
+
+
+def test_openmeteo_request_embargo_does_not_block_other_request(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    tracker.record_request_retry("request-a", endpoint="forecast", job="a")
+
+    allowed, reason, _lease_id = tracker.acquire_request(
+        "request-b", endpoint="forecast", job="b"
+    )
+
+    assert allowed is True
+    assert reason is None
+
+
+def test_openmeteo_request_success_clears_embargo(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    tracker.record_request_retry("request-a", endpoint="forecast", job="job")
+    tracker.record_request_success("request-a", endpoint="forecast", job="job")
+
+    allowed, reason, _lease_id = tracker.acquire_request(
+        "request-a", endpoint="forecast", job="job"
+    )
+
+    assert allowed is True
+    assert reason is None
+
+
+def test_openmeteo_request_single_flight_is_shared(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    first = OpenMeteoQuotaTracker(state_path=path)
+    second = OpenMeteoQuotaTracker(state_path=path)
+
+    allowed, reason, lease_id = first.acquire_request(
+        "request-a", endpoint="forecast", job="source-clock"
+    )
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+
+    allowed, reason, duplicate_lease = second.acquire_request(
+        "request-a", endpoint="forecast", job="source-clock"
+    )
+    assert allowed is False
+    assert reason is not None and reason.startswith("request_in_flight_until=")
+    assert duplicate_lease is None
+    assert first.calls_today() == 1
+
+    assert first.record_request_success(
+        "request-a",
+        endpoint="forecast",
+        job="source-clock",
+        lease_id=lease_id,
+    ) is True
+    allowed, reason, next_lease = second.acquire_request(
+        "request-a", endpoint="forecast", job="source-clock"
+    )
+    assert (allowed, reason) == (True, None)
+    assert next_lease and next_lease != lease_id
+
+
+def test_openmeteo_active_request_state_is_not_evicted(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+
+    tracker.record_request_retry(
+        "protected-request",
+        endpoint="forecast",
+        job="held-position",
+        retry_after_seconds=300,
+    )
+    for number in range(MAX_REQUEST_STATES + 10):
+        tracker.record_request_success(str(number), endpoint="forecast", job="bounded")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert len(payload["requests"]) <= MAX_REQUEST_STATES
+    assert "protected-request" in payload["requests"]
+
+
+def test_openmeteo_request_state_capacity_fails_closed_when_all_active(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+    now = datetime.now(timezone.utc)
+    state = tracker._default_state(now)
+    state["requests"] = {
+        str(number): {
+            "updated_at": now.isoformat(),
+            "next_retry_at": (now + timedelta(minutes=5)).isoformat(),
+            "in_flight_until": None,
+        }
+        for number in range(MAX_REQUEST_STATES)
+    }
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert tracker.record_request_retry(
+        "overflow", endpoint="forecast", job="maintenance"
+    ) == 0
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert len(payload["requests"]) == MAX_REQUEST_STATES
+    assert "overflow" not in payload["requests"]
+
+
+def test_openmeteo_fetch_single_flight_sends_one_http_attempt(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    first = OpenMeteoQuotaTracker(state_path=path)
+    second = OpenMeteoQuotaTracker(state_path=path)
+    started = threading.Event()
+    release = threading.Event()
+    calls = {"count": 0}
+    result: list[dict] = []
+
+    class _BlockingClient:
+        def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            started.set()
+            assert release.wait(2.0)
+            return httpx.Response(
+                200,
+                json={"fresh": True},
+                request=httpx.Request("GET", "https://api.open-meteo.com"),
+            )
+
+    worker = threading.Thread(
+        target=lambda: result.append(
+            openmeteo_client.fetch(
+                "https://api.open-meteo.com/v1/forecast",
+                {"latitude": 2, "longitude": 1},
+                max_retries=1,
+                quota=first,
+                client=_BlockingClient(),
+            )
+        )
+    )
+    worker.start()
+    assert started.wait(1.0)
+
+    with pytest.raises(RuntimeError, match="request embargoed"):
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"longitude": 1, "latitude": 2},
+            max_retries=1,
+            quota=second,
+            client=object(),
+        )
+
+    release.set()
+    worker.join(2.0)
+    assert worker.is_alive() is False
+    assert calls["count"] == 1
+    assert result == [{"fresh": True}]
+
+
+def test_openmeteo_fetch_releases_each_failed_attempt_before_retry(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(openmeteo_quota, "REQUEST_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(openmeteo_client.time, "sleep", lambda _seconds: None)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    calls = {"count": 0}
+
+    class _EventuallyFreshClient:
+        def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise httpx.ConnectError("transient")
+            return httpx.Response(
+                200,
+                json={"fresh": True},
+                request=httpx.Request("GET", "https://api.open-meteo.com"),
+            )
+
+    assert openmeteo_client.fetch(
+        "https://api.open-meteo.com/v1/forecast",
+        {"latitude": 2, "longitude": 1},
+        max_retries=2,
+        quota=tracker,
+        client=_EventuallyFreshClient(),
+    ) == {"fresh": True}
+    assert calls["count"] == 2
+    assert tracker.calls_today() == 2
+
+
+def test_openmeteo_expired_lease_recovers_without_late_owner_clobber(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    first = OpenMeteoQuotaTracker(state_path=path)
+    second = OpenMeteoQuotaTracker(state_path=path)
+    allowed, _reason, first_lease = first.acquire_request(
+        "request-a", endpoint="forecast", job="source-clock", lease_seconds=1
+    )
+    assert allowed and first_lease
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["requests"]["request-a"]["in_flight_until"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=1)
+    ).isoformat()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    allowed, reason, second_lease = second.acquire_request(
+        "request-a", endpoint="forecast", job="source-clock"
+    )
+    assert (allowed, reason) == (True, None)
+    assert second_lease and second_lease != first_lease
+    assert first.record_request_success(
+        "request-a", endpoint="forecast", job="source-clock", lease_id=first_lease
+    ) is False
+
+    allowed, reason, lease = first.acquire_request(
+        "request-a", endpoint="forecast", job="source-clock"
+    )
+    assert allowed is False
+    assert reason is not None and reason.startswith("request_in_flight_until=")
+    assert lease is None
+
+
+def test_openmeteo_client_discards_response_after_lease_expiry(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+
+    class _ExpiredOwnerClient:
+        def get(self, *_args, **_kwargs):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            request_id = next(iter(payload["requests"]))
+            payload["requests"][request_id]["in_flight_until"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            return httpx.Response(
+                200,
+                json={"stale_owner": True},
+                request=httpx.Request("GET", "https://api.open-meteo.com"),
+            )
+
+    with pytest.raises(RuntimeError, match="lease lost"):
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1},
+            max_retries=1,
+            quota=tracker,
+            client=_ExpiredOwnerClient(),
+        )
+
+
+def test_openmeteo_429_persists_cooldown_without_sleeping(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    slept: list[float] = []
+    monkeypatch.setattr(openmeteo_client.time, "sleep", slept.append)
+
+    class _RateLimitedClient:
+        def get(self, *_args, **_kwargs):
+            request = httpx.Request("GET", "https://api.open-meteo.com")
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "30"},
+                request=request,
+            )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1},
+            max_retries=3,
+            quota=tracker,
+            client=_RateLimitedClient(),
+        )
+
+    assert slept == []
+    assert tracker.cooldown_remaining_seconds() > 0
+
+
+def test_openmeteo_request_state_is_bounded_and_migrates_v1(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "openmeteo_quota.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "day": now.date().isoformat(),
+                "day_count": 17,
+                "hour": now.strftime("%Y-%m-%dT%H"),
+                "hour_count": 17,
+                "minute": now.strftime("%Y-%m-%dT%H:%M"),
+                "minute_count": 17,
+                "blocked_until": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+    assert tracker.calls_today() == 17
+    for number in range(MAX_REQUEST_STATES + 1):
+        tracker.record_request_success(str(number), endpoint="forecast", job="bounded")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert payload["day_count"] == 17
+    assert len(payload["requests"]) <= MAX_REQUEST_STATES
+
+
 def test_openmeteo_quota_reserves_capacity_for_source_clock():
     tracker = OpenMeteoQuotaTracker()
     tracker._count = MAINTENANCE_DAILY_LIMIT
@@ -11493,6 +11835,39 @@ def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch,
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "fast-fail to fallback ladder; no client sleep" in messages
     assert "waiting" not in messages
+
+
+def test_openmeteo_fetch_embargoes_terminal_transport_failure(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(openmeteo_quota.random, "uniform", lambda _low, _high: 60.0)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    calls = {"count": 0}
+
+    class _FailingClient:
+        def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            raise httpx.ConnectError("unreachable")
+
+    with pytest.raises(httpx.ConnectError):
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"longitude": 1, "latitude": 2},
+            max_retries=1,
+            endpoint_label="source-clock",
+            quota=tracker,
+            client=_FailingClient(),
+        )
+    with pytest.raises(RuntimeError, match="request embargoed"):
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1},
+            max_retries=1,
+            endpoint_label="source-clock",
+            quota=tracker,
+            client=_FailingClient(),
+        )
+
+    assert calls["count"] == 1
 
 
 def test_fetch_ensemble_caches_identical_request(monkeypatch):
