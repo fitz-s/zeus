@@ -6748,6 +6748,7 @@ def run_exit_monitor_cycle(
                     exit_order_submit_enabled=real_order_submit_enabled,
                     run_exit_preflight=True,
                     should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
+                    defer_partial_orderbook_gaps=target_families is None,
                 )
             except Exception as exc:
                 logger.error(

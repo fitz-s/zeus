@@ -6157,6 +6157,7 @@ def test_targeted_exit_monitor_pushes_family_scope_into_portfolio_loader() -> No
     assert "target_families=target_families" in source
     assert "if portfolio_dirty and target_families is None" in source
     assert "if target_families is None:" in source
+    assert "defer_partial_orderbook_gaps=target_families is None" in source
 
 
 def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> None:

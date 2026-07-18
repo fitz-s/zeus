@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-18
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -4580,7 +4580,8 @@ def _prefetch_held_monitor_orderbooks(
     *,
     now_utc: datetime,
     deps,
-) -> None:
+    local_only: bool = False,
+) -> frozenset[str]:
     from src.data.market_scanner import _configured_batch_orderbook_getter
     from src.engine.monitor_refresh import install_monitor_orderbook_prefetch
 
@@ -4608,12 +4609,12 @@ def _prefetch_held_monitor_orderbooks(
         token_id for token_id in token_ids if token_id not in local_books
     ]
     summary["held_monitor_orderbooks_network_requested"] = len(missing_token_ids)
-    if not missing_token_ids or getter is None:
+    if local_only or not missing_token_ids or getter is None:
         installed = install_monitor_orderbook_prefetch(clob, local_books)
         summary["held_monitor_orderbooks_prefetched"] = (
             len(local_books) if installed else 0
         )
-        return
+        return frozenset(missing_token_ids)
     try:
         network_books = getter(missing_token_ids)
         if not isinstance(network_books, dict):
@@ -4632,7 +4633,7 @@ def _prefetch_held_monitor_orderbooks(
             "held monitor batch orderbook prefetch failed; deferring ordinary quote reads: %s",
             exc,
         )
-        return
+        return frozenset(missing_token_ids)
     books = {**local_books, **network_books}
     installed = install_monitor_orderbook_prefetch(
         clob,
@@ -4640,6 +4641,7 @@ def _prefetch_held_monitor_orderbooks(
         attempted_token_ids=missing_token_ids,
     )
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
+    return frozenset(missing_token_ids)
 
 
 def _blocking_review_fact_for_position(portfolio, pos):
@@ -5076,6 +5078,7 @@ def execute_monitoring_phase(
     run_exit_preflight: bool = True,
     held_position_monitor_budget_seconds: float | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
+    defer_partial_orderbook_gaps: bool = False,
 ):
     from src.engine.monitor_refresh import (
         _GLOBAL_MONITOR_SAMPLES_ATTR,
@@ -5226,23 +5229,65 @@ def execute_monitoring_phase(
         if verdict is not None:
             durable_hard_facts[id(pos)] = verdict
     summary["held_monitor_durable_hard_facts"] = len(durable_hard_facts)
-    quote_positions = [
-        pos
+    structural_win_position_ids = frozenset(
+        id(pos)
         for pos in monitor_positions
         if getattr(durable_hard_facts.get(id(pos)), "action", None)
-        != "HOLD_STRUCTURAL_WIN"
+        == "HOLD_STRUCTURAL_WIN"
+    )
+    quote_positions = [
+        pos for pos in monitor_positions if id(pos) not in structural_win_position_ids
     ]
     summary["held_monitor_structural_win_orderbooks_bypassed"] = (
         len(monitor_positions) - len(quote_positions)
     )
-    _prefetch_held_monitor_orderbooks(
+    local_prefetch: dict = {}
+    network_book_tokens = _prefetch_held_monitor_orderbooks(
         conn,
         clob,
         quote_positions,
-        summary,
+        local_prefetch,
         now_utc=monitor_now_utc,
         deps=deps,
+        local_only=True,
     )
+    summary.update(local_prefetch)
+    local_book_tokens = frozenset(
+        _position_held_token_id(pos) for pos in quote_positions
+    ) - network_book_tokens
+    defer_network_gaps = bool(
+        defer_partial_orderbook_gaps and local_book_tokens and network_book_tokens
+    )
+    if defer_network_gaps:
+        summary["held_monitor_partial_orderbook_gaps_deferred"] = len(
+            network_book_tokens
+        )
+    network_positions = [
+        pos
+        for pos in quote_positions
+        if _position_held_token_id(pos) in network_book_tokens
+    ]
+
+    # A stale or inactive token must not hold locally executable positions
+    # behind one blocking CLOB read. Preserve order within each class while
+    # moving structural/local-ready work ahead of network-dependent work.
+    monitor_positions = sorted(
+        monitor_positions,
+        key=lambda pos: (
+            1
+            if id(pos) not in structural_win_position_ids
+            and _position_held_token_id(pos) in network_book_tokens
+            else 0
+        ),
+    )
+    summary["held_monitor_local_ready_positions"] = sum(
+        1
+        for pos in monitor_positions
+        if id(pos) in structural_win_position_ids
+        or _position_held_token_id(pos) in local_book_tokens
+        or _position_held_token_id(pos) not in network_book_tokens
+    )
+    network_prefetch_started = False
 
     for position_index, pos in enumerate(monitor_positions):
         if urgent_preemption_requested():
@@ -5432,6 +5477,55 @@ def execute_monitoring_phase(
             logger.warning("Quarantine placeholder %s reached monitor loop — skipping", pos.trade_id)
             summary["monitor_skipped_quarantine_placeholder"] = summary.get("monitor_skipped_quarantine_placeholder", 0) + 1
             continue
+
+        held_token_id = _position_held_token_id(pos)
+        if not network_prefetch_started and held_token_id in network_book_tokens:
+            if defer_network_gaps:
+                summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
+                    summary.get(
+                        "held_monitor_positions_deferred_for_orderbook_gap",
+                        0,
+                    )
+                    + 1
+                )
+                continue
+            # Local-ready decisions may have written lifecycle facts. Commit
+            # before the optional network wait so unrelated writers are never
+            # held behind CLOB I/O.
+            _release_monitor_write_lock_boundary(
+                conn,
+                summary,
+                deps,
+                boundary="before_network_orderbook_prefetch",
+            )
+            network_prefetch_started = True
+            network_prefetch: dict = {}
+            _prefetch_held_monitor_orderbooks(
+                conn,
+                clob,
+                network_positions,
+                network_prefetch,
+                now_utc=monitor_now_utc,
+                deps=deps,
+            )
+            summary["held_monitor_orderbooks_prefetched"] = (
+                int(summary.get("held_monitor_orderbooks_prefetched", 0) or 0)
+                + int(
+                    network_prefetch.get(
+                        "held_monitor_orderbooks_prefetched",
+                        0,
+                    )
+                    or 0
+                )
+            )
+            if error := network_prefetch.get("held_monitor_orderbook_prefetch_error"):
+                summary["held_monitor_orderbook_prefetch_error"] = error
+            if urgent_preemption_requested():
+                deferred_count = len(monitor_positions) - position_index
+                summary["held_monitor_preempted"] = True
+                summary["held_monitor_positions_deferred"] = deferred_count
+                summary["held_monitor_defer_reason"] = "urgent_day0_wake"
+                break
 
         hours_to_settlement = None
         monitor_result_written = False

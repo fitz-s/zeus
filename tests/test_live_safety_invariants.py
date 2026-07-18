@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-18
 # Authority basis: midstream verdict v2; finite-evidence single-q global SELL ownership
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -335,6 +335,152 @@ def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monk
     assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
     assert summary["monitors"] == 1
     assert len(monitor_results) == 1
+
+
+@pytest.mark.parametrize(
+    ("defer_partial_gaps", "expected_events", "prefetched"),
+    (
+        (
+            False,
+            [
+                "refresh:local-ready",
+                "network_fetch",
+                "refresh:network-dependent",
+            ],
+            2,
+        ),
+        (True, ["refresh:local-ready"], 1),
+    ),
+)
+def test_monitoring_phase_processes_local_books_before_blocking_network_fetch(
+    monkeypatch,
+    defer_partial_gaps,
+    expected_events,
+    prefetched,
+):
+    """One stale token must not delay positions with current executable books."""
+    from src.engine import cycle_runtime
+
+    network_pos = _make_position(
+        trade_id="network-dependent",
+        token_id="network-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    local_pos = _make_position(
+        trade_id="local-ready",
+        token_id="local-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    portfolio = _make_portfolio(network_pos, local_pos)
+    events: list[str] = []
+
+    class Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            events.append("network_fetch")
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+    clob = Clob()
+    local_book = {
+        "asset_id": "local-token",
+        "bids": [{"price": "0.40", "size": "20"}],
+        "asks": [{"price": "0.42", "size": "20"}],
+    }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda _conn, positions, **_kwargs: (
+            {"local-token": local_book}
+            if any(position.token_id == "local-token" for position in positions)
+            else {}
+        ),
+    )
+
+    def fake_refresh(_conn, _clob, position):
+        events.append(f"refresh:{position.trade_id}")
+        position.last_monitor_prob = 0.61
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.12
+        position.last_monitor_market_price = 0.49
+        position.last_monitor_market_price_is_fresh = True
+        return SimpleNamespace(
+            p_market=np.array([0.49]),
+            p_posterior=0.61,
+            forward_edge=0.12,
+            confidence_band_lower=0.08,
+            confidence_band_upper=0.16,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(
+            False,
+            "CI_OVERLAP_HOLD",
+            trigger="CI_OVERLAP_HOLD",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["replacement_posterior"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, _result: None},
+    )()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger("test_monitor_local_first"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(
+                lambda: datetime(2026, 7, 2, 18, 0, tzinfo=timezone.utc)
+            ),
+        },
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        clob,
+        portfolio,
+        artifact,
+        type("Tracker", (), {"record_exit": lambda self, position: None})(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+        defer_partial_orderbook_gaps=defer_partial_gaps,
+    )
+
+    assert events == expected_events
+    assert summary["held_monitor_local_ready_positions"] == 1
+    assert summary["held_monitor_orderbooks_prefetched"] == prefetched
+    assert summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0) == int(
+        defer_partial_gaps
+    )
 
 
 def _make_position(**overrides) -> Position:

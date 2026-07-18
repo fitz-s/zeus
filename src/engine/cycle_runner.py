@@ -533,6 +533,7 @@ def _execute_monitoring_phase(
     exit_order_submit_enabled: bool = True,
     run_exit_preflight: bool = True,
     should_preempt_for_urgent_day0=None,
+    defer_partial_orderbook_gaps: bool = False,
 ):
     return _runtime.execute_monitoring_phase(
         conn,
@@ -545,6 +546,7 @@ def _execute_monitoring_phase(
         exit_order_submit_enabled=exit_order_submit_enabled,
         run_exit_preflight=run_exit_preflight,
         should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
+        defer_partial_orderbook_gaps=defer_partial_orderbook_gaps,
     )
 
 
