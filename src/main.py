@@ -3788,6 +3788,7 @@ class _ReactorWakeEventState:
     ready: bool
     finished: bool
     terminal: bool = False
+    in_flight: bool = False
 
 
 def _reactor_wake_event_state(
@@ -3837,6 +3838,7 @@ def _reactor_wake_event_state(
     ready = False
     deferred = False
     terminal = False
+    in_flight = False
     missing = 0
     for _event_id, status, claimed_at in rows:
         if status is None:
@@ -3849,7 +3851,7 @@ def _reactor_wake_event_state(
             continue
         status = str(status)
         if status == "processing":
-            ready = True
+            in_flight = True
             continue
         if status != "pending":
             terminal = True
@@ -3876,8 +3878,9 @@ def _reactor_wake_event_state(
         )
     return _ReactorWakeEventState(
         ready=ready,
-        finished=not ready and (deferred or bool(rows)),
+        finished=not ready and not in_flight and (deferred or bool(rows)),
         terminal=terminal,
+        in_flight=in_flight,
     )
 
 

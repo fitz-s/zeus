@@ -1468,7 +1468,12 @@ def test_reactor_wake_acknowledges_event_durably_deferred_after_service(
 
     conn.status = "processing"
     conn.claimed_at = "2999-07-16T12:00:05+00:00"
-    assert main._reactor_wake_events_finished(("event-retry",)) is False
+    state = main._reactor_wake_event_state(("event-retry",))
+    assert state == main._ReactorWakeEventState(
+        ready=False,
+        finished=False,
+        in_flight=True,
+    )
 
 
 def test_reactor_wake_completed_event_needs_no_reactor_cycle(monkeypatch) -> None:
@@ -1664,6 +1669,49 @@ def test_reactor_wake_poll_keeps_unsettled_not_ready_hint(monkeypatch) -> None:
         reactor_wake,
         "acknowledge_reactor_wake",
         lambda _wake: pytest.fail("unsettled wake must remain durable"),
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert main._edli_last_reactor_wake_id is None
+
+
+def test_day0_processing_wake_does_not_reenter_monitor_or_reactor(monkeypatch) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-day0-processing",
+        "2026-07-16T12:00:00+00:00",
+        "ingest_main",
+        "day0_extreme_event_committed",
+        ("event-processing",),
+        (("Paris", "2026-07-16", "high"),),
+    )
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _ids: main._ReactorWakeEventState(
+            ready=False,
+            finished=False,
+            in_flight=True,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_requires_exit_monitor",
+        lambda _families: pytest.fail("owned event must not probe exit work"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: pytest.fail("owned event must not reenter the reactor"),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: pytest.fail("in-flight wake must remain durable"),
     )
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 
