@@ -7414,6 +7414,20 @@ def event_bound_live_adapter_from_trade_conn(
                 float(os.environ.get("ZEUS_GLOBAL_AUCTION_GAMMA_TIMEOUT_SECONDS", "6.0")),
             )
 
+            def _urgent_book_preemption(stage: str) -> bool:
+                if not _day0_selection_cancelled():
+                    return False
+                logging.getLogger(__name__).info(
+                    "global book epoch preempted by urgent input: stage=%s "
+                    "elapsed_s=%.3f",
+                    stage,
+                    _time.monotonic() - _book_started,
+                )
+                return True
+
+            if _urgent_book_preemption("start"):
+                return probabilities, None
+
             def _bind(
                 probability_slice,
                 *,
@@ -8196,6 +8210,8 @@ def event_bound_live_adapter_from_trade_conn(
                 if prefetch_slice is not None
                 else None
             )
+            if _urgent_book_preemption("before_network"):
+                return probabilities, None
             prefetched = None
             if not bind_slice:
                 if prefetch_slice is not None and (
@@ -8216,6 +8232,8 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_sink=full_metadata,
                     )
                 )
+                if _urgent_book_preemption("after_current_metadata"):
+                    return probabilities, None
             elif day0_urgent_batch and speculative_prefetch_tokens is None:
                 rebound_probabilities.update(
                     _bind(
@@ -8224,6 +8242,8 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_sink=full_metadata,
                     )
                 )
+                if _urgent_book_preemption("after_day0_current_metadata"):
+                    return probabilities, None
                 exact_tokens = _global_current_executable_prefetch_tokens(
                     rebound_probabilities,
                     book_metadata_by_key,
@@ -8236,7 +8256,10 @@ def event_bound_live_adapter_from_trade_conn(
                         token_override=exact_tokens,
                     )
             else:
-                from concurrent.futures import ThreadPoolExecutor
+                from concurrent.futures import (
+                    ThreadPoolExecutor,
+                    TimeoutError as FuturesTimeoutError,
+                )
 
                 projection_at = datetime.now(UTC)
                 projection_tokens = (
@@ -8256,10 +8279,11 @@ def event_bound_live_adapter_from_trade_conn(
                     if projection_tokens is not None
                     else None
                 )
-                with ThreadPoolExecutor(
+                pool = ThreadPoolExecutor(
                     max_workers=1,
                     thread_name_prefix="global-clob-prefetch",
-                ) as pool:
+                )
+                try:
                     future = pool.submit(
                         _prefetch_books,
                         prefetch_slice,
@@ -8276,7 +8300,23 @@ def event_bound_live_adapter_from_trade_conn(
                             metadata_sink=full_metadata,
                         )
                     )
-                    prefetched = future.result()
+                    while True:
+                        if _urgent_book_preemption("parallel_book_prefetch"):
+                            future.cancel()
+                            return probabilities, None
+                        try:
+                            prefetched = future.result(timeout=0.025)
+                            break
+                        except FuturesTimeoutError:
+                            if future.done():
+                                raise
+                finally:
+                    # A running public-book request owns no canonical state. Let
+                    # its bounded HTTP timeout finish outside the reactor instead
+                    # of making executor teardown retain the global decision lane.
+                    pool.shutdown(wait=False, cancel_futures=True)
+            if _urgent_book_preemption("after_initial_book_io"):
+                return probabilities, None
             bound_probabilities = dict(retained_bound_probabilities)
             bound_probabilities.update(rebound_probabilities)
             cache_checked_at = datetime.now(UTC)
@@ -8316,17 +8356,23 @@ def event_bound_live_adapter_from_trade_conn(
                 probability_delta = _refresh_capture_metadata(
                     probability_delta
                 )
+                if _urgent_book_preemption("after_delta_metadata"):
+                    return probabilities, None
                 bound_probabilities.update(probability_delta)
                 prefetched = _complete_current_prefetch(
                     probability_delta,
                     prefetched,
                     mode="family_delta_exact_books",
                 )
+                if _urgent_book_preemption("after_delta_prefetch"):
+                    return probabilities, None
                 delta_epoch = _capture_bound(
                     probability_delta,
                     mode="family_delta_books",
                     prefetched=prefetched,
                 )
+                if _urgent_book_preemption("after_delta_capture"):
+                    return probabilities, None
                 try:
                     cached_probabilities = _cached_global_book_probabilities(cached)
                     removed_family_keys = (
@@ -8387,20 +8433,28 @@ def event_bound_live_adapter_from_trade_conn(
                         mode="current_metadata_fallback",
                         metadata_sink=full_metadata,
                     )
+                    if _urgent_book_preemption("after_fallback_metadata"):
+                        return probabilities, None
 
             bound_probabilities = _refresh_capture_metadata(
                 bound_probabilities
             )
+            if _urgent_book_preemption("after_full_metadata"):
+                return probabilities, None
             prefetched = _complete_current_prefetch(
                 bound_probabilities,
                 prefetched,
                 mode="full_exact_books",
             )
+            if _urgent_book_preemption("after_full_prefetch"):
+                return probabilities, None
             epoch = _capture_bound(
                 bound_probabilities,
                 mode="full_books",
                 prefetched=prefetched,
             )
+            if _urgent_book_preemption("after_full_capture"):
+                return probabilities, None
             cache_store_status = _store_global_book_epoch(
                 trade_conn,
                 bound_probabilities,

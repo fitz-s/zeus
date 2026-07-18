@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-07-18 19:07Z tick — urgent Day0 fact 可抢占并行 book discovery，不再等待慢 CLOB teardown
+- **第一性阻塞:** global batch 外层只在 book provider 返回后检查 urgent cancellation；provider 内部并行 Gamma/CLOB 使用等待式 `ThreadPoolExecutor` context。新的 deterministic extreme 即使已提交，也可能继续等待无关 CLOB request 与 executor teardown，期间 targeted held SELL 无法取得 reactor handoff。
+- **隔离修复:** book epoch 在 DB、metadata、prefetch、capture 边界检查同一 durable Day0 wake revision；并行 CLOB 等待每 25ms 探测一次。urgent fact 到达后返回 `epoch=None`，外层沿既有 `GLOBAL_SELECTION_CANCELLED` fail-closed 路径 requeue；已运行 public-book request 按自身 bounded HTTP timeout 收尾，但不再持有 global decision lane。urgent monitor 同时从零等待改为最多 1 秒 cooperative handoff：reactor 一释放就直接接管，超时则清除 priority claim，避免原路径失败后至少再等约两轮 wake poll。未绕过 entry/exit actuation lock，未改变 q、book、risk 或 submit authority。
+- **故障注入:** CLOB worker 被人为挂起、Gamma bind 同时提交新 Day0 revision；provider 在 `<0.5s` 内返回，book capture 为零，worker 释放后正常结束。另用真实 lock 证明 urgent monitor 会在 cooperative release 后同一 attempt 内运行。exit-monitor 关系集 `12 passed`，正常 forecast Gamma/CLOB overlap 与 selection cancellation 定向集 `4 passed`；扩大集另暴露 3 个既有 Day0 overlap 断言与当前“无 speculative token 时先 Gamma 后 CLOB”实现不一致，本 diff 未改变该分支，单独保留为后续吞吐边界。
+- **运行态边界:** daemon 当前 loaded SHA `8f7d7d962`，不含本 tick 工作树改动；未手动重启。下一步缩小 `_edli_reactor_active_lock` 的 ownership：discovery 只做 cooperative cancellation，只有 submit/canonical transition 保留必要串行化。
+
 ### 2026-07-18 17:36Z tick — posterior-starvation enrichment 从 117 次目录扫描降为 1 次
 - **故障牵连证据:** `live_health` 一轮报告 117 个 starved families；每个 family 都对 53,301 个 failed receipts（620MB）单独 `glob`，observability 因此反复遍历同一目录，并与 fact-to-action 热路径争用 I/O。
 - **隔离修复:** 一次 `os.scandir` 建立 requested family→newest receipt 映射，只读取每个 family 最新 JSON；保留逐 family reason 与 ERROR 告警，监控仍不是 entry gate。当前目录 117 scopes 全量 batch `0.155s`；旧式 10-scope glob 已需 `0.733s`，按 scope 归一约 `55.16x`。

@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-17
+# Last reused or audited: 2026-07-18
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-18; last_reused=2026-07-18
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -5824,7 +5824,57 @@ def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
 
     assert main_module._held_position_monitor_active.is_set() is False
     assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
-    assert handoff_timeouts == [0.0]
+    assert handoff_timeouts == [
+        main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+    ]
+
+
+def test_urgent_exit_monitor_takes_handoff_after_reactor_preemption(
+    monkeypatch,
+) -> None:
+    import threading
+
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    reactor_gate = threading.Lock()
+    reactor_gate.acquire()
+    result: list[bool] = []
+    monitor_ran = threading.Event()
+
+    def _run(**kwargs) -> bool:
+        monitor_ran.set()
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", reactor_gate)
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+
+    monitor = threading.Thread(
+        target=lambda: result.append(
+            main_module._exit_monitor_cycle(
+                target_families=frozenset(
+                    {("Paris", "2026-07-18", "high")}
+                ),
+                urgent_day0=True,
+            )
+        )
+    )
+    monitor.start()
+    try:
+        assert main_module._held_position_monitor_active.wait(0.5)
+        reactor_gate.release()
+        monitor.join(0.5)
+    finally:
+        if reactor_gate.locked():
+            reactor_gate.release()
+        monitor.join(1.0)
+        main_module._held_position_monitor_active.clear()
+
+    assert monitor.is_alive() is False
+    assert monitor_ran.is_set()
+    assert result == [True]
 
 
 def test_urgent_exit_monitor_yields_to_newer_day0_wake(monkeypatch) -> None:

@@ -4444,6 +4444,177 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     world.close()
 
 
+def test_live_adapter_urgent_day0_preempts_parallel_book_prefetch(monkeypatch):
+    from src.runtime import reactor_wake
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+    revision = {"value": (1, 1, 1)}
+    reason = {"value": "market_price_advanced"}
+    book_started = threading.Event()
+    book_release = threading.Event()
+    book_finished = threading.Event()
+
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: revision["value"],
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_reason",
+        lambda: reason["value"],
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: (
+            captured.update(kwargs) or SimpleNamespace(events=tuple(events))
+        ),
+    )
+    monkeypatch.setattr(era, "_cached_global_book_metadata", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        era,
+        "_cached_global_book_speculative_metadata",
+        lambda *_a, **_k: {},
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_book_metadata_refresh_hwm",
+        lambda *_a, **_k: {},
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_book_metadata_refresh_family_keys",
+        lambda *_a, **_k: frozenset(),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_book_speculative_topology",
+        lambda *_a, **_k: (("family", "city", "date", "yes-token", "no-token"),),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_book_speculative_snapshot_metadata",
+        lambda *_a, **_k: {},
+    )
+    monkeypatch.setattr(
+        era,
+        "_probe_global_book_epoch_cache",
+        lambda *_a, **_k: (None, "cache_empty"),
+    )
+    monkeypatch.setattr(
+        era,
+        "_reuse_global_book_superset_token_bindings",
+        lambda *_a, **_k: (None, "cache_empty"),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_book_prefetch_tokens",
+        lambda *_a, **_k: ("yes-token", "no-token"),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_speculative_executable_prefetch_tokens",
+        lambda *_a, **_k: ("yes-token", "no-token"),
+    )
+    monkeypatch.setattr(
+        era,
+        "_projected_global_books",
+        lambda *_a, **_k: ({}, None),
+    )
+
+    def fake_bind(
+        _forecast_conn,
+        *,
+        probability_witnesses,
+        **_kwargs,
+    ):
+        assert book_started.wait(1.0)
+        revision["value"] = (2, 2, 2)
+        reason["value"] = "day0_extreme_event_committed"
+        return dict(probability_witnesses)
+
+    class SlowClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get_orderbook_snapshots(self, tokens, **_kwargs):
+            book_started.set()
+            assert book_release.wait(2.0)
+            try:
+                return {
+                    token: {"asset_id": token, "hash": f"hash-{token}"}
+                    for token in tokens
+                }
+            finally:
+                book_finished.set()
+
+    monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
+    monkeypatch.setattr(
+        universe,
+        "capture_current_global_book_epoch",
+        lambda *_a, **_k: pytest.fail("cancelled epoch must not reach capture"),
+    )
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        SlowClient,
+    )
+
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+    probability = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            ),
+        )
+    }
+
+    started = time.monotonic()
+    try:
+        bound, epoch = captured["current_book_epoch_provider"](
+            probability,
+            _dt.datetime.now(_dt.timezone.utc),
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        book_release.set()
+
+    assert bound == probability
+    assert epoch is None
+    assert elapsed < 0.5
+    assert book_finished.wait(1.0)
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
 def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
     trade = sqlite3.connect(":memory:")
     trade.executescript(

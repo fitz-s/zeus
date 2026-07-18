@@ -1341,6 +1341,7 @@ _venue_heartbeat_adapter = None
 _venue_heartbeat_thread = None
 _edli_reactor_active_lock = threading.Lock()
 _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS = 30.0
+_URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS = 1.0
 _venue_background_maintenance_lock = threading.Lock()
 _last_venue_background_maintenance_attempt_at = None
 VENUE_BACKGROUND_MAINTENANCE_SECONDS = 30.0
@@ -6039,7 +6040,11 @@ def _exit_monitor_cycle(
     # Claim exit priority before waiting. New reactor ticks defer on this Event;
     # the current reactor finishes without a competing SQLite traversal.
     _held_position_monitor_active.set()
-    handoff_timeout = 0.0 if urgent_day0 else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+    handoff_timeout = (
+        _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+        if urgent_day0
+        else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+    )
     reactor_idle = _edli_reactor_active_lock.acquire(
         timeout=handoff_timeout
     )
