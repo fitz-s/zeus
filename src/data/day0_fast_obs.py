@@ -2,20 +2,18 @@
 # Last reused or audited: 2026-07-16
 # Authority basis: day0 first-principles review 2026-06-10 §6.2 (live obs hook)
 #   + operator green-light 2026-06-10 (free METAR fast lane; no paid sources);
-#   /tmp/weather_source_research.md (aviationweather.gov ~3-5 min obs-to-cache,
-#   verified live 2026-06-10: KLGA 3.3 min, RKSI 4.6 min, EGLC 5.5 min).
+#   NOAA/NWS cycle files provide the publication-first METAR transport;
+#   aviationweather.gov provides bounded history/recovery.
 """Day0 fast observation lane: free METAR feed for the running-extreme tracker.
 
 First principles
 ----------------
 The day0 absorbing boundary is driven by the settlement station's running
-extreme. WU (the Polymarket settlement reference) publishes the SAME
-ASOS/METAR stream with 11-37 min median delay, and Zeus's persisted entry-lane
-surface adds another hourly import grid on top (measured 50-136 min median —
-see config/wu_obs_latency.json). aviationweather.gov serves the same station
-reports ~3-5 min after observation, free, no key, global coverage. This module
-reads that feed and emits DAY0_EXTREME_UPDATED events the moment the running
-extreme MOVES — the live hook the 2026-06-10 review found had zero callers.
+extreme. WU (the Polymarket settlement reference) publishes the same ASOS/METAR
+stream after the observation. NOAA/NWS cycle files expose newly published
+global METAR batches as an append-only file; aviationweather.gov supplies
+bounded history and recovery. This module emits DAY0_EXTREME_UPDATED events
+when the running extreme moves.
 
 Provenance law (source + authority on every datum):
 - source_id "aviationweather_metar"; station identity validated against the
@@ -48,6 +46,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Iterable, Optional
 from zoneinfo import ZoneInfo
 
@@ -58,6 +57,9 @@ logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
 AVIATIONWEATHER_METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
+NOAA_METAR_CYCLE_ENDPOINT = (
+    "https://tgftp.nws.noaa.gov/data/observations/metar/cycles/{hour}Z.TXT"
+)
 
 #: Canonical source id carried in event payload provenance.
 FAST_OBS_SOURCE_ID = "aviationweather_metar"
@@ -65,10 +67,13 @@ FAST_OBS_SOURCE_ID = "aviationweather_metar"
 #: T-group (temperature to tenths C) presence in the raw METAR remarks,
 #: e.g. "T02110150". Required for F-settled extreme tracking (see module doc).
 _T_GROUP_RE = re.compile(r"\bT\d{8}\b")
+_CYCLE_DATE_RE = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}$")
+_METAR_TEMP_RE = re.compile(r"(?:^|\s)(M?\d{2})/(?:M?\d{2}|//)(?:\s|$)")
 
-#: Minimum seconds between live HTTP fetches (the AWC cache updates ~1/min;
-#: the reactor cycle can be faster — do not hammer a free government API).
+#: Standalone-emitter throttle. The scheduled ingest lane sets this to zero
+#: because its own cadence drives the cycle cursor; AWC recovery stays bounded.
 DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
+METAR_AWC_RECOVERY_INTERVAL_S = 90.0
 #: Maximum cache age (seconds) at which the fast lane may serve the ENTRY gate
 #: (monitor fallback — Option B). Kills are staleness-safe; entries are not.
 #: At 15 min the cache is still fresh enough that the running extreme it
@@ -213,7 +218,7 @@ def fast_obs_source_for_city(city: Any) -> Optional[FastObsSource]:
             source_id=FAST_OBS_SOURCE_ID,
             station_id=station,
             authority="ICAO_STATION_NATIVE",
-            notes="same physical settlement station as WU; NOAA AWC distribution",
+            notes="same physical settlement station as WU; NOAA/NWS distribution",
             margin_units=margin_units,
         )
     return None
@@ -273,6 +278,160 @@ def parse_metar_api_payload(payload: object) -> list[MetarReport]:
         except (TypeError, ValueError, OSError, OverflowError) as exc:
             logger.debug("METAR row parse skipped: %s", exc)
     return out
+
+
+def _temperature_from_raw_metar(raw: str) -> float | None:
+    groups = _T_GROUP_RE.findall(raw)
+    if groups:
+        token = groups[-1]
+        sign = -1.0 if token[1] == "1" else 1.0
+        return sign * int(token[2:5]) / 10.0
+    match = _METAR_TEMP_RE.search(raw)
+    if match is None:
+        return None
+    token = match.group(1)
+    return float(-int(token[1:]) if token.startswith("M") else int(token))
+
+
+def parse_noaa_metar_cycle_payload(
+    payload: bytes | str,
+    *,
+    stations: Iterable[str],
+    published_at: datetime,
+) -> list[MetarReport]:
+    """Parse one append-only NOAA cycle-file segment for selected stations."""
+
+    text = payload.decode("ascii", "ignore") if isinstance(payload, bytes) else payload
+    selected = {
+        str(station).strip().upper()
+        for station in stations
+        if str(station).strip()
+    }
+    if not selected:
+        return []
+    published = published_at.astimezone(UTC)
+    lines = text.splitlines()
+    reports: dict[tuple[str, datetime, str], MetarReport] = {}
+    for index, line in enumerate(lines[:-1]):
+        stamp = line.strip()
+        if _CYCLE_DATE_RE.fullmatch(stamp) is None:
+            continue
+        raw = lines[index + 1].strip()
+        if not raw:
+            continue
+        tokens = raw.split()
+        station_index = 1 if tokens and tokens[0] in {"METAR", "SPECI"} else 0
+        if len(tokens) <= station_index:
+            continue
+        station = tokens[station_index].strip().upper()
+        if station not in selected:
+            continue
+        try:
+            observed = datetime.strptime(stamp, "%Y/%m/%d %H:%M").replace(
+                tzinfo=UTC
+            )
+            temp_c = _temperature_from_raw_metar(raw)
+        except (TypeError, ValueError):
+            continue
+        report = MetarReport(
+            station_id=station,
+            obs_time=observed,
+            receipt_time=published,
+            temp_c=temp_c,
+            metar_type="SPECI" if tokens[0] == "SPECI" else "METAR",
+            raw=raw,
+        )
+        reports[(station, observed, raw)] = report
+    return list(reports.values())
+
+
+@dataclass
+class NoaaMetarCycleCursor:
+    """Read only appended bytes from NOAA's current global METAR cycle file."""
+
+    endpoint: str = NOAA_METAR_CYCLE_ENDPOINT
+    _cycle_key: str | None = field(default=None, init=False)
+    _offset: int = field(default=0, init=False)
+
+    def poll(
+        self,
+        *,
+        client: httpx.Client,
+        stations: Iterable[str],
+        as_of: datetime,
+        timeout: float = DEFAULT_METAR_FETCH_TIMEOUT_S,
+    ) -> tuple[list[MetarReport], bool]:
+        now = as_of.astimezone(UTC)
+        cycle_key = now.strftime("%Y%m%d%H")
+        offset = self._offset if self._cycle_key == cycle_key else 0
+        headers: dict[str, str] = {}
+        if offset:
+            headers["Accept-Encoding"] = "identity"
+            headers["Range"] = f"bytes={offset}-"
+        url = self.endpoint.format(hour=now.strftime("%H"))
+        try:
+            response = client.get(url, headers=headers, timeout=timeout)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "NOAA_METAR_CYCLE_FETCH_FAILED exc=%s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return [], False
+
+        if response.status_code == 416:
+            total_match = re.search(
+                r"\*/(\d+)$", response.headers.get("content-range", "")
+            )
+            if total_match is not None and int(total_match.group(1)) < offset:
+                self._cycle_key = None
+                self._offset = 0
+                return [], False
+            return [], True
+        if response.status_code not in {200, 206}:
+            logger.warning(
+                "NOAA_METAR_CYCLE_HTTP_%s hour=%s",
+                response.status_code,
+                now.strftime("%H"),
+            )
+            return [], False
+
+        try:
+            published = parsedate_to_datetime(response.headers["last-modified"])
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=UTC)
+            published = published.astimezone(UTC)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            logger.warning(
+                "NOAA_METAR_CYCLE_MISSING_PUBLICATION_CLOCK hour=%s",
+                now.strftime("%H"),
+            )
+            return [], False
+
+        body = response.content
+        if response.status_code == 206:
+            total_match = re.search(
+                r"/(\d+)$", response.headers.get("content-range", "")
+            )
+            if total_match is None:
+                return [], False
+            new_offset = int(total_match.group(1))
+            delta = body
+        else:
+            new_offset = len(body)
+            delta = body[offset:] if offset and len(body) >= offset else body
+
+        self._cycle_key = cycle_key
+        self._offset = new_offset
+        reports = parse_noaa_metar_cycle_payload(
+            delta,
+            stations=stations,
+            published_at=published,
+        )
+        if offset == 0:
+            cutoff = now - timedelta(minutes=10)
+            reports = [report for report in reports if report.obs_time >= cutoff]
+        return reports, True
 
 
 def fetch_metar_reports(
@@ -746,12 +905,33 @@ def _report_publication_key(report: MetarReport) -> tuple[str, str, float] | Non
     )
 
 
+def _report_observation_key(
+    report: MetarReport,
+) -> tuple[str, str, float | None]:
+    return (
+        str(report.station_id).strip().upper(),
+        report.obs_time.astimezone(UTC).isoformat(),
+        None if report.temp_c is None else float(report.temp_c),
+    )
+
+
 def _merge_report_windows(
     cached: list[MetarReport],
     fetched: list[MetarReport],
 ) -> list[MetarReport]:
-    """Merge an incremental fetch into the retained full-history window."""
-    reports = list(dict.fromkeys((*cached, *fetched)))
+    """Merge reports, retaining the earliest publication of each observation."""
+    by_observation: dict[tuple[str, str, float | None], MetarReport] = {}
+    for report in (*cached, *fetched):
+        key = _report_observation_key(report)
+        previous = by_observation.get(key)
+        report_published = report.receipt_time or report.obs_time
+        if previous is None:
+            by_observation[key] = report
+            continue
+        previous_published = previous.receipt_time or previous.obs_time
+        if report_published < previous_published:
+            by_observation[key] = report
+    reports = list(by_observation.values())
     if not reports:
         return []
     cutoff = max(report.obs_time for report in reports) - timedelta(
@@ -880,10 +1060,15 @@ class Day0FastObsEmitter:
     fetcher: Callable[..., list[MetarReport]] = fetch_metar_reports
     min_fetch_interval_s: float = DEFAULT_MIN_FETCH_INTERVAL_S
     _last_attempt_monotonic: float = field(default=0.0, init=False)
+    _last_awc_attempt_monotonic: float = field(default=0.0, init=False)
     _cache_fetched_monotonic: float = field(default=0.0, init=False)
     _last_backfill_monotonic: float = field(default=0.0, init=False)
     _cached_reports: list[MetarReport] = field(default_factory=list, init=False)
     _full_window_loaded: bool = field(default=False, init=False)
+    _cycle_cursor: NoaaMetarCycleCursor = field(
+        default_factory=NoaaMetarCycleCursor,
+        init=False,
+    )
     _http_client: httpx.Client | None = field(default=None, init=False, repr=False)
     # SPLIT MEMOS (PR#404 round-2 P0-1): the KILL memo (hard-fact exit source,
     # advanced by any memo-safe value incl. stale-withheld ones) and the LIVE
@@ -1150,8 +1335,8 @@ class Day0FastObsEmitter:
         empty on a fresh process.
 
         A cold process's ``_cached_reports`` is empty until the first
-        successful HTTP fetch — normally ~90s (min_fetch_interval_s), but
-        unbounded during an outage. Every consumer of the cache
+        successful transport poll, and that wait is unbounded during an
+        outage. Every consumer of the cache
         (latest_extremes' entry gate, emit_prefetched's own extreme
         computation) silently has NOTHING for that whole window. This is a
         BRIDGE, not a replacement for the kill-memo restart recovery
@@ -1381,43 +1566,99 @@ class Day0FastObsEmitter:
                 )
                 if (now - self._last_backfill_monotonic) >= METAR_BACKFILL_INTERVAL_S:
                     fetch_hours = max(fetch_hours, METAR_BACKFILL_FETCH_HOURS)
-        try:
-            fetch_kwargs: dict[str, Any] = {"hours": fetch_hours}
-            if self.fetcher is fetch_metar_reports:
+        reports: list[MetarReport] = []
+        source_ok = False
+        history_loaded = False
+        if self.fetcher is fetch_metar_reports:
+            with self._lock:
+                if self._http_client is None:
+                    self._http_client = httpx.Client(limits=METAR_HTTP_LIMITS)
+                client = self._http_client
+                awc_due = (
+                    self._last_awc_attempt_monotonic == 0.0
+                    or now - self._last_awc_attempt_monotonic
+                    >= METAR_AWC_RECOVERY_INTERVAL_S
+                )
+                history_missing = not self._full_window_loaded
+            cycle_reports: list[MetarReport] = []
+            try:
+                cycle_reports, source_ok = self._cycle_cursor.poll(
+                    client=client,
+                    stations=stations,
+                    as_of=datetime.now(UTC),
+                )
+                reports.extend(cycle_reports)
+            except Exception as exc:  # noqa: BLE001 - isolate transports
+                logger.warning(
+                    "NOAA_METAR_CYCLE_POLL_RAISED exc=%s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+            if awc_due and (history_missing or not cycle_reports):
                 with self._lock:
-                    if self._http_client is None:
-                        self._http_client = httpx.Client(limits=METAR_HTTP_LIMITS)
-                    fetch_kwargs["client"] = self._http_client
-            reports = self.fetcher(stations, **fetch_kwargs)
-        except Exception as exc:  # noqa: BLE001 — fetcher contract is fail-soft, belt+braces
-            logger.warning("DAY0_FAST_OBS_FETCH_RAISED exc=%s: %s", type(exc).__name__, exc)
-            reports = []
+                    self._last_awc_attempt_monotonic = now
+                try:
+                    awc_reports = self.fetcher(
+                        stations,
+                        hours=fetch_hours,
+                        client=client,
+                    )
+                    history_loaded = bool(awc_reports)
+                    reports.extend(awc_reports)
+                    source_ok = source_ok or bool(awc_reports)
+                except Exception as exc:  # noqa: BLE001 - isolate transports
+                    logger.warning(
+                        "DAY0_FAST_OBS_RECOVERY_RAISED exc=%s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+        else:
+            try:
+                reports = self.fetcher(stations, hours=fetch_hours)
+                source_ok = bool(reports)
+                history_loaded = bool(reports)
+            except Exception as exc:  # noqa: BLE001 - injected fetcher contract
+                logger.warning(
+                    "DAY0_FAST_OBS_FETCH_RAISED exc=%s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
         with self._lock:
             if reports:
-                fetched = list(reports)
-                for report in fetched:
+                previous = {
+                    _report_observation_key(report): report
+                    for report in self._cached_reports
+                }
+                base = (
+                    []
+                    if history_loaded and not self._full_window_loaded
+                    else self._cached_reports
+                )
+                base_set = set(base)
+                merged = (
+                    list(base)
+                    if base and all(report in base_set for report in reports)
+                    else _merge_report_windows(base, reports)
+                )
+                for report in merged:
+                    old = previous.get(_report_observation_key(report))
+                    if old == report:
+                        continue
                     key = _report_publication_key(report)
                     if key is not None and key not in self._ledgered_report_keys:
                         self._pending_ledger_reports.setdefault(key, report)
-                if self._full_window_loaded:
-                    cached = set(self._cached_reports)
-                    delta = [report for report in fetched if report not in cached]
-                    if delta:
-                        self._cached_reports = _merge_report_windows(
-                            self._cached_reports,
-                            delta,
-                        )
-                else:
-                    self._cached_reports = fetched
-                self._full_window_loaded = True
+                self._cached_reports = merged
+                self._full_window_loaded = self._full_window_loaded or history_loaded
                 fetched_monotonic = time.monotonic()
                 self._cache_fetched_monotonic = fetched_monotonic
-                if fetch_hours >= METAR_BACKFILL_FETCH_HOURS:
+                if history_loaded and fetch_hours >= METAR_BACKFILL_FETCH_HOURS:
                     self._last_backfill_monotonic = fetched_monotonic
                 return list(self._cached_reports), FETCH_FRESH, 0.0
             cache_age = (
                 (time.monotonic() - self._cache_fetched_monotonic) if self._cached_reports else None
             )
+            if self._cached_reports and source_ok:
+                return list(self._cached_reports), FETCH_CACHE_HIT, cache_age
             if self._cached_reports:
                 logger.warning(
                     "DAY0_FAST_OBS_FETCH_FAILED serving stale cache age_s=%.0f (failure-throttled %ss)",

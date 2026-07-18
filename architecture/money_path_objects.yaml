@@ -1431,14 +1431,17 @@ external_truth_sources:
     endpoint_patterns: [data-api.polymarket.com, /positions]
     required_tests: [tests/test_inventory_redeem_sweep.py, tests/test_polymarket_v2_adapter_balance_probe.py]
   metar_fast_obs:
-    # Day0 fast-lane intraday observations (2026-06-10 first-principles day0):
-    # NOAA aviationweather.gov raw METAR cache, 2-9 min observation-to-available
-    # for all ~50 traded settlement stations (same ASOS/METAR stream WU derives
-    # from). INTRADAY truth for the running-extreme tracker + WU-vs-METAR
-    # oracle-anomaly guard ONLY — WU remains the settlement authority; Seoul/RKSI
-    # is excluded (settlement_faithful=false, measured ±1C divergence).
+    # Day0 fast-lane intraday observations: the append-only NOAA/NWS global
+    # METAR cycle is the publication-first transport; aviationweather.gov is
+    # the bounded recovery/history surface. Both carry the same configured
+    # station reports. This is intraday running-extreme and oracle-anomaly
+    # evidence only; WU remains settlement authority.
     authority_tier: intraday_observation
-    endpoint_patterns: [aviationweather.gov, /api/data/metar]
+    endpoint_patterns:
+      - tgftp.nws.noaa.gov
+      - /data/observations/metar/cycles
+      - aviationweather.gov
+      - /api/data/metar
     required_tests: [tests/test_day0_fast_obs_lane.py, tests/test_day0_first_principles_antibodies.py]
   nea_sg_observation:
     # Singapore NEA real-time air-temperature API. It is an intraday

@@ -1,5 +1,6 @@
 # Created: 2026-06-10
 # Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-18; last_reused=2026-07-18
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -36,9 +37,11 @@ from src.data.day0_fast_obs import (
     Day0FastObsEmitter,
     FastObsSource,
     MetarReport,
+    NoaaMetarCycleCursor,
     fast_obs_source_for_city,
     fast_obs_to_day0_observation,
     parse_metar_api_payload,
+    parse_noaa_metar_cycle_payload,
     running_extremes_for_local_day,
     settlement_temp_for_report,
 )
@@ -145,6 +148,238 @@ class TestParsePayload:
     def test_non_list_payload_returns_empty(self):
         assert parse_metar_api_payload({"error": "nope"}) == []
         assert parse_metar_api_payload(None) == []
+
+
+class TestNoaaMetarCycleFeed:
+    PUBLISHED = datetime(2026, 7, 18, 4, 16, tzinfo=UTC)
+
+    def test_parser_filters_stations_dedups_and_preserves_tenths(self):
+        payload = """2026/07/18 04:15
+KORD 180415Z 24006KT 10SM CLR 28/22 A2993 RMK AO2 T02830222
+
+2026/07/18 04:15
+KORD 180415Z 24006KT 10SM CLR 28/22 A2993 RMK AO2 T02830222
+
+2026/07/18 04:10
+LFPB 180410Z AUTO 35004KT CAVOK 17/13 Q1017 NOSIG
+"""
+
+        reports = parse_noaa_metar_cycle_payload(
+            payload,
+            stations=("KORD",),
+            published_at=self.PUBLISHED,
+        )
+
+        assert len(reports) == 1
+        assert reports[0].station_id == "KORD"
+        assert reports[0].temp_c == pytest.approx(28.3)
+        assert reports[0].receipt_time == self.PUBLISHED
+
+    def test_cursor_reads_only_appended_bytes_after_cold_start(self):
+        initial = b"""2026/07/18 04:00
+KORD 180400Z 24006KT 10SM CLR 27/22 A2993 RMK AO2 T02720222
+
+2026/07/18 04:15
+KORD 180415Z 24006KT 10SM CLR 28/22 A2993 RMK AO2 T02830222
+"""
+        delta = b"""
+2026/07/18 04:20
+KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
+"""
+
+        class _Response:
+            def __init__(self, status_code, content=b"", headers=None):
+                self.status_code = status_code
+                self.content = content
+                self.headers = headers or {}
+
+        class _Client:
+            def __init__(self):
+                self.calls = []
+                self.responses = [
+                    _Response(
+                        200,
+                        initial,
+                        {"last-modified": "Sat, 18 Jul 2026 04:16:00 GMT"},
+                    ),
+                    _Response(
+                        416,
+                        headers={"content-range": f"bytes */{len(initial)}"},
+                    ),
+                    _Response(
+                        206,
+                        delta,
+                        {
+                            "last-modified": "Sat, 18 Jul 2026 04:21:00 GMT",
+                            "content-range": (
+                                f"bytes {len(initial)}-"
+                                f"{len(initial) + len(delta) - 1}/"
+                                f"{len(initial) + len(delta)}"
+                            ),
+                        },
+                    ),
+                ]
+
+            def get(self, url, *, headers, timeout):
+                self.calls.append((url, headers, timeout))
+                return self.responses.pop(0)
+
+        client = _Client()
+        cursor = NoaaMetarCycleCursor()
+        as_of = datetime(2026, 7, 18, 4, 20, tzinfo=UTC)
+
+        first, first_ok = cursor.poll(
+            client=client,
+            stations=("KORD",),
+            as_of=as_of,
+        )
+        unchanged, unchanged_ok = cursor.poll(
+            client=client,
+            stations=("KORD",),
+            as_of=as_of,
+        )
+        appended, appended_ok = cursor.poll(
+            client=client,
+            stations=("KORD",),
+            as_of=as_of,
+        )
+
+        assert first_ok and unchanged_ok and appended_ok
+        assert [report.obs_time.minute for report in first] == [15]
+        assert unchanged == []
+        assert [report.obs_time.minute for report in appended] == [20]
+        assert "Range" not in client.calls[0][1]
+        assert "Accept-Encoding" not in client.calls[0][1]
+        assert client.calls[1][1]["Accept-Encoding"] == "identity"
+        assert client.calls[1][1]["Range"] == f"bytes={len(initial)}-"
+        assert client.calls[2][1]["Range"] == f"bytes={len(initial)}-"
+
+    def test_awc_history_fetch_is_not_repeated_each_source_clock_poll(
+        self,
+        monkeypatch,
+    ):
+        import src.data.day0_fast_obs as fast_obs
+
+        report = _report(
+            "KORD",
+            datetime(2026, 7, 18, 4, 15, tzinfo=UTC),
+            28.3,
+        )
+        awc_calls = []
+
+        def _awc(stations, **kwargs):
+            awc_calls.append((stations, kwargs))
+            return [report]
+
+        class _Cursor:
+            def poll(self, **_kwargs):
+                return [], True
+
+        monkeypatch.setattr(fast_obs, "fetch_metar_reports", _awc)
+        emitter = fast_obs.Day0FastObsEmitter(fetcher=_awc, min_fetch_interval_s=0.0)
+        emitter._cycle_cursor = _Cursor()
+
+        first = emitter._reports_with_status(["KORD"])
+        second = emitter._reports_with_status(["KORD"])
+
+        assert first[1] == fast_obs.FETCH_FRESH
+        assert second[1] == fast_obs.FETCH_CACHE_HIT
+        assert len(awc_calls) == 1
+
+    def test_cycle_fact_survives_awc_recovery_failure(self, monkeypatch):
+        import src.data.day0_fast_obs as fast_obs
+
+        cycle_report = _report(
+            "KORD",
+            datetime(2026, 7, 18, 4, 15, tzinfo=UTC),
+            28.3,
+        )
+
+        def _awc(*_args, **_kwargs):
+            raise TimeoutError("recovery unavailable")
+
+        class _Cursor:
+            def poll(self, **_kwargs):
+                return [cycle_report], True
+
+        monkeypatch.setattr(fast_obs, "fetch_metar_reports", _awc)
+        emitter = fast_obs.Day0FastObsEmitter(
+            fetcher=_awc,
+            min_fetch_interval_s=0.0,
+        )
+        emitter._cycle_cursor = _Cursor()
+
+        reports, status, _age = emitter._reports_with_status(["KORD"])
+
+        assert reports == [cycle_report]
+        assert status == fast_obs.FETCH_FRESH
+
+    def test_cycle_and_awc_mirror_keep_earliest_publication(self, monkeypatch):
+        import src.data.day0_fast_obs as fast_obs
+
+        observed = datetime(2026, 7, 18, 4, 15, tzinfo=UTC)
+        early = _report("KORD", observed, 28.3)
+        late = MetarReport(
+            station_id=early.station_id,
+            obs_time=early.obs_time,
+            receipt_time=early.receipt_time + timedelta(seconds=40),
+            temp_c=early.temp_c,
+            metar_type=early.metar_type,
+            raw=f"METAR {early.raw}",
+        )
+
+        def _awc(*_args, **_kwargs):
+            return [late]
+
+        class _Cursor:
+            def poll(self, **_kwargs):
+                return [early], True
+
+        monkeypatch.setattr(fast_obs, "fetch_metar_reports", _awc)
+        emitter = fast_obs.Day0FastObsEmitter(
+            fetcher=_awc,
+            min_fetch_interval_s=0.0,
+        )
+        emitter._cycle_cursor = _Cursor()
+
+        reports, status, _age = emitter._reports_with_status(["KORD"])
+
+        assert reports == [early]
+        assert status == fast_obs.FETCH_FRESH
+        assert list(emitter._pending_ledger_reports.values()) == [early]
+
+    def test_incremental_cycle_fact_defers_due_awc_recovery(self, monkeypatch):
+        import src.data.day0_fast_obs as fast_obs
+
+        report = _report(
+            "KORD",
+            datetime(2026, 7, 18, 4, 15, tzinfo=UTC),
+            28.3,
+        )
+        awc_calls = []
+
+        def _awc(*_args, **_kwargs):
+            awc_calls.append(True)
+            return []
+
+        class _Cursor:
+            def poll(self, **_kwargs):
+                return [report], True
+
+        monkeypatch.setattr(fast_obs, "fetch_metar_reports", _awc)
+        emitter = fast_obs.Day0FastObsEmitter(
+            fetcher=_awc,
+            min_fetch_interval_s=0.0,
+        )
+        emitter._cycle_cursor = _Cursor()
+        emitter._full_window_loaded = True
+
+        reports, status, _age = emitter._reports_with_status(["KORD"])
+
+        assert reports == [report]
+        assert status == fast_obs.FETCH_FRESH
+        assert awc_calls == []
+        assert emitter._last_awc_attempt_monotonic == 0.0
 
 
 # ===========================================================================
@@ -1209,8 +1444,16 @@ class TestMetarConnectionReuse:
                 self.calls = 0
                 clients.append(self)
 
-            def get(self, *_args, **_kwargs):
+            def get(self, url, **_kwargs):
                 self.calls += 1
+                if "tgftp.nws.noaa.gov" in url:
+                    return SimpleNamespace(
+                        status_code=200,
+                        content=b"",
+                        headers={
+                            "last-modified": "Sat, 18 Jul 2026 04:16:00 GMT",
+                        },
+                    )
                 return SimpleNamespace(
                     status_code=200,
                     json=lambda: [
@@ -1231,7 +1474,9 @@ class TestMetarConnectionReuse:
         emitter._reports_with_status(["RJTT"])
 
         assert len(clients) == 1
-        assert clients[0].calls == 2
+        # Cold start reads the cycle plus AWC history; the next source-clock
+        # poll reads only the cycle cursor. Both use the same pooled client.
+        assert clients[0].calls == 3
 
 
 class TestMutexNoHttpSplit:
