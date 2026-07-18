@@ -295,12 +295,16 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
     inserted_event_ids: list[str] = []
     inserted_families: list[tuple[str, str, str]] = []
     evaluated_report_keys: list[tuple[str, str, float]] = []
+    deferred_memo_updates: dict[
+        tuple[str, str, str], tuple[int | None, int | None]
+    ] = {}
     pending_reports = 0
     try:
         if not _DAY0_METAR_PENDING_COMMITS:
             return {"status": "SOURCE_CURRENT"}
         staged = _DAY0_METAR_PENDING_COMMITS[0]
         prefetch, received_at, day0_is_tradeable, family_admission = staged
+        emitter = _day0_metar_emitter()
         pending_reports = len(tuple(prefetch.ledger_reports or ()))
         if pending_reports == 0:
             del _DAY0_METAR_PENDING_COMMITS[0]
@@ -349,7 +353,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 conn.execute(f"PRAGMA busy_timeout = {max(1, remaining_ms)}")
                 before_changes = int(conn.total_changes)
                 conn.execute("BEGIN IMMEDIATE")
-                emitted = _day0_metar_emitter().emit_prefetched(
+                emitted = emitter.emit_prefetched(
                     world_conn=conn,
                     prefetch=prefetch,
                     received_at=received_at,
@@ -359,6 +363,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                     inserted_event_ids=inserted_event_ids,
                     inserted_families=inserted_families,
                     evaluated_report_keys=evaluated_report_keys,
+                    deferred_memo_updates=deferred_memo_updates,
                     persist_ledger=False,
                 )
                 commit_started = time.monotonic()
@@ -367,8 +372,14 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                     commit_ms=(time.monotonic() - commit_started) * 1000.0,
                     rows_changed=max(0, int(conn.total_changes) - before_changes),
                 )
+                apply_memo_updates = getattr(emitter, "apply_memo_updates", None)
+                if callable(apply_memo_updates):
+                    apply_memo_updates(deferred_memo_updates)
+                mark_memo_snapshot = getattr(emitter, "mark_event_memo_snapshot", None)
+                if callable(mark_memo_snapshot):
+                    mark_memo_snapshot(conn)
                 mark_evaluated = getattr(
-                    _day0_metar_emitter(),
+                    emitter,
                     "mark_prefetched_events_evaluated",
                     None,
                 )
@@ -1237,13 +1248,33 @@ def _day0_metar_source_clock_tick():
             "status": "LEDGER_FLUSHED" if persisted else "LEDGER_DEFERRED",
             "pending_reports": len(pending_reports),
         }
+    family_admission = _day0_source_family_admission(prefetch.eligible)
+    hydrate_event_memos = getattr(emitter, "hydrate_event_memos_from_events", None)
+    if callable(hydrate_event_memos):
+        read_conn = None
+        try:
+            read_conn = get_world_connection_read_only()
+            hydrate_event_memos(
+                read_conn,
+                prefetch.eligible,
+                family_admission=family_admission,
+            )
+        except Exception as exc:  # noqa: BLE001 - write phase retains fallback
+            logger.warning(
+                "DAY0_EVENT_MEMO_PREHYDRATE_FAILED exc=%s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        finally:
+            if read_conn is not None:
+                read_conn.close()
     _stage_day0_metar_commit(
         prefetch,
         received_at=decision_time.isoformat(),
         day0_is_tradeable=day0_is_tradeable_for_scope(
             str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
         ),
-        family_admission=_day0_source_family_admission(prefetch.eligible),
+        family_admission=family_admission,
     )
     return _commit_or_schedule_day0_metar(origin="source_clock")
 

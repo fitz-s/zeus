@@ -75,12 +75,23 @@ DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
 #: encodes is a valid local-day extreme for entry-probability computation.
 FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
 
+_MemoKey = tuple[str, str, str]
+_MemoUpdate = tuple[Optional[int], Optional[int]]
+
 # Soft entry signal for tomorrow's LOW markets. These are defaults only; the
 # live evaluator uses the deployed empirical residual model's policy. The
 # window is trailing as-of, not fixed to target midnight, so the runtime anchor
 # matches the historical calibration surface.
 PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS = 1.0
 PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS = 12.0
+
+
+def _absorbs(metric: str, value: int, previous: Optional[int]) -> bool:
+    return (
+        previous is None
+        or (metric == "high" and value > previous)
+        or (metric == "low" and value < previous)
+    )
 
 
 def _positive_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
@@ -883,6 +894,8 @@ class Day0FastObsEmitter:
     # exit lane's state). Two memos, two consumers, two update rules.
     _last_kill_memo_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _last_live_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
+    _event_memo_snapshot_rowid: int | None = field(default=None, init=False)
+    _event_memo_snapshot_keys: set[_MemoKey] = field(default_factory=set, init=False)
     _ledgered_report_keys: set[tuple[str, str, float]] = field(default_factory=set, init=False)
     _pending_ledger_reports: dict[tuple[str, str, float], MetarReport] = field(
         default_factory=dict,
@@ -922,6 +935,150 @@ class Day0FastObsEmitter:
 
         with self._lock:
             self._event_evaluated_report_keys.update(report_keys)
+
+    def hydrate_event_memos_from_events(
+        self,
+        world_conn: Any,
+        eligible: tuple,
+        *,
+        family_admission: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> int:
+        """Recover restart memos before the WORLD write-critical section.
+
+        Recovery is indexed by exact city/date and reads both metrics in one
+        range seek. A rowid watermark makes the result reusable while still
+        detecting a concurrent DAY0 event before a later write transaction.
+        """
+
+        keys = {
+            (str(getattr(city, "name", "")), str(target_date), metric)
+            for city, _source, target_date in eligible
+            for metric in ("high", "low")
+            if str(getattr(city, "name", "")) and str(target_date)
+            and (
+                family_admission is None
+                or family_admission(
+                    {
+                        "city": str(getattr(city, "name", "")),
+                        "target_date": str(target_date),
+                        "metric": metric,
+                    }
+                )
+            )
+        }
+        if not keys:
+            return 0
+        try:
+            row = world_conn.execute(
+                "SELECT COALESCE(MAX(rowid), 0) FROM opportunity_events"
+            ).fetchone()
+            snapshot_rowid = int(row[0] or 0) if row is not None else 0
+            with self._lock:
+                previous_rowid = self._event_memo_snapshot_rowid
+                checked = set(self._event_memo_snapshot_keys)
+
+            day0_changed = previous_rowid is None or snapshot_rowid < previous_rowid
+            if (
+                not day0_changed
+                and previous_rowid is not None
+                and snapshot_rowid > previous_rowid
+            ):
+                day0_changed = world_conn.execute(
+                    """
+                    SELECT 1
+                      FROM opportunity_events
+                     WHERE rowid > ?
+                       AND event_type = 'DAY0_EXTREME_UPDATED'
+                     LIMIT 1
+                    """,
+                    (previous_rowid,),
+                ).fetchone() is not None
+
+            requested = keys if day0_changed else keys - checked
+            recovered: dict[_MemoKey, int] = {}
+            families = sorted({(city, target_date) for city, target_date, _metric in requested})
+            for city_name, target_date in families:
+                rows = world_conn.execute(
+                    """
+                    SELECT json_extract(payload_json, '$.metric') AS metric,
+                           CASE json_extract(payload_json, '$.metric')
+                               WHEN 'high' THEN MAX(CAST(json_extract(
+                                   payload_json, '$.rounded_value'
+                               ) AS INTEGER))
+                               ELSE MIN(CAST(json_extract(
+                                   payload_json, '$.rounded_value'
+                               ) AS INTEGER))
+                           END AS extreme
+                      FROM opportunity_events
+                     WHERE event_type = 'DAY0_EXTREME_UPDATED'
+                       AND json_extract(payload_json, '$.city') = ?
+                       AND json_extract(payload_json, '$.target_date') = ?
+                       AND json_extract(payload_json, '$.metric') IN ('high', 'low')
+                       AND json_extract(payload_json, '$.source_authorized_status') = 'AUTHORIZED'
+                       AND json_extract(payload_json, '$.local_date_status') = 'MATCH'
+                       AND json_extract(payload_json, '$.dst_status') = 'UNAMBIGUOUS'
+                       AND json_extract(payload_json, '$.rounded_value') IS NOT NULL
+                     GROUP BY json_extract(payload_json, '$.metric')
+                    """,
+                    (city_name, target_date),
+                ).fetchall()
+                for metric, value in rows:
+                    key = (city_name, target_date, str(metric))
+                    if key in requested and value is not None:
+                        recovered[key] = int(value)
+        except Exception as exc:  # noqa: BLE001 - restart recovery is fail-soft
+            logger.debug(
+                "DAY0_EVENT_MEMO_HYDRATE_FAILED exc=%s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return 0
+
+        updates = {key: (value, value) for key, value in recovered.items()}
+        self.apply_memo_updates(updates)
+        with self._lock:
+            if day0_changed:
+                self._event_memo_snapshot_keys.clear()
+            self._event_memo_snapshot_keys.update(keys)
+            self._event_memo_snapshot_rowid = snapshot_rowid
+        return len(recovered)
+
+    def apply_memo_updates(self, updates: dict[_MemoKey, _MemoUpdate]) -> None:
+        """Apply staged memo movement after its event transaction commits."""
+
+        with self._lock:
+            for key, (kill_value, live_value) in updates.items():
+                metric = key[2]
+                if kill_value is not None and _absorbs(
+                    metric,
+                    kill_value,
+                    self._last_kill_memo_rounded.get(key),
+                ):
+                    self._last_kill_memo_rounded[key] = kill_value
+                if live_value is not None and _absorbs(
+                    metric,
+                    live_value,
+                    self._last_live_emitted_rounded.get(key),
+                ):
+                    self._last_live_emitted_rounded[key] = live_value
+
+    def mark_event_memo_snapshot(self, world_conn: Any) -> None:
+        """Advance the recovery watermark only after durable commit."""
+
+        try:
+            row = world_conn.execute(
+                "SELECT COALESCE(MAX(rowid), 0) FROM opportunity_events"
+            ).fetchone()
+            snapshot_rowid = int(row[0] or 0) if row is not None else 0
+        except Exception as exc:  # noqa: BLE001 - next read can rehydrate
+            logger.debug(
+                "DAY0_EVENT_MEMO_SNAPSHOT_MARK_FAILED exc=%s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return
+        with self._lock:
+            self._event_memo_snapshot_rowid = snapshot_rowid
 
     def sync_ledger_report_keys(
         self,
@@ -1658,6 +1815,7 @@ class Day0FastObsEmitter:
         inserted_event_ids: list[str] | None = None,
         inserted_families: list[tuple[str, str, str]] | None = None,
         evaluated_report_keys: list[tuple[str, str, float]] | None = None,
+        deferred_memo_updates: dict[_MemoKey, _MemoUpdate] | None = None,
         persist_ledger: bool = True,
     ) -> int:
         """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
@@ -1721,11 +1879,40 @@ class Day0FastObsEmitter:
             )
             if not emission_eligible:
                 return 0
+        self.hydrate_event_memos_from_events(
+            world_conn,
+            emission_eligible,
+            family_admission=family_admission,
+        )
         trigger = Day0ExtremeUpdatedTrigger(
             EventWriter(world_conn),
             day0_is_tradeable=day0_is_tradeable,
             family_admission=family_admission,
         )
+        pending_memo_updates: dict[_MemoKey, _MemoUpdate] = {}
+
+        def _memo_values(key: _MemoKey) -> _MemoUpdate:
+            with self._lock:
+                kill_value = self._last_kill_memo_rounded.get(key)
+                live_value = self._last_live_emitted_rounded.get(key)
+            pending_kill, pending_live = pending_memo_updates.get(key, (None, None))
+            return (
+                pending_kill if pending_kill is not None else kill_value,
+                pending_live if pending_live is not None else live_value,
+            )
+
+        def _stage_memo(
+            key: _MemoKey,
+            *,
+            kill_value: int | None = None,
+            live_value: int | None = None,
+        ) -> None:
+            pending_kill, pending_live = pending_memo_updates.get(key, (None, None))
+            pending_memo_updates[key] = (
+                kill_value if kill_value is not None else pending_kill,
+                live_value if live_value is not None else pending_live,
+            )
+
         emitted = 0
         attempted_stations: set[str] = set()
         failed_stations: set[str] = set()
@@ -1764,35 +1951,9 @@ class Day0FastObsEmitter:
                     # event), never the kill memo — a kill-memo-only update
                     # from a withheld pass must not suppress the later live
                     # event for the same rounded extreme.
-                    with self._lock:
-                        kill_previous = self._last_kill_memo_rounded.get(key)
-                        live_previous = self._last_live_emitted_rounded.get(key)
-
-                    if kill_previous is None or live_previous is None:
-                        recovered = _recover_kill_memo_from_events(
-                            city_name=city_name,
-                            target_date=target_date,
-                            metric=metric,
-                            world_conn=world_conn,
-                        )
-                        if recovered is not None:
-                            with self._lock:
-                                if self._last_kill_memo_rounded.get(key) is None:
-                                    self._last_kill_memo_rounded[key] = recovered
-                                if self._last_live_emitted_rounded.get(key) is None:
-                                    self._last_live_emitted_rounded[key] = recovered
-                                kill_previous = self._last_kill_memo_rounded.get(key)
-                                live_previous = self._last_live_emitted_rounded.get(key)
-
-                    def _moved(previous: Optional[int]) -> bool:
-                        return (
-                            previous is None
-                            or (metric == "high" and rounded > previous)
-                            or (metric == "low" and rounded < previous)
-                        )
-
-                    kill_moved = _moved(kill_previous)
-                    live_moved = _moved(live_previous)
+                    kill_previous, live_previous = _memo_values(key)
+                    kill_moved = _absorbs(metric, rounded, kill_previous)
+                    live_moved = _absorbs(metric, rounded, live_previous)
                     if not kill_moved and not live_moved:
                         continue
                     observation = fast_obs_to_day0_observation(
@@ -1810,10 +1971,9 @@ class Day0FastObsEmitter:
                         observation["live_authority_status"] == "live"
                         and not stale_blocked
                     )
-                    if memo_safe and kill_moved:
-                        with self._lock:
-                            self._last_kill_memo_rounded[key] = rounded
+                    kill_update = rounded if memo_safe and kill_moved else None
                     if not live_ok:
+                        _stage_memo(key, kill_value=kill_update)
                         if memo_safe and kill_moved:
                             logger.warning(
                                 "DAY0_FAST_OBS_LIVE_WITHHELD city=%s date=%s metric=%s "
@@ -1825,6 +1985,7 @@ class Day0FastObsEmitter:
                             )
                         continue
                     if not live_moved:
+                        _stage_memo(key, kill_value=kill_update)
                         continue
                     result = trigger.emit_from_observation(
                         observation=observation,
@@ -1833,6 +1994,7 @@ class Day0FastObsEmitter:
                         received_at=received_at,
                     )
                     if result is None:
+                        _stage_memo(key, kill_value=kill_update)
                         continue
                     if result.inserted or result.duplicate:
                         # A PERSISTED live event advances the live memo. `inserted`
@@ -1842,10 +2004,11 @@ class Day0FastObsEmitter:
                         # restarted daemon would re-attempt the same INSERT OR IGNORE
                         # every cycle until the next rounded movement. That is not a
                         # trading error, but it is not live-stable behavior either.
-                        with self._lock:
-                            self._last_live_emitted_rounded[key] = rounded
-                            if memo_safe and _moved(self._last_kill_memo_rounded.get(key)):
-                                self._last_kill_memo_rounded[key] = rounded
+                        _stage_memo(
+                            key,
+                            kill_value=kill_update,
+                            live_value=rounded,
+                        )
                     if result.inserted:
                         emitted += 1
                         if inserted_event_ids is not None:
@@ -1893,6 +2056,10 @@ class Day0FastObsEmitter:
                 world_conn=world_conn,
                 prefetch=prefetch,
             )
+        if deferred_memo_updates is None:
+            self.apply_memo_updates(pending_memo_updates)
+        else:
+            deferred_memo_updates.update(pending_memo_updates)
         return emitted
 
     def persist_prefetched_ledger(

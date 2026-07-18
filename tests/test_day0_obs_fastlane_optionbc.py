@@ -908,6 +908,16 @@ class TestDay0MetarSourceClockTick:
             def prefetch(self, **_kw):
                 return prefetch
 
+            def hydrate_event_memos_from_events(
+                self,
+                _conn,
+                _eligible,
+                *,
+                family_admission,
+            ):
+                self.hydrate_admission = family_admission
+                order.append("memo_hydrate")
+
             def emit_prefetched(self, **_kw):
                 self.family_admission = _kw["family_admission"]
                 assert _kw["persist_ledger"] is False
@@ -963,6 +973,10 @@ class TestDay0MetarSourceClockTick:
             return _Conn()
 
         monkeypatch.setattr("src.state.db.get_world_connection", _open_world)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: SimpleNamespace(close=lambda: order.append("read_close")),
+        )
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
 
         class _Lease:
@@ -996,6 +1010,8 @@ class TestDay0MetarSourceClockTick:
             "events_emitted": 2,
         }
         wake_entry = next(item for item in order if item.startswith("wake:"))
+        acquire_entry = next(item for item in order if item.startswith("acquire:"))
+        assert order.index("memo_hydrate") < order.index(acquire_entry)
         assert order.index("gate_enter") < order.index("db_open") < order.index("begin")
         assert order.index("commit") < order.index(wake_entry)
         assert (
@@ -1006,6 +1022,7 @@ class TestDay0MetarSourceClockTick:
         assert "ledger" not in order
         assert "wake:event-b,event-a" in wake_entry
         assert "(('Paris', '2026-06-12', 'high'),)" in wake_entry
+        assert emitter.hydrate_admission is admission
         assert emitter.family_admission is admission
 
     def test_non_emitting_pass_flushes_deferred_ledger(self, monkeypatch):
@@ -1360,6 +1377,94 @@ class TestDay0MetarSourceClockTick:
         assert order.index("commit") < order.index("wake:event-day0")
         assert not im._DAY0_METAR_PENDING_COMMITS
         assert len(scheduled) == 1
+
+    def test_commit_failure_does_not_advance_memo_before_retry(
+        self,
+        monkeypatch,
+    ):
+        import sqlite3
+
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            eligible=((_wu_icao_city(), object(), "2026-06-12"),),
+        )
+        applied = []
+
+        class _Emitter:
+            def emit_prefetched(self, **kwargs):
+                kwargs["deferred_memo_updates"][(
+                    "Paris",
+                    "2026-06-12",
+                    "high",
+                )] = (29, 29)
+                kwargs["inserted_event_ids"].append("event-day0")
+                return 1
+
+            def apply_memo_updates(self, updates):
+                applied.append(dict(updates))
+
+        class _Conn:
+            total_changes = 2
+
+            def __init__(self, *, fail_commit):
+                self.fail_commit = fail_commit
+                self.rolled_back = False
+
+            def execute(self, _sql, _params=()):
+                return self
+
+            def commit(self):
+                if self.fail_commit:
+                    raise sqlite3.OperationalError("database is locked")
+
+            def rollback(self):
+                self.rolled_back = True
+
+            def close(self):
+                return None
+
+        connections = iter((_Conn(fail_commit=True), _Conn(fail_commit=False)))
+        mutex = SimpleNamespace(
+            acquire=lambda **_kw: True,
+            release=lambda: None,
+        )
+        emitter = _Emitter()
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection",
+            lambda **_kw: next(connections),
+        )
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: mutex)
+        monkeypatch.setattr(
+            "src.runtime.reactor_wake.publish_reactor_wake",
+            lambda **_kw: None,
+        )
+        im._stage_day0_metar_commit(
+            prefetch,
+            received_at="2026-06-12T00:00:00+00:00",
+            day0_is_tradeable=True,
+        )
+
+        first = im._commit_pending_day0_metar(origin="test")
+
+        assert first == {"status": "WRITE_CONTENDED", "pending_reports": 1}
+        assert applied == []
+        assert im._DAY0_METAR_PENDING_COMMITS[0][0] is prefetch
+
+        second = im._commit_pending_day0_metar(origin="retry")
+
+        assert second == {
+            "status": "COMMITTED",
+            "pending_reports": 1,
+            "events_emitted": 1,
+        }
+        assert applied == [
+            {("Paris", "2026-06-12", "high"): (29, 29)}
+        ]
+        assert not im._DAY0_METAR_PENDING_COMMITS
 
     def test_commit_retry_without_pending_fact_does_no_db_work(
         self,

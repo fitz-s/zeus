@@ -1363,6 +1363,94 @@ class TestMutexNoHttpSplit:
         ) is True
         assert emitter.prefetched_events_evaluated(prefetch) is False
 
+    def test_deferred_memos_do_not_advance_before_commit(self):
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        city = _tokyo()
+        report = _report("RJTT", t0, 21.0, t_group=False)
+        prefetch = fast_obs.FastObsPrefetch(
+            eligible=((city, fast_obs.fast_obs_source_for_city(city), "2026-06-10"),),
+            reports=(report,),
+            freshness_status=fast_obs.FETCH_FRESH,
+            cache_age_s=0.0,
+            decision_time=t0 + timedelta(minutes=5),
+            ledger_reports=(report,),
+        )
+        emitter = fast_obs.Day0FastObsEmitter()
+        updates = {}
+
+        assert emitter.emit_prefetched(
+            world_conn=_world_conn(),
+            prefetch=prefetch,
+            received_at=(t0 + timedelta(minutes=5)).isoformat(),
+            deferred_memo_updates=updates,
+            persist_ledger=False,
+        ) == 2
+        high_key = ("Tokyo", "2026-06-10", "high")
+        low_key = ("Tokyo", "2026-06-10", "low")
+        assert high_key not in emitter._last_live_emitted_rounded
+        assert low_key not in emitter._last_live_emitted_rounded
+        assert updates == {
+            high_key: (21, 21),
+            low_key: (21, 21),
+        }
+
+        emitter.apply_memo_updates(updates)
+
+        assert emitter._last_live_emitted_rounded[high_key] == 21
+        assert emitter._last_live_emitted_rounded[low_key] == 21
+
+    def test_event_memo_watermark_ignores_non_day0_appends(self):
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        city = _tokyo()
+        report = _report("RJTT", t0, 21.0, t_group=False)
+        eligible = ((city, fast_obs.fast_obs_source_for_city(city), "2026-06-10"),)
+        prefetch = fast_obs.FastObsPrefetch(
+            eligible=eligible,
+            reports=(report,),
+            freshness_status=fast_obs.FETCH_FRESH,
+            cache_age_s=0.0,
+            decision_time=t0 + timedelta(minutes=5),
+        )
+        conn = _world_conn()
+        writer = fast_obs.Day0FastObsEmitter()
+        assert writer.emit_prefetched(
+            world_conn=conn,
+            prefetch=prefetch,
+            received_at=(t0 + timedelta(minutes=5)).isoformat(),
+        ) == 2
+        conn.commit()
+
+        fresh = fast_obs.Day0FastObsEmitter()
+        assert fresh.hydrate_event_memos_from_events(conn, eligible) == 2
+        conn.execute(
+            """
+            INSERT INTO opportunity_events (
+                event_id, event_type, entity_key, source,
+                observed_at, available_at, received_at,
+                causal_snapshot_id, payload_hash, idempotency_key,
+                priority, expires_at, payload_json, schema_version, created_at
+            )
+            SELECT 'non-day0-row', 'BOOK_SNAPSHOT', entity_key, source,
+                   observed_at, available_at, received_at,
+                   causal_snapshot_id, 'non-day0-hash', 'non-day0-key',
+                   priority, expires_at, payload_json, schema_version, created_at
+              FROM opportunity_events
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+             LIMIT 1
+            """
+        )
+        conn.commit()
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+
+        assert fresh.hydrate_event_memos_from_events(conn, eligible) == 0
+
+        assert not any("GROUP BY json_extract" in sql for sql in statements)
+
     def test_emit_prefetched_persists_anomaly_actions_with_world_conn(self, monkeypatch):
         from src.data import day0_oracle_anomaly as oa
         from src.data.day0_fast_obs import Day0FastObsEmitter, FastObsPrefetch
