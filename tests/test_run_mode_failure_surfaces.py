@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import sqlite3
@@ -4212,6 +4213,15 @@ def test_day0_decision_trace_degrades_when_processed_day0_has_no_artifact(
     assert "DAY0_PROCESSED_WITHOUT_DECISION_TRACE" in trace["issue"]
     assert trace["missing_trace_count"] == 1
     assert "day0_decision_trace" in result["failing_surfaces"]
+
+
+def test_day0_trace_processing_lookup_drives_composite_event_key() -> None:
+    source = inspect.getsource(live_health._day0_decision_trace_surface)
+
+    assert "WITH requested(event_id) AS (VALUES" in source
+    assert "p.consumer_name = 'edli_reactor_v1'" in source
+    assert "p.event_id = r.event_id" in source
+    assert "event_id IN" not in source
 
 
 def test_day0_decision_trace_accepts_processed_day0_with_regret_artifact(

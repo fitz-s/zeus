@@ -3877,14 +3877,16 @@ def _day0_decision_trace_surface(
             "evaluated": True,
             "recent_event_count": len(day0_events),
         }
-    placeholders = ",".join("?" for _ in event_ids)
+    requested = ",".join("(?)" for _ in event_ids)
     processing_rows, processing_err = _sqlite_ro_rows(
         world_db,
         f"""
-        SELECT event_id, processing_status, processed_at, last_error
-          FROM opportunity_event_processing
-         WHERE consumer_name = 'edli_reactor_v1'
-           AND event_id IN ({placeholders})
+        WITH requested(event_id) AS (VALUES {requested})
+        SELECT p.event_id, p.processing_status, p.processed_at, p.last_error
+          FROM requested r
+          JOIN opportunity_event_processing p
+            ON p.consumer_name = 'edli_reactor_v1'
+           AND p.event_id = r.event_id
         """,
         event_ids,
     )
