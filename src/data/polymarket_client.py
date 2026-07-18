@@ -26,6 +26,10 @@ from typing import Any, Optional
 
 import httpx
 
+from src.data.polymarket_request_governor import (
+    RequestPriority,
+    polymarket_request_governor,
+)
 from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
@@ -312,6 +316,7 @@ class PolymarketClient:
         *,
         public_http_timeout: "float | httpx.Timeout | None" = None,
         public_http_limits: "httpx.Limits | None" = None,
+        public_request_priority: RequestPriority | None = None,
     ):
         self._clob_client = None
         self._v2_adapter = None
@@ -332,6 +337,13 @@ class PolymarketClient:
         # inflating read to 2t (which would push connect+read past a caller's
         # outer guard). The submit-time JIT book fetch (GATE #84) uses this.
         self._public_http_timeout = public_http_timeout
+        # The dedicated JIT pool is only constructed by submit-time callers;
+        # ordinary public reads remain in the lowest-cost scan lane.
+        self._public_request_priority = public_request_priority or (
+            RequestPriority.SUBMIT_JIT
+            if public_http_limits is PRESUBMIT_JIT_CLOB_HTTP_LIMITS
+            else RequestPriority.SCAN
+        )
 
     def _public_http(self) -> httpx.Client:
         client = getattr(self, "_public_http_client", None)
@@ -374,7 +386,12 @@ class PolymarketClient:
         try:
             client = self._public_http()
             url = f"{CLOB_BASE}/time"
-            resp = client.get(url, timeout=timeout) if timeout is not None else client.get(url)
+            resp = polymarket_request_governor.request(
+                lambda: client.get(url, timeout=timeout) if timeout is not None else client.get(url),
+                "GET",
+                url,
+                priority=RequestPriority.HEARTBEAT,
+            )
             return 200 <= resp.status_code < 300
         except Exception:  # noqa: BLE001 - warm-up is best-effort; never propagate
             return False
@@ -405,14 +422,20 @@ class PolymarketClient:
     ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
-            return httpx.get(
-                url,
-                params=params,
-                timeout=timeout or PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS,
+            send = lambda: httpx.get(
+                url, params=params, timeout=timeout or PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS
             )
-        if timeout is not None:
-            return self._public_http().get(url, params=params, timeout=timeout)
-        return self._public_http().get(url, params=params)
+        elif timeout is not None:
+            send = lambda: self._public_http().get(url, params=params, timeout=timeout)
+        else:
+            send = lambda: self._public_http().get(url, params=params)
+        return polymarket_request_governor.request(
+            send,
+            "GET",
+            url,
+            params=params,
+            priority=getattr(self, "_public_request_priority", RequestPriority.SCAN),
+        )
 
     def _bounded_public_http_timeout(
         self,
@@ -466,14 +489,20 @@ class PolymarketClient:
     ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
-            return httpx.post(
-                url,
-                json=json_body,
-                timeout=timeout or PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS,
+            send = lambda: httpx.post(
+                url, json=json_body, timeout=timeout or PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS
             )
-        if timeout is not None:
-            return self._public_http().post(url, json=json_body, timeout=timeout)
-        return self._public_http().post(url, json=json_body)
+        elif timeout is not None:
+            send = lambda: self._public_http().post(url, json=json_body, timeout=timeout)
+        else:
+            send = lambda: self._public_http().post(url, json=json_body)
+        return polymarket_request_governor.request(
+            send,
+            "POST",
+            url,
+            json_body=json_body,
+            priority=getattr(self, "_public_request_priority", RequestPriority.SCAN),
+        )
 
     def _ensure_client(self):
         """Deprecated compatibility alias for the V2 adapter boundary."""
@@ -784,7 +813,7 @@ class PolymarketClient:
 
         Args:
             token_id: YES or NO token ID
-            price: live limit price [0.05, 0.95] (INV-43)
+            price: finite live limit price strictly inside (0, 1) (INV-43)
             size: number of shares
             side: "BUY" or "SELL"
             order_type: concrete CLOB limit-order type ("GTC", "FOK", "FAK", ...)
@@ -1014,10 +1043,14 @@ class PolymarketClient:
         if not address:
             raise RuntimeError("Missing funder_address for position fetch")
 
-        resp = httpx.get(
-            f"{DATA_API_BASE}/positions",
-            params={"user": address, "sizeThreshold": "0.01"},
-            timeout=15.0,
+        url = f"{DATA_API_BASE}/positions"
+        params = {"user": address, "sizeThreshold": "0.01"}
+        resp = polymarket_request_governor.request(
+            lambda: httpx.get(url, params=params, timeout=15.0),
+            "GET",
+            url,
+            params=params,
+            priority=RequestPriority.ACCOUNT_RECOVERY,
         )
         resp.raise_for_status()
         raw = resp.json()

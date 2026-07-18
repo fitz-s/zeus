@@ -6663,6 +6663,7 @@ def run_exit_monitor_cycle(
     """
     from src.config import settings
     from src.data.polymarket_client import PolymarketClient
+    from src.data.polymarket_request_governor import RequestPriority
     from src.engine.cycle_runner import (
         _execute_monitoring_phase,
         get_connection,
@@ -6728,7 +6729,9 @@ def run_exit_monitor_cycle(
                 {_exit_family_key(*family) for family in target_families}
             )
             summary["target_position_count"] = len(monitor_portfolio.positions)
-        with PolymarketClient() as clob:
+        with PolymarketClient(
+            public_request_priority=RequestPriority.HELD_REDUCE_ONLY
+        ) as clob:
             tracker = get_tracker()
             artifact = CycleArtifact(
                 mode="exit_monitor",

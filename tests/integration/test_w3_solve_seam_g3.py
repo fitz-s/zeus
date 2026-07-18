@@ -7386,7 +7386,7 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
         replace(proof, row={**proof.row, "captured_at": captured_at})
         for proof in proofs
     )
-    blocked_proof = replace(
+    legacy_price_proof = replace(
         proofs[0],
         missing_reason="ADMISSION_NEAR_SETTLED_PRICE:price=0.999000:ceiling=0.990000",
         passed_prefilter=False,
@@ -7396,7 +7396,7 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
         missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:legacy-pre-spine",
         passed_prefilter=False,
     )
-    proofs = (blocked_proof, recoverable_proof, *proofs[2:])
+    proofs = (legacy_price_proof, recoverable_proof, *proofs[2:])
     payload = _payload_with_joint_samples(proofs, payload, draws=400)
     restore = _set_flag(False)
     try:
@@ -7441,7 +7441,7 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
     seed_tokens = {
         seed.native_candidate.token_id for seed in prepared.candidate_seeds
     }
-    assert blocked_proof.token_id not in seed_tokens
+    assert legacy_price_proof.token_id in seed_tokens
     assert recoverable_proof.token_id in seed_tokens
     for seed in prepared.candidate_seeds:
         candidate = seed.native_candidate
@@ -14321,6 +14321,8 @@ def _adapter_sell_actuation(event, *, selected_shares="10"):
 def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     monkeypatch,
 ):
+    from src.data.polymarket_request_governor import RequestPriority
+
     event = _global_scope_event(city="Alpha", source_run_id="run-sell")
     actuation = _adapter_sell_actuation(event, selected_shares="6")
     position = SimpleNamespace(
@@ -14353,8 +14355,11 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     )
 
     class Clob:
-        def __init__(self, **_kwargs):
-            pass
+        def __init__(self, **kwargs):
+            assert (
+                kwargs["public_request_priority"]
+                is RequestPriority.HELD_REDUCE_ONLY
+            )
 
         def __enter__(self):
             return self

@@ -138,10 +138,8 @@ def _run(with_fusion_center: bool = True):
     return {(p.candidate.condition_id, p.direction): p for p in proofs}
 
 
-def test_day0_absorbing_no_at_999_is_untradeable_before_selection():
-    """A true Day0 absorbing NO belief is not itself a trade opportunity when the
-    available entry price is already 0.999. The proof must carry the deterministic
-    near-settled rejection instead of entering selection with a tiny positive EV."""
+def test_day0_absorbing_no_at_999_reaches_current_economics():
+    """A 0.999 quote is not a semantic veto; current economics owns selection."""
 
     candidate = MarketTopologyCandidate(
         city="Shanghai",
@@ -199,10 +197,9 @@ def test_day0_absorbing_no_at_999_is_untradeable_before_selection():
     assert no_proof.q_lcb_5pct == 1.0
     assert no_proof.execution_price is not None
     assert float(no_proof.execution_price.value) == 0.999
-    assert no_proof.missing_reason is not None
-    assert no_proof.missing_reason.startswith("ADMISSION_NEAR_SETTLED_PRICE:")
-    assert no_proof.trade_score == 0.0
-    assert no_proof.passed_prefilter is False
+    assert no_proof.missing_reason is None
+    assert no_proof.trade_score > 0.0
+    assert no_proof.passed_prefilter is True
 
 
 def test_incident_24c_buy_yes_is_not_killed_by_legacy_direction_law():

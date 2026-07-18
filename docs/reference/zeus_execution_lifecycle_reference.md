@@ -293,8 +293,9 @@ This never freezes unrelated entries; the function always returns `0`
 
 1. Compute exit limit: `current_price - 0.01` (1 cent below current)
 2. If `best_bid < base_price` and slippage ≤ 3% → use best_bid instead
-3. Reject outside absolute `[0.05, 0.95]`, then bind to the current executable
-   snapshot and align to its tick without clamping across the absolute boundary
+3. Reject non-finite prices and prices outside strict `(0, 1)`, then bind to
+   the current executable snapshot and align to its tick without clamping
+   outside the binary-contract domain
 4. SELL quantization: `math.floor(shares * 100 + 1e-9) / 100.0` (round DOWN)
 5. Reject if shares round to zero or no token_id
 6. Place via `PolymarketClient.place_limit_order(side="SELL")`
@@ -538,12 +539,14 @@ These are separate truth surfaces that should not be conflated.
 - `fee_deducted: bool` — whether taker fee has been applied
 - `currency: Literal["usd", "probability_units"]`
 
-Live venue submission adds two cumulative order-price contracts: every
-BUY/SELL, entry/exit, single/batch order must have unit price in the inclusive
-absolute range `[0.05, 0.95]`, and it must also be tick-aligned for the current
+Live venue submission adds cumulative order-price contracts: every BUY/SELL,
+entry/exit, single/batch order must have a finite unit price strictly inside
+`(0, 1)`, and it must also be tick-aligned and in-range for the current
 executable snapshot. `VenueSubmissionEnvelope.assert_live_submit_bound()`
-enforces the absolute range immediately before the adapter SDK boundary. Venue
-tick legality never widens the absolute range (INV-43).
+enforces the binary-contract domain immediately before the adapter SDK boundary.
+Tick legality, minimum size, identity, tradeability, fees/depth, and economic
+proof remain additional requirements; they do not turn nominal price into an
+entry-quality proxy (INV-43).
 
 ### 7.2 Kelly safety gate
 

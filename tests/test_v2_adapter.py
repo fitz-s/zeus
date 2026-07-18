@@ -1736,25 +1736,40 @@ def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
-@pytest.mark.parametrize("price", [0.05, 0.95])
+@pytest.mark.parametrize("price", [0.004, 0.996])
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
-def test_live_submit_unit_price_band_is_inclusive(tmp_path, price, side):
+def test_live_submit_unit_price_domain_is_side_symmetric(tmp_path, price, side):
     fake = FakeOneStepClient(response={"orderID": "ord-boundary", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
-        _priced_intent(price), FakeSnapshot(), order_type="GTC"
+        _priced_intent(price),
+        FakeSnapshot(tick_size=Decimal("0.001")),
+        order_type="GTC",
     ).with_updates(side=side)
 
     result = adapter.submit(envelope)
 
     assert result.status == "accepted"
+    assert result.envelope.price == Decimal(str(price))
+    assert result.envelope.tick_size == Decimal("0.001")
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
-@pytest.mark.parametrize("price", [0.0499, 0.9501, 0.99904995, 1.0, 1.0001])
+@pytest.mark.parametrize(
+    ("price", "error_fragment"),
+    [
+        (0.0, "outside strict open (0, 1)"),
+        (-0.001, "outside strict open (0, 1)"),
+        (1.0, "outside strict open (0, 1)"),
+        (1.001, "outside strict open (0, 1)"),
+        ("NaN", "must be finite"),
+        ("Infinity", "must be finite"),
+        ("-Infinity", "must be finite"),
+    ],
+)
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
-def test_live_submit_rejects_out_of_band_price_before_sdk_contact(
-    tmp_path, price, side
+def test_live_submit_rejects_non_binary_price_before_sdk_contact(
+    tmp_path, price, error_fragment, side
 ):
     fake = FakeOneStepClient(response={"orderID": "must-not-submit", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
@@ -1765,22 +1780,7 @@ def test_live_submit_rejects_out_of_band_price_before_sdk_contact(
     result = adapter.submit(envelope)
 
     assert result.status == "rejected"
-    assert "outside absolute [0.05, 0.95]" in str(result.error_message)
-    assert not fake.calls
-
-
-@pytest.mark.parametrize("price", [0.001, 0.04, 0.96, 0.999, 1.0, 1.001])
-def test_live_sell_submit_cannot_use_venue_tick_to_waive_absolute_band(tmp_path, price):
-    fake = FakeOneStepClient(response={"orderID": "must-not-submit", "status": "live"})
-    adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(
-        _priced_intent(0.50), FakeSnapshot(), order_type="GTC"
-    ).with_updates(price=Decimal(str(price)), side="SELL")
-
-    result = adapter.submit(envelope)
-
-    assert result.status == "rejected"
-    assert "outside absolute [0.05, 0.95]" in str(result.error_message)
+    assert error_fragment in str(result.error_message)
     assert not fake.calls
 
 
@@ -2635,17 +2635,17 @@ class TestSubmitBatch:
         with pytest.raises(ValueError, match="exceeds MAX_ORDERS_PER_BATCH"):
             adapter.submit_batch(envelopes)
 
-    def test_out_of_band_price_rejects_entire_batch_before_sdk_contact(self, tmp_path):
+    def test_non_binary_price_rejects_entire_batch_before_sdk_contact(self, tmp_path):
         fake = FakeBatchTwoStepClient()
         adapter, _ = _adapter(tmp_path, fake)
         envelopes = _batch_envelopes(adapter, 3)
-        envelopes[1] = envelopes[1].with_updates(price=Decimal("0.951"))
+        envelopes[1] = envelopes[1].with_updates(price=Decimal("1"))
 
         results = adapter.submit_batch(envelopes)
 
         assert [result.status for result in results] == ["rejected"] * 3
         assert all(
-            "outside absolute [0.05, 0.95]" in str(result.error_message)
+            "outside strict open (0, 1)" in str(result.error_message)
             for result in results
         )
         assert not fake.calls

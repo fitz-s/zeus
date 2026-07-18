@@ -2478,6 +2478,7 @@ def _edli_refresh_held_position_quote_evidence(
     """
 
     from src.data.polymarket_client import PolymarketClient
+    from src.data.polymarket_request_governor import RequestPriority
     from src.events.event_coalescer import EventCoalescer
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
@@ -2630,7 +2631,9 @@ def _edli_refresh_held_position_quote_evidence(
         # concern this boundary module only WIRES IN, never inlines (R6 split).
         from src.events.price_channel_redecision_router import _edli_price_channel_redecision_sink
 
-        with PolymarketClient() as clob:
+        with PolymarketClient(
+            public_request_priority=RequestPriority.HELD_REDUCE_ONLY
+        ) as clob:
             fetch_orderbook, fetch_orderbooks = _budgeted_orderbook_fetchers(
                 clob,
                 deadline_monotonic=deadline,

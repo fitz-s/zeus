@@ -280,7 +280,6 @@ from src.strategy.live_inference.live_admission import (
     coverage_unlicensed_tail_rejection_reason,
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
-    live_near_settled_entry_price_rejection_reason,
     replacement_no_bound_certificate_matches,  # noqa: F401 - compatibility test surface
     replacement_no_bound_certificate_mismatch_reason,
     replacement_no_bound_expected_from_parents,
@@ -4630,53 +4629,32 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
-def _global_current_entry_price_policy_rejection_reason(
-    candidate: object,
-    *,
-    strategy_key: str,
-) -> str | None:
-    """Apply the current owner strategy's tail-price policy before ranking.
+def _global_current_entry_feasibility_rejection_reason(candidate: object) -> str | None:
+    """Reject malformed BUYs without imposing a nominal entry-price floor.
 
-    The robust objective remains probability/price symmetric: no q=0.5 wall is
-    introduced.  This policy instead keeps a BUY whose current native best ask
-    is below the strategy's live floor out of the feasible set, so an
-    unsubmittable longshot cannot win the auction and starve a valid sibling.
-    SELL compares against HOLD and never consumes entry-price authority.
+    The auction owns economic selection: current q bounds, fees, full depth,
+    robust utility, Kelly sizing, wealth, and caps determine whether either
+    YES or NO is a winner.  This adapter policy merely requires a native,
+    executable BUY quote; a low or high valid price is not a feasible-set
+    exclusion.  SELL compares against HOLD and does not consume BUY authority.
     """
 
     action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
     if action == "SELL":
         return None
     if action != "BUY":
-        return "GLOBAL_ENTRY_PRICE_POLICY_ACTION_INVALID"
+        return "GLOBAL_ENTRY_FEASIBILITY_ACTION_INVALID"
     side = str(getattr(candidate, "side", "") or "").strip().upper()
     curve = getattr(candidate, "executable_cost_curve", None)
     levels = tuple(getattr(curve, "levels", ()) or ())
     if side not in {"YES", "NO"} or not levels:
-        return "GLOBAL_ENTRY_PRICE_POLICY_AUTHORITY_MISSING"
+        return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_MISSING"
     try:
         best_ask = Decimal(levels[0].price)
-        floor = Decimal(
-            str(
-                _event_bound_strategy_live_quality_floors(strategy_key)[
-                    "min_entry_price"
-                ]
-            )
-        )
     except (ArithmeticError, AttributeError, TypeError, ValueError):
-        return "GLOBAL_ENTRY_PRICE_POLICY_AUTHORITY_INVALID"
-    if (
-        not best_ask.is_finite()
-        or not floor.is_finite()
-        or not Decimal("0") < best_ask < Decimal("1")
-        or not Decimal("0") <= floor < Decimal("1")
-    ):
-        return "GLOBAL_ENTRY_PRICE_POLICY_AUTHORITY_INVALID"
-    if best_ask + Decimal("1e-12") < floor:
-        return (
-            "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
-            f"strategy={strategy_key}:side={side}:best_ask={best_ask}:floor={floor}"
-        )
+        return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
+    if not best_ask.is_finite() or not Decimal("0") < best_ask < Decimal("1"):
+        return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
     return None
 
 
@@ -8552,25 +8530,8 @@ def event_bound_live_adapter_from_trade_conn(
             owner = _global_entry_policy_by_family.get(family_key)
             side = str(getattr(candidate, "side", "") or "").strip().upper()
             if owner is None or side not in {"YES", "NO"}:
-                return "GLOBAL_ENTRY_PRICE_POLICY_OWNER_MISSING"
-            event_type, metric = owner
-            direction = "buy_yes" if side == "YES" else "buy_no"
-            try:
-                strategy_key = _event_bound_strategy_key(
-                    event_type=event_type,
-                    direction=direction,
-                    metric=metric,
-                    require_metric_live=False,
-                )
-            except Exception as exc:  # noqa: BLE001 - typed candidate exclusion
-                return (
-                    "GLOBAL_ENTRY_PRICE_POLICY_STRATEGY_UNAVAILABLE:"
-                    f"{type(exc).__name__}:{exc}"
-                )
-            return _global_current_entry_price_policy_rejection_reason(
-                candidate,
-                strategy_key=strategy_key,
-            )
+                return "GLOBAL_ENTRY_FEASIBILITY_OWNER_MISSING"
+            return _global_current_entry_feasibility_rejection_reason(candidate)
 
         try:
             result = process_current_global_batch(
@@ -10277,12 +10238,16 @@ def _submit_current_global_sell(
 
     try:
         from src.data.polymarket_client import PolymarketClient
+        from src.data.polymarket_request_governor import RequestPriority
 
         timeout = max(
             1.0,
             float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
         )
-        with PolymarketClient(public_http_timeout=timeout) as clob:
+        with PolymarketClient(
+            public_http_timeout=timeout,
+            public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
+        ) as clob:
             books = clob.get_orderbook_snapshots(
                 [str(getattr(candidate, "token_id", "") or "")],
                 timeout=timeout,
@@ -21887,21 +21852,19 @@ def _selection_scoped_proofs(
         capital-efficiency prefilter or the retired rounded-mu direction heuristic so
         the vector payoff engine can compare the leg honestly under the qkernel's
         settlement-bin law. It must not resurrect missing native structure,
-        near-settled-price blocks, or buy-NO conservative-evidence failures; those are
-        executable/semantic defects, not legacy scalar objective drift.
+        buy-NO conservative-evidence failures; those are executable/semantic defects,
+        not legacy scalar objective drift. The retired near-settled nominal-price
+        ceiling is always rescoreable by current executable economics.
         """
         text = str(missing_reason or "").strip()
         if not text:
-            return True
-        if allow_global_near_settled_rebind and text.startswith(
-            "ADMISSION_NEAR_SETTLED_PRICE:"
-        ):
             return True
         return text.startswith(
             (
                 "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
                 "ADMISSION_CAPITAL_EFFICIENCY",
                 "ADMISSION_WIN_RATE_FLOOR",
+                "ADMISSION_NEAR_SETTLED_PRICE",
                 "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
             )
         )
@@ -23859,13 +23822,6 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = capital_efficiency_reason
-            near_settled_reason = live_near_settled_entry_price_rejection_reason(
-                execution_price=execution_price.value if execution_price is not None else None,
-            )
-            if near_settled_reason is not None:
-                score = 0.0
-                if missing_reason is None:
-                    missing_reason = near_settled_reason
             def _lcb_source(value: object) -> str | None:
                 source = getattr(value, "calibration_source", None)
                 return str(source) if source else None
@@ -23926,7 +23882,6 @@ def _generate_candidate_proofs(
             # concern is telemetry-only now and is deliberately NOT a prefilter trigger.)
             if (
                 capital_efficiency_reason is not None
-                or near_settled_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
             ):

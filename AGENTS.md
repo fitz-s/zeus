@@ -189,11 +189,10 @@ Durable trading rules:
 
 - Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks.
 - Every live venue BUY or SELL, including entry, reduce-only exit, single-order,
-  and batch paths, must have an inclusive unit price in `[0.05, 0.95]`. The
-  venue envelope rejects anything below `0.05` or above `0.95` before SDK
-  contact. Strategy, q-kernel, economic proof, current state, risk, lifecycle,
-  venue tick, and order role have no exception. Only a direct operator
-  instruction may change this durable boundary.
+  and batch paths, must have a finite unit price strictly inside `(0, 1)`.
+  Current tick/range, minimum size, identity, tradeability, fees, depth, robust
+  delta-log-wealth/EV, and Kelly remain cumulative requirements. Nominal price
+  is not a probability-quality proxy and must not create an arbitrary tail gate.
 - Live may act; backtest may evaluate — and only against verified settlement joins, never mixed regimes. Shadow modes are extirpated (operator directive 2026-06-12); do not reintroduce one as a staging tier.
 - Settlement values flow through `SettlementSemantics`.
 - DB commits precede derived JSON/report exports.

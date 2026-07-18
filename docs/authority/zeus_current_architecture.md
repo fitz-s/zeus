@@ -304,16 +304,16 @@ or broken truth input must not silently downgrade risk.
 
 ### 10.2 Absolute Live Order Price Domain
 
-Every proposed or submitted BUY or SELL price must be finite and inside the
-inclusive absolute range `[0.05, 0.95]`. This applies to every entry,
-reduce-only exit, single-order, and batch order before SDK contact. The current
-executable snapshot still supplies tick alignment and venue legality, but a
-venue-legal price outside the absolute range remains forbidden. No strategy,
-q-kernel, lifecycle state, current-state proof, or order role may waive this
-contract (INV-43).
+Every proposed or submitted BUY or SELL price must be finite and strictly
+inside the binary-contract domain `(0, 1)`. This applies symmetrically to every
+entry, reduce-only exit, single-order, and batch order before SDK contact.
+The current executable snapshot still supplies tick alignment/range, minimum
+size, identity, and tradeability; fees, depth, robust delta-log-wealth/EV, and
+Kelly remain cumulative economic requirements. A tick-legal price is neither
+automatically good nor automatically bad because of its nominal level (INV-43).
 
-Price is not a probability-quality proxy. A band-legal price does not by
-itself authorize an entry: the global auction separately requires a strict
+Price is not a probability-quality proxy. A price in the binary-contract domain
+does not by itself authorize an entry: the global auction separately requires a strict
 current-evidence robust win majority, positive robust EV and delta log wealth,
 and only the remaining shares below the cumulative Fractional Kelly final-
 holding target. These economic conditions apply symmetrically to YES and NO.

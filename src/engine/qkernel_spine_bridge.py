@@ -2399,6 +2399,7 @@ def _qkernel_may_clear_legacy_missing_reason(missing_reason: str | None) -> bool
             "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
             "ADMISSION_CAPITAL_EFFICIENCY",
             "ADMISSION_WIN_RATE_FLOOR",
+            "ADMISSION_NEAR_SETTLED_PRICE",
             "CENTER_BUY_ULTRA_LOW_PRICE",
             "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
         )

@@ -5999,6 +5999,11 @@ def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
             self.closed = True
 
     class Client:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.HELD_REDUCE_ONLY
+
         def __enter__(self):
             return self
 

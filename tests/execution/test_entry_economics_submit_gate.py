@@ -7,7 +7,10 @@ import pytest
 
 from src.contracts import Direction, ExecutionIntent
 from src.contracts.slippage_bps import SlippageBps
-from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    qkernel_global_current_state_rejection_reason,
+)
 from src.execution.executor import (
     _actionable_certificate_intent_mismatch_reason,
     _entry_economics_component,
@@ -332,7 +335,7 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     assert verdict["details"]["live_min_entry_price"] == 0.10
 
 
-def test_entry_economics_rejects_micro_tail_yes_below_absolute_price_floor():
+def test_entry_economics_micro_tail_still_requires_strategy_economics():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.024,
@@ -360,10 +363,11 @@ def test_entry_economics_rejects_micro_tail_yes_below_absolute_price_floor():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["submit_edge"] == pytest.approx(0.05)
 
 
-def test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor():
+def test_entry_economics_buenos_aires_shape_still_requires_strategy_economics():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.041,
@@ -394,7 +398,8 @@ def test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor()
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["submit_edge"] > 0.0
 
 
 def test_entry_economics_allows_high_confidence_center_buy_yes():
@@ -465,7 +470,7 @@ def test_entry_economics_allows_center_buy_yes_when_symmetric_quality_floor_clea
     assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.52)
 
 
-def test_entry_economics_rejects_legacy_low_price_yes_below_absolute_price_floor():
+def test_entry_economics_legacy_low_price_still_requires_strategy_economics():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.031,
@@ -495,7 +500,8 @@ def test_entry_economics_rejects_legacy_low_price_yes_below_absolute_price_floor
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["submit_edge"] > 0.0
 
 
 def test_entry_economics_blocks_unarmed_selection_guard_even_with_large_raw_edge():
@@ -962,24 +968,31 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     ("direction", "side"),
     ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
 )
-def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
-    direction, side
+@pytest.mark.parametrize(
+    ("price", "q_lcb", "shares"),
+    ((0.001, 0.80, 1000.0), (0.999, 1.0, 10.0)),
+)
+def test_entry_economics_current_state_tail_price_requires_economics_not_nominal_band(
+    direction,
+    side,
+    price,
+    q_lcb,
+    shares,
 ):
-    price = 0.001
-    q_lcb = 0.80
-    edge = 0.799
-    shares = 1000.0
+    edge = q_lcb - price
+    q_live = max(0.92, q_lcb)
+    expected_cost = price * shares
     economics = _current_state_econ(
         side=side,
-        payoff_q_point=max(0.92, q_lcb),
+        payoff_q_point=q_live,
         payoff_q_lcb=q_lcb,
         cost=price,
         edge_lcb=edge,
         selection_guard_q_safe=q_lcb,
         global_limit_price=str(price),
         global_expected_fill_price_before_fee=str(price),
-        global_expected_cost_usd=str(price * shares),
-        global_max_spend_usd=str(price * shares),
+        global_expected_cost_usd=str(expected_cost),
+        global_max_spend_usd=str(expected_cost),
         global_target_shares=str(shares),
         global_robust_delta_log_wealth=0.10,
         global_robust_ev_usd=edge * shares,
@@ -987,10 +1000,10 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
         global_cut_time_loss_probability_ucb=1.0 - q_lcb,
         global_terminal_win_probability_lcb=q_lcb,
         global_terminal_loss_probability_ucb=1.0 - q_lcb,
-        global_terminal_loss_payoff_usd=str(-(price * shares)),
-        global_terminal_win_payoff_usd=str((1.0 - price) * shares),
-        global_terminal_median_payoff_usd=str((1.0 - price) * shares),
-        global_terminal_wealth_after_loss_usd=str(100.0 - price * shares),
+        global_terminal_loss_payoff_usd=str(-expected_cost),
+        global_terminal_win_payoff_usd=str(shares - expected_cost),
+        global_terminal_median_payoff_usd=str(shares - expected_cost),
+        global_terminal_wealth_after_loss_usd=str(100.0 - expected_cost),
         global_terminal_wealth_after_win_usd=str(100.0 + (1.0 - price) * shares),
         global_cut_time_expected_value_diagnostic_usd=edge * shares,
         global_expected_value_diagnostic_usd=edge * shares,
@@ -999,7 +1012,7 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
         _intent(
             direction=direction,
             limit_price=price,
-            q_live=max(0.92, q_lcb),
+            q_live=q_live,
             q_lcb_5pct=q_lcb,
             expected_edge=edge,
             min_entry_price=0.10,
@@ -1010,23 +1023,18 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["allowed"] is True
+    assert verdict["details"]["global_limit_bound_authorized"] is True
+    assert verdict["details"]["submit_edge"] == pytest.approx(edge)
 
 
-@pytest.mark.parametrize(
-    ("direction", "side"),
-    ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
-)
-def test_entry_economics_current_state_cannot_waive_absolute_price_ceiling(
-    direction, side
-):
+def test_entry_economics_current_state_tail_still_requires_positive_robust_utility():
     price = 0.999
     q_lcb = 1.0
     edge = 0.001
     shares = 10.0
     economics = _current_state_econ(
-        side=side,
+        side="YES",
         payoff_q_point=q_lcb,
         payoff_q_lcb=q_lcb,
         cost=price,
@@ -1037,7 +1045,7 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_ceiling(
         global_expected_cost_usd=str(price * shares),
         global_max_spend_usd=str(price * shares),
         global_target_shares=str(shares),
-        global_robust_delta_log_wealth=0.10,
+        global_robust_delta_log_wealth=0.0,
         global_robust_ev_usd=edge * shares,
         global_cut_time_win_probability_lcb=q_lcb,
         global_cut_time_loss_probability_ucb=0.0,
@@ -1053,7 +1061,7 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_ceiling(
     )
     verdict = _entry_economics_component(
         _intent(
-            direction=direction,
+            direction=Direction("buy_yes"),
             limit_price=price,
             q_live=q_lcb,
             q_lcb_5pct=q_lcb,
@@ -1066,55 +1074,40 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_ceiling(
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
-
-
-@pytest.mark.parametrize("direction", (Direction("buy_yes"), Direction("buy_no")))
-def test_entry_economics_current_state_cannot_waive_venue_tick_boundary(direction):
-    economics = _current_state_econ(
-        side="YES" if direction == Direction("buy_yes") else "NO",
-        payoff_q_point=0.92,
-        payoff_q_lcb=0.80,
-        cost=0.0009,
-        edge_lcb=0.7991,
-        selection_guard_q_safe=0.80,
-        global_limit_price="0.0009",
-        global_expected_fill_price_before_fee="0.0009",
-        global_expected_cost_usd="0.9",
-        global_max_spend_usd="0.9",
-        global_target_shares="1000",
-        global_robust_delta_log_wealth=0.10,
-        global_robust_ev_usd=799.1,
-        global_cut_time_win_probability_lcb=0.80,
-        global_cut_time_loss_probability_ucb=0.20,
-        global_terminal_win_probability_lcb=0.80,
-        global_terminal_loss_probability_ucb=0.20,
-        global_terminal_loss_payoff_usd="-0.9",
-        global_terminal_win_payoff_usd="999.1",
-        global_terminal_median_payoff_usd="999.1",
-        global_terminal_wealth_after_loss_usd="99.1",
-        global_terminal_wealth_after_win_usd="1099.1",
-        global_cut_time_expected_value_diagnostic_usd=799.1,
-        global_expected_value_diagnostic_usd=799.1,
+    assert (
+        qkernel_global_current_state_rejection_reason(
+            economics,
+            direction="buy_yes",
+        )
+        == "global_utility_envelope"
     )
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "expected_profit_below_floor"
+
+
+@pytest.mark.parametrize(
+    ("price", "expected_reason"),
+    (
+        (0.0, "invalid_price_or_size"),
+        (1.0, "invalid_price_or_size"),
+        (float("nan"), "missing_entry_economics"),
+        (float("inf"), "missing_entry_economics"),
+        (float("-inf"), "missing_entry_economics"),
+    ),
+)
+def test_entry_economics_rejects_non_binary_or_nonfinite_price(
+    price,
+    expected_reason,
+):
     verdict = _entry_economics_component(
         _intent(
-            direction=direction,
-            limit_price=0.0009,
-            q_live=0.92,
-            q_lcb_5pct=0.80,
-            expected_edge=0.7991,
-            min_entry_price=0.0,
-            executable_snapshot_min_tick_size="0.001",
-            qkernel_execution_economics=economics,
+            limit_price=price,
         ),
-        shares=1000.0,
-        actionable_payload={"qkernel_execution_economics": economics},
+        shares=10.0,
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == expected_reason
 
 
 def test_recomputed_current_state_marker_cannot_bypass_durable_legacy_certificate():

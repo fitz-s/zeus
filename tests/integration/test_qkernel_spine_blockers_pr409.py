@@ -141,7 +141,7 @@ def test_qkernel_band_alpha_invalid_config_falls_back(monkeypatch):
         (None, False),
         ("ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:legacy", False),
         ("CENTER_BUY_ULTRA_LOW_PRICE:legacy", False),
-        ("ADMISSION_NEAR_SETTLED_PRICE:price=0.999000:ceiling=0.990000", True),
+        ("ADMISSION_NEAR_SETTLED_PRICE:price=0.999000:ceiling=0.990000", False),
         ("SETTLEMENT_TRUTH_UNAVAILABLE", True),
     ),
 )
@@ -2234,8 +2234,8 @@ def test_global_current_state_seed_seals_probability_parent_without_local_overla
     }
 
 
-def test_global_near_settled_rebind_preserves_dynamic_selection_gates(monkeypatch):
-    """Global price-floor replacement still consumes the full current scope."""
+def test_retired_near_settled_rejection_is_rescored_by_current_economics(monkeypatch):
+    """A legacy nominal-price rejection cannot shrink the current scope."""
 
     from dataclasses import replace
 
@@ -2278,7 +2278,7 @@ def test_global_near_settled_rebind_preserves_dynamic_selection_gates(monkeypatc
         diagnostic_out=diagnostic,
     )
 
-    assert ordinary == ()
+    assert ordinary == (proof,)
     assert global_rebind == (proof,), diagnostic
 
     monkeypatch.setattr(

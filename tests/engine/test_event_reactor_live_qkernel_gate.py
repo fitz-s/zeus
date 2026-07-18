@@ -1138,7 +1138,7 @@ def test_deterministic_day0_witness_rejects_certificate_probability_drift():
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_current_entry_price_policy_is_native_side_symmetric(side):
+def test_global_current_entry_feasibility_is_native_side_symmetric_without_price_floor(side):
     def candidate(*, action="BUY", price="0.10"):
         return SimpleNamespace(
             action=action,
@@ -1148,29 +1148,59 @@ def test_global_current_entry_price_policy_is_native_side_symmetric(side):
             ),
         )
 
-    reason = era._global_current_entry_price_policy_rejection_reason(
-        candidate(price="0.004"),
-        strategy_key="forecast_qkernel_entry",
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate(price="0.004")
+    ) is None
+    assert (
+        era._global_current_entry_feasibility_rejection_reason(
+            candidate(price="0.996")
+        )
+        is None
+    )
+    assert (
+        era._global_current_entry_feasibility_rejection_reason(
+            candidate(action="SELL", price="0.004")
+        )
+        is None
     )
 
-    assert reason == (
-        "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
-        f"strategy=forecast_qkernel_entry:side={side}:best_ask=0.004:floor=0.1"
+
+@pytest.mark.parametrize(
+    ("side", "levels", "expected"),
+    (
+        (
+            "MAYBE",
+            (SimpleNamespace(price=Decimal("0.004")),),
+            "GLOBAL_ENTRY_FEASIBILITY_QUOTE_MISSING",
+        ),
+        ("YES", (), "GLOBAL_ENTRY_FEASIBILITY_QUOTE_MISSING"),
+        (
+            "YES",
+            (SimpleNamespace(price=Decimal("0")),),
+            "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID",
+        ),
+        (
+            "NO",
+            (SimpleNamespace(price=Decimal("1")),),
+            "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID",
+        ),
+        (
+            "YES",
+            (SimpleNamespace(price=Decimal("NaN")),),
+            "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID",
+        ),
+    ),
+)
+def test_global_current_entry_feasibility_rejects_missing_or_invalid_native_quote(
+    side, levels, expected
+):
+    candidate = SimpleNamespace(
+        action="BUY",
+        side=side,
+        executable_cost_curve=SimpleNamespace(levels=levels),
     )
-    assert (
-        era._global_current_entry_price_policy_rejection_reason(
-            candidate(price="0.10"),
-            strategy_key="forecast_qkernel_entry",
-        )
-        is None
-    )
-    assert (
-        era._global_current_entry_price_policy_rejection_reason(
-            candidate(action="SELL", price="0.004"),
-            strategy_key="forecast_qkernel_entry",
-        )
-        is None
-    )
+
+    assert era._global_current_entry_feasibility_rejection_reason(candidate) == expected
 
 
 def test_global_current_band_rejects_terminal_certificate_incoherent_with_its_branch():
@@ -2326,36 +2356,41 @@ def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
         )
 
 
-def test_live_entry_qkernel_authority_enforces_absolute_price_floor():
-    cert = _qkernel_cert()
+def test_live_entry_qkernel_authority_accepts_low_price_with_current_state_economics():
+    cert = _current_qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:b34@proof",
         candidate_id="YES:b34:DIRECT_YES:b34@proof",
         bin_id="b34",
-        payoff_q_point=0.12180248510788458,
-        payoff_q_lcb=0.06052567908958011,
-        cost=0.04001526925923045,
-        edge_lcb=0.020510409830349664,
+        payoff_q_point=0.12,
+        payoff_q_lcb=0.11,
+        cost=0.04,
+        edge_lcb=0.07,
         delta_u_at_min=0.00009152233738979263,
         optimal_stake_usd=1.4412832709285736,
         optimal_delta_u=0.0006333828915951036,
-        selection_guard_q_safe=0.06052567908958011,
+        selection_guard_q_safe=0.11,
     )
+    _seal_current_qkernel_cert(cert)
+    payload = {
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "selection_authority_applied": "qkernel_spine",
+        "direction": "buy_yes",
+        "strategy_key": "forecast_qkernel_entry",
+        "candidate_bin_id": "b34",
+        "q_live": 0.12,
+        "q_lcb_5pct": 0.11,
+        "min_entry_price": 0.95,
+        "qkernel_execution_economics": cert,
+    }
 
-    with pytest.raises(ValueError, match="LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS"):
-        _assert_live_entry_submit_authority(
-            {
-                "event_type": "FORECAST_SNAPSHOT_READY",
-                "selection_authority_applied": "qkernel_spine",
-                "direction": "buy_yes",
-                "strategy_key": "forecast_qkernel_entry",
-                "candidate_bin_id": "b34",
-                "q_live": 0.12180248510788458,
-                "q_lcb_5pct": 0.06052567908958011,
-                "min_entry_price": 0.05,
-                "qkernel_execution_economics": cert,
-            }
-        )
+    _assert_live_entry_submit_authority(payload)
+
+
+@pytest.mark.parametrize("price", (0.0, 1.0, float("nan")))
+def test_live_entry_unit_price_rejects_nonexecutable_binary_domain(price):
+    with pytest.raises(ValueError):
+        era.assert_live_order_unit_price(price)
 
 
 def test_live_entry_qkernel_gate_accepts_six_to_eight_cent_positive_yes():

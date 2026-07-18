@@ -33,6 +33,11 @@ import httpx
 
 from src import config as runtime_config
 from src.config import City, cities_by_name, state_path
+from src.data.polymarket_request_governor import (
+    RequestAdmissionDenied,
+    RequestPriority,
+    polymarket_request_governor,
+)
 from src.contracts.executable_market_snapshot import (
     FRESHNESS_WINDOW_DEFAULT,
     WIDE_SPREAD_THRESHOLD_USD,
@@ -1000,8 +1005,17 @@ def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, 
     last_exc: Exception | None = None
     for attempt in range(retries):
         try:
-            resp = httpx.get(f"{GAMMA_BASE}{path}", params=params, timeout=timeout)
+            url = f"{GAMMA_BASE}{path}"
+            resp = polymarket_request_governor.request(
+                lambda: httpx.get(url, params=params, timeout=timeout),
+                "GET",
+                url,
+                params=params,
+                priority=RequestPriority.SCAN,
+            )
             return resp
+        except RequestAdmissionDenied as exc:
+            raise httpx.RequestError(str(exc)) from exc
         except httpx.HTTPError as exc:
             last_exc = exc
             if attempt < retries - 1:
@@ -1648,11 +1662,14 @@ def _clob_market_is_live(condition_id: str) -> bool | None:
         archived, eob = cached
         return not archived and eob
     try:
-        resp = httpx.get(
-            f"{CLOB_BASE}/markets/{condition_id}",
-            timeout=2.0,
+        url = f"{CLOB_BASE}/markets/{condition_id}"
+        resp = polymarket_request_governor.request(
+            lambda: httpx.get(url, timeout=2.0),
+            "GET",
+            url,
+            priority=RequestPriority.SCAN,
         )
-    except httpx.RequestError as exc:
+    except (httpx.RequestError, RequestAdmissionDenied) as exc:
         # Memoize failure so subsequent same-tick calls short-circuit instead of
         # incurring serial timeouts. Bot review P1 (Codex + Copilot 2026-05-19):
         # _event_has_active_children runs up to 10 pages × 50 events per tag;

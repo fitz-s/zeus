@@ -1321,6 +1321,16 @@ files:
     - src/execution/executor.py
     - src/execution/harvester.py
     - src/main.py
+  src/data/polymarket_request_governor.py:
+    zone: K2_runtime
+    authority_role: polymarket_http_attempt_governor
+    why: Cross-process request leases, official per-route sliding budgets, priority reserve, full Retry-After preservation, route-specific 429 embargoes, and generation-fenced transport/5xx outage circuits for Gamma, public CLOB, and Data API attempts. It stores no response data and cannot authorize stale venue truth.
+    downstream:
+    - src/data/market_scanner.py
+    - src/data/polymarket_client.py
+    - src/engine/event_reactor_adapter.py
+    - src/execution/exit_lifecycle.py
+    - src/ingest/price_channel_ingest.py
   src/venue/AGENTS.md:
     zone: docs
     authority_role: registry

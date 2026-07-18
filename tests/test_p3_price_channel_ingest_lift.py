@@ -2185,6 +2185,11 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         return conn
 
     class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.HELD_REDUCE_ONLY
+
         def __enter__(self):
             return self
 
@@ -2339,6 +2344,11 @@ def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_h
             return len(token_ids)
 
     class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.HELD_REDUCE_ONLY
+
         def __enter__(self):
             return self
 
@@ -2425,6 +2435,11 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
             return len(selected)
 
     class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.HELD_REDUCE_ONLY
+
         def __enter__(self):
             return self
 
