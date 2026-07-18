@@ -941,6 +941,8 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
     lock = threading.Lock()
     fanout_started = threading.Event()
     release_priority = threading.Event()
+    slow_callback_started = threading.Event()
+    priority_callback_started = threading.Event()
 
     monkeypatch.setitem(
         prod.settings["edli"],
@@ -1005,9 +1007,17 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
             assert fanout_started.wait(0.5), (
                 "remaining provider I/O must start before the priority materialization callback"
             )
-        notifications.append((source, dict(task_report)))
         if source == "icon_global":
+            slow_callback_started.set()
             release_priority.set()
+            assert priority_callback_started.wait(0.5), (
+                "a slow source callback must not block an independent priority callback"
+            )
+        else:
+            assert slow_callback_started.wait(0.5)
+            priority_callback_started.set()
+        with lock:
+            notifications.append((source, dict(task_report)))
 
     report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         {
@@ -1021,7 +1031,6 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
 
     assert starts[0] == "ecmwf_ifs"
     assert starts[1:] == ["icon_global"]
-    assert notifications[0][0] == "icon_global"
     assert {source for source, _report in notifications} == set(sources)
     assert all(report["committed_families"] for _source, report in notifications)
     assert all(

@@ -904,33 +904,21 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         source_commit_notifications = 0
         source_commit_notification_errors: list[str] = []
 
-        def _notify_source_commit(
-            source: str,
-            task_report: Mapping[str, object],
-        ) -> None:
-            nonlocal source_commit_notifications
-            if (
-                on_source_commit is None
-                or int(task_report.get("written_row_count") or 0) <= 0
-            ):
-                return
-            try:
-                on_source_commit(source, task_report)
-            except Exception as exc:  # noqa: BLE001 - final catch-up remains authoritative
-                source_commit_notification_errors.append(
-                    f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
-                )
-            else:
-                source_commit_notifications += 1
-
         assert priority_task is not None
         priority_report: dict[str, object] = {}
         scheduled_tasks = (priority_task, *tasks)
         executor_worker_count = min(max_workers, len(scheduled_tasks))
-        with ThreadPoolExecutor(
-            max_workers=executor_worker_count,
-            thread_name_prefix="source-clock-bpf",
-        ) as executor:
+        callback_futures = {}
+        with (
+            ThreadPoolExecutor(
+                max_workers=executor_worker_count,
+                thread_name_prefix="source-clock-commit",
+            ) as callback_executor,
+            ThreadPoolExecutor(
+                max_workers=executor_worker_count,
+                thread_name_prefix="source-clock-bpf",
+            ) as executor,
+        ):
             futures = {
                 executor.submit(_download_task, *task): (task[0], index == 0)
                 for index, task in enumerate(scheduled_tasks)
@@ -947,7 +935,28 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 reports_by_source[result_source].append(task_report)
                 if is_priority:
                     priority_report = task_report
-                _notify_source_commit(result_source, task_report)
+                if (
+                    on_source_commit is not None
+                    and int(task_report.get("written_row_count") or 0) > 0
+                ):
+                    callback_futures[
+                        callback_executor.submit(
+                            on_source_commit,
+                            result_source,
+                            task_report,
+                        )
+                    ] = result_source
+
+            for future in as_completed(callback_futures):
+                source = callback_futures[future]
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001 - final catch-up remains authoritative
+                    source_commit_notification_errors.append(
+                        f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
+                    )
+                else:
+                    source_commit_notifications += 1
 
         source_results: dict[str, dict[str, object]] = {}
         for source in updated_sources:

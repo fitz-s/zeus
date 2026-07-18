@@ -2003,6 +2003,9 @@ def _replacement_availability_poll_tick():
     fallback_reseed_published = False
     scoped_reseed_completed = False
     scoped_reseed_summary: dict[str, object] = {}
+    publish_state_lock = threading.Lock()
+    publish_scope_locks: dict[tuple[str, str, str], threading.Lock] = {}
+    fallback_reseed_lock = threading.Lock()
 
     def _publish_committed_source(
         source: str,
@@ -2014,18 +2017,56 @@ def _replacement_availability_poll_tick():
             if isinstance(task_report, dict)
             else ()
         )
-        scopes = tuple(
-            scope
-            for scope in (
+        candidate_scopes = tuple(
+            dict.fromkeys(
                 (str(city), str(target_date), str(metric))
                 for city, target_date, metric in raw_scopes
             )
-            if (source, *scope) not in notified_source_scopes
         )
-        if scopes:
-            notified_source_scopes.update((source, *scope) for scope in scopes)
-        elif fallback_reseed_published:
-            return
+        with publish_state_lock:
+            scopes = tuple(
+                scope
+                for scope in candidate_scopes
+                if (source, *scope) not in notified_source_scopes
+            )
+            if scopes:
+                notified_source_scopes.update((source, *scope) for scope in scopes)
+                anchor_scopes = tuple(
+                    scope for scope in scopes if scope not in anchor_scopes_attempted
+                )
+                anchor_scopes_attempted.update(anchor_scopes)
+                scope_locks = tuple(
+                    publish_scope_locks.setdefault(scope, threading.Lock())
+                    for scope in sorted(scopes)
+                )
+            elif fallback_reseed_published:
+                return
+            else:
+                fallback_reseed_published = True
+                anchor_scopes = ()
+                scope_locks = (fallback_reseed_lock,)
+
+        for scope_lock in scope_locks:
+            scope_lock.acquire()
+        try:
+            _publish_committed_source_locked(
+                source=source,
+                task_report=task_report,
+                scopes=scopes,
+                anchor_scopes=anchor_scopes,
+            )
+        finally:
+            for scope_lock in reversed(scope_locks):
+                scope_lock.release()
+
+    def _publish_committed_source_locked(
+        *,
+        source: str,
+        task_report: object,
+        scopes: tuple[tuple[str, str, str], ...],
+        anchor_scopes: tuple[tuple[str, str, str], ...],
+    ) -> None:
+        nonlocal scoped_reseed_completed
         report = {
             "status": "SOURCE_CLOCK_PARTIAL_RAW_INPUTS_COMMITTED",
             "source": source,
@@ -2038,10 +2079,6 @@ def _replacement_availability_poll_tick():
         }
         if scopes:
             manifest_snapshot = None
-            anchor_scopes = tuple(
-                scope for scope in scopes if scope not in anchor_scopes_attempted
-            )
-            anchor_scopes_attempted.update(anchor_scopes)
             if anchor_scopes:
                 anchor_report = _download_replacement_forecast_current_targets_if_needed(
                     cfg,
@@ -2075,25 +2112,25 @@ def _replacement_availability_poll_tick():
             )
         else:
             _attach_reseed_reports(report)
-            fallback_reseed_published = True
-        for key in (
-            "anchor_scope_status",
-            "anchor_scope_manifest_count",
-            "fusion_upgrade_status",
-            "cycle_advance_status",
-            "cycle_advance_detail",
-        ):
-            if key in report:
-                scoped_reseed_summary[key] = report[key]
-        for key in (
-            "fusion_upgrade_seeds_enqueued",
-            "cycle_advance_seeds_enqueued",
-        ):
-            if key in report:
-                scoped_reseed_summary[key] = int(
-                    scoped_reseed_summary.get(key) or 0
-                ) + int(report.get(key) or 0)
-        scoped_reseed_completed = True
+        with publish_state_lock:
+            for key in (
+                "anchor_scope_status",
+                "anchor_scope_manifest_count",
+                "fusion_upgrade_status",
+                "cycle_advance_status",
+                "cycle_advance_detail",
+            ):
+                if key in report:
+                    scoped_reseed_summary[key] = report[key]
+            for key in (
+                "fusion_upgrade_seeds_enqueued",
+                "cycle_advance_seeds_enqueued",
+            ):
+                if key in report:
+                    scoped_reseed_summary[key] = int(
+                        scoped_reseed_summary.get(key) or 0
+                    ) + int(report.get(key) or 0)
+            scoped_reseed_completed = True
         logger.info(
             "replacement source-clock committed families published reseeds: %s",
             report,
