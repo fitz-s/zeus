@@ -1414,7 +1414,11 @@ def test_reactor_wake_completed_event_needs_no_reactor_cycle(monkeypatch) -> Non
 
     state = main._reactor_wake_event_state(("event-complete",))
 
-    assert state == main._ReactorWakeEventState(ready=False, finished=True)
+    assert state == main._ReactorWakeEventState(
+        ready=False,
+        finished=True,
+        terminal=True,
+    )
     assert conn.execute_count == 1
 
 
@@ -1595,6 +1599,106 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
         "reactor:day0_extreme_event_committed:event-day0:1",
     ]
     assert pending.is_set() is False
+
+
+@pytest.mark.parametrize(
+    "first_monitor_result",
+    (False, RuntimeError("monitor failed")),
+    ids=("incomplete", "exception"),
+)
+def test_day0_monitor_failure_keeps_retry_but_does_not_block_reactor(
+    monkeypatch,
+    first_monitor_result,
+) -> None:
+    import threading
+
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-day0-monitor-retry",
+        "2026-07-16T12:00:00+00:00",
+        "ingest_main",
+        "day0_extreme_event_committed",
+        ("event-day0",),
+        (("Paris", "2026-07-16", "high"),),
+    )
+    event_states = iter(
+        (
+            main._ReactorWakeEventState(ready=True, finished=False),
+            main._ReactorWakeEventState(
+                ready=False,
+                finished=True,
+                terminal=True,
+            ),
+        )
+    )
+    monitor_results = iter((first_monitor_result, True))
+    calls: list[str] = []
+    acknowledgements: list[str] = []
+    pending = threading.Event()
+
+    class _Lock:
+        def locked(self) -> bool:
+            return False
+
+    class _Held:
+        def is_set(self) -> bool:
+            return False
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda _wake: (wake,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
+    monkeypatch.setattr(main, "_reactor_wake_event_state", lambda _ids: next(event_states))
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_requires_exit_monitor",
+        lambda _target_families: True,
+    )
+
+    def run_monitor(**_kwargs):
+        calls.append("monitor")
+        result = next(monitor_results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(
+        main,
+        "_exit_monitor_cycle",
+        run_monitor,
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.append("reactor") or True,
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert calls == ["monitor", "reactor"]
+    assert acknowledgements == []
+    assert pending.is_set() is True
+    assert main._edli_last_reactor_wake_id is None
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert calls == ["monitor", "reactor", "monitor"]
+    assert acknowledgements == [wake.wake_id]
+    assert pending.is_set() is False
+    assert main._edli_last_reactor_wake_id == wake.wake_id
 
 
 def test_day0_wake_claims_monitor_priority_while_reactor_is_active(

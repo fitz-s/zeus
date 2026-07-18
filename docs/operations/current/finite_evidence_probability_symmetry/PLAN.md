@@ -487,3 +487,27 @@ Planning-lock, compilation, and `git diff --check` pass.  The existing repo-wide
 source registry check still reports unrelated baseline drift.  No canonical DB
 was copied or mutated, and no process restart, config change, or venue action was
 performed.
+
+## 2026-07-18 Day0 action-lane fault containment
+
+The durable Day0 wake previously made targeted held-position monitor success a
+strict prerequisite for processing the same observation event.  A monitor DB,
+quote, or lifecycle failure therefore blocked both the dead-position SELL lane
+and every sibling BUY/HOLD/CASH redecision even when the reactor still had
+current family authority.
+
+The wake now owns two independent completion conditions.  A failed or incomplete
+targeted monitor keeps the durable wake pending, but no longer blocks the event
+reactor from consuming the committed observation.  Once the event is terminal,
+the next poll retries only the targeted monitor and does not repeat the reactor;
+the wake is acknowledged only after both lanes complete.  A monitor already in
+flight remains a concurrency boundary, and every downstream submit, capital,
+risk, freshness, and unknown-side-effect gate remains unchanged.
+
+Acceptance requires the existing monitor-before-reactor success ordering, a
+counterexample for both `False` and exception monitor outcomes, proof that the
+reactor runs exactly once, proof that the wake remains durable until monitor
+recovery, and no regression to future-retry wake retirement.  The complete wake
+listener suite passes `79/79`; the focused periodic-monitor preemption antibody
+passes `1/1`; compilation and `git diff --check` pass.  No runtime process,
+canonical DB, config, or venue state was changed.

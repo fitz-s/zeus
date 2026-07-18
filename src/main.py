@@ -3785,6 +3785,7 @@ def _day0_wake_requires_exit_monitor(
 class _ReactorWakeEventState:
     ready: bool
     finished: bool
+    terminal: bool = False
 
 
 def _reactor_wake_event_state(
@@ -3831,12 +3832,14 @@ def _reactor_wake_event_state(
     now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
     ready = False
     deferred = False
+    terminal = False
     for _event_id, status, claimed_at in rows:
         status = str(status)
         if status == "processing":
             ready = True
             continue
         if status != "pending":
+            terminal = True
             continue
         if claimed_at in {None, ""}:
             ready = True
@@ -3855,6 +3858,7 @@ def _reactor_wake_event_state(
     return _ReactorWakeEventState(
         ready=ready,
         finished=not ready and (deferred or bool(rows)),
+        terminal=terminal,
     )
 
 
@@ -3953,9 +3957,15 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
+    wake_event_state = None
     if wake_event_ids:
         wake_event_state = _reactor_wake_event_state(wake_event_ids)
-        if wake_event_state.finished:
+        terminal_day0_monitor_retry = (
+            day0_wake
+            and wake_event_state.finished
+            and wake_event_state.terminal
+        )
+        if wake_event_state.finished and not terminal_day0_monitor_retry:
             if not _acknowledge_edli_reactor_wake_batch(
                 wake,
                 wakes,
@@ -3972,10 +3982,11 @@ def _edli_reactor_wake_poll_once() -> bool:
                 len(wake_event_ids),
             )
             return True
-        if not wake_event_state.ready:
+        if not wake_event_state.ready and not terminal_day0_monitor_retry:
             return False
     day0_target_families = None
     day0_requires_exit_monitor = False
+    day0_monitor_succeeded = True
     if day0_wake:
         _day0_urgent_wake_pending.set()
         day0_target_families = (
@@ -4014,16 +4025,41 @@ def _edli_reactor_wake_poll_once() -> bool:
             except Exception:
                 logger.exception(
                     "Day0 reactor wake held-position monitor failed; "
-                    "wake remains queued for retry"
+                    "continuing the event lane while the wake remains queued "
+                    "for targeted monitor retry"
                 )
-                return False
-            if monitor_ran is not True:
-                return False
+                day0_monitor_succeeded = False
+            else:
+                day0_monitor_succeeded = monitor_ran is True
+                if not day0_monitor_succeeded:
+                    logger.warning(
+                        "Day0 reactor wake held-position monitor incomplete; "
+                        "continuing the event lane while the wake remains queued "
+                        "for targeted monitor retry"
+                    )
         else:
             logger.info(
                 "Day0 reactor wake bypassed exit monitor: "
                 "target families have no runtime exposure or resting entry"
             )
+        if wake_event_state is not None and wake_event_state.finished:
+            if not day0_monitor_succeeded:
+                return False
+            if not _acknowledge_edli_reactor_wake_batch(
+                wake,
+                wakes,
+                day0_wake=True,
+            ):
+                return False
+            logger.info(
+                "Day0 monitor completed after terminal reactor event: "
+                "wake id=%s batch=%d events=%d families=%d",
+                wake.wake_id,
+                len(wakes),
+                len(wake_event_ids),
+                len(wake_families),
+            )
+            return True
     if not substrate_refresh_wake:
         ran = _edli_event_reactor_cycle(
             producer_wake_reason=wake.reason,
@@ -4033,6 +4069,8 @@ def _edli_reactor_wake_poll_once() -> bool:
     if ran is not True:
         return False
     if wake_event_ids and not _reactor_wake_events_finished(wake_event_ids):
+        return False
+    if day0_wake and not day0_monitor_succeeded:
         return False
     if not _acknowledge_edli_reactor_wake_batch(
         wake,

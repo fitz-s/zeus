@@ -18,6 +18,7 @@ in_scope:
 - docs/reference/AGENTS.md
 - src/data/replacement_forecast_materializer.py
 - src/data/replacement_forecast_cycle_policy.py
+- src/main.py
 - src/engine/position_belief.py
 - src/execution/venue_sync_contract.py
 - src/engine/cycle_runtime.py
@@ -54,6 +55,7 @@ in_scope:
 - tests/execution/test_venue_sync_contract.py
 - tests/test_monitor_refresh_nowcast_wiring.py
 - tests/test_runtime_guards.py
+- tests/test_forecast_live_daemon.py
 - tests/test_command_recovery.py
 - tests/test_exchange_reconcile.py
 - tests/state/test_fill_dedup.py
