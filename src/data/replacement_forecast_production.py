@@ -1607,11 +1607,45 @@ def _replacement_cycle_availability_poll_if_needed(
     return report
 
 
+def _prepared_reseed_manifests(
+    raw_manifest_dir: object,
+    manifest_snapshot: dict[str, object] | None,
+) -> tuple[datetime | None, object | None]:
+    if manifest_snapshot is None:
+        return None, None
+    from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+        _load_manifests,
+    )
+
+    computed_at = manifest_snapshot.get("computed_at")
+    if not isinstance(computed_at, datetime):
+        computed_at = datetime.now(timezone.utc)
+        manifest_snapshot["computed_at"] = computed_at
+    if "manifests" not in manifest_snapshot:
+        manifest_paths = manifest_snapshot.get("manifest_paths")
+        if isinstance(manifest_paths, (tuple, list)) and manifest_paths:
+            from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+                _load_manifest_files,
+            )
+
+            manifest_snapshot["manifests"] = _load_manifest_files(
+                manifest_paths,
+                computed_at=computed_at,
+            )
+        else:
+            manifest_snapshot["manifests"] = _load_manifests(
+                Path(str(raw_manifest_dir)),
+                computed_at=computed_at,
+            )
+    return computed_at, manifest_snapshot["manifests"]
+
+
 def _enqueue_fusion_upgrade_reseeds_if_needed(
     cfg: dict[str, object],
     *,
     scopes: Sequence[tuple[str, str, str]] | None = None,
     changed_sources: Sequence[str] | None = None,
+    manifest_snapshot: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """Enqueue scopes whose provider set or consumed raw input revision changed.
 
@@ -1624,6 +1658,10 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
     if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
         return None
     try:
+        computed_at, manifests = _prepared_reseed_manifests(
+            raw_manifest_dir,
+            manifest_snapshot,
+        )
         from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
             enqueue_fusion_upgrade_reseeds,
         )
@@ -1635,6 +1673,8 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
             limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
             scopes=scopes,
             changed_sources=changed_sources,
+            computed_at=computed_at,
+            manifests=manifests,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("fusion-upgrade trigger skipped (fail-soft): %s", exc)
@@ -1645,6 +1685,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(
     cfg: dict[str, object],
     *,
     scopes: Sequence[tuple[str, str, str]] | None = None,
+    manifest_snapshot: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """U5 step 2a — enqueue re-materialization seeds for active-window families whose latest
     posterior consumed a STRICTLY OLDER cycle than the freshest materializable in-universe cycle.
@@ -1658,6 +1699,10 @@ def _enqueue_cycle_advance_reseeds_if_needed(
     if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
         return None
     try:
+        computed_at, manifests = _prepared_reseed_manifests(
+            raw_manifest_dir,
+            manifest_snapshot,
+        )
         from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
             enqueue_cycle_advance_reseeds,
         )
@@ -1670,6 +1715,8 @@ def _enqueue_cycle_advance_reseeds_if_needed(
             trades_db=_zeus_trade_db_path(),
             limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
             scopes=scopes,
+            computed_at=computed_at,
+            manifests=manifests,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("cycle-advance trigger skipped (fail-soft): %s", exc)

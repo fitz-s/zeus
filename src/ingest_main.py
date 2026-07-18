@@ -1779,7 +1779,11 @@ def _replacement_availability_poll_tick():
         scopes: tuple[tuple[str, str, str], ...] | None = None,
         changed_sources: tuple[str, ...] | None = None,
         include_cycle_advance: bool = True,
+        prepared_manifest_snapshot: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        manifest_snapshot = None
+        if scopes is not None:
+            manifest_snapshot = prepared_manifest_snapshot or {}
         upgrade_report = (
             _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
             if scopes is None
@@ -1787,6 +1791,7 @@ def _replacement_availability_poll_tick():
                 cfg,
                 scopes=scopes,
                 changed_sources=changed_sources,
+                manifest_snapshot=manifest_snapshot,
             )
         )
         if upgrade_report is not None:
@@ -1797,7 +1802,11 @@ def _replacement_availability_poll_tick():
         cycle_advance_report = (
             _enqueue_cycle_advance_reseeds_if_needed(cfg)
             if scopes is None
-            else _enqueue_cycle_advance_reseeds_if_needed(cfg, scopes=scopes)
+            else _enqueue_cycle_advance_reseeds_if_needed(
+                cfg,
+                scopes=scopes,
+                manifest_snapshot=manifest_snapshot,
+            )
         )
         if cycle_advance_report is not None:
             report["cycle_advance_status"] = cycle_advance_report.get("status")
@@ -1918,6 +1927,7 @@ def _replacement_availability_poll_tick():
             "committed_family_count": len(scopes),
         }
         if scopes:
+            manifest_snapshot = None
             anchor_scopes = tuple(
                 scope for scope in scopes if scope not in anchor_scopes_attempted
             )
@@ -1938,10 +1948,20 @@ def _replacement_availability_poll_tick():
                     report["anchor_scope_manifest_count"] = anchor_report.get(
                         "written_manifest_count"
                     )
+                    written_manifests = tuple(
+                        str(path)
+                        for path in (anchor_report.get("written_manifests") or ())
+                        if str(path).strip()
+                    )
+                    if written_manifests:
+                        manifest_snapshot = {
+                            "manifest_paths": written_manifests,
+                        }
             _attach_reseed_reports(
                 report,
                 scopes=scopes,
                 changed_sources=(source,),
+                prepared_manifest_snapshot=manifest_snapshot,
             )
         else:
             _attach_reseed_reports(report)

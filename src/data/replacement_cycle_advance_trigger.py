@@ -46,6 +46,7 @@ from typing import Sequence
 
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
+from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 from src.data.replacement_forecast_readiness import SOURCE_ID
 
 _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
@@ -537,6 +538,7 @@ def enqueue_cycle_advance_reseeds(
     computed_at: datetime | None = None,
     limit: int = 50,
     scopes: Sequence[tuple[str, str, str]] | None = None,
+    manifests: Sequence[RawForecastArtifactManifest] | None = None,
 ) -> dict[str, object]:
     """For every active-window target whose latest posterior consumed a STRICTLY OLDER cycle than
     the freshest materializable in-universe cycle, enqueue exactly one re-materialization seed
@@ -651,7 +653,11 @@ def enqueue_cycle_advance_reseeds(
             )
         )
 
-    manifests = _load_manifests(raw_dir, computed_at=now)
+    manifests = (
+        _load_manifests(raw_dir, computed_at=now)
+        if manifests is None
+        else tuple(manifests)
+    )
 
     # HELD-position families (priority tier i). Read-only on the trades DB (mode=ro — the trigger
     # NEVER writes zeus_trades; K1 DB split). Fail-soft to empty: prioritization is best-effort.

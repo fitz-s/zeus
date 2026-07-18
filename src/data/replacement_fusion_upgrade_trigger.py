@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 from src.data.replacement_forecast_readiness import SOURCE_ID
 
 _LOG = logging.getLogger("zeus.replacement_fusion_upgrade_trigger")
@@ -429,6 +430,7 @@ def enqueue_fusion_upgrade_reseeds(
     limit: int = 50,
     scopes: Sequence[tuple[str, str, str]] | None = None,
     changed_sources: Sequence[str] | None = None,
+    manifests: Sequence[RawForecastArtifactManifest] | None = None,
 ) -> dict[str, object]:
     """Enqueue scopes with a larger provider set or changed persisted input revision.
 
@@ -532,7 +534,11 @@ def enqueue_fusion_upgrade_reseeds(
             )
         )
 
-    manifests = _load_manifests(raw_dir, computed_at=now)
+    manifests = (
+        _load_manifests(raw_dir, computed_at=now)
+        if manifests is None
+        else tuple(manifests)
+    )
 
     conn = _connect(forecast_db, write_class="live")
     conn.row_factory = sqlite3.Row

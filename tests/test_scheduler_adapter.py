@@ -319,6 +319,7 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "available_cycle": "2026-07-02T12:00:00+00:00",
             "written_manifest_count": 1,
+            "written_manifests": ["/tmp/munich-high.manifest.json"],
             "coverage": {
                 "status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
                 "target_count": 2,
@@ -369,21 +370,19 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
     assert result["source_clock_cursor_deferred_sources"] == ()
     assert probe_kwargs == [{"advance_cursor": False}]
-    assert fusion_calls == [
-        {
-            "scopes": (("Munich", "2026-07-03", "high"),),
-            "changed_sources": ("icon_global",),
-        },
-    ]
+    assert fusion_calls[0]["scopes"] == (("Munich", "2026-07-03", "high"),)
+    assert fusion_calls[0]["changed_sources"] == ("icon_global",)
+    assert fusion_calls[0]["manifest_snapshot"] is cycle_calls[0]["manifest_snapshot"]
+    assert fusion_calls[0]["manifest_snapshot"]["manifest_paths"] == (
+        "/tmp/munich-high.manifest.json",
+    )
     assert anchor_calls == [
         {
             "max_wall_clock_seconds": 10.0,
             "required_scopes": (("Munich", "2026-07-03", "high"),),
         }
     ]
-    assert cycle_calls == [
-        {"scopes": (("Munich", "2026-07-03", "high"),)},
-    ]
+    assert cycle_calls[0]["scopes"] == (("Munich", "2026-07-03", "high"),)
     assert call_order == [
         "probe",
         "scoped_download",
@@ -396,6 +395,68 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["reseed_maintenance_status"] == (
         "SOURCE_COMMIT_RESEEDS_PUBLISHED"
     )
+
+
+def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import src.data.replacement_cycle_advance_trigger as cycle_trigger
+    import src.data.replacement_forecast_production as prod
+    import src.data.replacement_forecast_seed_discovery as discovery
+    import src.data.replacement_fusion_upgrade_trigger as fusion_trigger
+
+    loaded = (object(),)
+    load_calls = []
+    trigger_calls = []
+    monkeypatch.setattr(
+        discovery,
+        "_load_manifests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scoped source commit must not scan manifest inventory")
+        ),
+    )
+    monkeypatch.setattr(
+        discovery,
+        "_load_manifest_files",
+        lambda paths, *, computed_at: load_calls.append((paths, computed_at)) or loaded,
+    )
+    monkeypatch.setattr(
+        fusion_trigger,
+        "enqueue_fusion_upgrade_reseeds",
+        lambda **kwargs: trigger_calls.append(("fusion", kwargs)) or {},
+    )
+    monkeypatch.setattr(
+        cycle_trigger,
+        "enqueue_cycle_advance_reseeds",
+        lambda **kwargs: trigger_calls.append(("cycle", kwargs)) or {},
+    )
+    cfg = {
+        "forecast_db": tmp_path / "forecast.db",
+        "seed_dir": tmp_path / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+        "limit": 8,
+    }
+    manifest_path = tmp_path / "anchor.manifest.json"
+    snapshot = {"manifest_paths": (str(manifest_path),)}
+
+    prod._enqueue_fusion_upgrade_reseeds_if_needed(
+        cfg,
+        scopes=(("Paris", "2026-07-18", "high"),),
+        changed_sources=("ecmwf_ifs",),
+        manifest_snapshot=snapshot,
+    )
+    prod._enqueue_cycle_advance_reseeds_if_needed(
+        cfg,
+        scopes=(("Paris", "2026-07-18", "high"),),
+        manifest_snapshot=snapshot,
+    )
+
+    assert len(load_calls) == 1
+    assert load_calls[0][0] == (str(manifest_path),)
+    assert trigger_calls[0][1]["manifests"] is loaded
+    assert trigger_calls[1][1]["manifests"] is loaded
+    assert trigger_calls[0][1]["computed_at"] == trigger_calls[1][1]["computed_at"]
 
 
 def test_replacement_availability_notification_error_keeps_global_reseed(

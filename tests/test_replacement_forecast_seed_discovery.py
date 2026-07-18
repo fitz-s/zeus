@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION
@@ -17,6 +18,7 @@ from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest,
 from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOURCE_ID
 from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
 from src.data.replacement_forecast_seed_discovery import (
+    _load_manifest_files,
     _load_manifests,
     _manifest_allows_target_date,
     _latest_manifest,
@@ -119,6 +121,34 @@ def test_load_manifests_reuses_unchanged_files_but_rechecks_availability(
     assert before == ()
     assert len(after) == len(changed) == 1
     assert reads == [manifest_path.resolve(), manifest_path.resolve()]
+
+
+def test_load_manifest_files_reads_only_producer_committed_paths(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    selected = _write_manifest(
+        raw_dir,
+        name="selected",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={},
+    )
+    _write_manifest(
+        raw_dir,
+        name="historical",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={},
+    )
+
+    manifests = _load_manifest_files(
+        (selected,),
+        computed_at=datetime.fromisoformat("2026-06-06T04:00:00+00:00"),
+    )
+
+    assert len(manifests) == 1
+    assert manifests[0].product_metadata["manifest_json"] == str(selected.resolve())
 
 
 def _init_db(path: Path) -> None:

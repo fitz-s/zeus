@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from src.config import cities_by_name
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
@@ -47,6 +47,37 @@ _MANIFEST_CACHE: dict[
     Path,
     dict[Path, tuple[tuple[int, int, int], RawForecastArtifactManifest]],
 ] = {}
+
+
+def _read_manifest_with_path(path: Path) -> RawForecastArtifactManifest:
+    loaded = read_manifest(path)
+    return RawForecastArtifactManifest(
+        **{
+            **loaded.to_dict(),
+            "product_metadata": {
+                **dict(loaded.product_metadata),
+                "manifest_json": str(path),
+            },
+        }
+    )
+
+
+def _load_manifest_files(
+    paths: Sequence[Path | str],
+    *,
+    computed_at: datetime,
+) -> tuple[RawForecastArtifactManifest, ...]:
+    """Load an exact producer-committed manifest set without inventory discovery."""
+
+    manifests = tuple(
+        _read_manifest_with_path(path)
+        for path in sorted({Path(raw).resolve() for raw in paths})
+    )
+    return tuple(
+        manifest
+        for manifest in manifests
+        if manifest.source_available_at <= computed_at
+    )
 
 
 @dataclass(frozen=True)
@@ -210,16 +241,7 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
             if entry is not None and entry[0] == signature:
                 manifest = entry[1]
             else:
-                loaded = read_manifest(path)
-                manifest = RawForecastArtifactManifest(
-                    **{
-                        **loaded.to_dict(),
-                        "product_metadata": {
-                            **dict(loaded.product_metadata),
-                            "manifest_json": str(path),
-                        },
-                    }
-                )
+                manifest = _read_manifest_with_path(path)
             current[path] = (signature, manifest)
         _MANIFEST_CACHE[root] = current
     return tuple(
