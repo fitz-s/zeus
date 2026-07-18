@@ -852,8 +852,10 @@ def _enqueue_single_family_belief_reseed_failsoft(
         ).start()
     except Exception as exc:  # noqa: BLE001 - monitor remains fail-closed, never blocked
         with _BELIEF_RESEED_LOCK:
-            if _BELIEF_RESEED_GENERATIONS.get(key) == generation:
-                _BELIEF_RESEED_GENERATIONS.pop(key, None)
+            # No worker exists to serve arrivals coalesced while ``start`` was
+            # blocked. Clear the whole dispatch window so the next arrival can
+            # create a real worker.
+            _BELIEF_RESEED_GENERATIONS.pop(key, None)
         logger.warning(
             "monitor belief reseed dispatch FAILED city=%s target_date=%s metric=%s exc=%s",
             city,

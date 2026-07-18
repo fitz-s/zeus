@@ -231,9 +231,7 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
     root = raw_manifest_dir.resolve()
     with _MANIFEST_CACHE_LOCK:
         observed_version = _MANIFEST_CACHE_VERSIONS.get(root, 0)
-        while (active := _MANIFEST_LOADS.get(root)) is not None:
-            while root in _MANIFEST_LOADS:
-                active.wait()
+        while root in _MANIFEST_LOADS:
             if _MANIFEST_CACHE_VERSIONS.get(root, 0) > observed_version:
                 current = _MANIFEST_CACHE.get(root, {})
                 return tuple(
@@ -241,6 +239,14 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
                     for _, manifest in current.values()
                     if manifest.source_available_at <= computed_at
                 )
+            _MANIFEST_LOADS[root].wait()
+        if _MANIFEST_CACHE_VERSIONS.get(root, 0) > observed_version:
+            current = _MANIFEST_CACHE.get(root, {})
+            return tuple(
+                manifest
+                for _, manifest in current.values()
+                if manifest.source_available_at <= computed_at
+            )
         active = threading.Condition(_MANIFEST_CACHE_LOCK)
         _MANIFEST_LOADS[root] = active
         cached = dict(_MANIFEST_CACHE.get(root, {}))

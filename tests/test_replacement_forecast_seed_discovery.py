@@ -206,6 +206,69 @@ def test_load_manifests_singleflights_concurrent_inventory_scans(
     assert [len(result) for result in results] == [1, 1]
 
 
+def test_load_manifests_waiter_uses_completed_generation_cache(
+    tmp_path: Path,
+) -> None:
+    import time
+
+    import src.data.replacement_forecast_seed_discovery as discovery
+
+    raw_dir = tmp_path / "raw"
+    manifest_path = _write_manifest(
+        raw_dir,
+        name="selected",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={},
+    ).resolve()
+    root = raw_dir.resolve()
+    manifest = discovery._read_manifest_with_path(manifest_path)
+    stat = manifest_path.stat()
+    signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+
+    with discovery._MANIFEST_CACHE_LOCK:
+        prior = threading.Condition(discovery._MANIFEST_CACHE_LOCK)
+        discovery._MANIFEST_CACHE.pop(root, None)
+        discovery._MANIFEST_CACHE_VERSIONS[root] = 0
+        discovery._MANIFEST_LOADS[root] = prior
+
+    results: list[tuple[RawForecastArtifactManifest, ...]] = []
+    waiter = threading.Thread(
+        target=lambda: results.append(
+            _load_manifests(
+                raw_dir,
+                computed_at=datetime.fromisoformat("2026-06-06T04:00:00+00:00"),
+            )
+        )
+    )
+    waiter.start()
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline and not prior._waiters:  # noqa: SLF001
+        time.sleep(0.005)
+    assert prior._waiters  # noqa: SLF001
+
+    with discovery._MANIFEST_CACHE_LOCK:
+        discovery._MANIFEST_CACHE[root] = {manifest_path: (signature, manifest)}
+        discovery._MANIFEST_CACHE_VERSIONS[root] = 1
+        discovery._MANIFEST_LOADS.pop(root)
+        prior.notify_all()
+        # A new loader generation wins the lock before the old waiter. The
+        # waiter must consume generation 1 instead of waiting on generation 2.
+        replacement = threading.Condition(discovery._MANIFEST_CACHE_LOCK)
+        discovery._MANIFEST_LOADS[root] = replacement
+
+    waiter.join(0.5)
+    returned_without_replacement_notify = not waiter.is_alive()
+    with discovery._MANIFEST_CACHE_LOCK:
+        discovery._MANIFEST_LOADS.pop(root, None)
+        replacement.notify_all()
+    waiter.join(0.5)
+
+    assert returned_without_replacement_notify is True
+    assert [len(result) for result in results] == [1]
+
+
 def test_load_manifest_files_reads_only_producer_committed_paths(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     selected = _write_manifest(

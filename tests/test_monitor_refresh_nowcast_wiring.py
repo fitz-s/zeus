@@ -89,6 +89,49 @@ def test_belief_reseed_dispatch_is_family_isolated_and_coalesced(monkeypatch) ->
     assert paris_calls == 2
 
 
+def test_belief_reseed_start_failure_clears_coalesced_generation(monkeypatch) -> None:
+    real_thread = threading.Thread
+    start_entered = threading.Event()
+    release_start = threading.Event()
+
+    class _FailedThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            start_entered.set()
+            assert release_start.wait(1.0)
+            raise RuntimeError("injected start failure")
+
+    monkeypatch.setattr(monitor_refresh_module.threading, "Thread", _FailedThread)
+    with monitor_refresh_module._BELIEF_RESEED_LOCK:
+        monitor_refresh_module._BELIEF_RESEED_GENERATIONS.clear()
+
+    first_result: list[object] = []
+
+    def enqueue_first() -> None:
+        first_result.append(
+            monitor_refresh_module._enqueue_single_family_belief_reseed_failsoft(
+                city="Paris", target_date="2026-07-18", metric="high"
+            )
+        )
+
+    first = real_thread(target=enqueue_first)
+    first.start()
+    assert start_entered.wait(0.5)
+    duplicate = monitor_refresh_module._enqueue_single_family_belief_reseed_failsoft(
+        city="paris", target_date="2026-07-18", metric="HIGH"
+    )
+    assert duplicate["status"] == "CYCLE_ADVANCE_RESEED_COALESCED"
+    release_start.set()
+    first.join(1.0)
+
+    assert first.is_alive() is False
+    assert first_result == [None]
+    with monitor_refresh_module._BELIEF_RESEED_LOCK:
+        assert monitor_refresh_module._BELIEF_RESEED_GENERATIONS == {}
+
+
 def _replacement_belief(*, fresh: bool = True) -> ReplacementBelief:
     return ReplacementBelief(
         held_side_prob=0.73,
