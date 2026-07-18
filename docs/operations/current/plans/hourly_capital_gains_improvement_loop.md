@@ -10,6 +10,7 @@
 - **隔离约束:** source/city/family/event/candidate/request/query/command 任一处失败或阻塞，只能影响依赖它的动作；pre-submit deadline/retry 必须局部化，外部 side effect 开始后转入 must-complete settlement/reconciliation，不占全局 discovery reactor。
 - **今天的运行态根因:** `state/zeus-world.db` 约 81GB，`opportunity_event_processing` 实读至少 10,837,406 行。100-event wake 的状态 SQL 因 `consumer_name + event_id IN (...)` 被 planner 选成仅按 consumer 的覆盖索引扫描；原查询 2,000ms 后仍未完成，live `edli-reactor-wake` 线程采样几乎全在 `sqlite3_step`。
 - **修复与实测:** 改为 `VALUES` 驱动的 `(consumer_name,event_id)` 复合主键 join；同一 live DB/同一 100-event batch 连续 20 次 median 2.50ms、近 p95 2.98ms、max 3.92ms。query-plan antibody 要求复合主键同时约束两列；`tests/test_forecast_live_daemon.py` 80 passed。未复制/修改 live DB，未重启 daemon。
+- **故障域解耦:** targeted Day0 exit monitor 不再同步占用 wake listener。每个 attempt 由 `wake_id` 唯一拥有；同 family event 等待 monitor 完成后再做 complementary BUY/HOLD，保持 SELL→BUY exposure 因果顺序；pending/刚失败的 monitor wake 在本地 selection 中被跳过，独立 price/forecast wake 可继续 drain。原 durable wake 只在 monitor+event 都完成后 ack，进程重启仍会恢复。已验证 slow monitor 阻塞期间独立 market wake 可执行并 ack；新 Day0 未被 attempt 接管时仍会抢占。wake suite 82 passed、event reactor 97 passed、exit-monitor 锁契约 7 passed。
 - **下一突破口:** durable wake queue 902 文件导致每 poll 重复全目录解析约 36ms；processing 历史债和 81GB DB 仍可能放大 ingest 写成本。先验证 active-vs-retained 语义，再消除 O(backlog) poll 和无界历史索引维护，不做盲目 live cleanup。
 
 ### 2026-07-17 00:10Z tick — deterministic dead-token SELL 脱离全局拍卖；JIT book hash 自拒绝已修

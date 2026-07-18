@@ -694,8 +694,10 @@ def test_producer_fast_path_skips_metar_ledger_recovery_sync():
 def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
     import src.events.reactor as reactor_module
     import src.main as main
+    from src.runtime import reactor_wake
 
     captured = {}
+    urgent_identity = ["wake-owned", "day0_extreme_event_committed"]
 
     def fake_run(**kwargs):
         captured.update(kwargs)
@@ -703,7 +705,13 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
 
     monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
     monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", fake_run)
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_identity",
+        lambda: tuple(urgent_identity),
+    )
     main._day0_urgent_wake_pending.clear()
+    main._day0_exit_monitor_attempts.clear()
     try:
         assert main._edli_event_reactor_cycle(
             producer_wake_reason="market_price_advanced",
@@ -712,8 +720,13 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
         assert captured["urgent_day0_pending"]() is False
         main._day0_urgent_wake_pending.set()
         assert captured["urgent_day0_pending"]() is True
+        main._day0_exit_monitor_attempts["wake-owned"] = None
+        assert captured["urgent_day0_pending"]() is False
+        urgent_identity[0] = "wake-new"
+        assert captured["urgent_day0_pending"]() is True
     finally:
         main._day0_urgent_wake_pending.clear()
+        main._day0_exit_monitor_attempts.clear()
 
 
 @pytest.mark.parametrize(

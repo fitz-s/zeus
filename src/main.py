@@ -88,6 +88,8 @@ _cycle_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
 _day0_urgent_wake_pending = threading.Event()
+_day0_exit_monitor_attempts_lock = threading.Lock()
+_day0_exit_monitor_attempts: dict[str, bool | None] = {}
 _edli_reactor_wake_thread: threading.Thread | None = None
 _edli_last_reactor_wake_id: str | None = None
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
@@ -3647,7 +3649,7 @@ def _edli_event_reactor_cycle(
         producer_wake_reason=producer_wake_reason,
         producer_wake_event_ids=producer_wake_event_ids,
         producer_wake_families=producer_wake_families,
-        urgent_day0_pending=_day0_urgent_wake_pending.is_set,
+        urgent_day0_pending=_unowned_day0_urgent_wake_pending,
     )
 
 
@@ -3885,6 +3887,104 @@ def _reactor_wake_events_ready(
     ).ready
 
 
+def _day0_exit_monitor_attempt_state(wake_id: str) -> tuple[bool, bool | None]:
+    with _day0_exit_monitor_attempts_lock:
+        return wake_id in _day0_exit_monitor_attempts, _day0_exit_monitor_attempts.get(
+            wake_id
+        )
+
+
+def _complete_day0_exit_monitor_attempt(wake_id: str, *, succeeded: bool) -> None:
+    with _day0_exit_monitor_attempts_lock:
+        if wake_id in _day0_exit_monitor_attempts:
+            _day0_exit_monitor_attempts[wake_id] = bool(succeeded)
+
+
+def _forget_day0_exit_monitor_attempt(wake_id: str) -> None:
+    with _day0_exit_monitor_attempts_lock:
+        _day0_exit_monitor_attempts.pop(wake_id, None)
+
+
+def _day0_exit_monitor_excluded_wake_ids() -> frozenset[str]:
+    """Skip in-flight or just-failed monitor wakes for one queue selection."""
+
+    with _day0_exit_monitor_attempts_lock:
+        excluded = frozenset(
+            wake_id
+            for wake_id, result in _day0_exit_monitor_attempts.items()
+            if result is not True
+        )
+        for wake_id in excluded:
+            if _day0_exit_monitor_attempts.get(wake_id) is False:
+                _day0_exit_monitor_attempts.pop(wake_id, None)
+        return excluded
+
+
+def _unowned_day0_urgent_wake_pending() -> bool:
+    """Preempt only for Day0 work not already isolated in a monitor attempt."""
+
+    if not _day0_urgent_wake_pending.is_set():
+        return False
+    with _day0_exit_monitor_attempts_lock:
+        owned = frozenset(_day0_exit_monitor_attempts)
+    try:
+        from src.runtime.reactor_wake import reactor_urgent_wake_identity
+
+        identity = reactor_urgent_wake_identity()
+    except Exception:
+        return True
+    if identity is None or identity[1] != "day0_extreme_event_committed":
+        return not owned
+    return identity[0] not in owned
+
+
+def _dispatch_day0_exit_monitor(
+    wake_id: str,
+    target_families: frozenset[tuple[str, str, str]] | None,
+) -> bool:
+    """Start one wake-owned monitor attempt without occupying the wake listener."""
+
+    with _day0_exit_monitor_attempts_lock:
+        if wake_id in _day0_exit_monitor_attempts:
+            return False
+        _day0_exit_monitor_attempts[wake_id] = None
+
+    def _run() -> None:
+        succeeded = False
+        try:
+            succeeded = (
+                _exit_monitor_cycle(
+                    target_families=target_families,
+                    urgent_day0=True,
+                )
+                is True
+            )
+            if not succeeded:
+                logger.warning(
+                    "Day0 wake targeted monitor incomplete; wake id=%s remains queued",
+                    wake_id,
+                )
+        except Exception:
+            logger.exception(
+                "Day0 wake targeted monitor failed; wake id=%s remains queued",
+                wake_id,
+            )
+        finally:
+            _complete_day0_exit_monitor_attempt(wake_id, succeeded=succeeded)
+
+    try:
+        threading.Thread(
+            target=_run,
+            name=f"day0-exit-{wake_id[:8]}",
+            daemon=True,
+        ).start()
+    except Exception:
+        _complete_day0_exit_monitor_attempt(wake_id, succeeded=False)
+        logger.exception("Day0 wake targeted monitor dispatch failed: wake id=%s", wake_id)
+        return False
+    return True
+
+
 def _acknowledge_edli_reactor_wake_batch(
     wake,
     wakes,
@@ -3915,6 +4015,8 @@ def _acknowledge_edli_reactor_wake_batch(
         )
         return False
     if day0_wake:
+        for queued in wakes:
+            _forget_day0_exit_monitor_attempt(queued.wake_id)
         acknowledged_wake_ids = {queued.wake_id for queued in wakes}
         try:
             next_urgent_identity = reactor_urgent_wake_identity()
@@ -3947,7 +4049,12 @@ def _edli_reactor_wake_poll_once() -> bool:
         read_reactor_wake,
     )
 
-    wake = read_reactor_wake()
+    excluded_wake_ids = _day0_exit_monitor_excluded_wake_ids()
+    wake = (
+        read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
+        if excluded_wake_ids
+        else read_reactor_wake()
+    )
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
     wakes = coalescible_reactor_wakes(wake)
@@ -4001,8 +4108,14 @@ def _edli_reactor_wake_poll_once() -> bool:
         day0_requires_exit_monitor = _day0_wake_requires_exit_monitor(
             day0_target_families
         )
-        if day0_requires_exit_monitor and _held_position_monitor_active.is_set():
-            return False
+        if day0_requires_exit_monitor:
+            started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
+            if not started:
+                _dispatch_day0_exit_monitor(wake.wake_id, day0_target_families)
+            _started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
+            day0_monitor_succeeded = result is True
+            if not day0_monitor_succeeded:
+                return False
     if substrate_refresh_wake:
         if (
             _edli_reactor_active_lock.locked()
@@ -4020,28 +4133,7 @@ def _edli_reactor_wake_poll_once() -> bool:
     ):
         return False
     if day0_wake and not substrate_refresh_wake:
-        if day0_requires_exit_monitor:
-            try:
-                monitor_ran = _exit_monitor_cycle(
-                    target_families=day0_target_families,
-                    urgent_day0=True,
-                )
-            except Exception:
-                logger.exception(
-                    "Day0 reactor wake held-position monitor failed; "
-                    "continuing the event lane while the wake remains queued "
-                    "for targeted monitor retry"
-                )
-                day0_monitor_succeeded = False
-            else:
-                day0_monitor_succeeded = monitor_ran is True
-                if not day0_monitor_succeeded:
-                    logger.warning(
-                        "Day0 reactor wake held-position monitor incomplete; "
-                        "continuing the event lane while the wake remains queued "
-                        "for targeted monitor retry"
-                    )
-        else:
+        if not day0_requires_exit_monitor:
             logger.info(
                 "Day0 reactor wake bypassed exit monitor: "
                 "target families have no runtime exposure or resting entry"
@@ -4074,8 +4166,10 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
     if wake_event_ids and not _reactor_wake_events_finished(wake_event_ids):
         return False
-    if day0_wake and not day0_monitor_succeeded:
-        return False
+    if day0_wake and day0_requires_exit_monitor:
+        _started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
+        if result is not True:
+            return False
     if not _acknowledge_edli_reactor_wake_batch(
         wake,
         wakes,

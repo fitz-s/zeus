@@ -1049,6 +1049,39 @@ def test_reactor_wake_queue_follows_alpha_clock_before_maintenance(tmp_path) -> 
     assert read_reactor_wake(path=path) is None
 
 
+def test_reactor_wake_queue_skips_locally_owned_attempt(tmp_path) -> None:
+    from src.runtime.reactor_wake import publish_reactor_wake, read_reactor_wake
+
+    path = tmp_path / "wake.json"
+    market = publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="wake-market",
+        published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+    day0 = publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="wake-day0",
+        published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
+    )
+
+    assert read_reactor_wake(path=path) == day0
+    assert read_reactor_wake(
+        path=path,
+        exclude_wake_ids=(day0.wake_id,),
+    ) == market
+    assert (
+        read_reactor_wake(
+            path=path,
+            exclude_wake_ids=(day0.wake_id, market.wake_id),
+        )
+        is None
+    )
+
+
 def test_reactor_wake_coalesces_same_reason_until_ordering_barrier(tmp_path) -> None:
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wakes,
@@ -1572,7 +1605,7 @@ def test_reactor_wake_poll_keeps_unsettled_not_ready_hint(monkeypatch) -> None:
     assert main._edli_last_reactor_wake_id is None
 
 
-def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None:
+def test_day0_reactor_wake_dispatches_exit_monitor_before_reactor(monkeypatch) -> None:
     import threading
 
     import src.main as main
@@ -1597,6 +1630,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
 
     calls: list[str] = []
     pending = threading.Event()
+    main._day0_exit_monitor_attempts.clear()
 
     def _run_reactor(
         *,
@@ -1636,11 +1670,12 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     )
     monkeypatch.setattr(
         main,
-        "_exit_monitor_cycle",
-        lambda *, target_families=None, urgent_day0=False: (
+        "_dispatch_day0_exit_monitor",
+        lambda wake_id, target_families: (
             calls.append(
-                f"monitor:{sorted(target_families or ())}:urgent={urgent_day0}"
+                f"monitor:{sorted(target_families or ())}:urgent=True"
             )
+            or main._day0_exit_monitor_attempts.__setitem__(wake_id, True)
             or True
         ),
     )
@@ -1660,7 +1695,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     (False, RuntimeError("monitor failed")),
     ids=("incomplete", "exception"),
 )
-def test_day0_monitor_failure_keeps_retry_but_does_not_block_reactor(
+def test_day0_monitor_failure_retries_before_its_own_event(
     monkeypatch,
     first_monitor_result,
 ) -> None:
@@ -1680,11 +1715,7 @@ def test_day0_monitor_failure_keeps_retry_but_does_not_block_reactor(
     event_states = iter(
         (
             main._ReactorWakeEventState(ready=True, finished=False),
-            main._ReactorWakeEventState(
-                ready=False,
-                finished=True,
-                terminal=True,
-            ),
+            main._ReactorWakeEventState(ready=True, finished=False),
         )
     )
     monitor_results = iter((first_monitor_result, True))
@@ -1700,7 +1731,10 @@ def test_day0_monitor_failure_keeps_retry_but_does_not_block_reactor(
         def is_set(self) -> bool:
             return False
 
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    def read_wake(*, exclude_wake_ids=()):
+        return None if wake.wake_id in exclude_wake_ids else wake
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", read_wake)
     monkeypatch.setattr(
         reactor_wake,
         "coalescible_reactor_wakes",
@@ -1723,17 +1757,18 @@ def test_day0_monitor_failure_keeps_retry_but_does_not_block_reactor(
         lambda _target_families: True,
     )
 
-    def run_monitor(**_kwargs):
+    def dispatch_monitor(wake_id, _target_families):
         calls.append("monitor")
         result = next(monitor_results)
         if isinstance(result, Exception):
-            raise result
-        return result
+            result = False
+        main._day0_exit_monitor_attempts[wake_id] = result is True
+        return True
 
     monkeypatch.setattr(
         main,
-        "_exit_monitor_cycle",
-        run_monitor,
+        "_dispatch_day0_exit_monitor",
+        dispatch_monitor,
     )
     monkeypatch.setattr(
         main,
@@ -1741,15 +1776,20 @@ def test_day0_monitor_failure_keeps_retry_but_does_not_block_reactor(
         lambda **_kwargs: calls.append("reactor") or True,
     )
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+    main._day0_exit_monitor_attempts.clear()
 
     assert main._edli_reactor_wake_poll_once() is False
-    assert calls == ["monitor", "reactor"]
+    assert calls == ["monitor"]
     assert acknowledgements == []
     assert pending.is_set() is True
     assert main._edli_last_reactor_wake_id is None
 
+    assert main._edli_reactor_wake_poll_once() is False
+    assert calls == ["monitor"]
+    assert acknowledgements == []
+
     assert main._edli_reactor_wake_poll_once() is True
-    assert calls == ["monitor", "reactor", "monitor"]
+    assert calls == ["monitor", "monitor", "reactor"]
     assert acknowledgements == [wake.wake_id]
     assert pending.is_set() is False
     assert main._edli_last_reactor_wake_id == wake.wake_id
@@ -1772,6 +1812,7 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
     )
     calls: list[str] = []
     pending = threading.Event()
+    main._day0_exit_monitor_attempts.clear()
 
     class _Lock:
         def locked(self) -> bool:
@@ -1808,11 +1849,12 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
     )
     monkeypatch.setattr(
         main,
-        "_exit_monitor_cycle",
-        lambda *, target_families=None, urgent_day0=False: (
+        "_dispatch_day0_exit_monitor",
+        lambda wake_id, target_families: (
             calls.append(
-                f"monitor:{sorted(target_families or ())}:urgent={urgent_day0}"
+                f"monitor:{sorted(target_families or ())}:urgent=True"
             )
+            or main._day0_exit_monitor_attempts.__setitem__(wake_id, True)
             or True
         ),
     )
@@ -1831,7 +1873,7 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
     assert pending.is_set() is True
 
 
-def test_day0_wake_marks_periodic_monitor_for_preemption_without_ack(
+def test_day0_wake_monitor_contention_keeps_its_event_queued(
     monkeypatch,
 ) -> None:
     import threading
@@ -1847,10 +1889,13 @@ def test_day0_wake_marks_periodic_monitor_for_preemption_without_ack(
         ("event-day0",),
     )
     pending = threading.Event()
+    calls: list[str] = []
+    main._day0_exit_monitor_attempts.clear()
 
-    class _Held:
-        def is_set(self) -> bool:
-            return True
+    def dispatch_monitor(wake_id, _target_families):
+        calls.append("monitor")
+        main._day0_exit_monitor_attempts[wake_id] = False
+        return True
 
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
     monkeypatch.setattr(
@@ -1858,13 +1903,124 @@ def test_day0_wake_marks_periodic_monitor_for_preemption_without_ack(
         "acknowledge_reactor_wake",
         lambda _wake: pytest.fail("busy monitor must leave urgent wake durable"),
     )
-    monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _ids: main._ReactorWakeEventState(ready=True, finished=False),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_target_families",
+        lambda _ids: frozenset({("Paris", "2026-07-16", "high")}),
+    )
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_requires_exit_monitor",
+        lambda _families: True,
+    )
+    monkeypatch.setattr(main, "_dispatch_day0_exit_monitor", dispatch_monitor)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.append("reactor") or True,
+    )
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 
     assert main._edli_reactor_wake_poll_once() is False
+    assert calls == ["monitor"]
     assert pending.is_set() is True
     assert main._edli_last_reactor_wake_id is None
+    main._forget_day0_exit_monitor_attempt(wake.wake_id)
+
+
+def test_slow_day0_monitor_does_not_block_unrelated_wake(monkeypatch) -> None:
+    import threading
+    import time
+
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    day0_wake = reactor_wake.ReactorWake(
+        "wake-day0-slow-monitor",
+        "2026-07-16T12:00:00+00:00",
+        "ingest_main",
+        "day0_extreme_event_committed",
+        ("event-day0",),
+        (("Paris", "2026-07-16", "high"),),
+    )
+    market_wake = reactor_wake.ReactorWake(
+        "wake-market-independent",
+        "2026-07-16T12:00:01+00:00",
+        "price_channel",
+        "market_price_advanced",
+        ("event-market",),
+    )
+    monitor_started = threading.Event()
+    release_monitor = threading.Event()
+    reactor_calls: list[str] = []
+    acknowledgements: list[str] = []
+
+    def run_monitor(**_kwargs):
+        monitor_started.set()
+        assert release_monitor.wait(2.0)
+        return True
+
+    def read_wake(*, exclude_wake_ids=()):
+        if day0_wake.wake_id not in exclude_wake_ids:
+            return day0_wake
+        return market_wake
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", read_wake)
+    monkeypatch.setattr(
+        reactor_wake, "coalescible_reactor_wakes", lambda selected: (selected,)
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _ids: main._ReactorWakeEventState(ready=True, finished=False),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
+    monkeypatch.setattr(
+        main, "_day0_wake_requires_exit_monitor", lambda _families: True
+    )
+    monkeypatch.setattr(main, "_exit_monitor_cycle", run_monitor)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda *, producer_wake_reason=None, **_kwargs: (
+            reactor_calls.append(str(producer_wake_reason)) or True
+        ),
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+    main._day0_exit_monitor_attempts.clear()
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert monitor_started.wait(1.0)
+    assert reactor_calls == []
+
+    started = time.monotonic()
+    assert main._edli_reactor_wake_poll_once() is True
+    assert time.monotonic() - started < 0.5
+    assert reactor_calls == ["market_price_advanced"]
+    assert acknowledgements == [market_wake.wake_id]
+
+    release_monitor.set()
+    deadline = time.monotonic() + 2.0
+    while main._day0_exit_monitor_attempt_state(day0_wake.wake_id)[1] is not True:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert acknowledgements == [market_wake.wake_id, day0_wake.wake_id]
+    assert reactor_calls == ["market_price_advanced", "day0_extreme_event_committed"]
 
 
 def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:

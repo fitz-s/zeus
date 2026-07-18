@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Collection, Iterator
 
 REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
@@ -260,7 +260,11 @@ def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
     ]
 
 
-def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
+def read_reactor_wake(
+    *,
+    path: Path | None = None,
+    exclude_wake_ids: Collection[str] = (),
+) -> ReactorWake | None:
     """Read the queued fact with the shortest alpha clock first.
 
     Day0 observations and executable-book changes can reverse value in
@@ -271,7 +275,10 @@ def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
     are coalesced and acknowledgement remains exact.
     """
 
-    queued = _queued_wakes(path)
+    excluded = {str(wake_id) for wake_id in exclude_wake_ids}
+    queued = [
+        item for item in _queued_wakes(path) if item[1].wake_id not in excluded
+    ]
     priority_reasons = (
         "day0_extreme_event_committed",
         "market_price_advanced",
@@ -286,7 +293,10 @@ def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
             return wake
     for _queue_file, wake in queued:
         return wake
-    return _read_reactor_wake_path(_wake_path(path))
+    legacy = _read_reactor_wake_path(_wake_path(path))
+    if legacy is not None and legacy.wake_id not in excluded:
+        return legacy
+    return None
 
 
 def coalescible_reactor_wakes(
