@@ -24,7 +24,7 @@ from src.data.forecast_source_registry import (
     source_id_for_ensemble_model,
     stable_payload_hash,
 )
-from src.data.openmeteo_quota import quota_tracker
+from src.data.openmeteo_client import fetch as _fetch_openmeteo
 
 
 API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -184,7 +184,6 @@ def fetch_ensemble(
         params["past_days"] = past_days
 
     fetch_time = datetime.now(timezone.utc)
-    last_error = None
     cache_key = _cache_key(city, model, past_days, role, temperature_metric)
     cached = _ENSEMBLE_CACHE.get(cache_key)
     if cached is not None:
@@ -193,44 +192,34 @@ def fetch_ensemble(
         if age_seconds <= CACHE_TTL_SECONDS and cached_days >= int(forecast_days):
             return _clone_result(cached)
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            if not quota_tracker.acquire_call("ensemble"):
-                print("  WARN Open-Meteo quota blocked ensemble request")
-                return None
-            resp = httpx.get(API_URL, params=params, timeout=30.0)
-            resp.raise_for_status()
-            data = resp.json()
-            parsed = _parse_response(
-                data,
-                model,
-                fetch_time,
-                source_id=source_spec.source_id,
-                authority_tier=source_spec.authority_tier,
-                degradation_level=source_spec.degradation_level,
-                forecast_source_role=role,
-                temperature_metric=temperature_metric,
-            )
-            parsed["forecast_days"] = int(forecast_days)
-            parsed[_CACHE_STORED_AT_KEY] = fetch_time
-            _ENSEMBLE_CACHE[cache_key] = parsed
-            return _clone_result(parsed)
-        except (httpx.HTTPError, KeyError, ValueError) as e:
-            last_error = e
-            if isinstance(e, httpx.HTTPStatusError) and e.response is not None and e.response.status_code == 429:
-                retry_after = e.response.headers.get("Retry-After")
-                try:
-                    retry_after_seconds = int(retry_after) if retry_after else None
-                except ValueError:
-                    retry_after_seconds = None
-                quota_tracker.note_rate_limited(retry_after_seconds)
-            if attempt < MAX_RETRIES - 1:
-                import time
-                time.sleep(RETRY_BACKOFF_S)
-
-    # All retries exhausted — return None (caller decides: skip market this cycle)
-    print(f"  WARN ensemble fetch failed after {MAX_RETRIES} retries: {last_error}")
-    return None
+    try:
+        data = _fetch_openmeteo(
+            API_URL,
+            params,
+            timeout=30.0,
+            max_retries=MAX_RETRIES,
+            backoff_sec=RETRY_BACKOFF_S,
+            endpoint_label=f"ensemble_{model}_{role}",
+        )
+        parsed = _parse_response(
+            data,
+            model,
+            fetch_time,
+            source_id=source_spec.source_id,
+            authority_tier=source_spec.authority_tier,
+            degradation_level=source_spec.degradation_level,
+            forecast_source_role=role,
+            temperature_metric=temperature_metric,
+        )
+        parsed["forecast_days"] = int(forecast_days)
+        parsed[_CACHE_STORED_AT_KEY] = fetch_time
+        _ENSEMBLE_CACHE[cache_key] = parsed
+        return _clone_result(parsed)
+    except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as exc:
+        # Preserve the legacy fail-soft public contract. The shared client owns
+        # request identity, quota/lease accounting, and 429 embargoes.
+        print(f"  WARN ensemble fetch failed after {MAX_RETRIES} retries: {exc}")
+        return None
 
 
 def _fetch_registered_ingest_ensemble(

@@ -24,17 +24,6 @@ NYC = City(
 )
 
 
-class _Response:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def raise_for_status(self):
-        return None
-
-    def json(self):
-        return self._payload
-
-
 def _payload():
     return {
         "hourly": {
@@ -50,13 +39,13 @@ def test_fetch_ensemble_uses_cache(monkeypatch):
     ensemble_client._ENSEMBLE_CACHE.clear()
     calls = {"n": 0}
 
-    monkeypatch.setattr(ensemble_client.quota_tracker, "acquire_call", lambda endpoint="": True)
-
-    def _get(*args, **kwargs):
+    def _fetch(*args, **kwargs):
         calls["n"] += 1
-        return _Response(_payload())
+        assert kwargs["endpoint_label"] == "ensemble_gfs025_monitor_fallback"
+        assert kwargs["max_retries"] == ensemble_client.MAX_RETRIES
+        return _payload()
 
-    monkeypatch.setattr(ensemble_client.httpx, "get", _get)
+    monkeypatch.setattr(ensemble_client, "_fetch_openmeteo", _fetch)
 
     first = ensemble_client.fetch_ensemble(
         NYC,
@@ -89,13 +78,11 @@ def test_fetch_ensemble_cache_key_includes_model(monkeypatch):
     ensemble_client._ENSEMBLE_CACHE.clear()
     calls = {"n": 0}
 
-    monkeypatch.setattr(ensemble_client.quota_tracker, "acquire_call", lambda endpoint="": True)
-
-    def _get(*args, **kwargs):
+    def _fetch(*args, **kwargs):
         calls["n"] += 1
-        return _Response(_payload())
+        return _payload()
 
-    monkeypatch.setattr(ensemble_client.httpx, "get", _get)
+    monkeypatch.setattr(ensemble_client, "_fetch_openmeteo", _fetch)
 
     ensemble_client.fetch_ensemble(
         NYC,
@@ -177,13 +164,11 @@ def test_fetch_ensemble_cache_key_includes_role(monkeypatch):
     ensemble_client._ENSEMBLE_CACHE.clear()
     calls = {"n": 0}
 
-    monkeypatch.setattr(ensemble_client.quota_tracker, "acquire_call", lambda endpoint="": True)
-
-    def _get(*args, **kwargs):
+    def _fetch(*args, **kwargs):
         calls["n"] += 1
-        return _Response(_payload())
+        return _payload()
 
-    monkeypatch.setattr(ensemble_client.httpx, "get", _get)
+    monkeypatch.setattr(ensemble_client, "_fetch_openmeteo", _fetch)
 
     monitor = ensemble_client.fetch_ensemble(
         NYC,
@@ -202,3 +187,19 @@ def test_fetch_ensemble_cache_key_includes_role(monkeypatch):
     assert monitor is not None and diagnostic is not None
     assert monitor["forecast_source_role"] == "monitor_fallback"
     assert diagnostic["forecast_source_role"] == "diagnostic"
+
+
+def test_fetch_ensemble_returns_none_when_shared_quota_is_blocked(monkeypatch):
+    ensemble_client._ENSEMBLE_CACHE.clear()
+
+    def _blocked(*args, **kwargs):
+        raise RuntimeError("Open-Meteo quota exhausted (10000 calls today)")
+
+    monkeypatch.setattr(ensemble_client, "_fetch_openmeteo", _blocked)
+
+    assert ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=4,
+        model="gfs025",
+        role="monitor_fallback",
+    ) is None

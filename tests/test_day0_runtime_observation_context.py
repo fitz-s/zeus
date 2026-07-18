@@ -11,6 +11,7 @@ directly — none of which depend on the discovery pipeline.
 """
 # Created: 2026-04-30
 # Last reused/audited: 2026-07-06
+# Authority basis: Day0 observation context and shared Open-Meteo client contract.
 
 from __future__ import annotations
 
@@ -234,6 +235,49 @@ def test_day0_wu_observation_preserves_station_and_iso_time(monkeypatch):
     assert obs.high_so_far == 74.0
     assert obs.low_so_far == 70.0
     assert obs.observation_time.endswith("+00:00")
+
+
+def test_openmeteo_hourly_uses_shared_client_and_preserves_typed_context(monkeypatch):
+    calls: list[dict] = []
+
+    def _fetch(url, params, **kwargs):
+        calls.append({"url": url, "params": params, **kwargs})
+        return {
+            "hourly": {
+                "time": ["2026-04-01T08:00", "2026-04-01T12:00"],
+                "temperature_2m": [70.0, 74.0],
+            }
+        }
+
+    monkeypatch.setattr(observation_client, "_fetch_openmeteo", _fetch)
+    context = observation_client._fetch_openmeteo_hourly(
+        _city(),
+        target_day=date(2026, 4, 1),
+        reference_local=datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+        tz=timezone.utc,
+    )
+
+    assert calls == [
+        {
+            "url": "https://api.open-meteo.com/v1/forecast",
+            "params": {
+                "latitude": 40.0,
+                "longitude": -73.0,
+                "hourly": "temperature_2m",
+                "temperature_unit": "fahrenheit",
+                "past_hours": 36,
+                "forecast_hours": 0,
+                "timezone": "UTC",
+            },
+            "timeout": 15.0,
+            "max_retries": 1,
+            "endpoint_label": "observation_openmeteo_hourly_Test City",
+        }
+    ]
+    assert isinstance(context, observation_client.Day0ObservationContext)
+    assert context.source == "openmeteo_hourly"
+    assert context.high_so_far == 74.0
+    assert context.low_so_far == 70.0
 
 
 def test_day0_nowcast_context_parses_epoch_timestamps():

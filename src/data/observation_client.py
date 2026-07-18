@@ -27,7 +27,7 @@ import httpx
 
 from src.config import City
 from src.contracts.exceptions import MissingCalibrationError, ObservationUnavailableError
-from src.data.openmeteo_quota import quota_tracker
+from src.data.openmeteo_client import fetch as _fetch_openmeteo
 from src.types.temperature import Fahrenheit, FahrenheitBox
 
 
@@ -859,14 +859,10 @@ def _fetch_openmeteo_hourly(
     tz: ZoneInfo,
 ) -> Optional[dict]:
     try:
-        if not quota_tracker.acquire_call("observation"):
-            logger.warning("Open-Meteo quota blocked non-settlement observation for %s", city.name)
-            return None
-
         temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
-        resp = httpx.get(
+        data = _fetch_openmeteo(
             "https://api.open-meteo.com/v1/forecast",
-            params={
+            {
                 "latitude": city.lat,
                 "longitude": city.lon,
                 "hourly": "temperature_2m",
@@ -876,9 +872,9 @@ def _fetch_openmeteo_hourly(
                 "timezone": city.timezone,
             },
             timeout=15.0,
+            max_retries=1,
+            endpoint_label=f"observation_openmeteo_hourly_{city.name}",
         )
-        resp.raise_for_status()
-        data = resp.json()
 
         hourly = data["hourly"]
         temps = hourly["temperature_2m"]
@@ -919,7 +915,7 @@ def _fetch_openmeteo_hourly(
             provider_reported_time=None,
         )
 
-    except (httpx.HTTPError, KeyError, ValueError) as e:
+    except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as e:
         logger.warning("Open-Meteo hourly fetch failed for %s: %s", city.name, e)
         return None
 

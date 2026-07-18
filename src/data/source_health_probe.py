@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.data.openmeteo_client import ARCHIVE_URL, fetch as _fetch_openmeteo
+
 logger = logging.getLogger(__name__)
 
 EXPECTED_SOURCES = [
@@ -76,14 +78,11 @@ def _empty_result(error: str | None = None) -> dict[str, Any]:
 
 def _probe_open_meteo_archive(timeout: float) -> dict[str, Any]:
     """Probe open-meteo archive API with a minimal 1-day fetch."""
-    import httpx
-    from src.data.openmeteo_client import ARCHIVE_URL
-
     start = time.monotonic()
     try:
-        resp = httpx.get(
+        data = _fetch_openmeteo(
             ARCHIVE_URL,
-            params={
+            {
                 "latitude": 51.51,
                 "longitude": -0.13,
                 "start_date": "2025-01-01",
@@ -95,12 +94,13 @@ def _probe_open_meteo_archive(timeout: float) -> dict[str, Any]:
                 "timezone": "UTC",
             },
             timeout=timeout,
+            max_retries=1,
+            endpoint_label="source_health_open_meteo_archive",
         )
         latency_ms = int((time.monotonic() - start) * 1000)
-        resp.raise_for_status()
         # Both daily fields must be present and non-empty, else the source is degraded for
         # one metric even if the HTTP call succeeded.
-        _daily = (resp.json() or {}).get("daily", {})
+        _daily = (data or {}).get("daily", {})
         if not _daily.get("temperature_2m_max") or not _daily.get("temperature_2m_min"):
             raise ValueError("open-meteo archive missing temperature_2m_max or temperature_2m_min")
         now = _now_iso()
@@ -478,7 +478,16 @@ def _apply_prior_failure_state(
     prev = prior.get(source, {})
     if result.get("error") and result.get("last_success_at") is None and source not in _MANUAL_OPERATOR_SOURCES:
         prev_consec = prev.get("consecutive_failures", 0) or 0
-        if prev.get("last_success_at"):
+        error = str(result.get("error") or "").lower()
+        quota_blocked = source == "open_meteo_archive" and (
+            "open-meteo quota exhausted" in error
+            or "open-meteo request embargoed" in error
+            or ("429" in error and "too many requests" in error)
+        )
+        # An Open-Meteo quota denial/429 embargo proves this probe did not
+        # execute. Do not retain a formerly-successful timestamp that a
+        # freshness consumer could mistake for a current healthy probe.
+        if prev.get("last_success_at") and not quota_blocked:
             result["last_success_at"] = prev.get("last_success_at")
         result["consecutive_failures"] = prev_consec + 1
         result["degraded_since"] = prev.get("degraded_since") or result.get("last_failure_at")

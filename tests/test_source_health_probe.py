@@ -326,6 +326,74 @@ class TestPriorStateSemantics:
         assert results["ogimet"]["last_success_at"] == prior_success_at
         assert results["ogimet"]["consecutive_failures"] == 1
 
+    @pytest.mark.parametrize(
+        "blocked_error",
+        [
+            "Open-Meteo quota exhausted (10000 calls today)",
+            "Open-Meteo request embargoed (request_retry_until=123)",
+        ],
+    )
+    def test_openmeteo_quota_block_does_not_retain_prior_success(self, monkeypatch, blocked_error):
+        """Quota denial or 429 embargo is a failed probe, never fresh health."""
+        import src.data.source_health_probe as shp
+
+        def _blocked(*args, **kwargs):
+            assert kwargs["max_retries"] == 1
+            assert kwargs["endpoint_label"] == "source_health_open_meteo_archive"
+            raise RuntimeError(blocked_error)
+
+        monkeypatch.setattr(shp, "_fetch_openmeteo", _blocked)
+
+        results = probe_sources(
+            ("open_meteo_archive",),
+            _prior_state={
+                "open_meteo_archive": {
+                    "last_success_at": "2026-05-21T16:00:00+00:00",
+                    "consecutive_failures": 0,
+                    "degraded_since": None,
+                }
+            },
+        )
+
+        result = results["open_meteo_archive"]
+        assert result["last_success_at"] is None
+        assert result["last_failure_at"] is not None
+        assert result["consecutive_failures"] == 1
+        assert result["degraded_since"] == result["last_failure_at"]
+        assert result["error"] == blocked_error
+
+    def test_openmeteo_real_429_does_not_retain_prior_success(self, monkeypatch):
+        """The shared client's HTTPStatusError shape is a current quota block."""
+        import httpx
+        import src.data.source_health_probe as shp
+
+        request = httpx.Request("GET", "https://archive-api.open-meteo.com/v1/archive")
+        response = httpx.Response(429, request=request)
+
+        def _rate_limited(*_args, **_kwargs):
+            raise httpx.HTTPStatusError(
+                "429 Too Many Requests",
+                request=request,
+                response=response,
+            )
+
+        monkeypatch.setattr(shp, "_fetch_openmeteo", _rate_limited)
+        results = probe_sources(
+            ("open_meteo_archive",),
+            _prior_state={
+                "open_meteo_archive": {
+                    "last_success_at": "2026-05-21T16:00:00+00:00",
+                    "consecutive_failures": 0,
+                    "degraded_since": None,
+                }
+            },
+        )
+
+        result = results["open_meteo_archive"]
+        assert result["last_success_at"] is None
+        assert result["consecutive_failures"] == 1
+        assert result["error"] == "429 Too Many Requests"
+
 
 class TestWriteSourceHealth:
     """write_source_health writes correct file structure."""
