@@ -924,50 +924,30 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 source_commit_notifications += 1
 
         assert priority_task is not None
-        priority_source, priority_report = _download_task(*priority_task)
-        reports_by_source[priority_source].append(priority_report)
-
-        if quota_abort.is_set():
-            # Preserve per-source retry accounting without admitting any more
-            # provider calls after the priority probe proves the transport is blocked.
-            for task in tasks:
-                source, task_report = _download_task(*task)
-                reports_by_source[source].append(task_report)
-        elif len(tasks) == 1:
-            with ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="source-clock-bpf",
-            ) as executor:
-                future = executor.submit(_download_task, *tasks[0])
-                _notify_source_commit(priority_source, priority_report)
-                source, task_report = future.result()
-                reports_by_source[source].append(task_report)
-                _notify_source_commit(source, task_report)
-        elif tasks:
-            with ThreadPoolExecutor(
-                max_workers=worker_count,
-                thread_name_prefix="source-clock-bpf",
-            ) as executor:
-                futures = {
-                    executor.submit(_download_task, *task): task[0]
-                    for task in tasks
-                }
-                # Start all remaining provider I/O before materializing the priority
-                # commit. The urgent family still publishes first, while its anchor and
-                # seed work overlap the broader source fan-out.
-                _notify_source_commit(priority_source, priority_report)
-                for future in as_completed(futures):
-                    source = futures[future]
-                    try:
-                        result_source, task_report = future.result()
-                        reports_by_source[result_source].append(task_report)
-                        _notify_source_commit(result_source, task_report)
-                    except Exception as exc:  # noqa: BLE001 - preserve successful sources
-                        fanout_errors.append(
-                            f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
-                        )
-        else:
-            _notify_source_commit(priority_source, priority_report)
+        priority_report: dict[str, object] = {}
+        scheduled_tasks = (priority_task, *tasks)
+        executor_worker_count = min(max_workers, len(scheduled_tasks))
+        with ThreadPoolExecutor(
+            max_workers=executor_worker_count,
+            thread_name_prefix="source-clock-bpf",
+        ) as executor:
+            futures = {
+                executor.submit(_download_task, *task): (task[0], index == 0)
+                for index, task in enumerate(scheduled_tasks)
+            }
+            for future in as_completed(futures):
+                source, is_priority = futures[future]
+                try:
+                    result_source, task_report = future.result()
+                except Exception as exc:  # noqa: BLE001 - preserve successful sources
+                    fanout_errors.append(
+                        f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
+                    )
+                    continue
+                reports_by_source[result_source].append(task_report)
+                if is_priority:
+                    priority_report = task_report
+                _notify_source_commit(result_source, task_report)
 
         source_results: dict[str, dict[str, object]] = {}
         for source in updated_sources:

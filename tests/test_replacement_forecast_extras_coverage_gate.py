@@ -940,6 +940,7 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
     notifications: list[tuple[str, dict[str, object]]] = []
     lock = threading.Lock()
     fanout_started = threading.Event()
+    release_priority = threading.Event()
 
     monkeypatch.setitem(
         prod.settings["edli"],
@@ -977,6 +978,10 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
             starts.append(source)
             if len(starts) > 1:
                 fanout_started.set()
+        if source == "ecmwf_ifs":
+            assert release_priority.wait(0.5), (
+                "a stalled priority source must not block an independent source commit"
+            )
         return {
             "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
             "target_count": len(kwargs["targets"]),
@@ -1001,6 +1006,8 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
                 "remaining provider I/O must start before the priority materialization callback"
             )
         notifications.append((source, dict(task_report)))
+        if source == "icon_global":
+            release_priority.set()
 
     report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         {
@@ -1014,6 +1021,7 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
 
     assert starts[0] == "ecmwf_ifs"
     assert starts[1:] == ["icon_global"]
+    assert notifications[0][0] == "icon_global"
     assert {source for source, _report in notifications} == set(sources)
     assert all(report["committed_families"] for _source, report in notifications)
     assert all(
