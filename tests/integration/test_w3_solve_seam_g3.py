@@ -1387,6 +1387,112 @@ def test_current_global_family_survives_duplicate_local_spine_input_loss():
     ) == "SPINE_WIRING_FAULT:broken"
 
 
+def test_global_deterministic_actuation_builds_only_selected_exact_proof():
+    from src.solve.solver import deterministic_bin_payoff_witness_identity
+
+    family, _bins = R._three_bin_family()
+    selected = family.candidates[0]
+    bin_id = era._candidate_bin_id_from_topology(selected)
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=era._candidate_bin_id_from_topology(candidate),
+            condition_id=str(candidate.condition_id),
+            yes_token_id=str(candidate.yes_token_id),
+            no_token_id=str(candidate.no_token_id),
+        )
+        for candidate in family.candidates
+    )
+    captured_at = _dt.datetime(2026, 7, 14, 5, 0, tzinfo=_dt.timezone.utc)
+    witness_fields = {
+        "family_key": family.family_id,
+        "bindings": bindings,
+        "exact_yes_payoffs": ((bin_id, 0),),
+        "q_version": "q-day0-exact",
+        "resolution_identity": "resolution-day0-exact",
+        "topology_identity": "topology-day0-exact",
+        "posterior_identity_hash": "posterior-day0-exact",
+        "source_truth_identity": "source-day0-exact",
+        "authority_certificate_hash": "authority-day0-exact",
+        "band_alpha": 0.05,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": captured_at,
+    }
+    witness = DeterministicBinPayoffWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(minutes=5),
+        witness_identity=deterministic_bin_payoff_witness_identity(
+            **witness_fields
+        ),
+    )
+    row = R._row(
+        condition_id=selected.condition_id,
+        yes_token=selected.yes_token_id,
+        no_token=selected.no_token_id,
+        yes_ask=0.80,
+        no_ask=0.20,
+        snapshot_id="snapshot-day0-exact",
+    )
+    actuation = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(
+                condition_id=selected.condition_id,
+                bin_id=bin_id,
+                side="NO",
+                token_id=selected.no_token_id,
+            )
+        )
+    )
+
+    proofs = era._global_deterministic_actuation_proofs(
+        global_actuation=actuation,
+        prepared_global_family=bridge.PreparedGlobalFamily(
+            decision_id="decision-day0-exact",
+            probability_witness=witness,
+            candidate_seeds=(),
+        ),
+        family=family,
+        snapshot_rows=[row],
+    )
+
+    assert proofs is not None
+    assert len(proofs) == 1
+    proof = proofs[0]
+    assert proof.candidate is selected
+    assert proof.direction == "buy_no"
+    assert proof.token_id == selected.no_token_id
+    assert proof.q_posterior == 1.0
+    assert proof.q_lcb_5pct == 1.0
+    assert proof.same_bin_yes_posterior == 0.0
+    assert proof.q_source == "day0_deterministic_bin_payoff"
+    assert proof.execution_price is not None
+    assert proof.trade_score > 0.0
+
+    unknown = family.candidates[1]
+    unknown_actuation = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(
+                condition_id=unknown.condition_id,
+                bin_id=era._candidate_bin_id_from_topology(unknown),
+                side="NO",
+                token_id=unknown.no_token_id,
+            )
+        )
+    )
+    with pytest.raises(
+        ValueError, match="GLOBAL_ACTUATION_DETERMINISTIC_PAYOFF_MISSING"
+    ):
+        era._global_deterministic_actuation_proofs(
+            global_actuation=unknown_actuation,
+            prepared_global_family=bridge.PreparedGlobalFamily(
+                decision_id="decision-day0-exact",
+                probability_witness=witness,
+                candidate_seeds=(),
+            ),
+            family=family,
+            snapshot_rows=[],
+        )
+
+
 def test_global_actuation_revalidates_content_then_preserves_selected_witness(monkeypatch):
     content = {
         field: f"current-{field}"

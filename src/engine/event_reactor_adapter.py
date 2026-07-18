@@ -10954,6 +10954,129 @@ def _global_current_state_may_rebind_scalar_rejection(reason: str | None) -> boo
     )
 
 
+def _global_deterministic_actuation_proofs(
+    *,
+    global_actuation: object,
+    prepared_global_family: object,
+    family: object,
+    snapshot_rows: list[dict[str, Any]],
+) -> tuple["_CandidateProof", ...] | None:
+    """Build only the selected exact-payoff proof; unknown siblings stay unknown."""
+
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        family_payoff_q_samples,
+    )
+
+    witness = getattr(prepared_global_family, "probability_witness", None)
+    if not isinstance(witness, DeterministicBinPayoffWitness):
+        return None
+    decision = getattr(global_actuation, "decision", None)
+    selected = getattr(decision, "candidate", None)
+    if selected is None:
+        raise ValueError("GLOBAL_ACTUATION_CANDIDATE_MISSING")
+    side = str(getattr(selected, "side", "") or "").strip().upper()
+    direction = {"YES": "buy_yes", "NO": "buy_no"}.get(side)
+    if direction is None:
+        raise ValueError("GLOBAL_ACTUATION_DETERMINISTIC_SIDE_INVALID")
+    condition_id = str(getattr(selected, "condition_id", "") or "").strip()
+    bin_id = str(getattr(selected, "bin_id", "") or "").strip()
+    token_id = str(getattr(selected, "token_id", "") or "").strip()
+    candidates = tuple(
+        candidate
+        for candidate in tuple(getattr(family, "candidates", ()) or ())
+        if str(getattr(candidate, "condition_id", "") or "") == condition_id
+        and _candidate_bin_id_from_topology(candidate) == bin_id
+    )
+    if len(candidates) != 1:
+        raise ValueError("GLOBAL_ACTUATION_DETERMINISTIC_TOPOLOGY_MISMATCH")
+    candidate = candidates[0]
+    expected_token = str(
+        getattr(candidate, "yes_token_id" if side == "YES" else "no_token_id", "")
+        or ""
+    )
+    if not token_id or token_id != expected_token:
+        raise ValueError("GLOBAL_ACTUATION_DETERMINISTIC_TOKEN_MISMATCH")
+    samples = family_payoff_q_samples(witness, bin_id=bin_id, side=side)
+    if samples is None or samples.size < 2 or not np.all(samples == samples[0]):
+        raise ValueError("GLOBAL_ACTUATION_DETERMINISTIC_PAYOFF_MISSING")
+    q_point = float(samples[0])
+    yes_payoff = witness.exact_yes_payoff(bin_id)
+    if yes_payoff is None:
+        raise ValueError("GLOBAL_ACTUATION_DETERMINISTIC_PAYOFF_MISSING")
+
+    rows = _snapshot_rows_by_condition_and_direction(snapshot_rows)
+    row = rows.get((condition_id, direction))
+    execution_price = None
+    p_fill_lcb = 0.0
+    c_cost_95pct = None
+    missing_reason = None
+    if row is None:
+        missing_reason = "missing executable snapshot row"
+    else:
+        complementary_top_bid = None
+        if direction == "buy_no":
+            yes_row = rows.get((condition_id, "buy_yes"))
+            if yes_row is not None:
+                complementary_top_bid = _optional_float(
+                    yes_row.get("orderbook_top_bid")
+                )
+        try:
+            execution_price, p_fill_lcb, c_cost_95pct = (
+                _execution_price_from_snapshot(
+                    row,
+                    selected_token_id=token_id,
+                    direction=direction,
+                    complementary_top_bid=complementary_top_bid,
+                )
+            )
+        except ValueError as exc:
+            missing_reason = str(exc)
+    score = _robust_trade_score_from_generated_inputs(
+        q_posterior=q_point,
+        q_lcb_5pct=q_point,
+        execution_price=execution_price,
+        c_cost_95pct=c_cost_95pct,
+        p_fill_lcb=p_fill_lcb,
+    )
+    probability_identity = stable_hash(
+        {
+            "witness_identity": witness.witness_identity,
+            "bin_id": bin_id,
+            "side": side,
+        }
+    )
+    return (
+        _CandidateProof(
+            candidate=candidate,
+            token_id=token_id,
+            direction=direction,
+            row=row,
+            executable_snapshot_id=(
+                str(row.get("snapshot_id") or "") if row is not None else None
+            ),
+            execution_price=execution_price,
+            q_posterior=q_point,
+            q_lcb_5pct=q_point,
+            q_lcb_calibration_source="day0_deterministic_bin_payoff",
+            c_cost_95pct=c_cost_95pct,
+            p_fill_lcb=p_fill_lcb,
+            trade_score=score,
+            p_value=0.0 if q_point == 1.0 else 1.0,
+            passed_prefilter=bool(
+                execution_price is not None and missing_reason is None and score > 0.0
+            ),
+            native_quote_available=execution_price is not None,
+            p_cal_vector_hash=probability_identity,
+            p_live_vector_hash=probability_identity,
+            missing_reason=missing_reason,
+            q_source="day0_deterministic_bin_payoff",
+            same_bin_yes_posterior=float(yes_payoff),
+            probability_authority="day0_deterministic_bin_payoff_v1",
+        ),
+    )
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -11672,8 +11795,28 @@ def _build_event_bound_no_submit_receipt_core(
                 source_status="MATCH",
                 family_complete=True,
             )
+    deterministic_global_proofs = None
+    if global_actuation is not None and current_actuation_family is not None:
+        try:
+            deterministic_global_proofs = _global_deterministic_actuation_proofs(
+                global_actuation=global_actuation,
+                prepared_global_family=current_actuation_family,
+                family=family,
+                snapshot_rows=family_rows,
+            )
+        except ValueError as exc:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=str(exc),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+            )
     try:
-        proofs = _generate_candidate_proofs(
+        proofs = deterministic_global_proofs or _generate_candidate_proofs(
             event=event,
             payload=payload,
             family=family,
@@ -11779,7 +11922,28 @@ def _build_event_bound_no_submit_receipt_core(
             selection_exposure_by_outcome=_selection_exposure,
         )
     )
-    if _spine_eligible_event and not _spine_flag_on:
+    if deterministic_global_proofs is not None:
+        _selection_scope_diagnostic: dict[str, object] = {}
+        _spine_entry_proofs = _selection_scoped_proofs(
+            proofs=proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=trade_conn,
+            strategy_policy_conn=trade_conn,
+            strategy_policy_event_type=event.event_type,
+            decision_time=decision_time,
+            allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
+            honor_admission_rejections=False,
+            allow_global_near_settled_rebind=True,
+            enforce_win_rate_floor=False,
+            diagnostic_out=_selection_scope_diagnostic,
+        )
+        proof = _spine_entry_proofs[0] if len(_spine_entry_proofs) == 1 else None
+        if proof is None:
+            _global_prepare_reason = str(
+                _selection_scope_diagnostic.get("empty_reason")
+                or "SELECTION_SCOPE_EMPTY:deterministic_global"
+            )
+    elif _spine_eligible_event and not _spine_flag_on:
         proof = None
         _spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"
     elif _spine_flag_on and _spine_eligible_event:
