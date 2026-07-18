@@ -310,10 +310,14 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
 
         from src.runtime.reactor_wake import publish_reactor_wake
         from src.state.db import get_world_connection, world_write_mutex
+        from src.state.write_coordinator import (
+            DBIdentity,
+            WriteLeaseTimeout,
+            default_runtime_write_coordinator,
+        )
 
-        conn = get_world_connection(write_class="live")
         write_budget_s = _day0_metar_write_budget_seconds()
-        conn.execute(f"PRAGMA busy_timeout = {max(1, int(write_budget_s * 1000.0))}")
+        write_deadline = time.monotonic() + write_budget_s
         mutex = world_write_mutex()
         acquired = mutex.acquire(timeout=write_budget_s)
         if not acquired:
@@ -330,30 +334,63 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
             }
 
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            emitted = _day0_metar_emitter().emit_prefetched(
-                world_conn=conn,
-                prefetch=prefetch,
-                received_at=received_at,
-                limit=max(50, len(prefetch.eligible) * 2),
-                day0_is_tradeable=day0_is_tradeable,
-                family_admission=family_admission,
-                inserted_event_ids=inserted_event_ids,
-                inserted_families=inserted_families,
-                evaluated_report_keys=evaluated_report_keys,
-                persist_ledger=False,
+            remaining_ms = max(
+                0,
+                int((write_deadline - time.monotonic()) * 1000.0),
             )
-            conn.commit()
-            mark_evaluated = getattr(
-                _day0_metar_emitter(),
-                "mark_prefetched_events_evaluated",
-                None,
+            with default_runtime_write_coordinator().lease(
+                (DBIdentity.WORLD,),
+                owner="day0_metar_source_clock",
+                write_class="live",
+                deadline_ms=remaining_ms,
+                max_hold_ms=max(1, int(write_budget_s * 1000.0)),
+            ) as write_lease:
+                conn = get_world_connection(write_class="live")
+                conn.execute(f"PRAGMA busy_timeout = {max(1, remaining_ms)}")
+                before_changes = int(conn.total_changes)
+                conn.execute("BEGIN IMMEDIATE")
+                emitted = _day0_metar_emitter().emit_prefetched(
+                    world_conn=conn,
+                    prefetch=prefetch,
+                    received_at=received_at,
+                    limit=max(50, len(prefetch.eligible) * 2),
+                    day0_is_tradeable=day0_is_tradeable,
+                    family_admission=family_admission,
+                    inserted_event_ids=inserted_event_ids,
+                    inserted_families=inserted_families,
+                    evaluated_report_keys=evaluated_report_keys,
+                    persist_ledger=False,
+                )
+                commit_started = time.monotonic()
+                conn.commit()
+                write_lease.record_commit(
+                    commit_ms=(time.monotonic() - commit_started) * 1000.0,
+                    rows_changed=max(0, int(conn.total_changes) - before_changes),
+                )
+                mark_evaluated = getattr(
+                    _day0_metar_emitter(),
+                    "mark_prefetched_events_evaluated",
+                    None,
+                )
+                if callable(mark_evaluated):
+                    mark_evaluated(evaluated_report_keys)
+                del _DAY0_METAR_PENDING_COMMITS[0]
+        except WriteLeaseTimeout as exc:
+            logger.info(
+                "DAY0_METAR_COMMIT_DEFERRED origin=%s reason=world_writer_gate_busy "
+                "pending_reports=%d budget_ms=%d exc=%r",
+                origin,
+                pending_reports,
+                int(write_budget_s * 1000.0),
+                exc,
             )
-            if callable(mark_evaluated):
-                mark_evaluated(evaluated_report_keys)
-            del _DAY0_METAR_PENDING_COMMITS[0]
+            return {
+                "status": "WRITE_CONTENDED",
+                "pending_reports": pending_reports,
+            }
         except sqlite3.OperationalError as exc:
-            conn.rollback()
+            if conn is not None:
+                conn.rollback()
             if "locked" in str(exc).lower() or "busy" in str(exc).lower():
                 logger.info(
                     "DAY0_METAR_COMMIT_DEFERRED origin=%s reason=sqlite_busy "

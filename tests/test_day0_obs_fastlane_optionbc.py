@@ -732,6 +732,18 @@ class TestDay0MetarSourceClockTick:
         )
         monkeypatch.setattr("src.config.runtime_cities", lambda: [_wu_icao_city()])
 
+        class _Lease:
+            def __enter__(self):
+                return SimpleNamespace(record_commit=lambda **_kw: None)
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+        monkeypatch.setattr(
+            "src.state.write_coordinator.default_runtime_write_coordinator",
+            lambda: SimpleNamespace(lease=lambda *_args, **_kwargs: _Lease()),
+        )
+
     @staticmethod
     def _primed(emitter):
         emitter.ledger_report_keys_loaded = lambda: True
@@ -912,6 +924,8 @@ class TestDay0MetarSourceClockTick:
                 return True
 
         class _Conn:
+            total_changes = 0
+
             def execute(self, sql, _params=()):
                 if "opportunity_events" in sql:
                     raise AssertionError("inserted event IDs must not be recovered by history scan")
@@ -944,8 +958,28 @@ class TestDay0MetarSourceClockTick:
             "_day0_source_family_admission",
             lambda _eligible: admission,
         )
-        monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
+        def _open_world(**_kw):
+            order.append("db_open")
+            return _Conn()
+
+        monkeypatch.setattr("src.state.db.get_world_connection", _open_world)
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
+
+        class _Lease:
+            def __enter__(self):
+                order.append("gate_enter")
+                return SimpleNamespace(
+                    record_commit=lambda **_kw: order.append("record_commit")
+                )
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                order.append("gate_exit")
+                return False
+
+        monkeypatch.setattr(
+            "src.state.write_coordinator.default_runtime_write_coordinator",
+            lambda: SimpleNamespace(lease=lambda *_args, **_kwargs: _Lease()),
+        )
         monkeypatch.setattr(
             "src.runtime.reactor_wake.publish_reactor_wake",
             lambda **kwargs: order.append(
@@ -962,7 +996,13 @@ class TestDay0MetarSourceClockTick:
             "events_emitted": 2,
         }
         wake_entry = next(item for item in order if item.startswith("wake:"))
+        assert order.index("gate_enter") < order.index("db_open") < order.index("begin")
         assert order.index("commit") < order.index(wake_entry)
+        assert (
+            order.index("commit")
+            < order.index("gate_exit")
+            < order.index(wake_entry)
+        )
         assert "ledger" not in order
         assert "wake:event-b,event-a" in wake_entry
         assert "(('Paris', '2026-06-12', 'high'),)" in wake_entry
@@ -995,6 +1035,8 @@ class TestDay0MetarSourceClockTick:
                 return True
 
         class _Conn:
+            total_changes = 0
+
             def execute(self, _sql, _params=()):
                 return self
 
@@ -1094,6 +1136,8 @@ class TestDay0MetarSourceClockTick:
                 return 2
 
         class _Conn:
+            total_changes = 0
+
             def execute(self, _sql, _params=()):
                 return self
 
@@ -1165,7 +1209,7 @@ class TestDay0MetarSourceClockTick:
         result = im._day0_metar_source_clock_tick.__wrapped__()
 
         assert result == {"status": "WRITE_CONTENDED", "pending_reports": 1}
-        conn.close.assert_called_once_with()
+        conn.close.assert_not_called()
         mutex.release.assert_not_called()
         assert len(scheduled) == 1
         args, kwargs = scheduled[0]
@@ -1174,6 +1218,61 @@ class TestDay0MetarSourceClockTick:
         assert kwargs["executor"] == "source_clock_db"
         assert kwargs["replace_existing"] is True
         assert kwargs["run_date"] is not None
+
+    def test_unified_writer_gate_contention_defers_before_db_open(
+        self,
+        monkeypatch,
+    ):
+        import src.ingest_main as im
+        from src.state.write_coordinator import WriteLeaseTimeout
+
+        self._enable(monkeypatch)
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+            eligible=((_wu_icao_city(), object(), "2026-06-12"),),
+        )
+        emitter = self._primed(SimpleNamespace(prefetch=lambda **_kw: prefetch))
+        mutex = MagicMock()
+        mutex.acquire.return_value = True
+        scheduled = []
+
+        class _ContendedLease:
+            def __enter__(self):
+                raise WriteLeaseTimeout("WORLD gate busy")
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: mutex)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection",
+            lambda **_kw: (_ for _ in ()).throw(
+                AssertionError("DB opened before unified WORLD gate")
+            ),
+        )
+        monkeypatch.setattr(
+            "src.state.write_coordinator.default_runtime_write_coordinator",
+            lambda: SimpleNamespace(
+                lease=lambda *_args, **_kwargs: _ContendedLease()
+            ),
+        )
+        monkeypatch.setattr(
+            im,
+            "_scheduler",
+            SimpleNamespace(
+                add_job=lambda *args, **kwargs: scheduled.append((args, kwargs))
+            ),
+        )
+
+        result = im._day0_metar_source_clock_tick.__wrapped__()
+
+        assert result == {"status": "WRITE_CONTENDED", "pending_reports": 1}
+        mutex.release.assert_called_once_with()
+        assert len(scheduled) == 1
+        assert im._DAY0_METAR_PENDING_COMMITS[0][0] is prefetch
 
     def test_commit_retry_reuses_prefetch_after_writer_contention(
         self,
@@ -1204,6 +1303,8 @@ class TestDay0MetarSourceClockTick:
                 return 1
 
         class _Conn:
+            total_changes = 0
+
             def execute(self, sql, _params=()):
                 if sql == "BEGIN IMMEDIATE":
                     order.append("begin")
