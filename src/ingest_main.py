@@ -1821,6 +1821,14 @@ def _replacement_availability_poll_tick():
             "unattempted_target_count": download_report.get("unattempted_target_count"),
             "max_wall_clock_seconds": download_report.get("max_wall_clock_seconds"),
             "error": download_report.get("error"),
+            "fusion_upgrade_status": download_report.get("fusion_upgrade_status"),
+            "fusion_upgrade_seeds_enqueued": download_report.get(
+                "fusion_upgrade_seeds_enqueued"
+            ),
+            "cycle_advance_status": download_report.get("cycle_advance_status"),
+            "cycle_advance_seeds_enqueued": download_report.get(
+                "cycle_advance_seeds_enqueued"
+            ),
         }
         coverage = download_report.get("coverage")
         if isinstance(coverage, dict):
@@ -1971,6 +1979,7 @@ def _replacement_availability_poll_tick():
         return report
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
     source_clock_anchor_report = None
+    anchor_reseed_published = False
     if "ecmwf_ifs" in source_clock_report.updated_sources:
         # The current provider center is the first q input and already has a
         # run-authoritative live-API ladder. Capture it before waiting for the
@@ -1983,6 +1992,12 @@ def _replacement_availability_poll_tick():
                 ),
             )
         )
+        if (
+            isinstance(source_clock_anchor_report, dict)
+            and int(source_clock_anchor_report.get("written_manifest_count") or 0) > 0
+        ):
+            _attach_reseed_reports(source_clock_anchor_report)
+            anchor_reseed_published = True
     notified_source_scopes: set[tuple[str, str, str, str]] = set()
     anchor_scopes_attempted: set[tuple[str, str, str]] = set()
     fallback_reseed_published = False
@@ -2126,9 +2141,11 @@ def _replacement_availability_poll_tick():
         notification_errors = tuple(
             report.get("source_commit_notification_errors") or ()
         )
-        if scoped_reseed_completed and not notification_errors:
+        if (scoped_reseed_completed or anchor_reseed_published) and not notification_errors:
             report["reseed_maintenance_status"] = (
                 "SOURCE_COMMIT_RESEEDS_PUBLISHED"
+                if scoped_reseed_completed
+                else "SOURCE_ANCHOR_RESEEDS_PUBLISHED"
             )
         else:
             # No committed callback completed, or at least one callback failed.

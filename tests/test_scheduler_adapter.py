@@ -441,7 +441,13 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
 
     def _scoped(_cfg, **_kwargs):
         calls.append("scoped_download")
-        assert calls[:3] == ["probe", "anchor", "scoped_download"]
+        assert calls == [
+            "probe",
+            "anchor",
+            "anchor_fusion_reseed",
+            "anchor_cycle_reseed",
+            "scoped_download",
+        ]
         return {
             "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
             "written_row_count": 0,
@@ -455,12 +461,14 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
     monkeypatch.setattr(
         prod,
         "_enqueue_fusion_upgrade_reseeds_if_needed",
-        lambda _cfg: None,
+        lambda _cfg: calls.append("anchor_fusion_reseed")
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
     )
     monkeypatch.setattr(
         prod,
         "_enqueue_cycle_advance_reseeds_if_needed",
-        lambda _cfg: None,
+        lambda _cfg: calls.append("anchor_cycle_reseed")
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1},
     )
     monkeypatch.setattr(
         source_clock_probe,
@@ -472,8 +480,19 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
 
     assert result["source_clock_anchor_download"] == {
         "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+        "fusion_upgrade_status": "FUSION_UPGRADE_TRIGGER",
+        "fusion_upgrade_seeds_enqueued": 1,
+        "cycle_advance_status": "CYCLE_ADVANCE_TRIGGER",
+        "cycle_advance_seeds_enqueued": 1,
     }
-    assert calls == ["probe", "anchor", "scoped_download"]
+    assert result["reseed_maintenance_status"] == "SOURCE_ANCHOR_RESEEDS_PUBLISHED"
+    assert calls == [
+        "probe",
+        "anchor",
+        "anchor_fusion_reseed",
+        "anchor_cycle_reseed",
+        "scoped_download",
+    ]
 
 
 def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
