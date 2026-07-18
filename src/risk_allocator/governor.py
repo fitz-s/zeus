@@ -1076,9 +1076,25 @@ def _load_current_position_authority_costs(
         return {}
     if not _has_table(conn, "venue_commands"):
         return {}
+    current_entry_commands = """
+        WHERE fact.command_id IN (
+            SELECT scoped_cmd.command_id
+              FROM venue_commands scoped_cmd
+              JOIN position_current scoped_pc
+                ON scoped_pc.position_id = scoped_cmd.position_id
+             WHERE scoped_cmd.intent_kind = 'ENTRY'
+               AND scoped_cmd.side = 'BUY'
+               AND scoped_pc.phase IN ('active', 'day0_window', 'pending_exit')
+               AND CASE
+                   WHEN COALESCE(scoped_pc.chain_shares, 0) > 0
+                   THEN scoped_pc.chain_shares
+                   ELSE COALESCE(scoped_pc.shares, 0)
+               END > 0
+        )
+    """
     sql = (
         "WITH "
-        + canonical_trade_fact_cte()
+        + canonical_trade_fact_cte(source_clause_sql=current_entry_commands)
         + ",\n"
         + economic_trade_fact_cte()
         + """

@@ -44,6 +44,7 @@ from src.risk_allocator import (
     snapshot_global_auction_capital_authority,
     summary as risk_allocator_summary,
 )
+from src.risk_allocator.governor import _load_current_position_authority_costs
 from src.riskguard.risk_level import RiskLevel
 from src.types import Bin, BinEdge
 
@@ -990,6 +991,7 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
           chain_cost_basis_usd REAL
         );
         CREATE TABLE venue_trade_facts (
+          trade_fact_id INTEGER PRIMARY KEY,
           command_id TEXT,
           trade_id TEXT,
           state TEXT,
@@ -998,7 +1000,9 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
           local_sequence INTEGER,
           venue_timestamp TEXT,
           observed_at TEXT,
-          tx_hash TEXT
+          tx_hash TEXT,
+          raw_payload_json TEXT,
+          venue_order_id TEXT
         );
         INSERT INTO venue_commands VALUES (
           'cmd-current', 'uuid-current', 'ENTRY', 'BUY', '2902043', 'no-token',
@@ -1088,11 +1092,17 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
         ) VALUES (
           5001, 'OPTIMISTIC_EXPOSURE', 5, '0.68', 'cmd-optimistic', 'REST', '{}', 2
         );
-        INSERT INTO venue_trade_facts VALUES (
+        INSERT INTO venue_trade_facts (
+          command_id, trade_id, state, filled_size, fill_price, local_sequence,
+          venue_timestamp, observed_at, tx_hash
+        ) VALUES (
           'cmd-confirmed', 'trade-confirmed', 'CONFIRMED', '10', '0.69', 1,
           '2026-07-14T07:13:50+00:00', '2026-07-14T07:13:50+00:00', 'tx-confirmed'
         );
-        INSERT INTO venue_trade_facts VALUES (
+        INSERT INTO venue_trade_facts (
+          command_id, trade_id, state, filled_size, fill_price, local_sequence,
+          venue_timestamp, observed_at, tx_hash
+        ) VALUES (
           'cmd-optimistic', 'trade-optimistic', 'MATCHED', '5', '0.68', 1,
           '2026-07-14T07:14:20+00:00', '2026-07-14T07:14:20+00:00', 'tx-optimistic'
         );
@@ -1151,6 +1161,66 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
         3_400_000,
         8_600_000,
     )
+
+
+def test_current_position_authority_costs_exclude_historical_positions():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+          position_id TEXT PRIMARY KEY,
+          phase TEXT,
+          shares REAL,
+          chain_shares REAL
+        );
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          position_id TEXT,
+          intent_kind TEXT,
+          side TEXT
+        );
+        CREATE TABLE venue_trade_facts (
+          trade_fact_id INTEGER PRIMARY KEY,
+          command_id TEXT,
+          trade_id TEXT,
+          state TEXT,
+          filled_size TEXT,
+          fill_price TEXT,
+          local_sequence INTEGER,
+          venue_timestamp TEXT,
+          observed_at TEXT,
+          tx_hash TEXT,
+          raw_payload_json TEXT,
+          venue_order_id TEXT
+        );
+        INSERT INTO position_current VALUES ('active-position', 'active', 5, 0);
+        INSERT INTO position_current VALUES ('settled-position', 'settled', 0, 0);
+        INSERT INTO venue_commands VALUES (
+          'active-command', 'active-position', 'ENTRY', 'BUY'
+        );
+        INSERT INTO venue_commands VALUES (
+          'settled-command', 'settled-position', 'ENTRY', 'BUY'
+        );
+        INSERT INTO venue_trade_facts VALUES (
+          1, 'active-command', 'active-trade', 'CONFIRMED', '5', '0.40', 1,
+          '2026-07-18T00:00:00+00:00', '2026-07-18T00:00:00+00:00',
+          'active-tx', '{}', 'active-order'
+        );
+        INSERT INTO venue_trade_facts VALUES (
+          2, 'settled-command', 'settled-trade', 'CONFIRMED', '1000', '0.99', 1,
+          '2026-07-01T00:00:00+00:00', '2026-07-01T00:00:00+00:00',
+          'settled-tx', '{}', 'settled-order'
+        );
+        """
+    )
+
+    assert _load_current_position_authority_costs(conn) == {
+        "active-position": {
+            "confirmed_cost": Decimal("2.00"),
+            "optimistic_cost": Decimal("0"),
+        }
+    }
 
 
 def test_position_lots_normalize_sibling_and_legacy_weather_exposure_to_family():
