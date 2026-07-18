@@ -332,19 +332,15 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["book_native_side_candidate_coverage_status"] == "COMPLETE"
     assert summary["book_native_side_status_counts"] == {
         "NO": {
-            "BOOK_UNAVAILABLE": 0,
             "EXECUTABLE": 0,
             "NO_ASK": 2,
             "VENUE_METADATA_STALE": 0,
-            "VENUE_METADATA_UNAVAILABLE": 0,
             "VENUE_NOT_EXECUTABLE": 0,
         },
         "YES": {
-            "BOOK_UNAVAILABLE": 0,
             "EXECUTABLE": 1,
             "NO_ASK": 0,
             "VENUE_METADATA_STALE": 0,
-            "VENUE_METADATA_UNAVAILABLE": 0,
             "VENUE_NOT_EXECUTABLE": 1,
         },
     }
@@ -8952,25 +8948,11 @@ def test_current_global_book_epoch_rejects_older_projected_token_change():
         )
 
 
-def test_current_global_book_epoch_isolates_missing_books_to_their_family():
+def test_current_global_book_epoch_rejects_one_missing_native_side():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)
     at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
-    family_a = SimpleNamespace(
-        family_key="family-a",
-        bindings=tuple(probability.bindings[:1]),
-    )
-    family_b = SimpleNamespace(
-        family_key="family-b",
-        bindings=tuple(probability.bindings[1:]),
-    )
-    assert family_b.bindings
-    unavailable = {
-        token
-        for binding in family_a.bindings
-        for token in (binding.yes_token_id, binding.no_token_id)
-    }
 
     def incomplete_books(tokens):
         return {
@@ -8982,57 +8964,18 @@ def test_current_global_book_epoch_isolates_missing_books_to_their_family():
                 "bids": [],
                 "asks": [{"price": "0.30", "size": "100"}],
             }
-            for token in tokens
-            if token not in unavailable
+            for token in tokens[:-1]
         }
 
-    epoch = capture_current_global_book_epoch(
-        conn,
-        probability_witnesses={
-            family_a.family_key: family_a,
-            family_b.family_key: family_b,
-        },
-        get_books=incomplete_books,
-        clock=lambda: next(times),
-        max_age=_dt.timedelta(seconds=30),
-        batch_size=500,
-    )
-
-    states_by_family = {
-        family_key: tuple(
-            state for state in epoch.asset_states if state[0] == family_key
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_RESPONSE_INCOMPLETE:1"):
+        capture_current_global_book_epoch(
+            conn,
+            probability_witnesses={probability.family_key: probability},
+            get_books=incomplete_books,
+            clock=lambda: next(times),
+            max_age=_dt.timedelta(seconds=30),
+            batch_size=500,
         )
-        for family_key in (family_a.family_key, family_b.family_key)
-    }
-    assert {state[5] for state in states_by_family[family_a.family_key]} == {
-        "BOOK_UNAVAILABLE"
-    }
-    assert {state[5] for state in states_by_family[family_b.family_key]} == {
-        "EXECUTABLE"
-    }
-    assert not any(asset.family_key == family_a.family_key for asset in epoch.assets)
-    assert {asset.family_key for asset in epoch.assets} == {family_b.family_key}
-    receipt = global_batch_runtime._book_native_side_receipt(
-        asset_states=epoch.asset_states,
-        probability_keys=(family_a.family_key, family_b.family_key),
-        buy_candidate_index=tuple(
-            (
-                f"candidate-{asset.token_id}",
-                asset.family_key,
-                asset.bin_id,
-                asset.condition_id,
-                asset.side,
-                asset.token_id,
-            )
-            for asset in epoch.assets
-        ),
-        excluded_by_family={},
-    )
-    assert receipt["book_native_side_candidate_coverage_complete"] is True
-    assert sum(
-        side_counts["BOOK_UNAVAILABLE"]
-        for side_counts in receipt["book_native_side_status_counts"].values()
-    ) == len(unavailable)
 
 
 def test_current_global_book_epoch_overlaps_chunks_and_preserves_window():
@@ -9166,7 +9109,7 @@ def test_current_global_book_epoch_one_chunk_stays_synchronous():
     assert called_threads == [caller_thread]
 
 
-def test_current_global_book_epoch_isolates_parallel_chunk_error():
+def test_current_global_book_epoch_rejects_parallel_chunk_error():
     probability = _current_global_book_probability()
     failed_token = probability.bindings[0].no_token_id
 
@@ -9187,22 +9130,16 @@ def test_current_global_book_epoch_isolates_parallel_chunk_error():
 
     at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
-    epoch = capture_current_global_book_epoch(
-        _global_book_metadata_conn(probability),
-        probability_witnesses={probability.family_key: probability},
-        get_books=books,
-        clock=lambda: next(times),
-        max_age=_dt.timedelta(seconds=30),
-        batch_size=1,
-        book_fetch_workers=2,
-    )
-
-    state_by_token = {state[4]: state for state in epoch.asset_states}
-    assert state_by_token[failed_token][5] == "BOOK_UNAVAILABLE"
-    assert {
-        state[5] for token, state in state_by_token.items() if token != failed_token
-    } == {"EXECUTABLE"}
-    assert failed_token not in {asset.token_id for asset in epoch.assets}
+    with pytest.raises(RuntimeError, match="chunk failure"):
+        capture_current_global_book_epoch(
+            _global_book_metadata_conn(probability),
+            probability_witnesses={probability.family_key: probability},
+            get_books=books,
+            clock=lambda: next(times),
+            max_age=_dt.timedelta(seconds=30),
+            batch_size=1,
+            book_fetch_workers=2,
+        )
 
 
 def test_current_gamma_identity_fills_missing_no_without_changing_q():
@@ -9681,165 +9618,6 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
                 2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc
             ),
         )
-
-
-def test_current_gamma_isolates_malformed_family_without_shrinking_universe(
-    monkeypatch,
-):
-    probability = _current_global_book_probability()
-    family_bad = SimpleNamespace(
-        family_key="family-bad",
-        bindings=tuple(probability.bindings[:1]),
-    )
-    family_good = SimpleNamespace(
-        family_key="family-good",
-        bindings=tuple(probability.bindings[1:]),
-    )
-    assert family_good.bindings
-    monkeypatch.setattr(
-        universe,
-        "_rebind_probability_witness_tokens",
-        lambda witness, **_kwargs: witness,
-    )
-    monkeypatch.setattr(
-        universe,
-        "actionable_family_payoff_bindings",
-        lambda witness: witness.bindings,
-    )
-
-    def gamma_market(binding, family_key, *, malformed=False):
-        market = {
-            "conditionId": binding.condition_id,
-            "id": f"market-{binding.condition_id}",
-            "clobTokenIds": [binding.yes_token_id, binding.no_token_id],
-            "outcomes": ["Yes", "No"],
-            "outcomePrices": ["0.5", "0.5"],
-            "acceptingOrders": True,
-            "enableOrderBook": True,
-            "active": True,
-            "closed": False,
-            "feeSchedule": {
-                "exponent": 1,
-                "rate": 0.05,
-                "takerOnly": True,
-                "rebateRate": 0.25,
-            },
-            "orderPriceMinTickSize": "0.01",
-            "orderMinSize": "5",
-        }
-        if not malformed:
-            market["events"] = [
-                {
-                    "id": f"event-{family_key}",
-                    "slug": f"slug-{family_key}",
-                    "endDate": "2026-07-14T12:00:00Z",
-                }
-            ]
-        return market
-
-    batch = (
-        gamma_market(family_bad.bindings[0], family_bad.family_key, malformed=True),
-        *(
-            gamma_market(binding, family_good.family_key)
-            for binding in family_good.bindings
-        ),
-    )
-    metadata = {}
-    rebound = universe.bind_current_global_probability_tokens(
-        sqlite3.connect(":memory:"),
-        probability_witnesses={
-            family_bad.family_key: family_bad,
-            family_good.family_key: family_good,
-        },
-        get_gamma_event=lambda _slug: pytest.fail(
-            "complete batch must not amplify into event requests"
-        ),
-        get_gamma_markets=lambda _conditions: batch,
-        metadata_sink=metadata,
-        isolate_metadata_failures=True,
-    )
-
-    assert set(rebound) == {family_bad.family_key, family_good.family_key}
-    assert {
-        row.get("_global_current_gamma_unavailable")
-        for (condition_id, _token), row in metadata.items()
-        if condition_id == family_bad.bindings[0].condition_id
-    } == {f"GLOBAL_CURRENT_GAMMA_EVENT_INVALID:{family_bad.family_key}"}
-    assert all(
-        not row.get("_global_current_gamma_unavailable")
-        for (condition_id, _token), row in metadata.items()
-        if condition_id in {
-            binding.condition_id for binding in family_good.bindings
-        }
-    )
-
-    requested = []
-    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
-    times = iter((at, at + _dt.timedelta(seconds=1)))
-    epoch = capture_current_global_book_epoch(
-        _global_book_metadata_conn(probability),
-        probability_witnesses={
-            family_bad.family_key: family_bad,
-            family_good.family_key: family_good,
-        },
-        get_books=lambda tokens: (
-            requested.extend(tokens)
-            or {
-                token: {
-                    "asset_id": token,
-                    "bids": [{"price": "0.20", "size": "100"}],
-                    "asks": [{"price": "0.30", "size": "100"}],
-                }
-                for token in tokens
-            }
-        ),
-        clock=lambda: next(times),
-        max_age=_dt.timedelta(seconds=30),
-        metadata_overrides=metadata,
-    )
-    assert not set(requested).intersection(
-        {
-            family_bad.bindings[0].yes_token_id,
-            family_bad.bindings[0].no_token_id,
-        }
-    )
-    assert {
-        state[5]
-        for state in epoch.asset_states
-        if state[0] == family_bad.family_key
-    } == {"VENUE_METADATA_UNAVAILABLE"}
-    assert {
-        state[5]
-        for state in epoch.asset_states
-        if state[0] == family_good.family_key
-    } == {"EXECUTABLE"}
-
-    timeout_metadata = {}
-    timeout_event_calls = []
-
-    def timeout_markets(_conditions):
-        raise TimeoutError("batch timed out")
-
-    timeout_rebound = universe.bind_current_global_probability_tokens(
-        sqlite3.connect(":memory:"),
-        probability_witnesses={
-            family_bad.family_key: family_bad,
-            family_good.family_key: family_good,
-        },
-        get_gamma_event=lambda slug: timeout_event_calls.append(slug),
-        get_gamma_markets=timeout_markets,
-        metadata_sink=timeout_metadata,
-        isolate_metadata_failures=True,
-    )
-    assert set(timeout_rebound) == {family_bad.family_key, family_good.family_key}
-    assert timeout_event_calls == []
-    assert len(timeout_metadata) == 2 * sum(
-        len(family.bindings) for family in (family_bad, family_good)
-    )
-    assert {
-        row.get("_global_current_gamma_unavailable")
-        for row in timeout_metadata.values()
-    } == {"TimeoutError:batch timed out"}
 
 
 def test_global_scope_is_independent_of_the_reactor_page_and_current_q_identity():

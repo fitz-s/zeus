@@ -7559,7 +7559,6 @@ def event_bound_live_adapter_from_trade_conn(
                         checked_at_utc=_at,
                         max_workers=16,
                         metadata_sink=metadata_sink,
-                        isolate_metadata_failures=True,
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
