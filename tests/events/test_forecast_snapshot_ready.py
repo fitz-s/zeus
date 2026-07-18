@@ -99,6 +99,15 @@ def _bind_replacement_readiness(
     metric: str,
     computed_at: str,
 ) -> None:
+    from src.config import cities_by_name
+    from src.data.replacement_forecast_source_run_identity import (
+        expected_replacement_dependency_identity_by_role,
+    )
+
+    city_config = cities_by_name[city]
+    identity = expected_replacement_dependency_identity_by_role(metric)[
+        "soft_anchor_posterior"
+    ]
     data_version = (
         "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1"
         if metric == "high"
@@ -122,20 +131,27 @@ def _bind_replacement_readiness(
     )
     conn.execute(
         """INSERT OR REPLACE INTO readiness_state (
-            readiness_id, scope_key, scope_type, city, target_local_date,
-            temperature_metric, data_version, source_id, strategy_key, status,
+            readiness_id, scope_key, scope_type, city_id, city, city_timezone,
+            target_local_date, metric, temperature_metric, physical_quantity,
+            observation_field, data_version, source_id, track, strategy_key, status,
             reason_codes_json, computed_at, expires_at, dependency_json, provenance_json,
             token_ids_json
-        ) VALUES (?, ?, 'strategy', ?, ?, ?, ?, ?, ?, 'READY',
+        ) VALUES (?, ?, 'strategy', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY',
                   '[]', ?, ?, ?, '{}', '[]')""",
         (
             f"replacement-readiness:{city}:{target_date}:{metric}",
             f"{city}|{target_date}|{metric}",
+            city_config.name.upper().replace(" ", "_"),
             city,
+            city_config.timezone,
             target_date,
             metric,
+            metric,
+            identity.physical_quantity,
+            identity.observation_field,
             data_version,
             "openmeteo_ecmwf_ifs9_bayes_fusion",
+            "soft_anchor_posterior",
             "openmeteo_ecmwf_ifs9_bayes_fusion",
             computed_at,
             f"{target_date}T23:59:59+00:00",
@@ -1125,6 +1141,8 @@ def test_restricted_redecision_counts_raw_members_only_for_screened_family(monke
     )
     forecasts_conn = sqlite3.connect(":memory:")
     forecasts_conn.row_factory = sqlite3.Row
+    traced_sql: list[str] = []
+    forecasts_conn.set_trace_callback(traced_sql.append)
     from src.state.db import init_schema_forecasts
 
     init_schema_forecasts(forecasts_conn)
@@ -1189,10 +1207,35 @@ def test_restricted_redecision_counts_raw_members_only_for_screened_family(monke
 
     assert len(results) == 1
     assert counted == [("Chicago", "2026-05-24", "high")]
+    readiness_select = next(sql for sql in traced_sql if "requested_readiness" in sql)
+    assert "ROW_NUMBER() OVER" not in readiness_select
+    assert not any("ranked_ready AS" in sql for sql in traced_sql)
+    assert "('Chicago','CHICAGO','America/Chicago','2026-05-24','high'" in readiness_select
+    assert "rs.city = requested.city" in readiness_select
+    assert "rs.city_id = requested.city_id" in readiness_select
+    assert "rs.city_timezone = requested.city_timezone" in readiness_select
+    assert "rs.target_local_date = requested.target_local_date" in readiness_select
+    assert "rs.temperature_metric = requested.temperature_metric" in readiness_select
     import json
 
     payload = json.loads(world_conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
     assert payload["city"] == "Chicago"
+
+    forecasts_conn.execute(
+        "UPDATE readiness_state SET city_id = NULL WHERE city = 'Chicago'"
+    )
+    traced_sql.clear()
+    fallback = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:19:00+00:00",
+        source="cycle-2",
+        event_type="EDLI_REDECISION_PENDING",
+        restrict_to_families={("Chicago", "2026-05-24", "high")},
+        phase_filter_exempt_families={("Chicago", "2026-05-24", "high")},
+    )
+    assert len(fallback) == 1
+    assert any("ranked_ready AS" in sql for sql in traced_sql)
 
 
 def test_posterior_raw_member_counts_are_batched_for_global_scope():

@@ -16,6 +16,9 @@ from src.data.replacement_forecast_readiness import (
     SOURCE_ID as REPLACEMENT_SOURCE_ID,
     STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY,
 )
+from src.data.replacement_forecast_source_run_identity import (
+    expected_replacement_dependency_identity_by_role,
+)
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import (
     ForecastSnapshotReadyPayload,
@@ -366,6 +369,93 @@ def _family_restriction_sql(
         )
         params.extend((city, target, metric))
     return " AND (" + " OR ".join(clauses) + ")", tuple(params)
+
+
+def _replacement_readiness_exact_scope_cte(
+    restrict_to_families: set[tuple[str, str, str]] | None,
+) -> tuple[str, tuple[str, ...]] | None:
+    """Build an indexed readiness projection lookup for a bounded family set."""
+
+    if not restrict_to_families:
+        return None
+    try:
+        from src.config import cities_by_name
+
+        requested: list[tuple[str, ...]] = []
+        for city, target_date, metric in sorted(restrict_to_families):
+            city_config = cities_by_name.get(str(city))
+            if city_config is None or metric not in {"high", "low"}:
+                return None
+            identity = expected_replacement_dependency_identity_by_role(metric)[
+                "soft_anchor_posterior"
+            ]
+            requested.append(
+                (
+                    str(city_config.name),
+                    str(city_config.name).upper().replace(" ", "_"),
+                    str(city_config.timezone),
+                    str(target_date),
+                    str(metric),
+                    identity.physical_quantity,
+                    identity.observation_field,
+                    identity.data_version,
+                )
+            )
+    except Exception:  # noqa: BLE001 - legacy projection query remains the fallback
+        return None
+    if not requested:
+        return None
+
+    values = ",".join("(?,?,?,?,?,?,?,?)" for _ in requested)
+    params = tuple(value for row in requested for value in row)
+    return (
+        f"""
+        requested_readiness(
+            city, city_id, city_timezone, target_local_date,
+            temperature_metric, physical_quantity, observation_field, data_version
+        ) AS (VALUES {values}),
+        ready_posterior AS (
+            SELECT rs.*, dep.value AS dependency
+              FROM requested_readiness AS requested
+              JOIN readiness_state AS rs
+                ON rs.scope_type = 'strategy'
+               AND rs.city = requested.city
+               AND rs.city_id = requested.city_id
+               AND rs.city_timezone = requested.city_timezone
+               AND rs.target_local_date = requested.target_local_date
+               AND rs.temperature_metric = requested.temperature_metric
+               AND rs.physical_quantity = requested.physical_quantity
+               AND rs.observation_field = requested.observation_field
+               AND rs.data_version = requested.data_version
+               AND rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
+               AND rs.market_family IS NULL
+               AND rs.source_id = '{REPLACEMENT_SOURCE_ID}'
+               AND rs.track = 'soft_anchor_posterior'
+               AND rs.condition_id IS NULL
+              CROSS JOIN json_each(
+                   CASE
+                       WHEN json_valid(rs.dependency_json)
+                       THEN rs.dependency_json
+                       ELSE '{{}}'
+                   END,
+                   '$.dependencies'
+              ) AS dep
+             WHERE julianday(rs.computed_at) <= julianday(?)
+               AND rs.status = '{REPLACEMENT_READY_STATUS}'
+               AND rs.expires_at IS NOT NULL
+               AND julianday(rs.expires_at) > julianday(?)
+               AND json_extract(dep.value, '$.role') = 'soft_anchor_posterior'
+               AND json_extract(dep.value, '$.source_id') = rs.source_id
+               AND json_extract(dep.value, '$.status') = '{REPLACEMENT_READY_STATUS}'
+               AND json_type(dep.value, '$.source_available_at') = 'text'
+               AND julianday(
+                   json_extract(dep.value, '$.source_available_at')
+               ) <= julianday(?)
+               AND json_type(dep.value, '$.posterior_id') = 'integer'
+        )
+        """,
+        params,
+    )
 
 
 LiveEligibilityReader = Callable[[dict[str, Any], dict[str, Any], dict[str, Any], datetime], bool]
@@ -822,6 +912,15 @@ class ForecastSnapshotReadyTrigger:
             metric_col="temperature_metric",
             restrict_to_families=restrict_to_families,
         )
+        _readiness_family_filter_sql, _readiness_family_filter_params = (
+            _family_restriction_sql(
+                table_alias="rs",
+                city_col="city",
+                target_col="target_local_date",
+                metric_col="temperature_metric",
+                restrict_to_families=restrict_to_families,
+            )
+        )
         _legacy_family_filter_sql, _legacy_family_filter_params = _family_restriction_sql(
             table_alias="c0",
             city_col="city",
@@ -853,8 +952,8 @@ class ForecastSnapshotReadyTrigger:
             _posterior_runtime_filter = (
                 " AND fp.runtime_layer = 'live' AND fp.training_allowed = 0"
             )
-            _select_sql_base = f"""
-                WITH ranked_ready AS (
+            _ranked_readiness_cte_sql = f"""
+                ranked_ready AS (
                     SELECT
                         rs.*,
                         ROW_NUMBER() OVER (
@@ -874,6 +973,7 @@ class ForecastSnapshotReadyTrigger:
                        AND rs.scope_type = 'strategy'
                        AND rs.source_id = '{REPLACEMENT_SOURCE_ID}'
                        AND julianday(rs.computed_at) <= julianday(?)
+                       {_readiness_family_filter_sql}
                 ),
                 ready_posterior AS (
                     SELECT rs.*, dep.value AS dependency
@@ -899,6 +999,28 @@ class ForecastSnapshotReadyTrigger:
                        ) <= julianday(?)
                        AND json_type(dep.value, '$.posterior_id') = 'integer'
                 )
+            """
+            _exact_readiness = _replacement_readiness_exact_scope_cte(
+                restrict_to_families
+            )
+            if _exact_readiness is None:
+                _readiness_cte_sql = _ranked_readiness_cte_sql
+                _readiness_params = (
+                    _decision_iso,
+                    *_readiness_family_filter_params,
+                    _decision_iso,
+                    _decision_iso,
+                )
+            else:
+                _readiness_cte_sql, _exact_readiness_params = _exact_readiness
+                _readiness_params = (
+                    *_exact_readiness_params,
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                )
+            _select_sql_template = f"""
+                WITH __READINESS_CTE__
                 SELECT
                     fp.posterior_id AS coverage_id,
                     fp.posterior_identity_hash AS source_run_id,
@@ -993,19 +1115,41 @@ class ForecastSnapshotReadyTrigger:
                    {posterior_market_filter}
                 ORDER BY fp.source_cycle_time DESC, fp.computed_at DESC
                 """
+            _select_sql_base = _select_sql_template.replace(
+                "__READINESS_CTE__",
+                _readiness_cte_sql,
+                1,
+            )
             rows = _dict_rows(
                 forecasts_conn,
                 _select_sql_base,
                 (
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
+                    *_readiness_params,
                     *_family_filter_params,
                     _target_date_floor,
                     _decision_iso,
                     _decision_iso,
                 ),
             )
+            if _exact_readiness is not None and not rows:
+                rows = _dict_rows(
+                    forecasts_conn,
+                    _select_sql_template.replace(
+                        "__READINESS_CTE__",
+                        _ranked_readiness_cte_sql,
+                        1,
+                    ),
+                    (
+                        _decision_iso,
+                        *_readiness_family_filter_params,
+                        _decision_iso,
+                        _decision_iso,
+                        *_family_filter_params,
+                        _target_date_floor,
+                        _decision_iso,
+                        _decision_iso,
+                    ),
+                )
         else:
             replacement_filter = ""
             if _replacement_live_enabled():
