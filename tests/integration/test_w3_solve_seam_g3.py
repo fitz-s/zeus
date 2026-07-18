@@ -5742,6 +5742,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
             "BLOCKED",
         ),
+        ("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE", "BLOCKED"),
         (
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
             "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"

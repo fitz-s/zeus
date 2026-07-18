@@ -10354,6 +10354,7 @@ def _global_preflight_block_status(reason: str) -> str:
                 "FamilyAuthorityUnavailable:"
                 "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"
             ),
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
             (
                 "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
                 "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
