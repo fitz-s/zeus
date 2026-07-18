@@ -1299,6 +1299,98 @@ def test_price_channel_redecision_coalesced_sink_does_not_block_ingest(
     assert batches == [(first,), (latest,)]
 
 
+def test_price_channel_redecision_worker_reuses_reads_across_quote_burst(monkeypatch):
+    import threading
+
+    from src.events import price_channel_redecision_router as router
+    from src.state import db
+
+    opened: list[str] = []
+    closed: list[str] = []
+    routed: list[tuple[object, ...]] = []
+    all_closed = threading.Event()
+
+    class ReadConnection:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            opened.append(name)
+
+        def close(self) -> None:
+            closed.append(self.name)
+            if len(closed) == 3:
+                all_closed.set()
+
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: ReadConnection("world"))
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: ReadConnection("trade"))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: ReadConnection("forecasts"),
+    )
+
+    def build(_world, _trade, _forecasts, events, **_kwargs):  # noqa: ANN001
+        routed.append(tuple(events))
+        return []
+
+    monkeypatch.setattr(router, "_edli_price_channel_redecision_events_for_events", build)
+    worker = router._CoalescingPriceChannelRedecisionSink(
+        router._edli_price_channel_redecision_sink(reuse_read_connections=True),
+        idle_timeout_seconds=0.05,
+    )
+
+    def event(token: str, version: int):
+        return types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json=json.dumps({"token_id": token, "version": version}),
+        )
+
+    first = event("token-a", 1)
+    second = event("token-b", 1)
+    worker((first,))
+    assert worker.wait_idle(1.0)
+    worker((second,))
+    assert worker.wait_idle(1.0)
+
+    assert routed == [(first,), (second,)]
+    assert opened == ["world", "trade", "forecasts"]
+    assert all_closed.wait(1.0)
+    assert closed == ["forecasts", "trade", "world"]
+
+
+def test_price_channel_redecision_worker_reopens_reads_after_failure(monkeypatch):
+    from src.events import price_channel_redecision_router as router
+
+    class RetryingSink:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closes = 0
+
+        def __call__(self, _events) -> None:  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("read connection failed")
+
+        def close(self) -> None:
+            self.closes += 1
+
+    monkeypatch.setattr(router.time, "sleep", lambda _seconds: None)
+    routed = RetryingSink()
+    worker = router._CoalescingPriceChannelRedecisionSink(
+        routed,
+        idle_timeout_seconds=0.01,
+    )
+    event = types.SimpleNamespace(
+        event_type="BOOK_SNAPSHOT",
+        payload_json=json.dumps({"token_id": "token-a"}),
+    )
+
+    worker((event,))
+
+    assert worker.wait_idle(1.0)
+    assert routed.calls == 2
+    assert routed.closes >= 1
+
+
 def test_market_channel_forever_uses_coalesced_redecision_sink():
     from src.ingest import price_channel_ingest
 

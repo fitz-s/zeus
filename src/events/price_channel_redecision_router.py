@@ -654,22 +654,23 @@ def _edli_write_price_channel_redecision_events(world_conn, events) -> int:
     return sum(1 for result in emitted if result.inserted)
 
 
-def _edli_price_channel_redecision_sink(_world_with_trades_conn=None, *, trade_schema: str = "trades"):
-    """Build an independently coordinated market-event sink.
+class _PriceChannelRedecisionSink:
+    def __init__(self, *, reuse_read_connections: bool) -> None:
+        self._reuse_read_connections = bool(reuse_read_connections)
+        self._read_stack: contextlib.ExitStack | None = None
+        self._reads: tuple[object, object, object] | None = None
+        self._read_thread_id: int | None = None
 
-    This is the ONE seam the venue-fact boundary (``price_channel_ingest``) reaches into
-    the decision layer through: it hands this sink to ``MarketChannelIngestor`` as its
-    ``market_event_sink`` dependency and never inlines the routing decision itself.
-    """
-
-    def _sink(events) -> None:
+    @staticmethod
+    def _open_reads() -> tuple[contextlib.ExitStack, tuple[object, object, object]]:
         from src.state.db import (
             get_forecasts_connection_read_only,
             get_trade_connection_read_only,
             get_world_connection_read_only,
         )
 
-        with contextlib.ExitStack() as stack:
+        stack = contextlib.ExitStack()
+        try:
             world_read = stack.enter_context(
                 contextlib.closing(get_world_connection_read_only())
             )
@@ -679,14 +680,37 @@ def _edli_price_channel_redecision_sink(_world_with_trades_conn=None, *, trade_s
             forecasts_read = stack.enter_context(
                 contextlib.closing(get_forecasts_connection_read_only())
             )
-            events_to_emit = _edli_price_channel_redecision_events_for_events(
-                world_read,
-                trade_read,
-                forecasts_read,
-                events,
-                received_at=datetime.now(timezone.utc).isoformat(),
-                trade_schema="",
-            )
+        except Exception:
+            stack.close()
+            raise
+        return stack, (world_read, trade_read, forecasts_read)
+
+    def _build(self, events) -> list:  # noqa: ANN001
+        thread_id = threading.get_ident()
+        if self._reads is None:
+            self._read_stack, self._reads = self._open_reads()
+            self._read_thread_id = thread_id
+        elif self._read_thread_id != thread_id:
+            raise RuntimeError("price-channel read connections changed worker thread")
+        return _edli_price_channel_redecision_events_for_events(
+            *self._reads,
+            events,
+            received_at=datetime.now(timezone.utc).isoformat(),
+            trade_schema="",
+        )
+
+    def __call__(self, events) -> None:  # noqa: ANN001
+        if self._reuse_read_connections:
+            events_to_emit = self._build(events)
+        else:
+            stack, reads = self._open_reads()
+            with stack:
+                events_to_emit = _edli_price_channel_redecision_events_for_events(
+                    *reads,
+                    events,
+                    received_at=datetime.now(timezone.utc).isoformat(),
+                    trade_schema="",
+                )
         if not events_to_emit:
             return
 
@@ -723,17 +747,42 @@ def _edli_price_channel_redecision_sink(_world_with_trades_conn=None, *, trade_s
                 len(event_ids),
             )
 
-    return _sink
+    def close(self) -> None:
+        if self._read_stack is not None:
+            self._read_stack.close()
+        self._read_stack = None
+        self._reads = None
+        self._read_thread_id = None
+
+
+def _edli_price_channel_redecision_sink(
+    _world_with_trades_conn=None,
+    *,
+    trade_schema: str = "trades",
+    reuse_read_connections: bool = False,
+):
+    """Build an independently coordinated market-event sink.
+
+    This is the ONE seam the venue-fact boundary (``price_channel_ingest``) reaches into
+    the decision layer through: it hands this sink to ``MarketChannelIngestor`` as its
+    ``market_event_sink`` dependency and never inlines the routing decision itself.
+    """
+
+    return _PriceChannelRedecisionSink(
+        reuse_read_connections=reuse_read_connections,
+    )
 
 
 class _CoalescingPriceChannelRedecisionSink:
     """Keep decision routing off the WS receive loop and retain latest per token."""
 
-    def __init__(self, sink) -> None:  # noqa: ANN001
+    def __init__(self, sink, *, idle_timeout_seconds: float = 0.25) -> None:  # noqa: ANN001
         self._sink = sink
         self._lock = threading.Lock()
+        self._wake = threading.Condition(self._lock)
         self._pending: dict[str, object] = {}
         self._running = False
+        self._idle_timeout_seconds = max(0.001, float(idle_timeout_seconds))
         self._idle = threading.Event()
         self._idle.set()
 
@@ -744,15 +793,18 @@ class _CoalescingPriceChannelRedecisionSink:
 
     def __call__(self, events) -> None:  # noqa: ANN001
         start = False
-        with self._lock:
+        with self._wake:
             for event in events or ():
                 key = self._event_key(event)
                 if key is not None:
                     self._pending[key] = event
+            if self._pending:
+                self._idle.clear()
             if self._pending and not self._running:
                 self._running = True
-                self._idle.clear()
                 start = True
+            elif self._pending:
+                self._wake.notify()
         if start:
             threading.Thread(
                 target=self._drain,
@@ -762,37 +814,49 @@ class _CoalescingPriceChannelRedecisionSink:
 
     def _drain(self) -> None:
         failures = 0
-        while True:
-            with self._lock:
-                if not self._pending:
-                    self._running = False
-                    self._idle.set()
-                    return
-                batch = tuple(self._pending.values())
-                self._pending.clear()
-            try:
-                self._sink(batch)
-            except Exception as exc:  # noqa: BLE001 - derived work retries off-loop
-                failures += 1
-                with self._lock:
-                    for event in batch:
-                        key = self._event_key(event)
-                        if key is not None:
-                            self._pending.setdefault(key, event)
-                delay = min(30.0, float(2 ** min(failures - 1, 5)))
-                logger.warning(
-                    "price-channel redecision worker failed; retry_after_seconds=%.1f "
-                    "batch=%d pending=%d: %s: %s",
-                    delay,
-                    len(batch),
-                    len(self._pending),
-                    type(exc).__name__,
-                    exc,
-                    exc_info=True,
-                )
-                time.sleep(delay)
-            else:
-                failures = 0
+        try:
+            while True:
+                with self._wake:
+                    if not self._pending:
+                        self._idle.set()
+                        self._wake.wait(timeout=self._idle_timeout_seconds)
+                        if not self._pending:
+                            self._running = False
+                            return
+                    batch = tuple(self._pending.values())
+                    self._pending.clear()
+                    self._idle.clear()
+                try:
+                    self._sink(batch)
+                except Exception as exc:  # noqa: BLE001 - derived work retries off-loop
+                    failures += 1
+                    close = getattr(self._sink, "close", None)
+                    if callable(close):
+                        with contextlib.suppress(Exception):
+                            close()
+                    with self._lock:
+                        for event in batch:
+                            key = self._event_key(event)
+                            if key is not None:
+                                self._pending.setdefault(key, event)
+                    delay = min(30.0, float(2 ** min(failures - 1, 5)))
+                    logger.warning(
+                        "price-channel redecision worker failed; retry_after_seconds=%.1f "
+                        "batch=%d pending=%d: %s: %s",
+                        delay,
+                        len(batch),
+                        len(self._pending),
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
+                    time.sleep(delay)
+                else:
+                    failures = 0
+        finally:
+            close = getattr(self._sink, "close", None)
+            if callable(close):
+                close()
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         return self._idle.wait(timeout)
@@ -807,5 +871,6 @@ def _edli_coalesced_price_channel_redecision_sink(
         _edli_price_channel_redecision_sink(
             _world_with_trades_conn,
             trade_schema=trade_schema,
+            reuse_read_connections=True,
         )
     )
