@@ -4554,7 +4554,10 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     return out
 
 
-def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
+def _edli_day0_hourly_priority_families(
+    *,
+    held_families: Iterable[tuple[str, str, str]] | None = None,
+) -> list[tuple[str, str, str]]:
     """Money-path families that should drive Day0 hourly-vector refresh order."""
     import logging as _logging
 
@@ -4575,7 +4578,12 @@ def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
     # Held money is the first refresh consumer. Pending event queues can grow
     # large when the reactor is behind; putting them first lets stale candidates
     # delay fresh held-position Day0 probabilities.
-    add(sorted(_edli_current_held_position_family_keys()))
+    held = (
+        _edli_current_held_position_family_keys()
+        if held_families is None
+        else held_families
+    )
+    add(sorted(held))
 
     try:
         world_ro = get_world_connection_read_only()
@@ -4652,12 +4660,17 @@ def _edli_rotate_day0_hourly_refresh_order(
     ordered: list[Any],
     *,
     priority_city_count: int,
+    held_city_count: int = 0,
     cursor: int,
 ) -> list[Any]:
-    priority = ordered[: max(0, int(priority_city_count))]
-    rest = ordered[max(0, int(priority_city_count)) :]
+    priority_end = max(0, min(len(ordered), int(priority_city_count)))
+    held_end = max(0, min(priority_end, int(held_city_count)))
+    held = ordered[:held_end]
+    priority = ordered[held_end:priority_end]
+    rest = ordered[priority_end:]
     return (
-        _rotate_day0_refresh_segment(priority, cursor)
+        _rotate_day0_refresh_segment(held, cursor)
+        + _rotate_day0_refresh_segment(priority, cursor)
         + _rotate_day0_refresh_segment(rest, cursor)
     )
 
@@ -4742,15 +4755,25 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
 
         decision_time = datetime.now(timezone.utc)
-        priority_families = _edli_day0_hourly_priority_families()
+        held_families = sorted(_edli_current_held_position_family_keys())
+        priority_families = _edli_day0_hourly_priority_families(
+            held_families=held_families,
+        )
+        cities = _rc()
         ordered_cities, priority_city_count = _edli_order_day0_hourly_refresh_cities(
-            _rc(),
+            cities,
             decision_time=decision_time,
             priority_families=priority_families,
+        )
+        _, held_city_count = _edli_order_day0_hourly_refresh_cities(
+            cities,
+            decision_time=decision_time,
+            priority_families=held_families,
         )
         ordered_cities = _edli_rotate_day0_hourly_refresh_order(
             ordered_cities,
             priority_city_count=priority_city_count,
+            held_city_count=held_city_count,
             cursor=_DAY0_HOURLY_REFRESH_CURSOR,
         )
         max_cities = _day0_hourly_refresh_max_cities(
@@ -4762,6 +4785,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             budget_s=_day0_hourly_refresh_budget_seconds(),
             max_cities=max_cities,
             timeout_s=_day0_hourly_fetch_timeout_seconds(),
+            quota_priority_cities=held_city_count,
             persist_lock_blocking=False,
             return_stats=True,
         )
@@ -4775,12 +4799,14 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             _log.info(
                 "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
                 "max_cities=%d cities_attempted=%d skipped_throttle=%d "
-                "incomplete_expected_bundles=%d budget_exhausted=%s cursor=%d",
+                "skipped_quota=%d incomplete_expected_bundles=%d "
+                "budget_exhausted=%s cursor=%d",
                 vectors_written,
                 priority_city_count,
                 max_cities,
                 cities_attempted,
                 int(getattr(stats, "cities_skipped_throttle", 0) or 0),
+                int(getattr(stats, "cities_skipped_quota", 0) or 0),
                 int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
                 bool(getattr(stats, "budget_exhausted", False)),
                 _DAY0_HOURLY_REFRESH_CURSOR,

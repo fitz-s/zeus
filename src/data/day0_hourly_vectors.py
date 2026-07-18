@@ -41,10 +41,13 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo
+
+from src.data.openmeteo_quota import quota_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +137,7 @@ class Day0HourlyRefreshStats:
     vectors_written: int = 0
     cities_attempted: int = 0
     cities_skipped_throttle: int = 0
+    cities_skipped_quota: int = 0
     incomplete_expected_bundles: int = 0
     budget_exhausted: bool = False
 
@@ -619,6 +623,7 @@ def maybe_refresh_day0_hourly_vectors(
     budget_s: float = DEFAULT_REFRESH_BUDGET_S,
     max_cities: int = DEFAULT_REFRESH_MAX_CITIES,
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
+    quota_priority_cities: int = 0,
     persist_lock_blocking: bool = True,
     return_stats: bool = False,
 ) -> int | Day0HourlyRefreshStats:
@@ -627,17 +632,21 @@ def maybe_refresh_day0_hourly_vectors(
     Cities with an in-domain regional high-res model use that regional source;
     other cities use the ECMWF IFS global fallback from
     ``day0_hourly_models_for_city``. One open-meteo call per city per interval.
-    Fail-soft per city. Empty transport/shape results do not consume the full
-    refresh interval; the key is cleared so the next reactor pass can retry.
+    Fail-soft per city. Failed or incomplete fetches retain the refresh
+    interval so a provider outage cannot turn the 45-second scheduler into a
+    quota-consuming retry storm. The ordered prefix named by
+    ``quota_priority_cities`` may consume the Open-Meteo reserve; callers must
+    use that prefix only for current held-position exposure.
     """
     written = 0
     skipped_throttle = 0
+    skipped_quota = 0
     incomplete_expected_bundles = 0
     budget_exhausted = False
     now_monotonic = time.monotonic()
     started_monotonic = now_monotonic
     checked = 0
-    for city in cities:
+    for city_index, city in enumerate(cities):
         if checked >= max(0, int(max_cities)):
             break
         if budget_s > 0.0 and checked > 0 and (time.monotonic() - started_monotonic) >= budget_s:
@@ -656,28 +665,40 @@ def maybe_refresh_day0_hourly_vectors(
                 city=city, decision_time=decision_time
             )
             refresh_key = f"{name}|{target_dates[0]}"
+            models = day0_hourly_models_for_city(city)
+            if not models:
+                continue
             with _REFRESH_LOCK:
                 last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
                 if now_monotonic - last < float(interval_s):
                     skipped_throttle += 1
                     continue
-                _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
-            models = day0_hourly_models_for_city(city)
-            if not models:
+            quota_context = (
+                quota_tracker.priority_lane()
+                if city_index < max(0, int(quota_priority_cities))
+                else nullcontext()
+            )
+            with quota_context:
+                if not quota_tracker.can_call():
+                    skipped_quota += 1
+                    break
                 with _REFRESH_LOCK:
-                    _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
-                continue
-            checked += 1
-            try:
-                vectors, request_hash = fetch_day0_hourly_vectors(
-                    city, models=models, now=decision_time, timeout_s=timeout_s
-                )
-            except TypeError as exc:
-                if "timeout_s" not in str(exc):
-                    raise
-                vectors, request_hash = fetch_day0_hourly_vectors(
-                    city, models=models, now=decision_time
-                )
+                    last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
+                    if now_monotonic - last < float(interval_s):
+                        skipped_throttle += 1
+                        continue
+                    _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
+                checked += 1
+                try:
+                    vectors, request_hash = fetch_day0_hourly_vectors(
+                        city, models=models, now=decision_time, timeout_s=timeout_s
+                    )
+                except TypeError as exc:
+                    if "timeout_s" not in str(exc):
+                        raise
+                    vectors, request_hash = fetch_day0_hourly_vectors(
+                        city, models=models, now=decision_time
+                    )
             if vectors and request_hash:
                 vector_models = {str(vector.model) for vector in vectors}
                 expected_models = {str(model) for model in models}
@@ -691,11 +712,6 @@ def maybe_refresh_day0_hourly_vectors(
                     )
                 if incomplete_expected:
                     incomplete_expected_bundles += 1
-                    with _REFRESH_LOCK:
-                        _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
-            else:
-                with _REFRESH_LOCK:
-                    _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
             if isinstance(exc, BlockingIOError):
                 with _REFRESH_LOCK:
@@ -708,6 +724,7 @@ def maybe_refresh_day0_hourly_vectors(
         vectors_written=written,
         cities_attempted=checked,
         cities_skipped_throttle=skipped_throttle,
+        cities_skipped_quota=skipped_quota,
         incomplete_expected_bundles=incomplete_expected_bundles,
         budget_exhausted=budget_exhausted,
     )

@@ -1107,8 +1107,8 @@ class TestRequestHashProvenance:
         assert (n1, n2) == (0, 0)
         assert attempts == {"fetch": 2, "persist": 2}
 
-    def test_empty_fetch_result_does_not_throttle_next_attempt(self, monkeypatch):
-        """Transport/shape soft-failures return empty vectors; they must retry next pass."""
+    def test_empty_fetch_result_is_throttled_to_prevent_retry_storm(self, monkeypatch):
+        """Transport/shape soft-failures must not spend quota every scheduler pass."""
         import src.data.day0_hourly_vectors as hv
 
         attempts = {"fetch": 0, "persist": 0}
@@ -1139,10 +1139,10 @@ class TestRequestHashProvenance:
         )
 
         assert (n1, n2) == (0, 0)
-        assert attempts == {"fetch": 2, "persist": 0}
+        assert attempts == {"fetch": 1, "persist": 0}
 
-    def test_partial_expected_bundle_does_not_throttle_next_attempt(self, monkeypatch):
-        """A partial regional+global bundle persists, but cannot authorize Day0 q."""
+    def test_partial_expected_bundle_is_throttled_after_persist(self, monkeypatch):
+        """A partial bundle stays unauthorized without creating a retry storm."""
         import src.data.day0_hourly_vectors as hv
 
         attempts = {"fetch": 0, "persist": 0}
@@ -1178,8 +1178,65 @@ class TestRequestHashProvenance:
             interval_s=1800.0,
         )
 
-        assert (n1, n2) == (2, 2)
-        assert attempts == {"fetch": 2, "persist": 4}
+        assert (n1, n2) == (2, 0)
+        assert attempts == {"fetch": 1, "persist": 2}
+
+    def test_quota_block_stops_batch_without_fetch_or_throttle(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+
+        attempts = {"fetch": 0}
+
+        def fake_fetch(city, *, models=None, now=None, timeout_s=None):
+            attempts["fetch"] += 1
+            return [], ""
+
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
+        monkeypatch.setattr(hv.quota_tracker, "can_call", lambda: False)
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        stats = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris(), _wellington()],
+            decision_time=decision_time,
+            return_stats=True,
+        )
+
+        assert stats.cities_attempted == 0
+        assert stats.cities_skipped_quota == 1
+        assert attempts == {"fetch": 0}
+        assert hv._LAST_REFRESH_MONOTONIC == {}
+
+    def test_held_prefix_can_use_reserved_quota_before_batch_stops(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+        from src.data.openmeteo_quota import (
+            MAINTENANCE_DAILY_LIMIT,
+            OpenMeteoQuotaTracker,
+        )
+
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = MAINTENANCE_DAILY_LIMIT
+        attempts: list[str] = []
+
+        def fake_fetch(city, *, models=None, now=None, timeout_s=None):
+            attempts.append(city.name)
+            return [], ""
+
+        monkeypatch.setattr(hv, "quota_tracker", tracker)
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        stats = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris(), _wellington()],
+            decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            quota_priority_cities=1,
+            return_stats=True,
+        )
+
+        assert attempts == ["Paris"]
+        assert stats.cities_attempted == 1
+        assert stats.cities_skipped_quota == 1
 
     def test_no_regional_model_uses_global_multimodel_bundle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
@@ -1310,6 +1367,19 @@ class TestRequestHashProvenance:
         rotated = reactor._edli_rotate_day0_hourly_refresh_order(
             ordered,
             priority_city_count=2,
+            cursor=1,
+        )
+
+        assert [c.name for c in rotated] == ["Wellington", "Paris", "London"]
+
+    def test_scheduler_rotates_held_cities_without_demoting_them(self):
+        from src.events import reactor
+
+        ordered = [_paris(), _wellington(), SimpleNamespace(name="London")]
+        rotated = reactor._edli_rotate_day0_hourly_refresh_order(
+            ordered,
+            priority_city_count=3,
+            held_city_count=2,
             cursor=1,
         )
 
