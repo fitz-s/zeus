@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-18; last_reused=2026-07-18
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-18
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -604,11 +604,13 @@ def test_transport_failure_resets_dedicated_pool_without_abandoning_chain():
 
     assert _run(supervisor.run_once()).health is HeartbeatHealth.HEALTHY
     assert _run(supervisor.run_once()).health is HeartbeatHealth.DEGRADED
+    lost = _run(supervisor.run_once())
     recovered = _run(supervisor.run_once())
 
+    assert lost.health is HeartbeatHealth.LOST
     assert recovered.health is HeartbeatHealth.HEALTHY
     assert recovered.heartbeat_id == "id-recovered"
-    assert adapter.heartbeat_ids == ["", "id-1", "id-1", ""]
+    assert adapter.heartbeat_ids == ["", "id-1", "id-1", "id-1"]
     assert [type(cause.__cause__).__name__ for cause in reset_causes] == [
         "PoolTimeout",
         "PoolTimeout",
@@ -756,12 +758,13 @@ def test_one_miss_degraded_two_misses_lost():
     assert "miss-2" in (lost.last_error or "")
 
 
-def test_lost_generic_request_failure_attempts_empty_chain_recovery_but_keeps_gtc_blocked():
-    """A long generic request-exception streak can mean the client missed a
-    server-side rotation without receiving an Invalid Heartbeat ID body. Once the
-    lease is already LOST, empty-chain recovery is safer than pinning forever to
-    a stale local id; resting orders still stay blocked through the lease-gap
-    window after recovery."""
+def test_lost_generic_request_failure_retries_preserved_chain_on_next_tick():
+    """Generic failures never add an empty-chain POST to their failed tick.
+
+    A timeout cannot say whether the venue rotated the old token. Only the
+    explicit Invalid Heartbeat ID protocol response authorizes empty-chain
+    recovery; generic failures retain the original id and fail closed for GTC.
+    """
     adapter = FakeHeartbeatAdapter([
         HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"}),
         RuntimeError("request miss-1"),
@@ -772,9 +775,11 @@ def test_lost_generic_request_failure_attempts_empty_chain_recovery_but_keeps_gt
 
     assert _run(supervisor.run_once()).health is HeartbeatHealth.HEALTHY
     degraded = _run(supervisor.run_once())
+    lost = _run(supervisor.run_once())
     recovered = _run(supervisor.run_once())
 
     assert degraded.health is HeartbeatHealth.DEGRADED
+    assert lost.health is HeartbeatHealth.LOST
     assert recovered.health is HeartbeatHealth.HEALTHY
     assert recovered.consecutive_failures == 0
     assert recovered.heartbeat_id == "id-recovered"
@@ -782,7 +787,41 @@ def test_lost_generic_request_failure_attempts_empty_chain_recovery_but_keeps_gt
     assert recovered.resting_order_safe() is False
     assert supervisor.gate_for_order_type("GTC") is False
     assert supervisor.gate_for_order_type("FOK") is True
-    assert adapter.heartbeat_ids == ["", "id-1", "id-1", ""]
+    assert adapter.heartbeat_ids == ["", "id-1", "id-1", "id-1"]
+
+
+def test_connect_timeout_posts_once_per_tick_and_preserves_chain():
+    """RELATIONSHIP: ConnectTimeout -> one POST -> transport reset -> next-tick retry.
+
+    This is the exact live incident shape. A generic transport failure may not
+    start an empty heartbeat chain, even after health reaches LOST.
+    """
+    import httpx
+
+    request = httpx.Request("POST", "https://clob.polymarket.com/v1/heartbeats")
+    timeout = httpx.ConnectTimeout("TLS handshake timed out", request=request)
+    adapter = FakeHeartbeatAdapter([
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"}),
+        timeout,
+        timeout,
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-2"}),
+    ])
+    reset_causes: list[BaseException] = []
+    supervisor = HeartbeatSupervisor(
+        adapter,
+        cadence_seconds=5,
+        transport_reset=reset_causes.append,
+    )
+
+    assert _run(supervisor.run_once()).health is HeartbeatHealth.HEALTHY
+    assert _run(supervisor.run_once()).health is HeartbeatHealth.DEGRADED
+    assert _run(supervisor.run_once()).health is HeartbeatHealth.LOST
+    recovered = _run(supervisor.run_once())
+
+    assert recovered.health is HeartbeatHealth.HEALTHY
+    assert recovered.heartbeat_id == "id-2"
+    assert adapter.heartbeat_ids == ["", "id-1", "id-1", "id-1"]
+    assert reset_causes == [timeout, timeout]
 
 
 def test_lost_state_blocks_GTC_and_GTD_placement():

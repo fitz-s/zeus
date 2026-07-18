@@ -1102,7 +1102,13 @@ class HeartbeatSupervisor:
         comment in __init__. Each successful post returns the next canonical
         `heartbeat_id` which we capture for the following tick. Transient
         failures keep that id so existing resting orders stay tied to the same
-        lease chain; explicit Invalid Heartbeat ID restarts from `""`.
+        lease chain; explicit Invalid Heartbeat ID alone restarts from `""`.
+        A generic network failure is ambiguous: the venue might have processed
+        the POST without returning the rotated token. Sending an empty-chain
+        POST in that same tick can therefore create a second lease chain and
+        amplify an upstream outage. It records the failure, resets only the
+        dedicated transport when appropriate, and retries the preserved token
+        on the next tick.
         """
 
         if not self._run_once_lock.acquire(blocking=False):
@@ -1133,16 +1139,6 @@ class HeartbeatSupervisor:
                 else:
                     self.record_failure(exc)
                     self._reset_transport_after_failure(exc)
-                    if self._health is HeartbeatHealth.LOST:
-                        try:
-                            self._heartbeat_id = await self._post_heartbeat_once("")
-                            self.record_success()
-                            return self.status()
-                        except Exception as retry_exc:
-                            self._reset_transport_after_failure(retry_exc)
-                            self._last_error = (
-                                f"{self._last_error}; empty-chain recovery failed: {retry_exc}"
-                            )
         finally:
             self._run_once_lock.release()
         return self.status()
