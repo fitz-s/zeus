@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -74,6 +75,10 @@ POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT = 12.0
 # 20:15 under this threshold, instead of running dark until the silent TTL
 # expiry at 2026-07-14T06:00+.
 POSTERIOR_STARVATION_REASON_MAX_CHARS = 300
+_POSTERIOR_FAILED_RECEIPT_NAME = re.compile(
+    r"^(?P<city>.+)\.(?P<target>\d{4}-\d{2}-\d{2})\."
+    r"(?P<metric>high|low)\..+\.receipt\.json$"
+)
 LIVE_DAEMON_PROCESS_CODE_PATHS = (
     "src/main.py",
     "src/control/cutover_guard.py",
@@ -5377,33 +5382,59 @@ def _posterior_starvation_newest_blocked_reason(
     target_date: str,
     metric: str,
 ) -> str | None:
-    """Best-effort newest replacement-forecast-live failure reason for this scope.
+    key = (str(city), str(target_date), str(metric).lower())
+    return _posterior_starvation_newest_blocked_reasons(
+        state_dir,
+        (key,),
+    ).get(key)
 
-    Cheap directory scan of the existing failed-materialization sidecar
+
+def _posterior_starvation_newest_blocked_reasons(
+    state_dir: Path,
+    scopes: tuple[tuple[str, str, str], ...],
+) -> dict[tuple[str, str, str], str]:
+    """Read newest failure reasons for all requested scopes in one directory pass.
+
+    Best-effort scan of the existing failed-materialization sidecar
     (config ``replacement_forecast_live.failed_dir``); never raises and never
     blocks the alert on a filesystem hiccup — this is enrichment, not the gate.
     """
 
+    requested = frozenset(
+        (str(city), str(target_date), str(metric).lower())
+        for city, target_date, metric in scopes
+    )
+    if not requested:
+        return {}
     try:
         failed_dir = state_dir / "replacement_forecast_live" / "failed"
         if not failed_dir.is_dir():
-            return None
-        prefix = f"{city}.{target_date}.{metric}."
-        candidates = sorted(
-            (p.name for p in failed_dir.glob(f"{prefix}*.receipt.json")),
-            reverse=True,
-        )
-        if not candidates:
-            return None
-        payload = _read_json(failed_dir / candidates[0])
-        if not isinstance(payload, dict):
-            return None
-        reason = payload.get("stderr") or payload.get("error")
-        if isinstance(reason, str) and reason.strip():
-            return reason.strip()[:POSTERIOR_STARVATION_REASON_MAX_CHARS]
-        return None
+            return {}
+        newest: dict[tuple[str, str, str], str] = {}
+        with os.scandir(failed_dir) as entries:
+            for entry in entries:
+                match = _POSTERIOR_FAILED_RECEIPT_NAME.match(entry.name)
+                if match is None:
+                    continue
+                key = (
+                    match.group("city"),
+                    match.group("target"),
+                    match.group("metric"),
+                )
+                if key not in requested or entry.name <= newest.get(key, ""):
+                    continue
+                newest[key] = entry.name
+        reasons: dict[tuple[str, str, str], str] = {}
+        for key, name in newest.items():
+            payload = _read_json(failed_dir / name)
+            if not isinstance(payload, dict):
+                continue
+            reason = payload.get("stderr") or payload.get("error")
+            if isinstance(reason, str) and reason.strip():
+                reasons[key] = reason.strip()[:POSTERIOR_STARVATION_REASON_MAX_CHARS]
+        return reasons
     except Exception:  # noqa: BLE001 - best-effort sidecar; never blocks the alert.
-        return None
+        return {}
 
 
 def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
@@ -5511,18 +5542,6 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
             has_posterior = False
         if age_h <= threshold_hours:
             continue
-        reason = _posterior_starvation_newest_blocked_reason(
-            state_dir, city, target_date, metric
-        )
-        logger.error(
-            "ZEUS_POSTERIOR_STARVATION city=%s target=%s metric=%s age_h=%.2f "
-            "newest_blocked_reason=%s",
-            city,
-            target_date,
-            metric,
-            age_h,
-            reason or "unknown",
-        )
         starved.append(
             {
                 "city": city,
@@ -5530,8 +5549,30 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
                 "metric": metric,
                 "age_h": age_h,
                 "has_posterior": has_posterior,
-                "newest_blocked_reason": reason,
             }
+        )
+
+    blocked_reasons = _posterior_starvation_newest_blocked_reasons(
+        state_dir,
+        tuple(
+            (item["city"], item["target_date"], item["metric"])
+            for item in starved
+        ),
+    )
+    for item in starved:
+        city = item["city"]
+        target_date = item["target_date"]
+        metric = item["metric"]
+        reason = blocked_reasons.get((city, target_date, metric))
+        item["newest_blocked_reason"] = reason
+        logger.error(
+            "ZEUS_POSTERIOR_STARVATION city=%s target=%s metric=%s age_h=%.2f "
+            "newest_blocked_reason=%s",
+            city,
+            target_date,
+            metric,
+            item["age_h"],
+            reason or "unknown",
         )
 
     detail = {

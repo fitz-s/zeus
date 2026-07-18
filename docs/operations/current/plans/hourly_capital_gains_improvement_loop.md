@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-07-18 17:36Z tick — posterior-starvation enrichment 从 117 次目录扫描降为 1 次
+- **故障牵连证据:** `live_health` 一轮报告 117 个 starved families；每个 family 都对 53,301 个 failed receipts（620MB）单独 `glob`，observability 因此反复遍历同一目录，并与 fact-to-action 热路径争用 I/O。
+- **隔离修复:** 一次 `os.scandir` 建立 requested family→newest receipt 映射，只读取每个 family 最新 JSON；保留逐 family reason 与 ERROR 告警，监控仍不是 entry gate。当前目录 117 scopes 全量 batch `0.155s`；旧式 10-scope glob 已需 `0.733s`，按 scope 归一约 `55.16x`。
+- **验证与边界:** posterior-starvation suite `13 passed`，新增 antibody 要求两个 starved families 也只能扫描目录一次。未修改/清理 620MB evidence，未重启 daemon；当前 loaded SHA 尚未包含修复。
+- **下一突破口:** starvation SQL 仍对 15,853,507-row `market_events` 做无 target-leading index 的聚合 join；下一步先把两侧按 family 独立聚合，消除历史行乘积，再评估是否需要 compact current-family projection。
+
 ### 2026-07-18 17:31Z tick — speculative book 读取退出千万行历史表
 - **运行态证据:** 11-family global batch 的 `prepare_families=13.126s`、`book_epoch_fence=34.785s`，整个 `process_pending=53.084s`；同一时段 urgent exit monitor 等 reactor 30 秒后超时。book epoch 内 Gamma/CLOB 阶段仅约 2–4 秒，剩余时间发生在 trade-DB topology/cache 读取与 I/O contention。
 - **第一性冗余:** speculative prefetch 只决定提前抓哪些 books，却通过 `executable_market_snapshot_latest` 回表读取 10,203,966 行的历史 `executable_market_snapshots`；历史 evidence 不应参与稳态 I/O hint。改为只读 27,620 行 latest projection，当前 Gamma/CLOB 继续独占 tradeability、book 和 submit authority。

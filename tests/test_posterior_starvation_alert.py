@@ -344,6 +344,60 @@ def test_newest_blocked_reason_reads_newest_failed_receipt(tmp_path):
     assert starved["newest_blocked_reason"] == "MATERIALIZATION_FAILED: newest reason"
 
 
+def test_blocked_reason_enrichment_scans_failed_directory_once(
+    tmp_path,
+    monkeypatch,
+):
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    target_date = "2026-07-17"
+    for city in ("Shanghai", "Paris"):
+        _write_market_events(
+            sd,
+            city=city,
+            target_date=target_date,
+            metric="high",
+            token_id=f"tok-{city.lower()}-high",
+            created_at=_now_iso(now, -48.0),
+        )
+        _write_forecast_posterior(
+            sd,
+            city=city,
+            target_date=target_date,
+            metric="high",
+            runtime_layer="live",
+            computed_at=_now_iso(now, -20.0),
+        )
+    failed_dir = sd / "replacement_forecast_live" / "failed"
+    failed_dir.mkdir(parents=True)
+    for city in ("Shanghai", "Paris"):
+        for suffix, reason in (("000000", "older"), ("010000", f"newest-{city}")):
+            (failed_dir / f"{city}.{target_date}.high.{suffix}.receipt.json").write_text(
+                json.dumps({"stderr": reason})
+            )
+
+    import src.control.live_health as live_health
+
+    real_scandir = live_health.os.scandir
+    scan_count = 0
+
+    def counted_scandir(path):
+        nonlocal scan_count
+        scan_count += 1
+        return real_scandir(path)
+
+    monkeypatch.setattr(live_health.os, "scandir", counted_scandir)
+
+    result = _posterior_starvation_surface(sd, now)
+
+    assert scan_count == 1
+    assert {
+        row["city"]: row["newest_blocked_reason"]
+        for row in result["starved_sample"]
+    } == {"Paris": "newest-Paris", "Shanghai": "newest-Shanghai"}
+
+
 # ---------------------------------------------------------------------------
 # T6: composite wiring + not an entry gate
 # ---------------------------------------------------------------------------
