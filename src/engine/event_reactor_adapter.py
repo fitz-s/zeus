@@ -10431,6 +10431,11 @@ def _global_preflight_block_status(reason: str) -> str:
             "FILL_UP_NO_SUBMIT:",
             "SHIFT_BIN_NO_SUBMIT:",
             "EVENT_BOUND_MARKET_PHASE_CLOSED:",
+            "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
+            (
+                "GLOBAL_ACTUATION_PREPARE_FAILED:"
+                "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:"
+            ),
             (
                 "GLOBAL_FAMILY_INELIGIBLE:"
                 "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"

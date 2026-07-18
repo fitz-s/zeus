@@ -5866,7 +5866,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED",
             "BATCH_BLOCKED",
         ),
-        ("EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING", "BATCH_BLOCKED"),
+        ("EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING", "BLOCKED"),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:spine_members_unavailable",
+            "BLOCKED",
+        ),
         ("GLOBAL_ACTUATION_BOOK_SUPERSEDED", "BATCH_BLOCKED"),
         ("UNCLASSIFIED_PREFLIGHT_FAILURE", "BATCH_BLOCKED"),
         (
@@ -12570,8 +12575,20 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     assert result.receipts[event.event_id].submitted is True
 
 
-def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch):
-    blocked_reason = "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED"
+@pytest.mark.parametrize(
+    "blocked_reason",
+    (
+        "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED",
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:spine_members_unavailable"
+        ),
+        "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
+    ),
+)
+def test_global_batch_falls_through_candidate_local_preflight_block(
+    monkeypatch, blocked_reason
+):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
     event_b = _global_scope_event(city="Beta", source_run_id="run-b")
@@ -12669,7 +12686,8 @@ def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch)
         calls["preflight"].append(event.event_id)
         if event.event_id == event_a.event_id:
             return global_batch_runtime.GlobalWinnerPreflight(
-                status="BLOCKED", reason=blocked_reason
+                status=era._global_preflight_block_status(blocked_reason),
+                reason=blocked_reason,
             )
         return global_batch_runtime.GlobalWinnerPreflight(
             status="STABLE", binding_token="binding-b"
@@ -12915,7 +12933,6 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED"
         ),
-        "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
         "GLOBAL_ACTUATION_BOOK_SUPERSEDED",
         "UNCLASSIFIED_PREFLIGHT_FAILURE",
     ),
