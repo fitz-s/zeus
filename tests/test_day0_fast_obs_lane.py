@@ -317,27 +317,147 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
             def poll(self, **_kwargs):
                 return [report], True
 
+        cycle_started = threading.Event()
+        release_cycle = threading.Event()
+
         class _CycleCursor:
             def poll(self, **_kwargs):
-                raise AssertionError("priority fact must not wait for global cycle I/O")
+                cycle_started.set()
+                release_cycle.wait(1.0)
+                return [], True
 
         emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
         emitter._station_cursor = _StationCursor()
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
 
-        reports, status, _age = emitter._reports_with_status(
-            ["KORD"],
-            priority_stations=("KORD",),
+        started = time.monotonic()
+        try:
+            reports, status, _age = emitter._reports_with_status(
+                ["KORD"],
+                priority_stations=("KORD",),
+            )
+            elapsed = time.monotonic() - started
+
+            assert cycle_started.wait(0.5)
+            assert elapsed < 0.2
+            assert reports == [report]
+            assert status == fast_obs.FETCH_FRESH
+            assert emitter._priority_http_client is not emitter._http_client
+            assert (
+                fast_obs.METAR_PRIORITY_HTTP_LIMITS.max_connections
+                >= fast_obs.NoaaMetarStationCursor().max_workers
+            )
+        finally:
+            release_cycle.set()
+            if emitter._global_fetch_future is not None:
+                emitter._global_fetch_future.result(timeout=1.0)
+            if emitter._global_fetch_executor is not None:
+                emitter._global_fetch_executor.shutdown(wait=True)
+
+    def test_unchanged_priority_station_is_not_held_behind_global_cycle(self):
+        import src.data.day0_fast_obs as fast_obs
+
+        cached = _report(
+            "KORD",
+            datetime(2026, 7, 18, 4, 15, tzinfo=UTC),
+            28.3,
+        )
+        cycle_started = threading.Event()
+        release_cycle = threading.Event()
+        cycle_calls = 0
+
+        class _StationCursor:
+            def poll(self, **_kwargs):
+                return [], True
+
+        class _CycleCursor:
+            def poll(self, **_kwargs):
+                nonlocal cycle_calls
+                cycle_calls += 1
+                cycle_started.set()
+                release_cycle.wait(1.0)
+                return [], True
+
+        emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+        emitter._station_cursor = _StationCursor()
+        emitter._cycle_cursor = _CycleCursor()
+        emitter._cached_reports = [cached]
+        emitter._cache_fetched_monotonic = time.monotonic()
+        emitter._full_window_loaded = True
+
+        started = time.monotonic()
+        try:
+            reports, status, _age = emitter._reports_with_status(
+                ["KORD"],
+                priority_stations=("KORD",),
+            )
+            elapsed = time.monotonic() - started
+
+            assert cycle_started.wait(0.5)
+            assert elapsed < 0.2
+            assert reports == [cached]
+            assert status == fast_obs.FETCH_CACHE_HIT
+
+            second_started = time.monotonic()
+            second_reports, second_status, _age = emitter._reports_with_status(
+                ["KORD"],
+                priority_stations=("KORD",),
+            )
+            assert time.monotonic() - second_started < 0.2
+            assert second_reports == [cached]
+            assert second_status == fast_obs.FETCH_CACHE_HIT
+            assert cycle_calls == 1
+        finally:
+            release_cycle.set()
+            if emitter._global_fetch_future is not None:
+                emitter._global_fetch_future.result(timeout=1.0)
+            if emitter._global_fetch_executor is not None:
+                emitter._global_fetch_executor.shutdown(wait=True)
+
+    def test_completed_global_cycle_is_harvested_on_next_priority_tick(self):
+        import src.data.day0_fast_obs as fast_obs
+
+        report = _report(
+            "KORD",
+            datetime(2026, 7, 18, 4, 15, tzinfo=UTC),
+            28.3,
         )
 
-        assert reports == [report]
-        assert status == fast_obs.FETCH_FRESH
-        assert emitter._priority_http_client is not emitter._http_client
-        assert (
-            fast_obs.METAR_PRIORITY_HTTP_LIMITS.max_connections
-            >= fast_obs.NoaaMetarStationCursor().max_workers
-        )
+        class _StationCursor:
+            def poll(self, **_kwargs):
+                return [], True
+
+        class _CycleCursor:
+            def poll(self, **_kwargs):
+                return [report], True
+
+        emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+        emitter._station_cursor = _StationCursor()
+        emitter._cycle_cursor = _CycleCursor()
+        emitter._full_window_loaded = True
+
+        try:
+            first_reports, first_status, _age = emitter._reports_with_status(
+                ["KORD"],
+                priority_stations=("KORD",),
+            )
+            assert first_reports == []
+            assert first_status == fast_obs.FETCH_NO_DATA
+            assert emitter._global_fetch_future is not None
+            emitter._global_fetch_future.result(timeout=1.0)
+
+            reports, status, _age = emitter._reports_with_status(
+                ["KORD"],
+                priority_stations=("KORD",),
+            )
+            assert reports == [report]
+            assert status == fast_obs.FETCH_FRESH
+        finally:
+            if emitter._global_fetch_future is not None:
+                emitter._global_fetch_future.result(timeout=1.0)
+            if emitter._global_fetch_executor is not None:
+                emitter._global_fetch_executor.shutdown(wait=True)
 
     def test_awc_history_fetch_is_not_repeated_each_source_clock_poll(
         self,

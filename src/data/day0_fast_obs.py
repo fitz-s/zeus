@@ -444,6 +444,7 @@ class NoaaMetarCycleCursor:
 
 
 _StationFetchResult = tuple[str, list[MetarReport], bool, str | None]
+_GlobalFetchResult = tuple[list[MetarReport], bool, bool]
 
 
 @dataclass
@@ -1261,6 +1262,16 @@ class Day0FastObsEmitter:
         init=False,
         repr=False,
     )
+    _global_fetch_executor: ThreadPoolExecutor | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _global_fetch_future: Future[_GlobalFetchResult] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
     # SPLIT MEMOS (PR#404 round-2 P0-1): the KILL memo (hard-fact exit source,
     # advanced by any memo-safe value incl. stale-withheld ones) and the LIVE
     # memo (emit moved-check, advanced ONLY by an INSERTED live event) were one
@@ -1731,6 +1742,109 @@ class Day0FastObsEmitter:
                     self._event_evaluated_report_keys.discard(key)
         return len(reports)
 
+    def _fetch_global_sources(
+        self,
+        *,
+        client: httpx.Client,
+        stations: tuple[str, ...],
+        fetch_hours: float,
+        awc_due: bool,
+        history_missing: bool,
+        attempt_monotonic: float,
+    ) -> _GlobalFetchResult:
+        """Fetch non-priority cycle/recovery data outside the source clock."""
+
+        reports: list[MetarReport] = []
+        source_ok = False
+        history_loaded = False
+        cycle_ok = False
+        try:
+            cycle_reports, cycle_ok = self._cycle_cursor.poll(
+                client=client,
+                stations=stations,
+                as_of=datetime.now(UTC),
+            )
+            reports.extend(cycle_reports)
+            source_ok = source_ok or cycle_ok
+        except Exception as exc:  # noqa: BLE001 - isolate transports
+            logger.warning(
+                "NOAA_METAR_CYCLE_POLL_RAISED exc=%s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        if awc_due and (history_missing or not cycle_ok):
+            with self._lock:
+                self._last_awc_attempt_monotonic = attempt_monotonic
+            try:
+                awc_reports = self.fetcher(
+                    stations,
+                    hours=fetch_hours,
+                    client=client,
+                )
+                history_loaded = bool(awc_reports)
+                reports.extend(awc_reports)
+                source_ok = source_ok or history_loaded
+            except Exception as exc:  # noqa: BLE001 - isolate transports
+                logger.warning(
+                    "DAY0_FAST_OBS_RECOVERY_RAISED exc=%s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        return reports, source_ok, history_loaded
+
+    def _poll_global_sources_in_background(
+        self,
+        *,
+        client: httpx.Client,
+        stations: tuple[str, ...],
+        fetch_hours: float,
+        now: float,
+        awc_due: bool,
+        history_missing: bool,
+    ) -> _GlobalFetchResult | None:
+        """Harvest one completed global fetch and keep at most one in flight."""
+
+        completed: Future[_GlobalFetchResult] | None = None
+        with self._lock:
+            future = self._global_fetch_future
+            if future is not None and not future.done():
+                return None
+            if future is not None:
+                completed = future
+                self._global_fetch_future = None
+
+        result: _GlobalFetchResult | None = None
+        if completed is not None:
+            try:
+                result = completed.result()
+            except Exception as exc:  # noqa: BLE001 - worker failure is scoped
+                logger.warning(
+                    "DAY0_FAST_OBS_GLOBAL_WORKER_FAILED exc=%s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                result = ([], False, False)
+
+        with self._lock:
+            if self._global_fetch_executor is None:
+                self._global_fetch_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="day0-global",
+                )
+            effective_history_missing = not (
+                self._full_window_loaded or bool(result and result[2])
+            )
+            self._global_fetch_future = self._global_fetch_executor.submit(
+                self._fetch_global_sources,
+                client=client,
+                stations=stations,
+                fetch_hours=fetch_hours,
+                awc_due=awc_due,
+                history_missing=history_missing and effective_history_missing,
+                attempt_monotonic=now,
+            )
+        return result
+
     def _reports_with_status(
         self,
         stations: list[str],
@@ -1781,50 +1895,48 @@ class Day0FastObsEmitter:
                     >= METAR_AWC_RECOVERY_INTERVAL_S
                 )
                 history_missing = not self._full_window_loaded
-            cycle_reports: list[MetarReport] = []
+            priority_station_ids = tuple(
+                dict.fromkeys(
+                    station
+                    for raw in priority_stations
+                    if (station := str(raw).strip().upper())
+                )
+            )
             priority_reports, priority_ok = self._station_cursor.poll(
                 client=priority_client,
-                stations=priority_stations,
+                stations=priority_station_ids,
                 budget_s=self.priority_station_poll_budget_s,
             )
             reports.extend(priority_reports)
             source_ok = source_ok or priority_ok
-            cycle_ok = priority_ok
-            if priority_reports:
-                cycle_reports = priority_reports
-            try:
-                if not priority_reports:
-                    cycle_reports, cycle_ok = self._cycle_cursor.poll(
-                        client=client,
-                        stations=stations,
-                        as_of=datetime.now(UTC),
-                    )
-                    reports.extend(cycle_reports)
-                    source_ok = source_ok or cycle_ok
-            except Exception as exc:  # noqa: BLE001 - isolate transports
-                logger.warning(
-                    "NOAA_METAR_CYCLE_POLL_RAISED exc=%s: %s",
-                    type(exc).__name__,
-                    exc,
+            if priority_station_ids:
+                global_result = self._poll_global_sources_in_background(
+                    client=client,
+                    stations=tuple(stations),
+                    fetch_hours=fetch_hours,
+                    now=now,
+                    awc_due=awc_due,
+                    history_missing=history_missing,
                 )
-            if awc_due and (history_missing or not cycle_ok):
-                with self._lock:
-                    self._last_awc_attempt_monotonic = now
-                try:
-                    awc_reports = self.fetcher(
-                        stations,
-                        hours=fetch_hours,
+                if global_result is not None:
+                    global_reports, global_ok, global_history_loaded = global_result
+                    reports.extend(global_reports)
+                    source_ok = source_ok or global_ok
+                    history_loaded = history_loaded or global_history_loaded
+            else:
+                global_reports, global_ok, global_history_loaded = (
+                    self._fetch_global_sources(
                         client=client,
+                        stations=tuple(stations),
+                        fetch_hours=fetch_hours,
+                        awc_due=awc_due,
+                        history_missing=history_missing,
+                        attempt_monotonic=now,
                     )
-                    history_loaded = bool(awc_reports)
-                    reports.extend(awc_reports)
-                    source_ok = source_ok or bool(awc_reports)
-                except Exception as exc:  # noqa: BLE001 - isolate transports
-                    logger.warning(
-                        "DAY0_FAST_OBS_RECOVERY_RAISED exc=%s: %s",
-                        type(exc).__name__,
-                        exc,
-                    )
+                )
+                reports.extend(global_reports)
+                source_ok = source_ok or global_ok
+                history_loaded = history_loaded or global_history_loaded
         else:
             try:
                 reports = self.fetcher(stations, hours=fetch_hours)
