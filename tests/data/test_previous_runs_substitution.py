@@ -1103,3 +1103,39 @@ def test_blocked_source_clock_request_ignores_unrelated_input_churn(
     finally:
         conn.close()
         source_clock.load_city_one_schemes.cache_clear()
+
+
+def test_empty_materialization_queues_skip_cycle_priority_reads(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+
+    def _unexpected_priority_read(_forecast_db):
+        raise AssertionError("empty queues must not read cycle priority")
+
+    monkeypatch.setattr(
+        queue_mod,
+        "_cycle_advance_seed_priority_map",
+        _unexpected_priority_read,
+    )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        forecast_db=tmp_path / "forecasts.db",
+        discover=False,
+        limit=8,
+    )
+
+    assert report.status == "NO_REQUESTS"
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY" in report.reason_codes
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY" in report.reason_codes

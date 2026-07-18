@@ -1129,15 +1129,16 @@ def _prepare_seed_requests(
     seed_path = Path(seed_dir)
     if not seed_path.exists():
         return [], [], ["REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_ABSENT"]
+    seed_files = tuple(path for path in seed_path.glob("*.json") if path.is_file())
+    if not seed_files:
+        return [], [], ["REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY"]
     priority = _cycle_advance_seed_priority_map(forecast_db)
     seeds = tuple(
         sorted(
-            (path for path in seed_path.glob("*.json") if path.is_file()),
+            seed_files,
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
         )
     )
-    if not seeds:
-        return [], [], ["REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY"]
     if seed_processed_dir is None or seed_failed_dir is None:
         raise ValueError("seed_processed_dir and seed_failed_dir are required when seed_dir is set")
     processed_path = Path(seed_processed_dir)
@@ -1386,14 +1387,8 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             seed_failed_files=tuple(seed_failed),
             reason_codes=tuple(seed_reasons + ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_ABSENT"]),
         )
-    priority = _cycle_advance_seed_priority_map(forecast_db)
-    requests = tuple(
-        sorted(
-            (path for path in request_path.glob("*.json") if path.is_file()),
-            key=lambda path: _cycle_advance_file_sort_key(path, priority),
-        )
-    )
-    if not requests:
+    request_files = tuple(path for path in request_path.glob("*.json") if path.is_file())
+    if not request_files:
         return ReplacementForecastLiveMaterializationQueueReport(
             status="NO_REQUESTS",
             request_dir=str(request_path),
@@ -1411,6 +1406,13 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             seed_failed_files=tuple(seed_failed),
             reason_codes=tuple(seed_reasons + ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY"]),
         )
+    priority = _cycle_advance_seed_priority_map(forecast_db)
+    requests = tuple(
+        sorted(
+            request_files,
+            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+        )
+    )
 
     requests, superseded = _coalesce_superseded_materialization_requests(
         requests,
