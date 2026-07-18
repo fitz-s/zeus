@@ -5197,10 +5197,48 @@ def execute_monitoring_phase(
         summary["held_monitor_defer_reason"] = "urgent_day0_wake"
         return portfolio_dirty, tracker_dirty
     install_monitor_day0_family_cache(clob)
+
+    durable_hard_facts = {}
+    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+
+    for pos in monitor_positions:
+        city = deps.cities_by_name.get(pos.city)
+        if not _day0_hard_fact_position_eligible(pos) or city is None:
+            continue
+        try:
+            verdict = evaluate_hard_fact_exit(
+                position=pos,
+                city=city,
+                now=monitor_now_utc,
+                world_conn=conn,
+                durable_only=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - isolate one family from the batch.
+            summary["held_monitor_hard_fact_preclass_errors"] = (
+                summary.get("held_monitor_hard_fact_preclass_errors", 0) + 1
+            )
+            deps.logger.warning(
+                "held monitor hard-fact preclassification failed for %s: %s",
+                pos.trade_id,
+                exc,
+            )
+            continue
+        if verdict is not None:
+            durable_hard_facts[id(pos)] = verdict
+    summary["held_monitor_durable_hard_facts"] = len(durable_hard_facts)
+    quote_positions = [
+        pos
+        for pos in monitor_positions
+        if getattr(durable_hard_facts.get(id(pos)), "action", None)
+        != "HOLD_STRUCTURAL_WIN"
+    ]
+    summary["held_monitor_structural_win_orderbooks_bypassed"] = (
+        len(monitor_positions) - len(quote_positions)
+    )
     _prefetch_held_monitor_orderbooks(
         conn,
         clob,
-        monitor_positions,
+        quote_positions,
         summary,
         now_utc=monitor_now_utc,
         deps=deps,
@@ -5516,16 +5554,20 @@ def execute_monitoring_phase(
             # CLOB closed/non-accepting state cannot hide an already-dead bin or
             # a structurally won hold behind a generic awaiting-settlement
             # receipt.
-            _hard_fact = None
+            _hard_fact = durable_hard_facts.get(id(pos))
             if _day0_hard_fact_position_eligible(pos) and city is not None:
                 try:
                     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
                     # Pass conn as world_conn so the METAR kill-memo cold-start
                     # recovery does not open per-city independent world connections
                     # (connection-burst antibody 2026-06-13).
-                    _hard_fact = evaluate_hard_fact_exit(
-                        position=pos, city=city, now=deps._utcnow(), world_conn=conn
-                    )
+                    if _hard_fact is None:
+                        _hard_fact = evaluate_hard_fact_exit(
+                            position=pos,
+                            city=city,
+                            now=deps._utcnow(),
+                            world_conn=conn,
+                        )
                 except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
                     deps.logger.warning(
                         "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc

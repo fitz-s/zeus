@@ -1432,6 +1432,8 @@ class TestStructuralWinTerminalHold:
         assert summary.get("day0_hard_fact_structural_win_holds") == 1
         assert summary.get("day0_hard_fact_structural_win_quote_bypassed") == 1
         assert summary.get("day0_hard_fact_probability_refresh_bypassed") == 1
+        assert summary.get("held_monitor_structural_win_orderbooks_bypassed") == 1
+        assert summary.get("held_monitor_orderbooks_requested") == 0
         assert summary.get("day0_hard_fact_exits") is None
         assert not any(getattr(r, "should_exit", False) for r in results), (
             "structural-win hold must block the estimator exit (should_exit must be False)"
