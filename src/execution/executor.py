@@ -1231,11 +1231,7 @@ def _entry_economics_component(
             shares=submitted_shares,
         )
     try:
-        assert_live_order_unit_price(
-            limit_price,
-            side="BUY",
-            tick_size=getattr(intent, "executable_snapshot_min_tick_size", None),
-        )
+        assert_live_order_unit_price(limit_price)
     except ValueError as exc:
         return _capability_component(
             "entry_economics",
@@ -4689,14 +4685,9 @@ def _align_buy_limit_price_to_tick(limit_price: float, min_tick_size: Decimal | 
     """Round a BUY limit down to the executable snapshot tick."""
 
     tick = _submit_tick_size_or_raise(min_tick_size)
-    price = assert_live_order_unit_price(
-        limit_price,
-        side="BUY",
-    )
+    price = assert_live_order_unit_price(limit_price)
     aligned = (price / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
-    return float(
-        assert_live_order_unit_price(aligned, side="BUY", tick_size=tick)
-    )
+    return float(assert_live_order_unit_price(aligned))
 
 
 def _submit_tick_size_or_raise(min_tick_size: Decimal | str | float) -> Decimal:
@@ -4715,17 +4706,9 @@ def _align_sell_limit_price_to_tick(limit_price: float, min_tick_size: Decimal |
     """Round a SELL limit down to the executable snapshot tick."""
 
     tick = _submit_tick_size_or_raise(min_tick_size)
-    try:
-        price = Decimal(str(limit_price))
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(f"SELL limit price must be decimal: {limit_price!r}") from exc
-    if not price.is_finite():
-        raise ValueError(f"SELL limit price must be finite: {limit_price!r}")
-    price = min(max(price, tick), Decimal("1") - tick)
+    price = assert_live_order_unit_price(limit_price)
     aligned = (price / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
-    return float(
-        assert_live_order_unit_price(aligned, side="SELL", tick_size=tick)
-    )
+    return float(assert_live_order_unit_price(aligned))
 
 
 def _exit_base_limit_price(

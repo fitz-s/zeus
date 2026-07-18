@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-18
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
@@ -1469,7 +1469,7 @@ def test_pre_submit_rejects_low_price_yes_below_live_floor():
         )
 
 
-def test_pre_submit_rejects_legacy_qkernel_price_below_strategy_floor():
+def test_pre_submit_rejects_legacy_qkernel_price_below_absolute_price_floor():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -1479,7 +1479,7 @@ def test_pre_submit_rejects_legacy_qkernel_price_below_strategy_floor():
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
+    with pytest.raises(LiveOrderAggregateError, match="unit price out of bounds"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",

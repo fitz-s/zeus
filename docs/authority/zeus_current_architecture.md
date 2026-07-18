@@ -302,16 +302,17 @@ Risk levels must change behavior:
 Overall risk is fail-closed: the max active level wins, and computation error
 or broken truth input must not silently downgrade risk.
 
-### 10.2 Venue-Bound Live Order Price Domain
+### 10.2 Absolute Live Order Price Domain
 
-Before a current executable snapshot supplies the market tick, a proposed BUY
-or SELL price must be finite and strictly inside the probability domain
-`(0, 1)`. At live submission, every entry, reduce-only exit, single-order, and
-batch order must be bound to the same snapshot-native inclusive range
-`[tick, 1 - tick]` and be tick-aligned. No strategy or order role may waive
-that venue legality.
+Every proposed or submitted BUY or SELL price must be finite and inside the
+inclusive absolute range `[0.05, 0.95]`. This applies to every entry,
+reduce-only exit, single-order, and batch order before SDK contact. The current
+executable snapshot still supplies tick alignment and venue legality, but a
+venue-legal price outside the absolute range remains forbidden. No strategy,
+q-kernel, lifecycle state, current-state proof, or order role may waive this
+contract (INV-43).
 
-Price is not a probability-quality proxy. A venue-legal tail price does not by
+Price is not a probability-quality proxy. A band-legal price does not by
 itself authorize an entry: the global auction separately requires a strict
 current-evidence robust win majority, positive robust EV and delta log wealth,
 and only the remaining shares below the cumulative Fractional Kelly final-

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-18; last_reused=2026-07-18
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-18
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -1736,9 +1736,9 @@ def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
-@pytest.mark.parametrize("price", [0.01, 0.99])
+@pytest.mark.parametrize("price", [0.05, 0.95])
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
-def test_live_submit_venue_tick_band_is_inclusive(tmp_path, price, side):
+def test_live_submit_unit_price_band_is_inclusive(tmp_path, price, side):
     fake = FakeOneStepClient(response={"orderID": "ord-boundary", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
@@ -1751,24 +1751,27 @@ def test_live_submit_venue_tick_band_is_inclusive(tmp_path, price, side):
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
-@pytest.mark.parametrize("price", [0.009, 0.991])
-def test_live_buy_submit_rejects_outside_venue_tick_band_before_sdk_contact(tmp_path, price):
+@pytest.mark.parametrize("price", [0.0499, 0.9501])
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_live_submit_rejects_out_of_band_price_before_sdk_contact(
+    tmp_path, price, side
+):
     fake = FakeOneStepClient(response={"orderID": "must-not-submit", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
         _priced_intent(0.50), FakeSnapshot(), order_type="GTC"
-    ).with_updates(price=Decimal(str(price)), side="BUY")
+    ).with_updates(price=Decimal(str(price)), side=side)
 
     result = adapter.submit(envelope)
 
     assert result.status == "rejected"
-    assert "outside venue [0.01, 0.99]" in str(result.error_message)
+    assert "outside absolute [0.05, 0.95]" in str(result.error_message)
     assert not fake.calls
 
 
-@pytest.mark.parametrize("price", [0.01, 0.04, 0.96, 0.99])
-def test_live_sell_submit_uses_venue_tick_band_not_entry_band(tmp_path, price):
-    fake = FakeOneStepClient(response={"orderID": "sell-boundary", "status": "live"})
+@pytest.mark.parametrize("price", [0.001, 0.04, 0.96, 0.999])
+def test_live_sell_submit_cannot_use_venue_tick_to_waive_absolute_band(tmp_path, price):
+    fake = FakeOneStepClient(response={"orderID": "must-not-submit", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
         _priced_intent(0.50), FakeSnapshot(), order_type="GTC"
@@ -1776,8 +1779,9 @@ def test_live_sell_submit_uses_venue_tick_band_not_entry_band(tmp_path, price):
 
     result = adapter.submit(envelope)
 
-    assert result.status == "accepted"
-    assert any(call[0] == "create_and_post_order" for call in fake.calls)
+    assert result.status == "rejected"
+    assert "outside absolute [0.05, 0.95]" in str(result.error_message)
+    assert not fake.calls
 
 
 def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):
@@ -2635,13 +2639,13 @@ class TestSubmitBatch:
         fake = FakeBatchTwoStepClient()
         adapter, _ = _adapter(tmp_path, fake)
         envelopes = _batch_envelopes(adapter, 3)
-        envelopes[1] = envelopes[1].with_updates(price=Decimal("0.991"))
+        envelopes[1] = envelopes[1].with_updates(price=Decimal("0.951"))
 
         results = adapter.submit_batch(envelopes)
 
         assert [result.status for result in results] == ["rejected"] * 3
         assert all(
-            "outside venue [0.01, 0.99]" in str(result.error_message)
+            "outside absolute [0.05, 0.95]" in str(result.error_message)
             for result in results
         )
         assert not fake.calls
