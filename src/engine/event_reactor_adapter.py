@@ -30108,6 +30108,35 @@ class _Day0BootstrapSampler:
                 self.members[idx]
                 + analysis._rng.normal(0.0, self.sigma, members_per_row)
             )
+        return self._probability_matrix(analysis, draws)
+
+    def sample_matrix_with_interleaved_normal(
+        self,
+        analysis,
+        n_samples: int,
+        n_members: int,
+        *,
+        normal_sigma: float,
+        normal_width: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Batch Day0 draws while preserving scalar RNG interleaving."""
+
+        rows = max(0, int(n_samples))
+        members_per_row = max(1, int(n_members))
+        width = max(0, int(normal_width))
+        draws = np.empty((rows, members_per_row), dtype=np.float64)
+        noise = np.empty((rows, width), dtype=np.float64)
+        for row in range(rows):
+            idx = analysis._rng.integers(0, self.members.size, members_per_row)
+            draws[row] = (
+                self.members[idx]
+                + analysis._rng.normal(0.0, self.sigma, members_per_row)
+            )
+            noise[row] = analysis._rng.normal(0.0, normal_sigma, width)
+        return self._probability_matrix(analysis, draws), noise
+
+    def _probability_matrix(self, analysis, draws: np.ndarray) -> np.ndarray:
+        members_per_row = draws.shape[1]
         if self.rounded is not None:
             if self.metric == "high":
                 draws = np.maximum(draws, self.rounded)

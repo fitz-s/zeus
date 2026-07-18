@@ -960,14 +960,46 @@ class MarketAnalysis:
         map_A = float(self._calibrator.A) if has_platt else 0.0
         map_B = float(self._calibrator.B) if has_platt else 0.0
         map_C = float(self._calibrator.C) if has_platt else 0.0
-        # Transfer uncertainty consumes RNG inside this loop. Keep scalar
-        # sampler draws interleaved with it so each stochastic layer receives
-        # the same draws as the authority path.
-        p_raw_matrix = (
-            None
-            if has_platt and self._transfer_logit_sigma > 0.0
-            else self._bootstrap_p_raw_matrix(n, n_members)
+        # Transfer uncertainty consumes RNG after every raw row. A capable
+        # sampler can batch settlement/binning while returning those interleaved
+        # normal draws separately, preserving the scalar authority byte-for-byte.
+        transfer_noise_matrix = None
+        interleaved_sampler = getattr(
+            self._bootstrap_probability_sampler,
+            "sample_matrix_with_interleaved_normal",
+            None,
         )
+        if (
+            has_platt
+            and self._transfer_logit_sigma > 0.0
+            and callable(interleaved_sampler)
+        ):
+            p_raw_matrix, transfer_noise_matrix = interleaved_sampler(
+                self,
+                n,
+                n_members,
+                normal_sigma=self._transfer_logit_sigma,
+                normal_width=len(self.bins),
+            )
+            p_raw_matrix = np.asarray(p_raw_matrix, dtype=np.float64)
+            transfer_noise_matrix = np.asarray(
+                transfer_noise_matrix,
+                dtype=np.float64,
+            )
+            if p_raw_matrix.shape != (n, len(self.bins)):
+                raise ValueError(
+                    "interleaved bootstrap probability matrix shape invalid"
+                )
+            if transfer_noise_matrix.shape != (n, len(self.bins)):
+                raise ValueError("interleaved transfer noise matrix shape invalid")
+            if not np.all(np.isfinite(transfer_noise_matrix)):
+                raise ValueError("interleaved transfer noise matrix must be finite")
+        else:
+            p_raw_matrix = (
+                None
+                if has_platt and self._transfer_logit_sigma > 0.0
+                else self._bootstrap_p_raw_matrix(n, n_members)
+            )
         if (
             p_raw_matrix is not None
             and not has_platt
@@ -1002,7 +1034,11 @@ class MarketAnalysis:
                         )
                     z = A * logit_safe(p_input) + B * self._lead_days + C
                     if self._transfer_logit_sigma > 0.0:
-                        z += rng.normal(0.0, self._transfer_logit_sigma)
+                        z += (
+                            transfer_noise_matrix[i, j]
+                            if transfer_noise_matrix is not None
+                            else rng.normal(0.0, self._transfer_logit_sigma)
+                        )
                     p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:
                 p_cal_boot_all = p_raw_all
