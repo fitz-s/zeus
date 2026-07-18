@@ -1422,6 +1422,60 @@ def test_reactor_wake_completed_event_needs_no_reactor_cycle(monkeypatch) -> Non
     assert conn.execute_count == 1
 
 
+def test_reactor_wake_event_state_uses_composite_key_lookup(monkeypatch) -> None:
+    import src.main as main
+
+    class _KeepOpenConnection(sqlite3.Connection):
+        def close(self) -> None:
+            pass
+
+    conn = sqlite3.connect(":memory:", factory=_KeepOpenConnection)
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            claimed_at TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(
+                consumer_name, processing_status, updated_at
+            );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, claimed_at, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'processed', NULL, '2026-07-18T00:00:00Z')
+        """,
+        ((f"event-{index}",) for index in range(100)),
+    )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda: conn)
+
+    state = main._reactor_wake_event_state(("event-2", "event-97"))
+
+    assert state.finished is True
+    query = next(
+        statement for statement in statements if "WITH requested(event_id)" in statement
+    )
+    plan = [
+        str(row[3])
+        for row in conn.execute(f"EXPLAIN QUERY PLAN {query}").fetchall()
+    ]
+    assert any(
+        "sqlite_autoindex_opportunity_event_processing_1" in detail
+        and "consumer_name=? AND event_id=?" in detail
+        for detail in plan
+    ), plan
+    sqlite3.Connection.close(conn)
+
+
 def test_reactor_wake_poll_retires_durable_future_retry_hint(monkeypatch) -> None:
     import threading
 

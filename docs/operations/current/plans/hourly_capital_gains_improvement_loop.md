@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-07-18 13:58Z tick — 目标升级为 edge-reversal + fault containment；wake 状态读从历史扫描改为批次主键查
+- **新地图:** 唯一计时从新 causal fact 的 ingest commit 开始，到其受影响 BUY/SELL/HOLD submit 为止。forecast reversal 使用百秒窗口；deterministic observation reversal 优先 held SELL 和 exact complementary BUY。平均 cycle 速度不是验收。
+- **隔离约束:** source/city/family/event/candidate/request/query/command 任一处失败或阻塞，只能影响依赖它的动作；pre-submit deadline/retry 必须局部化，外部 side effect 开始后转入 must-complete settlement/reconciliation，不占全局 discovery reactor。
+- **今天的运行态根因:** `state/zeus-world.db` 约 81GB，`opportunity_event_processing` 实读至少 10,837,406 行。100-event wake 的状态 SQL 因 `consumer_name + event_id IN (...)` 被 planner 选成仅按 consumer 的覆盖索引扫描；原查询 2,000ms 后仍未完成，live `edli-reactor-wake` 线程采样几乎全在 `sqlite3_step`。
+- **修复与实测:** 改为 `VALUES` 驱动的 `(consumer_name,event_id)` 复合主键 join；同一 live DB/同一 100-event batch 连续 20 次 median 2.50ms、近 p95 2.98ms、max 3.92ms。query-plan antibody 要求复合主键同时约束两列；`tests/test_forecast_live_daemon.py` 80 passed。未复制/修改 live DB，未重启 daemon。
+- **下一突破口:** durable wake queue 902 文件导致每 poll 重复全目录解析约 36ms；processing 历史债和 81GB DB 仍可能放大 ingest 写成本。先验证 active-vs-retained 语义，再消除 O(backlog) poll 和无界历史索引维护，不做盲目 live cleanup。
+
 ### 2026-07-17 00:10Z tick — deterministic dead-token SELL 脱离全局拍卖；JIT book hash 自拒绝已修
 - **严格占优退出:** `DAY0_EXTREME_UPDATED` 已先唤醒受影响 family 的 targeted exit monitor，但旧代码仍把 exact terminal value=0 的 held token SELL 委托给 107-family global auction。现在只有 absorbing `EXIT_DEAD_BIN` 直接生成 `urgency=immediate` reduce-only exit；canonical monitor write、fresh executable bid、submit gate、现有 `execute_exit` 和 lifecycle 仍全部保留。statistical SELL 继续只由 global auction actuation，互补 BUY 继续参加 BUY/HOLD/CASH 全局比较。
 - **为什么不需要全局排序:** 对结算价值严格为 0 的 held token，任何扣费后正现金回收都逐状态严格优于 HOLD；等待 unrelated family probability/book/wealth 只能损失残值，不会产生更优的保留理由。

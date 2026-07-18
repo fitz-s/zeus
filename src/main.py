@@ -3807,13 +3807,17 @@ def _reactor_wake_event_state(
     conn = None
     try:
         conn = get_world_connection_read_only()
-        placeholders = ",".join("?" for _ in clean_event_ids)
+        # A plain event_id IN predicate lets SQLite choose the status index and
+        # scan every row for this consumer. Drive the composite key explicitly.
+        requested = ",".join("(?)" for _ in clean_event_ids)
         rows = conn.execute(
             f"""
-            SELECT event_id, processing_status, claimed_at
-              FROM opportunity_event_processing
-             WHERE consumer_name = 'edli_reactor_v1'
-               AND event_id IN ({placeholders})
+            WITH requested(event_id) AS (VALUES {requested})
+            SELECT p.event_id, p.processing_status, p.claimed_at
+              FROM requested r
+              JOIN opportunity_event_processing p
+                ON p.consumer_name = 'edli_reactor_v1'
+               AND p.event_id = r.event_id
             """,
             clean_event_ids,
         ).fetchall()
