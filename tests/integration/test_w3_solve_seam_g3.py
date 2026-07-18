@@ -1399,15 +1399,25 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
         probability_witness=refreshed,
         candidate_seeds=(),
     )
+    required_conditions: list[str] = []
+
+    def current_family_for_condition(*_args, **kwargs):
+        required_conditions.append(kwargs["required_condition_id"])
+        return current_family
+
     monkeypatch.setattr(
         era,
         "_prepare_current_global_probability_family",
-        lambda *_args, **_kwargs: current_family,
+        current_family_for_condition,
     )
     conn = sqlite3.connect(":memory:")
+    actuation = SimpleNamespace(
+        probability_witness=selected,
+        decision=SimpleNamespace(candidate=SimpleNamespace(condition_id="c0")),
+    )
     rebound, current_day0_payload = era._current_global_actuation_prepared_family(
         SimpleNamespace(),
-        global_actuation=SimpleNamespace(probability_witness=selected),
+        global_actuation=actuation,
         forecast_conn=conn,
         topology_conn=conn,
         observation_conn=conn,
@@ -1416,6 +1426,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
     assert rebound.probability_witness is selected
     assert rebound.decision_id == "fresh-decision"
     assert current_day0_payload == {}
+    assert required_conditions == ["c0"]
 
     monkeypatch.setattr(
         era,
@@ -1428,7 +1439,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
     with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
         era._current_global_actuation_prepared_family(
             SimpleNamespace(),
-            global_actuation=SimpleNamespace(probability_witness=selected),
+            global_actuation=actuation,
             forecast_conn=conn,
             topology_conn=conn,
             observation_conn=conn,
@@ -2724,13 +2735,31 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     )
     assert dict(selected_dead.probability_witness.exact_yes_payoffs) == exact_payoffs
 
+    revalidated, revalidated_payload = era._current_global_actuation_prepared_family(
+        deterministic_event,
+        global_actuation=SimpleNamespace(
+            probability_witness=selected_dead.probability_witness,
+            decision=SimpleNamespace(candidate=SimpleNamespace(condition_id="c0")),
+        ),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=3),
+    )
+    assert remaining_day_calls == 1
+    assert isinstance(
+        revalidated.probability_witness,
+        DeterministicBinPayoffWitness,
+    )
+    assert revalidated_payload["_edli_day0_exact_yes_payoffs"] == exact_payoffs
+
     held_unknown_payload: dict[str, object] = {}
     held_unknown = era._prepare_current_global_probability_family(
         deterministic_event,
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=3),
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=4),
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=held_unknown_payload,
         required_condition_id="c1",

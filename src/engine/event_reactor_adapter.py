@@ -11285,6 +11285,13 @@ def _current_global_actuation_prepared_family(
     selected = getattr(global_actuation, "probability_witness", None)
     if selected is None:
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_WITNESS_MISSING")
+    decision = getattr(global_actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    required_condition_id = str(
+        getattr(candidate, "condition_id", "") or ""
+    ).strip()
+    if not required_condition_id:
+        raise ValueError("GLOBAL_ACTUATION_CONDITION_ID_MISSING")
     current_day0_payload: dict[str, object] = {}
     current = _prepare_current_global_probability_family(
         event,
@@ -11294,6 +11301,7 @@ def _current_global_actuation_prepared_family(
         decision_time=decision_time,
         max_age=FRESHNESS_WINDOW_DEFAULT,
         day0_payload_out=current_day0_payload,
+        required_condition_id=required_condition_id,
     )
     current_witness = getattr(current, "probability_witness", None)
     if current_witness is None or any(
