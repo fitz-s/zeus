@@ -173,3 +173,15 @@ QUEUED (design-first, not rushed inline):
       (compute or delete); M-7 OK_FAST_ONLY unreachable (wire classifier or narrow
       policy); M-13 verifier re-proves conditioning from primitives. T0-1 slice 2:
       persisted remaining-member sigma narrowing (after slice-1 validation).
+
+## T0-1 SLICE 1 LANDED (2026-07-18 22:5x)
+- [x] fix(day0) remaining-window center correction  b1cda5be3 (cherry-picked from
+      worktree a238a756; 2 files +509; 18 new tests; 162 green across baseline set;
+      60-file materializer-importer sweep byte-identical failure set vs base).
+- Validation (independent, byte-exact replay 5c0e87fd8): HIGH post-peak 9.31->0.98
+  (accept <=2.0 PASS), peak 1.49->1.00, pre-peak stability 0.86 in [0.6,1.4] PASS;
+  straddle under-weight closes 93%. LOW eve misplaced mass -64%; LOW day n=7 open.
+- Coverage: day0_hourly_vectors starts 2026-07-15 (no backfill) -> validation spans
+  last 3 settled days; live serving forward-only, fail-open on missing vector.
+- Slice 2 queue (needs more live vector days): sigma narrowing from persisted
+  remaining members; revisit LOW day cell + Shenzhen-style per-row misses.
