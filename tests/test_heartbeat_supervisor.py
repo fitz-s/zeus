@@ -807,6 +807,44 @@ def test_lost_state_allows_FOK_FAK_immediate_only():
     assert supervisor.gate_for_order_type("FAK") is True
 
 
+def test_lost_summary_and_pre_submit_authority_expose_immediate_only():
+    from src.engine.cycle_runner import _discovery_gates_allow_entries
+    from src.events.reactor import _edli_heartbeat_authority_summary
+    from src.observability.status_summary import _heartbeat_component
+    from src.riskguard.risk_level import RiskLevel
+
+    supervisor = HeartbeatSupervisor(FakeHeartbeatAdapter([]), cadence_seconds=5)
+    supervisor.record_failure("miss-1")
+    supervisor.record_failure("miss-2")
+    configure_global_supervisor(supervisor)
+
+    payload = heartbeat_supervisor_module.summary()
+
+    assert payload["entry"]["allow_submit"] is True
+    assert payload["entry"]["resting_allow_submit"] is False
+    assert payload["entry"]["immediate_allow_submit"] is True
+    assert payload["entry"]["allowed_order_types"] == ["FOK", "FAK"]
+    assert _edli_heartbeat_authority_summary("GTC")["allow_submit"] is False
+    assert _edli_heartbeat_authority_summary("FOK")["allow_submit"] is True
+    assert _heartbeat_component(payload)["allowed"] is True
+    assert _heartbeat_component(payload, order_type="FAK")["allowed"] is True
+    assert _heartbeat_component(payload, order_type="GTC")["allowed"] is False
+    assert _discovery_gates_allow_entries(
+        risk_level=RiskLevel.GREEN,
+        heartbeat_status=payload,
+        ws_gap_status={"entry": {"allow_submit": True}},
+        cutover_summary={"entry": {"allow_submit": True}},
+        governor_status={"entry": {"allow_submit": True}},
+        current_posture="NORMAL",
+        chain_ready=True,
+        force_exit=False,
+        freshness_allows_entries=True,
+        entry_bankroll=1.0,
+        exposure_gate_hit=False,
+        entries_paused=False,
+    )
+
+
 def test_executor_blocks_gtc_before_command_persistence_when_heartbeat_lost(monkeypatch):
     from src.execution.executor import _live_order
 

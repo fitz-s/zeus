@@ -246,14 +246,12 @@ def test_auction_capital_snapshot_excludes_transient_actuation_health():
         resolution_window="day0",
         correlation_key="corr-1",
     ) == Decimal("50")
-    with pytest.raises(AllocationDenied) as excinfo:
-        current_global_entry_capacity_usd(
-            market_id="m1",
-            event_id="e1",
-            resolution_window="day0",
-            correlation_key="corr-1",
-        )
-    assert excinfo.value.decision.reason == "reduce_only_mode_active"
+    assert current_global_entry_capacity_usd(
+        market_id="m1",
+        event_id="e1",
+        resolution_window="day0",
+        correlation_key="corr-1",
+    ) == Decimal("50")
 
     clear_global_allocator()
 
@@ -483,16 +481,18 @@ def test_heartbeat_degraded_switches_to_FOK_FAK_only():
 
     assert allocator.maker_or_taker(SimpleNamespace(orderbook_depth_micro=100_000_000), state) == "TAKER"
     assert allocator.allowed_order_types(state) == ("FOK", "FAK")
-    assert allocator.reduce_only_mode_active(state)
+    assert not allocator.reduce_only_mode_active(state)
 
 
-def test_heartbeat_lost_switches_to_no_trade():
+def test_heartbeat_lost_isolated_to_resting_order_types():
     allocator = RiskAllocator()
     state = _state(heartbeat_health=HeartbeatHealth.LOST)
 
-    assert allocator.maker_or_taker(SimpleNamespace(orderbook_depth_micro=100_000_000), state) == "NO_TRADE"
-    assert allocator.allowed_order_types(state) == ()
-    assert allocator.can_allocate(_intent(size=1), state).reason == "heartbeat_lost"
+    assert allocator.maker_or_taker(SimpleNamespace(orderbook_depth_micro=100_000_000), state) == "TAKER"
+    assert allocator.allowed_order_types(state) == ("FOK", "FAK")
+    assert allocator.can_allocate(_intent(size=1), state).allowed
+    assert not allocator.reduce_only_mode_active(state)
+    assert allocator.kill_switch_reason(state) is None
 
 
 def test_book_depth_json_can_select_maker_when_healthy_and_deep():
@@ -561,18 +561,21 @@ def test_global_allocator_defaults_fail_closed_until_cycle_refresh():
     }
 
 
-def test_executor_pre_submit_guard_raises_structured_allocation_denied():
+def test_executor_pre_submit_allocator_allows_immediate_entry_when_heartbeat_lost():
     from src.execution.executor import _assert_risk_allocator_allows_submit
 
     configure_global_allocator(RiskAllocator(), _state(heartbeat_health=HeartbeatHealth.LOST))
 
     try:
-        with pytest.raises(AllocationDenied) as excinfo:
-            _assert_risk_allocator_allows_submit(_intent(size=1))
+        decision = _assert_risk_allocator_allows_submit(_intent(size=1))
+        order_type = select_global_order_type(
+            SimpleNamespace(orderbook_depth_micro=100_000_000)
+        )
     finally:
         clear_global_allocator()
 
-    assert excinfo.value.decision.reason == "heartbeat_lost"
+    assert decision.allowed
+    assert order_type == "FOK"
 
 
 def test_execute_exit_order_kill_switch_blocks_before_persistence_or_sdk(monkeypatch):
@@ -655,11 +658,25 @@ def test_live_entry_submit_uses_allocator_selected_FOK_for_shallow_book(monkeypa
     assert envelope_order_type == "FOK"
 
 
-def test_live_exit_submit_uses_allocator_selected_FOK_when_heartbeat_is_degraded(monkeypatch):
+def test_live_exit_submit_uses_FAK_when_heartbeat_is_lost(monkeypatch):
     conn = _trade_conn()
     heartbeat_order_types: list[str] = []
     captured: dict[str, object] = {}
     _patch_submit_guards(monkeypatch, heartbeat_order_types)
+    monkeypatch.setattr(
+        "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+        lambda *args, **kwargs: {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._assert_collateral_allows_sell",
+        lambda *args, **kwargs: {
+            "component": "collateral_sell_preflight",
+            "allowed": True,
+        },
+    )
     snapshot_id = _insert_snapshot(conn, token_id="yes-exit", depth_json='{"bids":[["0.49","500"]],"asks":[["0.51","500"]]}')
 
     class DummyClient:
@@ -682,7 +699,7 @@ def test_live_exit_submit_uses_allocator_selected_FOK_when_heartbeat_is_degraded
             }
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
-    configure_global_allocator(RiskAllocator(), _state(heartbeat_health=HeartbeatHealth.DEGRADED))
+    configure_global_allocator(RiskAllocator(), _state(heartbeat_health=HeartbeatHealth.LOST))
     try:
         result = execute_exit_order(
             create_exit_order_intent(
@@ -707,9 +724,9 @@ def test_live_exit_submit_uses_allocator_selected_FOK_when_heartbeat_is_degraded
         conn.close()
 
     assert result.status == "pending"
-    assert captured["order_type"] == "FOK"
-    assert heartbeat_order_types == ["FOK"]
-    assert envelope_order_type == "FOK"
+    assert captured["order_type"] == "FAK"
+    assert heartbeat_order_types == ["FAK"]
+    assert envelope_order_type == "FAK"
 
 
 def test_polymarket_client_threads_selected_order_type_to_v2_adapter():

@@ -372,9 +372,9 @@ class RiskAllocator:
     def maker_or_taker(self, snapshot: Any, governor_state: GovernorState) -> OrderMode:
         if self.kill_switch_reason(governor_state):
             return "NO_TRADE"
-        if governor_state.heartbeat_health is HeartbeatHealth.LOST:
-            return "NO_TRADE"
-        if governor_state.heartbeat_health in {HeartbeatHealth.DEGRADED, HeartbeatHealth.DISABLED_FOR_NON_RESTING_ONLY, HeartbeatHealth.STARTING}:
+        # Venue heartbeat owns resting-order leases only. Immediate orders do
+        # not depend on that lease and remain available through a lost keeper.
+        if governor_state.heartbeat_health is not HeartbeatHealth.HEALTHY:
             return "TAKER"
         if _snapshot_depth_micro(snapshot) < self.cap_policy.taker_min_depth_micro:
             return "TAKER"
@@ -394,8 +394,6 @@ class RiskAllocator:
     def reduce_only_mode_active(self, governor_state: GovernorState) -> bool:
         if governor_state.kill_switch_armed:
             return True
-        if governor_state.heartbeat_health in {HeartbeatHealth.STARTING, HeartbeatHealth.DEGRADED, HeartbeatHealth.LOST, HeartbeatHealth.DISABLED_FOR_NON_RESTING_ONLY}:
-            return True
         if governor_state.ws_gap_active:
             return True
         # Reconcile findings are always systemic (common-path accounting failure).
@@ -412,8 +410,6 @@ class RiskAllocator:
         policy = self.cap_policy
         if governor_state.kill_switch_armed:
             return governor_state.manual_reason or "kill_switch_armed"
-        if governor_state.heartbeat_health is HeartbeatHealth.LOST:
-            return "heartbeat_lost"
         if governor_state.ws_gap_active and governor_state.ws_gap_seconds > policy.ws_gap_seconds_limit:
             return "ws_gap_threshold"
         return None
@@ -483,7 +479,6 @@ class PortfolioGovernor:
         risk_level = _coerce_risk_level(getattr(ledger, "risk_level", _mapping_get(ledger, "risk_level", RiskLevel.GREEN)))
         automatic_reason = _automatic_kill_switch_reason(
             self.cap_policy,
-            heartbeat_health=health,
             ws_gap_active=ws_gap_active,
             ws_gap_seconds=ws_gap_seconds,
             unknown_side_effect_count=int(unknown_count),
@@ -623,7 +618,7 @@ def select_global_order_type(snapshot: Any) -> str:
     """Return the concrete venue order type allowed by the current governor.
 
     A2's maker/taker switch is behavior-changing: healthy/deep/far-from-close
-    conditions may rest as ``GTC``; degraded heartbeat, shallow books, or near
+    conditions may rest as ``GTC``; unhealthy heartbeat, shallow books, or near
     resolution force immediate-or-cancel semantics (``FOK``).  True no-trade
     states raise ``AllocationDenied`` so callers block before persistence/SDK.
     """
@@ -1614,14 +1609,11 @@ class _EmptySnapshot:
 def _automatic_kill_switch_reason(
     policy: CapPolicy,
     *,
-    heartbeat_health: HeartbeatHealth,
     ws_gap_active: bool,
     ws_gap_seconds: int,
     unknown_side_effect_count: int,
     reconcile_finding_count: int,
 ) -> str | None:
-    if heartbeat_health is HeartbeatHealth.LOST:
-        return "heartbeat_lost"
     if ws_gap_active and ws_gap_seconds > policy.ws_gap_seconds_limit:
         return "ws_gap_threshold"
     return None

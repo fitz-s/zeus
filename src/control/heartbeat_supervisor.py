@@ -1266,14 +1266,24 @@ def assert_heartbeat_allows_order_type(order_type: str | OrderType | None = Orde
 def summary() -> dict[str, Any]:
     status = current_status()
     supervisor = get_global_supervisor()
-    entry_allowed = supervisor.gate_for_order_type(OrderType.GTC) if supervisor is not None else False
+    resting_allowed = (
+        supervisor.gate_for_order_type(OrderType.GTC)
+        if supervisor is not None
+        else False
+    )
+    allowed_order_types = [OrderType.FOK.value, OrderType.FAK.value]
+    if resting_allowed:
+        allowed_order_types = [order_type.value for order_type in OrderType]
     payload = status.to_dict()
     payload["entry"] = {
-        "allow_submit": entry_allowed,
+        "allow_submit": bool(allowed_order_types),
+        "allowed_order_types": allowed_order_types,
+        "resting_allow_submit": resting_allowed,
+        "immediate_allow_submit": True,
         "required_order_types": sorted(_RESTING_ORDER_TYPES),
     }
-    if not entry_allowed:
-        payload["entry"]["reason"] = status.last_error or (
+    if not resting_allowed:
+        payload["entry"]["restriction_reason"] = status.last_error or (
             "heartbeat_lease_gap_suspected"
             if status.health is HeartbeatHealth.HEALTHY
             else f"heartbeat={status.health.value}"

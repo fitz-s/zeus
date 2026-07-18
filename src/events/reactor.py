@@ -8201,7 +8201,13 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
                 f"token_id={token_id}:has_limit_price={has_limit_price}:has_size={has_size}"
             )
 
-        heartbeat_summary = _edli_heartbeat_authority_summary()
+        heartbeat_order_type = "GTC" if intent.get("post_only") is True else "FOK"
+        heartbeat_summary = _edli_heartbeat_authority_summary(heartbeat_order_type)
+        if not heartbeat_summary["allow_submit"]:
+            raise ValueError(
+                "PRE_SUBMIT_HEARTBEAT_ORDER_TYPE_BLOCKED:"
+                f"order_type={heartbeat_order_type}"
+            )
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)
         venue_summary = _cached_venue_summary(checked_at)
         (
@@ -8327,13 +8333,24 @@ def _edli_latest_pre_submit_book_row(
         (token_id, decision_time.isoformat()),
     ).fetchone()
 
-def _edli_heartbeat_authority_summary() -> dict[str, object]:
+def _edli_heartbeat_authority_summary(order_type: str) -> dict[str, object]:
     from src.control.heartbeat_supervisor import summary as heartbeat_summary
 
     summary = heartbeat_summary()
+    entry = summary.get("entry", {})
+    allowed_order_types = {
+        str(value).strip().upper()
+        for value in entry.get("allowed_order_types", ())
+    }
+    allowed = (
+        str(order_type).strip().upper() in allowed_order_types
+        if allowed_order_types
+        else bool(entry.get("allow_submit", False))
+    )
     return {
         "authority_id": "heartbeat_supervisor",
-        "allow_submit": bool(summary.get("entry", {}).get("allow_submit", False)),
+        "allow_submit": allowed,
+        "order_type": str(order_type).strip().upper(),
     }
 
 def _edli_user_ws_authority_summary(checked_at: datetime) -> dict[str, object]:

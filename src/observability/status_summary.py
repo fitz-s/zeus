@@ -1385,12 +1385,22 @@ def _cutover_component(action: str, payload: dict) -> dict:
     )
 
 
-def _heartbeat_component(payload: dict, *, order_type: str = "GTC") -> dict:
+def _heartbeat_component(payload: dict, *, order_type: str | None = None) -> dict:
     entry = payload.get("entry", {}) if isinstance(payload, dict) else {}
-    allowed = bool(entry.get("allow_submit", False))
+    allowed_order_types = {
+        str(value).strip().upper()
+        for value in entry.get("allowed_order_types", ())
+    }
+    normalized_order_type = str(order_type or "").strip().upper()
+    allowed = (
+        normalized_order_type in allowed_order_types
+        if normalized_order_type and allowed_order_types
+        else bool(entry.get("allow_submit", False))
+    )
     details = {
         "health": payload.get("health"),
-        "order_type": order_type,
+        "order_type": normalized_order_type or "ANY",
+        "allowed_order_types": sorted(allowed_order_types),
         "required_order_types": list(entry.get("required_order_types", []) or []),
     }
     _propagate_loader_failure(payload, details)
@@ -1557,7 +1567,7 @@ def _get_execution_capability_status() -> dict:
         gate_key="global_allow_submit",
         components=[
             _cutover_component("exit", cutover),
-            _heartbeat_component(heartbeat),
+            _heartbeat_component(heartbeat, order_type="FAK"),
             _ws_gap_component(ws_gap, current_executor_blocks_exit=True),
             _risk_allocator_reduce_only_component(risk),
             _collateral_component(collateral, collateral="CTF"),
