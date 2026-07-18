@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-07-18 19:26Z tick — reconcile 慢读退出 WORLD writer 临界区
+- **运行态锁证据:** `edli_user_channel_reconcile` 在 20:08/20:10/20:15 本地周期分别占用约 69/55/97 秒；同窗 reactor `BEGIN IMMEDIATE` 连续报 `database is locked`，一次 event 被反复 lock-bounce。该 job 在无 user/reconcile JSONL 配置时仍有 0.1 秒到 253 秒的巨大抖动，主要剩余工作是 authenticated WS/REST fill bridge 的历史查询。
+- **第一性错误:** cycle 处理 inbox 后已打开 WORLD 写事务，却继续读取 external reconcile evidence，并在同一事务内串联两个重历史 bridge scan。外部/历史 I/O 既不需要 writer ownership，也让一个 reconcile lane 的慢读阻塞全部无关 opportunity claim。
+- **隔离修复:** inbox、venue fact apply、WS-confirmed bridge、REST-orphan bridge 现在分成四个独立 commit phase；仅有 pending aggregate 时才加载 reconcile evidence。external reader/单 aggregate failure 只跳过依赖项；网络/文件结果返回后重新验证 `pending_reconcile`，仍由原 aggregate state machine + SAVEPOINT 应用。未改变 fill authority、event hash、projection CAS 或 cross-DB bridge。
+- **验证与边界:** 事务抗体先制造 inbox write，再证明 external reconcile、confirmed scan、rest scan 三个边界均见 `in_transaction=False`，且最终 projection 正确进入 `RECONCILED`。现有 cycle fixtures 同时改为准确 patch WORLD 主连接与独立 trade bridge 连接。当前 daemon loaded SHA 仍为 `8f7d7d962`，本修复尚未 live；下一步把两个 10M+ historical event bridge query 改为 pending/changed aggregate 增量读取，并继续定位 user-cycle 结束后仍存在的第二个 WORLD writer。
+
 ### 2026-07-18 19:07Z tick — urgent Day0 fact 可抢占并行 book discovery，不再等待慢 CLOB teardown
 - **第一性阻塞:** global batch 外层只在 book provider 返回后检查 urgent cancellation；provider 内部并行 Gamma/CLOB 使用等待式 `ThreadPoolExecutor` context。新的 deterministic extreme 即使已提交，也可能继续等待无关 CLOB request 与 executor teardown，期间 targeted held SELL 无法取得 reactor handoff。
 - **隔离修复:** book epoch 在 DB、metadata、prefetch、capture 边界检查同一 durable Day0 wake revision；并行 CLOB 等待每 25ms 探测一次。urgent fact 到达后返回 `epoch=None`，外层沿既有 `GLOBAL_SELECTION_CANCELLED` fail-closed 路径 requeue；已运行 public-book request 按自身 bounded HTTP timeout 收尾，但不再持有 global decision lane。urgent monitor 同时从零等待改为最多 1 秒 cooperative handoff：reactor 一释放就直接接管，超时则清除 priority claim，避免原路径失败后至少再等约两轮 wake poll。未绕过 entry/exit actuation lock，未改变 q、book、risk 或 submit authority。

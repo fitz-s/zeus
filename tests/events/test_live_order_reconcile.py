@@ -488,7 +488,12 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
     monkeypatch.setattr(
         _state_db,
         "get_trade_connection_with_world_required",
-        lambda *args, **kwargs: conn,
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(
+        _state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
     )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
@@ -569,6 +574,11 @@ def test_user_channel_reconcile_cycle_recovers_rest_filled_orphan(monkeypatch, t
         "get_trade_connection_with_world_required",
         lambda *args, **kwargs: _conn(db_path),
     )
+    monkeypatch.setattr(
+        _state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
@@ -637,6 +647,11 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages
     monkeypatch.setattr(
         _state_db,
         "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(
+        _state_db,
+        "get_world_connection_with_trades_required",
         lambda *args, **kwargs: _conn(db_path),
     )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
@@ -772,6 +787,11 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_trade_messages
         "get_trade_connection_with_world_required",
         lambda *args, **kwargs: _conn(db_path),
     )
+    monkeypatch.setattr(
+        _state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
     main._edli_user_channel_reconcile_cycle()
@@ -839,7 +859,12 @@ def test_user_channel_reconcile_cycle_clears_submit_unknown_from_venue_fact(monk
     monkeypatch.setattr(
         _state_db,
         "get_trade_connection_with_world_required",
-        lambda *args, **kwargs: conn,
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(
+        _state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: _conn(db_path),
     )
     monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
@@ -847,6 +872,117 @@ def test_user_channel_reconcile_cycle_clears_submit_unknown_from_venue_fact(monk
 
     check_ledger = LiveOrderAggregateLedger(_conn(db_path))
     projection = check_ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "RECONCILED"
+    assert projection.pending_reconcile is False
+
+
+def test_user_channel_reconcile_releases_world_writer_before_independent_phases(
+    monkeypatch, tmp_path
+):
+    from src.ingest import price_channel_ingest as main
+    import src.events.edli_trade_fact_bridge as _trade_bridge
+    import src.observability.scheduler_health as _sched_health
+    import src.state.db as _state_db
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitUnknown",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "venue_order_id": "venue-1",
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    enqueue_user_channel_inbox_message(
+        conn,
+        aggregate_id="event-1:intent-1",
+        message={
+            "source": "polymarket_user_channel",
+            "type": "order",
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "venue_order_id": "venue-1",
+            "order_update_type": "UPDATE",
+            "message_hash": "order-before-reconcile-1",
+        },
+        occurred_at=NOW,
+        received_at=NOW,
+    )
+    conn.commit()
+
+    phase_transactions = []
+
+    class _Reader:
+        def reconcile(self, pending):
+            phase_transactions.append(("external_reconcile", conn.in_transaction))
+            return {
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "source": "venue_reconcile",
+                "pending_reconcile": False,
+                "observed_at": NOW.isoformat(),
+                "payload": {"venue_order_exists": False},
+            }
+
+    def _confirmed_phase(phase_conn, *, now):
+        phase_transactions.append(("confirmed_scan", phase_conn.in_transaction))
+        phase_conn.execute(
+            "UPDATE edli_live_order_projection SET updated_at = updated_at WHERE aggregate_id = ?",
+            ("event-1:intent-1",),
+        )
+        return 0
+
+    def _rest_phase(phase_conn, *, now):
+        phase_transactions.append(("rest_scan", phase_conn.in_transaction))
+        return 0
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        {
+            "edli": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": "",
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+    monkeypatch.setattr(main, "_edli_venue_reconcile_reader", lambda _cfg: _Reader())
+    monkeypatch.setattr(
+        _state_db,
+        "get_world_connection_with_trades_required",
+        lambda *args, **kwargs: conn,
+    )
+    monkeypatch.setattr(
+        _state_db,
+        "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(_trade_bridge, "append_confirmed_trade_facts_to_edli", _confirmed_phase)
+    monkeypatch.setattr(
+        _trade_bridge,
+        "append_rest_filled_orphan_trade_facts_to_edli",
+        _rest_phase,
+    )
+    monkeypatch.setattr(main, "_edli_durable_fill_bridge_scan", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
+
+    main._edli_user_channel_reconcile_cycle()
+
+    assert phase_transactions == [
+        ("external_reconcile", False),
+        ("confirmed_scan", False),
+        ("rest_scan", False),
+    ]
+    projection = LiveOrderAggregateLedger(_conn(db_path)).get_projection("event-1:intent-1")
     assert projection.current_state == "RECONCILED"
     assert projection.pending_reconcile is False
 

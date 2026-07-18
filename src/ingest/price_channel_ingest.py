@@ -1527,8 +1527,14 @@ def _edli_user_channel_reconcile_cycle() -> None:
     # cycle. After the world-conn commit, the bridge materialises a canonical
     # position_current row for each that reached FILL_CONFIRMED.
     _edli_fill_bridge_aggregate_ids: set[str] = set()
-    from src.events.live_order_aggregate import LiveOrderAggregateLedger
-    from src.events.live_order_reconcile import append_reconciled
+    from src.events.live_order_aggregate import (
+        LiveOrderAggregateError,
+        LiveOrderAggregateLedger,
+    )
+    from src.events.live_order_reconcile import (
+        LiveOrderReconcileError,
+        append_reconciled,
+    )
     from src.events.triggers.user_channel_ingestor import (
         INBOX_DUPLICATE,
         INBOX_FAILED,
@@ -1617,28 +1623,86 @@ def _edli_user_channel_reconcile_cycle() -> None:
                     error=str(exc),
                 )
 
-        venue_reconcile_reader = _edli_venue_reconcile_reader(edli_cfg)
-        for pending in _edli_pending_reconcile_aggregates(conn, limit=pending_limit):
-            fact = venue_reconcile_reader.reconcile(pending)
-            if not fact:
+        # User-channel events are already durable truth. Release the world WAL
+        # writer before reading external reconcile evidence or running the
+        # heavier authenticated-trade scans below.
+        conn.commit()
+
+        pending_rows = _edli_pending_reconcile_aggregates(conn, limit=pending_limit)
+        reconcile_facts = []
+        if pending_rows:
+            try:
+                venue_reconcile_reader = _edli_venue_reconcile_reader(edli_cfg)
+            except Exception as exc:  # noqa: BLE001 - isolate external evidence source
+                logger.error(
+                    "EDLI venue reconcile evidence unavailable: %s",
+                    exc,
+                    exc_info=True,
+                )
+            else:
+                for pending in pending_rows:
+                    try:
+                        fact = venue_reconcile_reader.reconcile(pending)
+                    except Exception as exc:  # noqa: BLE001 - one aggregate cannot block peers
+                        logger.error(
+                            "EDLI venue reconcile failed aggregate=%s: %s",
+                            _row_get(pending, "aggregate_id"),
+                            exc,
+                            exc_info=True,
+                        )
+                        continue
+                    if fact:
+                        reconcile_facts.append((pending, fact))
+
+        for pending, fact in reconcile_facts:
+            aggregate_id = str(_row_get(pending, "aggregate_id"))
+            current = conn.execute(
+                "SELECT pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+                (aggregate_id,),
+            ).fetchone()
+            if current is None or not bool(_row_get(current, "pending_reconcile")):
                 continue
-            append_reconciled(
-                ledger,
-                aggregate_id=str(_row_get(pending, "aggregate_id")),
-                event_id=str(fact.get("event_id") or _row_get(pending, "event_id")),
-                final_intent_id=str(fact.get("final_intent_id") or _row_get(pending, "final_intent_id")),
-                source=str(fact.get("source") or "venue_reconcile"),
-                pending_reconcile=_parse_edli_runtime_bool(fact.get("pending_reconcile"), default=False),
-                occurred_at=_parse_edli_runtime_time(fact, default=now),
-                payload=fact.get("payload") if isinstance(fact.get("payload"), dict) else None,
-            )
+            try:
+                append_reconciled(
+                    ledger,
+                    aggregate_id=aggregate_id,
+                    event_id=str(fact.get("event_id") or _row_get(pending, "event_id")),
+                    final_intent_id=str(
+                        fact.get("final_intent_id") or _row_get(pending, "final_intent_id")
+                    ),
+                    source=str(fact.get("source") or "venue_reconcile"),
+                    pending_reconcile=_parse_edli_runtime_bool(
+                        fact.get("pending_reconcile"), default=False
+                    ),
+                    occurred_at=_parse_edli_runtime_time(fact, default=now),
+                    payload=(
+                        fact.get("payload")
+                        if isinstance(fact.get("payload"), dict)
+                        else None
+                    ),
+                )
+            except (
+                LiveOrderAggregateError,
+                LiveOrderReconcileError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                logger.warning(
+                    "EDLI venue reconcile fact rejected aggregate=%s: %s",
+                    aggregate_id,
+                    exc,
+                )
+                continue
             reconcile_count += 1
+        conn.commit()
+
         from src.events.edli_trade_fact_bridge import (
             append_confirmed_trade_facts_to_edli,
             append_rest_filled_orphan_trade_facts_to_edli,
         )
 
         reconcile_count += append_confirmed_trade_facts_to_edli(conn, now=now)
+        conn.commit()
         reconcile_count += append_rest_filled_orphan_trade_facts_to_edli(conn, now=now)
         conn.commit()
     finally:
