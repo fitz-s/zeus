@@ -90,6 +90,8 @@ _held_position_monitor_bootstrap_complete = threading.Event()
 _day0_urgent_wake_pending = threading.Event()
 _day0_exit_monitor_attempts_lock = threading.Lock()
 _day0_exit_monitor_attempts: dict[str, bool | None] = {}
+_forecast_exit_monitor_attempts_lock = threading.Lock()
+_forecast_exit_monitor_attempts: dict[str, bool | None] = {}
 _edli_reactor_wake_thread: threading.Thread | None = None
 _edli_last_reactor_wake_id: str | None = None
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
@@ -3917,19 +3919,28 @@ def _forget_day0_exit_monitor_attempt(wake_id: str) -> None:
         _day0_exit_monitor_attempts.pop(wake_id, None)
 
 
-def _day0_exit_monitor_excluded_wake_ids() -> frozenset[str]:
-    """Skip in-flight or just-failed monitor wakes for one queue selection."""
+def _exit_monitor_excluded_wake_ids() -> frozenset[str]:
+    """Skip in-flight or just-failed urgent monitors for one queue selection."""
 
     with _day0_exit_monitor_attempts_lock:
-        excluded = frozenset(
+        day0_excluded = {
             wake_id
             for wake_id, result in _day0_exit_monitor_attempts.items()
             if result is not True
-        )
-        for wake_id in excluded:
+        }
+        for wake_id in day0_excluded:
             if _day0_exit_monitor_attempts.get(wake_id) is False:
                 _day0_exit_monitor_attempts.pop(wake_id, None)
-        return excluded
+    with _forecast_exit_monitor_attempts_lock:
+        forecast_excluded = {
+            wake_id
+            for wake_id, result in _forecast_exit_monitor_attempts.items()
+            if result is not True
+        }
+        for wake_id in forecast_excluded:
+            if _forecast_exit_monitor_attempts.get(wake_id) is False:
+                _forecast_exit_monitor_attempts.pop(wake_id, None)
+    return frozenset(day0_excluded | forecast_excluded)
 
 
 def _unowned_day0_urgent_wake_pending() -> bool:
@@ -3997,11 +4008,169 @@ def _dispatch_day0_exit_monitor(
     return True
 
 
+def _forecast_exit_monitor_attempt_state(wake_id: str) -> tuple[bool, bool | None]:
+    with _forecast_exit_monitor_attempts_lock:
+        return (
+            wake_id in _forecast_exit_monitor_attempts,
+            _forecast_exit_monitor_attempts.get(wake_id),
+        )
+
+
+def _complete_forecast_exit_monitor_attempt(
+    wake_id: str, *, succeeded: bool
+) -> None:
+    with _forecast_exit_monitor_attempts_lock:
+        if wake_id in _forecast_exit_monitor_attempts:
+            _forecast_exit_monitor_attempts[wake_id] = bool(succeeded)
+
+
+def _forget_forecast_exit_monitor_attempt(wake_id: str) -> None:
+    with _forecast_exit_monitor_attempts_lock:
+        _forecast_exit_monitor_attempts.pop(wake_id, None)
+
+
+def _forecast_wake_held_families(
+    target_families: tuple[tuple[str, str, str], ...],
+) -> frozenset[tuple[str, str, str]]:
+    """Return only changed families with current chain-confirmed exposure.
+
+    A forecast wake is also an exit signal when money is already at risk. The
+    entry reactor may correctly reject that family by market phase or duplicate
+    exposure policy; neither rule may suppress the held-position re-decision.
+    On a truth-read failure, monitor every changed family fail-closed.
+    """
+
+    families = tuple(
+        dict.fromkeys(
+            (
+                str(city or "").strip(),
+                str(target_date or "").strip()[:10],
+                str(metric or "").strip().lower(),
+            )
+            for city, target_date, metric in target_families
+            if str(city or "").strip()
+            and str(target_date or "").strip()
+            and str(metric or "").strip().lower() in {"high", "low"}
+        )
+    )
+    if not families:
+        return frozenset()
+
+    conn = None
+    try:
+        from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+        from src.state.db import get_trade_connection_read_only
+
+        conn = get_trade_connection_read_only()
+        chain_states = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        placeholders = ",".join("?" for _ in chain_states)
+        rows = conn.execute(
+            f"""
+            SELECT city, target_date, temperature_metric
+              FROM position_current
+             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+               AND chain_state IN ({placeholders})
+               AND COALESCE(chain_shares, 0) > 0
+               AND COALESCE(chain_cost_basis_usd, 0) > 0
+            """,
+            chain_states,
+        ).fetchall()
+    except Exception:
+        logger.warning(
+            "forecast wake held-family scope unavailable; monitoring all changed families",
+            exc_info=True,
+        )
+        return frozenset(families)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    held = {
+        (
+            str(row[0] or "").strip().casefold(),
+            str(row[1] or "").strip()[:10],
+            str(row[2] or "").strip().lower(),
+        )
+        for row in rows
+    }
+    return frozenset(
+        family
+        for family in families
+        if (family[0].casefold(), family[1], family[2]) in held
+    )
+
+
+def _dispatch_forecast_exit_monitor(
+    wake_ids: tuple[str, ...],
+    target_families: frozenset[tuple[str, str, str]],
+) -> bool:
+    """Run held-family belief re-decision independently of entry event admission."""
+
+    owned_wake_ids = tuple(
+        dict.fromkeys(
+            clean
+            for raw in wake_ids
+            if (clean := str(raw or "").strip())
+        )
+    )
+    if not owned_wake_ids:
+        return False
+    wake_id = owned_wake_ids[0]
+    with _forecast_exit_monitor_attempts_lock:
+        if any(owned in _forecast_exit_monitor_attempts for owned in owned_wake_ids):
+            return False
+        for owned in owned_wake_ids:
+            _forecast_exit_monitor_attempts[owned] = None
+
+    def _run() -> None:
+        succeeded = False
+        try:
+            succeeded = (
+                _exit_monitor_cycle(
+                    target_families=target_families,
+                    urgent_forecast=True,
+                )
+                is True
+            )
+            if not succeeded:
+                logger.warning(
+                    "forecast wake targeted monitor incomplete; wake id=%s remains queued",
+                    wake_id,
+                )
+        except Exception:
+            logger.exception(
+                "forecast wake targeted monitor failed; wake id=%s remains queued",
+                wake_id,
+            )
+        finally:
+            for owned in owned_wake_ids:
+                _complete_forecast_exit_monitor_attempt(
+                    owned,
+                    succeeded=succeeded,
+                )
+
+    try:
+        threading.Thread(
+            target=_run,
+            name=f"forecast-exit-{wake_id[:8]}",
+            daemon=True,
+        ).start()
+    except Exception:
+        for owned in owned_wake_ids:
+            _complete_forecast_exit_monitor_attempt(owned, succeeded=False)
+        logger.exception(
+            "forecast wake targeted monitor dispatch failed: wake id=%s", wake_id
+        )
+        return False
+    return True
+
+
 def _acknowledge_edli_reactor_wake_batch(
     wake,
     wakes,
     *,
     day0_wake: bool,
+    forecast_monitor_wake: bool = False,
 ) -> bool:
     """Retire serviced hints and keep the urgent in-memory signal exact."""
 
@@ -4047,6 +4216,9 @@ def _acknowledge_edli_reactor_wake_batch(
                 _day0_urgent_wake_pending.set()
             else:
                 _day0_urgent_wake_pending.clear()
+    if forecast_monitor_wake:
+        for queued in wakes:
+            _forget_forecast_exit_monitor_attempt(queued.wake_id)
     _edli_last_reactor_wake_id = wake.wake_id
     return True
 
@@ -4061,7 +4233,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         read_reactor_wake,
     )
 
-    excluded_wake_ids = _day0_exit_monitor_excluded_wake_ids()
+    excluded_wake_ids = _exit_monitor_excluded_wake_ids()
     wake = (
         read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
         if excluded_wake_ids
@@ -4079,6 +4251,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         )
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
+    forecast_wake = wake.reason == "forecast_posterior_advanced"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
     wake_event_state = None
     if wake_event_ids:
@@ -4128,6 +4301,21 @@ def _edli_reactor_wake_poll_once() -> bool:
             day0_monitor_succeeded = result is True
             if not day0_monitor_succeeded:
                 return False
+    forecast_monitor_families = (
+        _forecast_wake_held_families(wake_families)
+        if forecast_wake and wake_families
+        else frozenset()
+    )
+    if forecast_monitor_families:
+        started, result = _forecast_exit_monitor_attempt_state(wake.wake_id)
+        if not started:
+            _dispatch_forecast_exit_monitor(
+                tuple(queued.wake_id for queued in wakes),
+                forecast_monitor_families,
+            )
+        _started, result = _forecast_exit_monitor_attempt_state(wake.wake_id)
+        if result is not True:
+            return False
     if substrate_refresh_wake:
         if (
             _edli_reactor_active_lock.locked()
@@ -4186,6 +4374,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         wake,
         wakes,
         day0_wake=day0_wake,
+        forecast_monitor_wake=bool(forecast_monitor_families),
     ):
         return False
     logger.info(
@@ -6018,6 +6207,7 @@ def _exit_monitor_cycle(
     *,
     target_families: frozenset[tuple[str, str, str]] | None = None,
     urgent_day0: bool = False,
+    urgent_forecast: bool = False,
 ) -> bool:
     """Scheduler hook — body owned by src.execution.exit_lifecycle (R4-b
     extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
@@ -6030,9 +6220,11 @@ def _exit_monitor_cycle(
     """
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
-    pending_before_claim = (
-        not urgent_day0 and _day0_urgent_wake_pending.is_set()
-    )
+    urgent_fact = urgent_day0 or urgent_forecast
+    if urgent_forecast and _day0_urgent_wake_pending.is_set():
+        logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
+        return False
+    pending_before_claim = not urgent_fact and _day0_urgent_wake_pending.is_set()
     if _held_position_monitor_active.is_set():
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
@@ -6042,7 +6234,7 @@ def _exit_monitor_cycle(
     _held_position_monitor_active.set()
     handoff_timeout = (
         _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-        if urgent_day0
+        if urgent_fact
         else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
     )
     reactor_idle = _edli_reactor_active_lock.acquire(
@@ -6071,7 +6263,7 @@ def _exit_monitor_cycle(
             "periodic exit_monitor servicing full portfolio after bounded Day0 priority"
         )
     should_preempt_for_urgent_day0 = None
-    if urgent_day0:
+    if urgent_fact:
         from src.runtime.reactor_wake import (
             reactor_urgent_wake_reason,
             reactor_urgent_wake_revision,

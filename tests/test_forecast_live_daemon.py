@@ -1339,6 +1339,11 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
     monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_identity", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main,
+        "_forecast_wake_held_families",
+        lambda _families: frozenset(),
+    )
     monkeypatch.setattr(main, "_edli_event_reactor_cycle", _run_reactor)
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 
@@ -2197,6 +2202,211 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
     assert main._edli_reactor_wake_poll_once() is True
     assert calls == ["reactor"]
     assert pending.is_set() is False
+
+
+def test_forecast_wake_refreshes_held_family_before_entry_reactor(
+    monkeypatch,
+) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Tel Aviv", "2026-07-18", "high")
+    wake = reactor_wake.ReactorWake(
+        "wake-forecast-held",
+        "2026-07-18T19:22:05+00:00",
+        "replacement_forecast_materializer",
+        "forecast_posterior_advanced",
+        (),
+        (family,),
+    )
+    calls: list[str] = []
+
+    class _Lock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda selected: calls.append(f"ack:{selected.wake_id}") or True,
+    )
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(
+        main,
+        "_forecast_wake_held_families",
+        lambda _families: frozenset({family}),
+    )
+
+    def dispatch_monitor(wake_ids, target_families):
+        calls.append(f"monitor:{sorted(target_families)}")
+        for wake_id in wake_ids:
+            main._forecast_exit_monitor_attempts[wake_id] = True
+        return True
+
+    monkeypatch.setattr(main, "_dispatch_forecast_exit_monitor", dispatch_monitor)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: calls.append(f"reactor:{kwargs['producer_wake_reason']}")
+        or True,
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+    main._forecast_exit_monitor_attempts.clear()
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert calls == [
+        "monitor:[('Tel Aviv', '2026-07-18', 'high')]",
+        "reactor:forecast_posterior_advanced",
+        "ack:wake-forecast-held",
+    ]
+    assert main._forecast_exit_monitor_attempts == {}
+
+
+def test_forecast_wake_without_exposure_does_not_run_exit_monitor(
+    monkeypatch,
+) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-forecast-entry-only",
+        "2026-07-18T19:22:05+00:00",
+        "replacement_forecast_materializer",
+        "forecast_posterior_advanced",
+        (),
+        (("Shanghai", "2026-07-20", "high"),),
+    )
+    calls: list[str] = []
+
+    class _Lock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    monkeypatch.setattr(reactor_wake, "acknowledge_reactor_wake", lambda _wake: True)
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(
+        main,
+        "_forecast_wake_held_families",
+        lambda _families: frozenset(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_dispatch_forecast_exit_monitor",
+        lambda *_args: pytest.fail("entry-only family must not run exit monitor"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.append("reactor") or True,
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert calls == ["reactor"]
+
+
+def test_slow_forecast_monitor_does_not_block_unrelated_wake(monkeypatch) -> None:
+    import threading
+    import time
+
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Tel Aviv", "2026-07-18", "high")
+    forecast_wake = reactor_wake.ReactorWake(
+        "wake-forecast-slow-monitor",
+        "2026-07-18T19:22:05+00:00",
+        "replacement_forecast_materializer",
+        "forecast_posterior_advanced",
+        (),
+        (family,),
+    )
+    market_wake = reactor_wake.ReactorWake(
+        "wake-market-independent-from-forecast",
+        "2026-07-18T19:22:06+00:00",
+        "price_channel",
+        "market_price_advanced",
+        ("event-market",),
+    )
+    monitor_started = threading.Event()
+    release_monitor = threading.Event()
+    reactor_calls: list[str] = []
+    acknowledgements: list[str] = []
+
+    def run_monitor(**_kwargs):
+        monitor_started.set()
+        assert release_monitor.wait(2.0)
+        return True
+
+    def read_wake(*, exclude_wake_ids=()):
+        if forecast_wake.wake_id not in exclude_wake_ids:
+            return forecast_wake
+        return market_wake
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", read_wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _ids: main._ReactorWakeEventState(ready=True, finished=False),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
+    monkeypatch.setattr(
+        main,
+        "_forecast_wake_held_families",
+        lambda families: frozenset({family}) if family in families else frozenset(),
+    )
+    monkeypatch.setattr(main, "_exit_monitor_cycle", run_monitor)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda *, producer_wake_reason=None, **_kwargs: (
+            reactor_calls.append(str(producer_wake_reason)) or True
+        ),
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+    main._forecast_exit_monitor_attempts.clear()
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert monitor_started.wait(1.0)
+    assert reactor_calls == []
+
+    started = time.monotonic()
+    assert main._edli_reactor_wake_poll_once() is True
+    assert time.monotonic() - started < 0.5
+    assert reactor_calls == ["market_price_advanced"]
+    assert acknowledgements == [market_wake.wake_id]
+
+    release_monitor.set()
+    deadline = time.monotonic() + 2.0
+    while main._forecast_exit_monitor_attempt_state(forecast_wake.wake_id)[1] is not True:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert acknowledgements == [market_wake.wake_id, forecast_wake.wake_id]
+    assert reactor_calls == ["market_price_advanced", "forecast_posterior_advanced"]
 
 
 @pytest.mark.parametrize(
