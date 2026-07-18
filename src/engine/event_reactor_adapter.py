@@ -965,6 +965,38 @@ def _global_book_speculative_topology(
     return tuple(sorted(topology)) or None
 
 
+def _global_book_speculative_snapshot_metadata(
+    trade_conn: sqlite3.Connection,
+    topology: tuple[tuple[str, str, str, str, str], ...] | None,
+) -> dict[tuple[str, str], Mapping[str, object]]:
+    """Read last-seen tradeability only to prune concurrent speculative book I/O."""
+
+    if topology is None:
+        return {}
+    token_pair_by_condition = {row[2]: (row[3], row[4]) for row in topology}
+    try:
+        from src.engine.global_auction_universe import _global_book_snapshot_rows
+
+        rows = _global_book_snapshot_rows(
+            trade_conn,
+            condition_ids=tuple(token_pair_by_condition),
+        )
+    except (sqlite3.Error, TypeError, ValueError):
+        return {}
+    metadata: dict[tuple[str, str], Mapping[str, object]] = {}
+    for row in rows:
+        condition_id = str(row.get("condition_id") or "").strip()
+        expected = token_pair_by_condition.get(condition_id)
+        if expected is None or expected != (
+            str(row.get("yes_token_id") or "").strip(),
+            str(row.get("no_token_id") or "").strip(),
+        ):
+            continue
+        for token_id in expected:
+            metadata[(condition_id, token_id)] = row
+    return metadata
+
+
 def _global_book_metadata_refresh_family_keys(
     trade_conn: sqlite3.Connection,
     probabilities: Mapping[str, object],
@@ -7796,6 +7828,15 @@ def event_bound_live_adapter_from_trade_conn(
                 trade_conn,
                 probabilities,
             )
+            effective_speculative_book_metadata = (
+                _global_book_speculative_snapshot_metadata(
+                    trade_conn,
+                    speculative_topology,
+                )
+            )
+            effective_speculative_book_metadata.update(
+                speculative_book_metadata_by_key
+            )
             cached_before_bind, cache_before_reason = _probe_global_book_epoch_cache(
                 trade_conn,
                 probabilities,
@@ -8130,14 +8171,17 @@ def event_bound_live_adapter_from_trade_conn(
             speculative_prefetch_tokens = (
                 _global_speculative_executable_prefetch_tokens(
                     prefetch_slice,
-                    speculative_book_metadata_by_key,
+                    effective_speculative_book_metadata,
                 )
                 if prefetch_slice is not None
                 else None
             )
             prefetched = None
             if not bind_slice:
-                if prefetch_slice is not None and not day0_urgent_batch:
+                if prefetch_slice is not None and (
+                    not day0_urgent_batch
+                    or speculative_prefetch_tokens is not None
+                ):
                     prefetched = _prefetch_books(
                         prefetch_slice,
                         mode=prefetch_mode,
@@ -8152,7 +8196,7 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_sink=full_metadata,
                     )
                 )
-            elif day0_urgent_batch:
+            elif day0_urgent_batch and speculative_prefetch_tokens is None:
                 rebound_probabilities.update(
                     _bind(
                         bind_slice,

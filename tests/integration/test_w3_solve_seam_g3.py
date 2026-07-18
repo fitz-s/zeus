@@ -4125,9 +4125,14 @@ def test_global_book_projection_reserves_fetch_timeout_before_mixed_prefetch():
     "projection_mode",
     ["survives", "expires_after_fetch", "insufficient_headroom"],
 )
+@pytest.mark.parametrize(
+    "event_type",
+    ["BOOK_SNAPSHOT", "DAY0_EXTREME_UPDATED"],
+)
 def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     monkeypatch,
     projection_mode,
+    event_type,
 ):
     trade = sqlite3.connect(":memory:")
     trade.executescript(
@@ -4183,7 +4188,7 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
             '5',
             0,
             '{}',
-            '{}',
+            '{"executable_allowed":true}',
             '{"asset_id":"yes-token-a","hash":"hash-yes-token-a"}',
             '2026-07-10T07:00:00+00:00',
             '2026-07-10T08:13:00+00:00'
@@ -4252,7 +4257,7 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     )
     event = replace(
         _global_scope_event(city="Dallas", source_run_id="run-dallas"),
-        event_type="BOOK_SNAPSHOT",
+        event_type=event_type,
     )
     adapter.process_global_batch(
         (event,),
