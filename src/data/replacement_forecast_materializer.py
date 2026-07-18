@@ -2871,11 +2871,19 @@ def _current_evidence_tail_ucb_floors(
     rounding_rule: str,
     members_c: Sequence[float],
     metric: str | None = None,
+    day0_observed_extreme_c: float | None = None,
+    day0_metric: str | None = None,
 ) -> dict[str, float]:
     """Per-bin UCB floors from exact member hits and current first two moments.
 
     ``metric`` selects the fitted member-dependence rho for the CP term (see
     ``_finite_evidence_binomial_ucb``); the Cantelli moment term is untouched.
+
+    When ``day0_observed_extreme_c`` is set, bins the Day0 support transform makes
+    settlement-IMPOSSIBLE (HIGH: upper preimage <= obs; LOW: lower preimage >= obs —
+    the exact predicate ``_build_fused_q_bounds`` zeroes) get a 0.0 floor: the
+    absorbed obs already removes them, so the forecast ambiguity band must not lift
+    them off zero. The remaining POSSIBLE bins keep the ordinary member/moment floor.
     """
 
     from src.contracts.settlement_semantics import settlement_preimage_offsets  # noqa: PLC0415
@@ -2898,10 +2906,25 @@ def _current_evidence_tail_ucb_floors(
         members_c=members,
     )
     variance = sigma * sigma
+    day0_obs = (
+        None
+        if day0_observed_extreme_c is None or not math.isfinite(float(day0_observed_extreme_c))
+        else float(day0_observed_extreme_c)
+    )
+    day0_dir = str(day0_metric or "").lower() if day0_obs is not None else None
     floors: dict[str, float] = {}
     for bin_ in bins:
         low = None if bin_.lower_c is None else float(bin_.lower_c) + low_off
         high = None if bin_.upper_c is None else float(bin_.upper_c) + high_off
+        # Day0 settlement-impossible bins carry no forecast-ambiguity floor (same
+        # predicate _build_fused_q_bounds uses to zero them: HIGH highs<=obs, LOW lows>=obs).
+        if day0_obs is not None:
+            if day0_dir == "high" and high is not None and high <= day0_obs:
+                floors[str(bin_.bin_id)] = 0.0
+                continue
+            if day0_dir == "low" and low is not None and low >= day0_obs:
+                floors[str(bin_.bin_id)] = 0.0
+                continue
         moment = 0.0
         if low is not None and low > mu:
             gap = low - mu
@@ -3453,9 +3476,10 @@ def _build_fused_q_bounds(
     # and variance also licenses the one-sided Cantelli ambiguity mass
     # sigma^2/(sigma^2+gap^2). Use the larger per-bin value.
     # Encode it inside coherent simplex rows so lower-CVaR and scalar bounds see
-    # one probability world. Day0 absorbing facts remain outside this forecast
-    # ambiguity band.
-    if evidence_members_c is not None and day0_obs is None:
+    # one probability world. On Day0 the absorbed obs removes the IMPOSSIBLE bins
+    # (their floor is masked to 0 inside the floor helper); the remaining POSSIBLE
+    # bins are still finite current evidence and keep the member/moment tail floor.
+    if evidence_members_c is not None:
         finite_floors = _current_evidence_tail_ucb_floors(
             mu_star=mu_star,
             predictive_sigma_c=predictive_sigma_c,
@@ -3468,6 +3492,8 @@ def _build_fused_q_bounds(
             # None (e.g. direct test calls) => pooled/max-rho conservative
             # fallback inside the dependence loader.
             metric=day0_metric,
+            day0_observed_extreme_c=day0_obs,
+            day0_metric=day0_metric,
         )
         required_ucb = np.array([finite_floors[bin_id] for bin_id in bin_ids])
         probs = _stress_coherent_samples_to_marginal_ucb_floors(
@@ -3697,7 +3723,7 @@ def _compute_posterior_payload(
             # construction rule, no knob.
             _sigma_pred_raw = float(bayes_precision_fusion_override.predictive_sigma_c)
             _current_shape = bayes_precision_fusion_override.current_evidence_shape
-            if _current_shape is not None and _day0_obs_extreme_c is None:
+            if _current_shape is not None:
                 _finite_evidence_members_c = tuple(
                     float(value)
                     for value in (
@@ -3792,6 +3818,8 @@ def _compute_posterior_payload(
                     rounding_rule=_rounding_rule,
                     members_c=_finite_evidence_members_c,
                     metric=metric,
+                    day0_observed_extreme_c=_day0_obs_extreme_c,
+                    day0_metric=metric,
                 )
             # k provenance: stamped iff the scale fired (k != 1.0, k > 0.0) — the k=1 no-op stays None.
             _sigma_after_k = _sigma_pred_raw * _k if (_k != 1.0 and _k > 0.0) else _sigma_pred_raw

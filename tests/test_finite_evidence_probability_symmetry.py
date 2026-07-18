@@ -139,6 +139,8 @@ def test_tail_stress_preserves_existing_certain_rows_and_raises_only_deficit() -
 
 
 def test_day0_absorbing_fact_dominates_forecast_ambiguity() -> None:
+    # obs=24 makes low/far/center all settlement-IMPOSSIBLE (upper preimage <= obs);
+    # an impossible bin must never carry the finite-evidence tail floor.
     bins = _bins()
     floor = _finite_evidence_zero_hit_ucb_floor(51)
 
@@ -157,3 +159,53 @@ def test_day0_absorbing_fact_dominates_forecast_ambiguity() -> None:
     )
 
     assert ucb["low"] < floor
+
+
+def test_day0_possible_bin_keeps_finite_evidence_tail_floor() -> None:
+    # Regression (2026-07-18): Day0 conditioning absorbs the IMPOSSIBLE bins, but the
+    # remaining POSSIBLE bins are still a finite-current-evidence forecast and must keep
+    # the member/moment tail floor. Previously _build_fused_q_bounds skipped the floor
+    # whenever day0_obs was set, leaving Day0 possible-bin q_ucb overconfident
+    # (settlement-graded proof: docs/evidence/upstream_physical_2026_07_17/
+    # day0_possible_bin_humility_floor_proof.md).
+    bins = _bins()  # low<=18, far 19-20, center 21-23, high 24+
+    obs = 19.0
+    mu, sigma = 22.0, 2.0
+    members = [22.0] * 51  # all members at the center -> "far" is a ZERO-HIT possible bin
+
+    floors = _current_evidence_tail_ucb_floors(
+        mu_star=mu,
+        predictive_sigma_c=sigma,
+        bins=bins,
+        half_step=0.5,
+        rounding_rule="wmo_half_up",
+        members_c=members,
+        day0_observed_extreme_c=obs,
+        day0_metric="high",
+    )
+    # "low" (upper preimage 18.5 <= obs) is settlement-impossible -> floor masked to 0.
+    assert floors["low"] == 0.0
+    # "far" preimage [18.5, 20.5] straddles/sits below mu and is POSSIBLE -> its Cantelli
+    # moment floor survives (dominates the zero-hit binomial UCB here).
+    gap = mu - 20.5
+    moment_far = sigma**2 / (sigma**2 + gap**2)
+    assert math.isclose(floors["far"], moment_far, rel_tol=0.0, abs_tol=1e-12)
+    assert floors["far"] > _finite_evidence_zero_hit_ucb_floor(51)
+
+    _, ucb = _build_fused_q_bounds(
+        mu_star=mu,
+        center_sigma_c=0.1,
+        predictive_sigma_c=sigma,
+        bins=bins,
+        half_step=0.5,
+        q_point={"low": 0.0, "far": 0.0, "center": 0.55, "high": 0.45},
+        n_draws=400,
+        rounding_rule="wmo_half_up",
+        day0_observed_extreme_c=obs,
+        day0_metric="high",
+        evidence_members_c=members,
+    )
+    # The possible zero-hit bin retains its tail floor even under Day0 conditioning...
+    assert ucb["far"] >= floors["far"] - 1e-9
+    # ...while the impossible below-obs bin stays hard-zero (settlement support intact).
+    assert ucb["low"] <= 1e-9
