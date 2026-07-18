@@ -314,6 +314,234 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
     assert forecasts.closed is True
 
 
+def test_day0_monitor_reuses_family_snapshot_across_sibling_bins(monkeypatch) -> None:
+    """One family build serves sibling held bins without changing side identity."""
+    import numpy as np
+
+    reset_counters()
+    first_condition = "0x" + "71" * 32
+    second_condition = "0x" + "72" * 32
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                bin_id="33C",
+                condition_id=first_condition,
+                yes_token_id="first-yes",
+                no_token_id="first-no",
+            ),
+            SimpleNamespace(
+                bin_id="34C",
+                condition_id=second_condition,
+                yes_token_id="second-yes",
+                no_token_id="second-no",
+            ),
+        ),
+        yes_q_samples=np.array([[0.2, 0.7], [0.4, 0.5]]),
+        witness_identity="shared-family-witness",
+        q_version="shared-family-q",
+        source_truth_identity="shared-family-truth",
+        band_basis="current_coherent_day0_remaining_finite_evidence_v2",
+        band_alpha=0.25,
+    )
+    snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=(
+            (first_condition, "first-yes", "first-no"),
+            (second_condition, "second-yes", "second-no"),
+        ),
+        deterministic_condition_ids=frozenset(),
+        day0_payload={},
+        metric="high",
+    )
+    builds = []
+
+    def build(position, **_kwargs):
+        builds.append(position.condition_id)
+        return snapshot
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_build_current_global_day0_family_snapshot",
+        build,
+    )
+
+    def held(condition_id: str, direction: str, yes: str, no: str) -> Position:
+        pos = _make_position()
+        pos.city = "Moscow"
+        pos.target_date = "2026-07-18"
+        pos.condition_id = condition_id
+        pos.direction = direction
+        pos.token_id = yes
+        pos.no_token_id = no
+        return pos
+
+    first = held(first_condition, "buy_yes", "first-yes", "first-no")
+    second = held(second_condition, "buy_no", "second-yes", "second-no")
+    cache = monitor_refresh_module._CurrentGlobalDay0FamilyCache()
+
+    first_probability, _, _ = (
+        monitor_refresh_module._refresh_current_global_day0_probability(
+            first, trade_conn=object(), family_cache=cache
+        )
+    )
+    second_probability, _, _ = (
+        monitor_refresh_module._refresh_current_global_day0_probability(
+            second, trade_conn=object(), family_cache=cache
+        )
+    )
+
+    assert (first_probability, second_probability) == pytest.approx((0.3, 0.4))
+    assert builds == [first_condition]
+    assert read_counter("monitor_day0_family_snapshot_build_total") == 1
+    assert read_counter("monitor_day0_family_snapshot_cache_hit_total") == 1
+
+
+def test_day0_family_cache_keeps_partial_exact_witness_condition_local() -> None:
+    from datetime import timedelta
+
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        OutcomeTokenBinding,
+        deterministic_bin_payoff_witness_identity,
+    )
+
+    exact_condition = "0x" + "81" * 32
+    unknown_condition = "0x" + "82" * 32
+    bindings = (
+        OutcomeTokenBinding("33C", exact_condition, "exact-yes", "exact-no"),
+        OutcomeTokenBinding("34C", unknown_condition, "unknown-yes", "unknown-no"),
+    )
+    identity = {
+        "family_key": "Moscow|2026-07-18|high",
+        "bindings": bindings,
+        "exact_yes_payoffs": (("33C", 0),),
+        "q_version": "q",
+        "resolution_identity": "resolution",
+        "topology_identity": "topology",
+        "posterior_identity_hash": "posterior",
+        "source_truth_identity": "truth",
+        "authority_certificate_hash": "certificate",
+        "band_alpha": 0.05,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": datetime(2026, 7, 18, 12, tzinfo=timezone.utc),
+    }
+    witness = DeterministicBinPayoffWitness(
+        **identity,
+        max_age=timedelta(seconds=30),
+        witness_identity=deterministic_bin_payoff_witness_identity(**identity),
+    )
+    snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=(
+            (exact_condition, "exact-yes", "exact-no"),
+            (unknown_condition, "unknown-yes", "unknown-no"),
+        ),
+        deterministic_condition_ids=frozenset({exact_condition}),
+        day0_payload={},
+        metric="high",
+    )
+
+    assert monitor_refresh_module._day0_family_snapshot_covers_condition(
+        snapshot, exact_condition
+    )
+    assert not monitor_refresh_module._day0_family_snapshot_covers_condition(
+        snapshot, unknown_condition
+    )
+    remaining = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=SimpleNamespace(bindings=bindings),
+        token_pairs=snapshot.token_pairs,
+        deterministic_condition_ids=frozenset({exact_condition}),
+        day0_payload={},
+        metric="high",
+    )
+    assert not monitor_refresh_module._day0_family_snapshot_covers_condition(
+        remaining, exact_condition
+    )
+    assert monitor_refresh_module._day0_family_snapshot_covers_condition(
+        remaining, unknown_condition
+    )
+
+
+def test_day0_family_failure_cache_does_not_block_independent_family(
+    monkeypatch,
+) -> None:
+    reset_counters()
+    builds = []
+
+    def fail(position, **_kwargs):
+        builds.append((position.city, position.condition_id))
+        raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING")
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_build_current_global_day0_family_snapshot",
+        fail,
+    )
+
+    def held(city: str, condition_byte: str) -> Position:
+        pos = _make_position()
+        pos.city = city
+        pos.target_date = "2026-07-18"
+        pos.condition_id = "0x" + condition_byte * 32
+        return pos
+
+    first = held("Moscow", "91")
+    sibling = held("Moscow", "92")
+    independent = held("Ankara", "93")
+    cache = monitor_refresh_module._CurrentGlobalDay0FamilyCache()
+
+    with pytest.raises(ValueError, match="BASE_FORECAST_SNAPSHOT_MISSING"):
+        monitor_refresh_module._refresh_current_global_day0_probability(
+            first, trade_conn=object(), family_cache=cache
+        )
+    with pytest.raises(monitor_refresh_module._CachedCurrentGlobalDay0FamilyError):
+        monitor_refresh_module._refresh_current_global_day0_probability(
+            sibling, trade_conn=object(), family_cache=cache
+        )
+    with pytest.raises(ValueError, match="BASE_FORECAST_SNAPSHOT_MISSING"):
+        monitor_refresh_module._refresh_current_global_day0_probability(
+            independent, trade_conn=object(), family_cache=cache
+        )
+
+    assert builds == [
+        ("Moscow", first.condition_id),
+        ("Ankara", independent.condition_id),
+    ]
+    assert read_counter("monitor_day0_family_builder_failure_total") == 2
+    assert read_counter("monitor_day0_family_failure_cache_hit_total") == 1
+
+
+def test_day0_condition_binding_failure_does_not_poison_family(monkeypatch) -> None:
+    builds = []
+
+    def fail(position, **_kwargs):
+        builds.append(position.condition_id)
+        raise ValueError("GLOBAL_REQUIRED_CONDITION_BINDING_INVALID")
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_build_current_global_day0_family_snapshot",
+        fail,
+    )
+    cache = monitor_refresh_module._CurrentGlobalDay0FamilyCache()
+    positions = []
+    for condition_byte in ("a1", "a2"):
+        pos = _make_position()
+        pos.city = "Moscow"
+        pos.target_date = "2026-07-18"
+        pos.condition_id = "0x" + condition_byte * 32
+        positions.append(pos)
+
+    for pos in positions:
+        with pytest.raises(ValueError, match="REQUIRED_CONDITION_BINDING_INVALID"):
+            monitor_refresh_module._refresh_current_global_day0_probability(
+                pos, trade_conn=object(), family_cache=cache
+            )
+
+    assert builds == [pos.condition_id for pos in positions]
+    assert cache.failures == {}
+
+
 @pytest.mark.parametrize(
     ("direction", "expected"),
     (("buy_yes", [0.1, 0.3]), ("buy_no", [0.9, 0.7])),

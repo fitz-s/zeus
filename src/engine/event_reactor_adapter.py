@@ -27746,6 +27746,15 @@ def _prepare_current_global_probability_family(
                 payload=payload,
             )
             exact_bin_ids = {bin_id for bin_id, _payoff in exact_yes_payoffs}
+            if cache_metadata_out is not None:
+                cache_metadata_out["deterministic_condition_ids_json"] = json.dumps(
+                    sorted(
+                        binding.condition_id
+                        for binding in bindings
+                        if binding.bin_id in exact_bin_ids
+                    ),
+                    separators=(",", ":"),
+                )
             if exact_yes_payoffs and (
                 required_bin_id is None or required_bin_id in exact_bin_ids
             ):

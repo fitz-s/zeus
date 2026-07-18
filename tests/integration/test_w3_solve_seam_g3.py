@@ -2860,6 +2860,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     assert revalidated_payload["_edli_day0_exact_yes_payoffs"] == exact_payoffs
 
     held_unknown_payload: dict[str, object] = {}
+    held_unknown_cache_metadata: dict[str, str] = {}
     held_unknown = era._prepare_current_global_probability_family(
         deterministic_event,
         forecast_conn=forecast,
@@ -2868,6 +2869,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         decision_time=deterministic_cut + _dt.timedelta(milliseconds=4),
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=held_unknown_payload,
+        cache_metadata_out=held_unknown_cache_metadata,
         required_condition_id="c1",
     )
     assert remaining_day_calls == 2
@@ -2878,6 +2880,9 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     assert held_unknown.probability_witness.yes_q_samples[0].tolist() == pytest.approx(
         [0.0, 0.2, 0.8]
     )
+    assert json.loads(
+        held_unknown_cache_metadata["deterministic_condition_ids_json"]
+    ) == ["c0"]
 
     observed_extreme["value"] = 72.0
     exact_payload: dict[str, object] = {}

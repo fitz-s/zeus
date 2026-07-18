@@ -21,7 +21,7 @@ import logging
 import sqlite3
 import copy
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -94,6 +94,7 @@ _MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
 _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
 )
+_MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
@@ -111,6 +112,27 @@ _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
     "Day0 observation is stale for executable probability generation:"
 )
 _nowcast_consecutive_write_failures = 0
+
+
+@dataclass(frozen=True)
+class _CurrentGlobalDay0FamilySnapshot:
+    witness: object
+    token_pairs: tuple[tuple[str, str, str], ...]
+    deterministic_condition_ids: frozenset[str]
+    day0_payload: dict[str, object]
+    metric: str
+
+
+@dataclass
+class _CurrentGlobalDay0FamilyCache:
+    snapshots: dict[
+        tuple[str, str, str], list[_CurrentGlobalDay0FamilySnapshot]
+    ] = field(default_factory=dict)
+    failures: dict[tuple[str, str, str], str] = field(default_factory=dict)
+
+
+class _CachedCurrentGlobalDay0FamilyError(RuntimeError):
+    pass
 
 
 def install_monitor_orderbook_prefetch(
@@ -134,6 +156,20 @@ def install_monitor_orderbook_prefetch(
     try:
         setattr(clob, _MONITOR_PREFETCHED_ORDERBOOKS_ATTR, clean)
         setattr(clob, _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR, attempted)
+    except (AttributeError, TypeError):
+        return False
+    return True
+
+
+def install_monitor_day0_family_cache(clob) -> bool:
+    """Install a fresh family cache for one held-monitor cycle."""
+
+    try:
+        setattr(
+            clob,
+            _MONITOR_DAY0_FAMILY_CACHE_ATTR,
+            _CurrentGlobalDay0FamilyCache(),
+        )
     except (AttributeError, TypeError):
         return False
     return True
@@ -4052,123 +4088,50 @@ def _current_global_held_samples(
     return np.ascontiguousarray(samples)
 
 
-def _refresh_current_global_day0_probability(
+def _day0_family_snapshot_token_map(
+    snapshot: _CurrentGlobalDay0FamilySnapshot,
+) -> dict[str, tuple[str, str]]:
+    return {
+        condition_id: (yes_token_id, no_token_id)
+        for condition_id, yes_token_id, no_token_id in snapshot.token_pairs
+    }
+
+
+def _day0_family_snapshot_covers_condition(
+    snapshot: _CurrentGlobalDay0FamilySnapshot,
+    condition_id: str,
+) -> bool:
+    bindings = tuple(getattr(snapshot.witness, "bindings", ()) or ())
+    matched = tuple(
+        binding
+        for binding in bindings
+        if str(getattr(binding, "condition_id", "") or "") == condition_id
+    )
+    if len(matched) != 1:
+        return False
+
+    from src.solve.solver import DeterministicBinPayoffWitness
+
+    if not isinstance(snapshot.witness, DeterministicBinPayoffWitness):
+        return condition_id not in snapshot.deterministic_condition_ids
+    exact_bin_ids = {
+        str(bin_id)
+        for bin_id, _payoff in snapshot.witness.exact_yes_payoffs
+    }
+    return str(matched[0].bin_id) in exact_bin_ids
+
+
+def _materialize_current_global_day0_probability(
     position: Position,
-    *,
-    trade_conn,
-    decision_time: datetime | None = None,
-) -> tuple[float, Position, bool] | None:
-    """Read the held side from the same current joint-q witness as live entry.
-
-    The event is only a causal family carrier.  The shared builder rebinds it to
-    current forecast, topology, observation, and finite-evidence truth before
-    returning a witness.  Both DB handles are read-only and short-lived.
-    """
-
+    snapshot: _CurrentGlobalDay0FamilySnapshot,
+) -> tuple[float, Position, bool]:
     condition_id = _canonical_condition_id(position)
     if condition_id is None:
-        return None
-    if trade_conn is None:
-        raise ValueError("monitor current-global trade authority is missing")
-    metric = resolve_position_metric(position)[0]
-    now = decision_time or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        raise ValueError("monitor current-global decision_time must be timezone-aware")
-    now = now.astimezone(timezone.utc)
-
-    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
-    from src.events.opportunity_event import OpportunityEvent
-    from src.state.db import (
-        get_forecasts_connection_read_only,
-        get_world_connection_read_only,
-    )
-
-    world = get_world_connection_read_only()
-    forecasts = None
-    try:
-        forecasts = get_forecasts_connection_read_only()
-        row = world.execute(
-            """
-            SELECT event_id, event_type, entity_key, source, observed_at,
-                   available_at, received_at, causal_snapshot_id, payload_hash,
-                   idempotency_key, priority, expires_at, payload_json,
-                   schema_version, created_at
-              FROM opportunity_events
-             WHERE event_type = 'DAY0_EXTREME_UPDATED'
-               AND json_extract(payload_json, '$.city') = ?
-               AND json_extract(payload_json, '$.target_date') = ?
-               AND lower(json_extract(payload_json, '$.metric')) = ?
-             ORDER BY available_at DESC
-             LIMIT 1
-            """,
-            (str(position.city), str(position.target_date), metric),
-        ).fetchone()
-        if row is None:
-            raise ObservationUnavailableError(
-                "current global Day0 family event unavailable"
-            )
-        event = OpportunityEvent(**dict(row))
-        from src.engine.event_reactor_adapter import (
-            _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
-            _prepare_current_global_probability_family,
-        )
-
-        day0_payload: dict[str, object] = {}
-        prepared = _prepare_current_global_probability_family(
-            event,
-            forecast_conn=forecasts,
-            topology_conn=forecasts,
-            observation_conn=world,
-            decision_time=now,
-            max_age=FRESHNESS_WINDOW_DEFAULT,
-            day0_payload_out=day0_payload,
-            required_condition_id=condition_id,
-        )
-    finally:
-        if forecasts is not None:
-            forecasts.close()
-        world.close()
-
-    witness = prepared.probability_witness
-    condition_ids = tuple(binding.condition_id for binding in witness.bindings)
-    placeholders = ",".join("?" for _ in condition_ids)
-    token_rows = trade_conn.execute(
-        f"""
-        SELECT condition_id, yes_token_id, no_token_id
-          FROM executable_market_snapshot_latest
-         WHERE condition_id IN ({placeholders})
-           AND yes_token_id IS NOT NULL
-           AND no_token_id IS NOT NULL
-         ORDER BY captured_at DESC, snapshot_id DESC
-        """,
-        condition_ids,
-    ).fetchall()
-    token_map: dict[str, tuple[str, str]] = {}
-    for token_row in token_rows:
-        try:
-            row_condition = token_row["condition_id"]
-            pair = (token_row["yes_token_id"], token_row["no_token_id"])
-        except (TypeError, KeyError, IndexError):
-            row_condition = token_row[0]
-            pair = (token_row[1], token_row[2])
-        key = str(row_condition or "").strip()
-        normalized = tuple(str(token or "").strip() for token in pair)
-        if not key or not all(normalized):
-            continue
-        existing = token_map.get(key)
-        if existing is not None and existing != normalized:
-            raise ValueError("monitor current family token identity is ambiguous")
-        token_map[key] = normalized
-    if set(token_map) != set(condition_ids):
+        raise ValueError("monitor canonical condition identity is missing")
+    token_map = _day0_family_snapshot_token_map(snapshot)
+    if condition_id not in token_map:
         raise ValueError("monitor current family token identity is incomplete")
-    from src.engine.global_auction_universe import (
-        _rebind_probability_witness_tokens,
-    )
-
-    witness = _rebind_probability_witness_tokens(
-        witness,
-        token_map_by_condition=token_map,
-    )
+    witness = snapshot.witness
     held_samples = _current_global_held_samples(
         position,
         witness,
@@ -4176,6 +4139,10 @@ def _refresh_current_global_day0_probability(
     )
     direction = _normalize_monitor_direction(position.direction)
     held_probability = float(held_samples.mean())
+
+    from src.engine.event_reactor_adapter import (
+        _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+    )
 
     refreshed = replace(position)
     refreshed.token_id = token_map[condition_id][0]
@@ -4208,16 +4175,16 @@ def _refresh_current_global_day0_probability(
             refreshed,
             selected_method=selected_method,
             kind="exact_final_daily_observation",
-            metric=metric,
+            metric=snapshot.metric,
         )
     else:
-        _stamp_day0_remaining_window_belief(refreshed, metric=metric)
+        _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
     _set_monitor_probability_fresh(refreshed, True)
     _set_day0_zero_probability_exit_authority(refreshed, False)
     setattr(refreshed, _GLOBAL_MONITOR_SAMPLES_ATTR, held_samples)
     setattr(refreshed, _GLOBAL_MONITOR_ALPHA_ATTR, float(witness.band_alpha))
 
-    observation = day0_payload.get("_edli_global_day0_binding")
+    observation = snapshot.day0_payload.get("_edli_global_day0_binding")
     setattr(
         refreshed,
         "_day0_monitor_probability_receipt",
@@ -4225,7 +4192,7 @@ def _refresh_current_global_day0_probability(
             "schema_version": 1,
             "selected_method": selected_method,
             "probability_authority": probability_authority,
-            "metric": metric,
+            "metric": snapshot.metric,
             "held_direction": direction,
             "held_side_probability": held_probability,
             "probability_witness_identity": witness.witness_identity,
@@ -4242,16 +4209,212 @@ def _refresh_current_global_day0_probability(
             if is_final_daily
             else {
                 "source": "current_global_probability_builder",
-                "finite_evidence_member_count": day0_payload.get(
+                "finite_evidence_member_count": snapshot.day0_payload.get(
                     "_edli_day0_finite_evidence_member_count"
                 ),
-                "finite_evidence_hits_by_condition": day0_payload.get(
+                "finite_evidence_hits_by_condition": snapshot.day0_payload.get(
                     "_edli_day0_finite_evidence_hits_by_condition"
                 ),
             },
         },
     )
     return held_probability, refreshed, True
+
+
+def _build_current_global_day0_family_snapshot(
+    position: Position,
+    *,
+    trade_conn,
+    decision_time: datetime | None,
+    cached_snapshots: tuple[_CurrentGlobalDay0FamilySnapshot, ...]
+    | list[_CurrentGlobalDay0FamilySnapshot],
+) -> _CurrentGlobalDay0FamilySnapshot:
+    condition_id = _canonical_condition_id(position)
+    if condition_id is None:
+        raise ValueError("monitor canonical condition identity is missing")
+    metric = resolve_position_metric(position)[0]
+    now = decision_time or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("monitor current-global decision_time must be timezone-aware")
+    now = now.astimezone(timezone.utc)
+
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.events.opportunity_event import OpportunityEvent
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_world_connection_read_only,
+    )
+
+    world = None
+    forecasts = None
+    try:
+        world = get_world_connection_read_only()
+        forecasts = get_forecasts_connection_read_only()
+        row = world.execute(
+            """
+            SELECT event_id, event_type, entity_key, source, observed_at,
+                   available_at, received_at, causal_snapshot_id, payload_hash,
+                   idempotency_key, priority, expires_at, payload_json,
+                   schema_version, created_at
+              FROM opportunity_events
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(payload_json, '$.city') = ?
+               AND json_extract(payload_json, '$.target_date') = ?
+               AND lower(json_extract(payload_json, '$.metric')) = ?
+             ORDER BY available_at DESC
+             LIMIT 1
+            """,
+            (str(position.city), str(position.target_date), metric),
+        ).fetchone()
+        if row is None:
+            raise ObservationUnavailableError(
+                "current global Day0 family event unavailable"
+            )
+        event = OpportunityEvent(**dict(row))
+        from src.engine.event_reactor_adapter import (
+            _prepare_current_global_probability_family,
+        )
+
+        day0_payload: dict[str, object] = {}
+        cache_metadata: dict[str, str] = {}
+        prepared = _prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecasts,
+            topology_conn=forecasts,
+            observation_conn=world,
+            decision_time=now,
+            max_age=FRESHNESS_WINDOW_DEFAULT,
+            day0_payload_out=day0_payload,
+            cache_metadata_out=cache_metadata,
+            required_condition_id=condition_id,
+        )
+    finally:
+        if forecasts is not None:
+            forecasts.close()
+        if world is not None:
+            world.close()
+
+    witness = prepared.probability_witness
+    condition_ids = tuple(binding.condition_id for binding in witness.bindings)
+    if cached_snapshots:
+        token_map = _day0_family_snapshot_token_map(cached_snapshots[0])
+        if set(token_map) != set(condition_ids):
+            raise ValueError("monitor current family topology changed within cycle")
+    else:
+        placeholders = ",".join("?" for _ in condition_ids)
+        token_rows = trade_conn.execute(
+            f"""
+            SELECT condition_id, yes_token_id, no_token_id
+              FROM executable_market_snapshot_latest
+             WHERE condition_id IN ({placeholders})
+               AND yes_token_id IS NOT NULL
+               AND no_token_id IS NOT NULL
+             ORDER BY captured_at DESC, snapshot_id DESC
+            """,
+            condition_ids,
+        ).fetchall()
+        token_map = {}
+        for token_row in token_rows:
+            try:
+                row_condition = token_row["condition_id"]
+                pair = (token_row["yes_token_id"], token_row["no_token_id"])
+            except (TypeError, KeyError, IndexError):
+                row_condition = token_row[0]
+                pair = (token_row[1], token_row[2])
+            key = str(row_condition or "").strip()
+            normalized = tuple(str(token or "").strip() for token in pair)
+            if not key or not all(normalized):
+                continue
+            existing = token_map.get(key)
+            if existing is not None and existing != normalized:
+                raise ValueError("monitor current family token identity is ambiguous")
+            token_map[key] = normalized
+    if set(token_map) != set(condition_ids):
+        raise ValueError("monitor current family token identity is incomplete")
+    from src.engine.global_auction_universe import (
+        _rebind_probability_witness_tokens,
+    )
+
+    witness = _rebind_probability_witness_tokens(
+        witness,
+        token_map_by_condition=token_map,
+    )
+    try:
+        deterministic_condition_ids = frozenset(
+            str(value)
+            for value in json.loads(
+                cache_metadata.get("deterministic_condition_ids_json", "[]")
+            )
+        )
+    except (TypeError, ValueError):
+        raise ValueError("monitor deterministic condition metadata is invalid")
+    if not deterministic_condition_ids.issubset(condition_ids):
+        raise ValueError("monitor deterministic condition metadata is inconsistent")
+    return _CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=tuple(
+            (bound_condition, *token_map[bound_condition])
+            for bound_condition in condition_ids
+        ),
+        deterministic_condition_ids=deterministic_condition_ids,
+        day0_payload=day0_payload,
+        metric=metric,
+    )
+
+
+def _refresh_current_global_day0_probability(
+    position: Position,
+    *,
+    trade_conn,
+    decision_time: datetime | None = None,
+    family_cache: _CurrentGlobalDay0FamilyCache | None = None,
+) -> tuple[float, Position, bool] | None:
+    """Read one held side from a cycle-scoped current family witness."""
+
+    condition_id = _canonical_condition_id(position)
+    if condition_id is None:
+        return None
+    if trade_conn is None:
+        raise ValueError("monitor current-global trade authority is missing")
+    family_key = (
+        str(position.city),
+        str(position.target_date),
+        resolve_position_metric(position)[0],
+    )
+    cached_snapshots = (
+        family_cache.snapshots.get(family_key, ())
+        if family_cache is not None
+        else ()
+    )
+    for snapshot in cached_snapshots:
+        if _day0_family_snapshot_covers_condition(snapshot, condition_id):
+            _cnt_inc("monitor_day0_family_snapshot_cache_hit_total")
+            return _materialize_current_global_day0_probability(position, snapshot)
+    if family_cache is not None:
+        cached_failure = family_cache.failures.get(family_key)
+        if cached_failure is not None:
+            _cnt_inc("monitor_day0_family_failure_cache_hit_total")
+            raise _CachedCurrentGlobalDay0FamilyError(cached_failure)
+
+    try:
+        snapshot = _build_current_global_day0_family_snapshot(
+            position,
+            trade_conn=trade_conn,
+            decision_time=decision_time,
+            cached_snapshots=cached_snapshots,
+        )
+    except Exception as exc:
+        if (
+            family_cache is not None
+            and str(exc) != "GLOBAL_REQUIRED_CONDITION_BINDING_INVALID"
+        ):
+            family_cache.failures[family_key] = str(exc)
+            _cnt_inc("monitor_day0_family_builder_failure_total")
+        raise
+    if family_cache is not None:
+        family_cache.snapshots.setdefault(family_key, []).append(snapshot)
+    _cnt_inc("monitor_day0_family_snapshot_build_total")
+    return _materialize_current_global_day0_probability(position, snapshot)
 
 
 def _current_global_monitor_edge_band(
@@ -4424,6 +4587,7 @@ def monitor_probability_refresh(
     conn,
     city,
     target_d,
+    day0_family_cache: _CurrentGlobalDay0FamilyCache | None = None,
 ) -> tuple[float, Position, bool | None]:
     """Refresh held-side posterior without consuming the held-token quote.
 
@@ -4453,6 +4617,7 @@ def monitor_probability_refresh(
                 current = _refresh_current_global_day0_probability(
                     pos,
                     trade_conn=conn,
+                    family_cache=day0_family_cache,
                 )
             except Exception as exc:  # noqa: BLE001 - current authority fails closed
                 stale = replace(pos)
@@ -4467,7 +4632,10 @@ def monitor_probability_refresh(
                     else "day0_current_global_probability_unavailable:"
                     f"{type(exc).__name__}:{exc}",
                 )
-                if not post_day_final_missing:
+                if not post_day_final_missing and not isinstance(
+                    exc,
+                    _CachedCurrentGlobalDay0FamilyError,
+                ):
                     _enqueue_single_family_belief_reseed_failsoft(
                         city=str(pos.city),
                         target_date=str(pos.target_date),
@@ -4776,11 +4944,19 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     try:
         target_d = date.fromisoformat(pos.target_date)
+        day0_family_cache = getattr(
+            clob,
+            _MONITOR_DAY0_FAMILY_CACHE_ATTR,
+            None,
+        )
+        if not isinstance(day0_family_cache, _CurrentGlobalDay0FamilyCache):
+            day0_family_cache = None
         refreshed_p_posterior, refresh_pos, prob_refresh_is_fresh = monitor_probability_refresh(
             pos,
             conn=conn,
             city=city,
             target_d=target_d,
+            day0_family_cache=day0_family_cache,
         )
         pos.selected_method = refresh_pos.selected_method
         _replace_probability_validations_preserving_exit_confirmation(pos, refresh_pos)

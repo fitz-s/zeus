@@ -5079,6 +5079,7 @@ def execute_monitoring_phase(
 ):
     from src.engine.monitor_refresh import (
         _GLOBAL_MONITOR_SAMPLES_ATTR,
+        install_monitor_day0_family_cache,
         refresh_position,
     )
     from src.execution.exit_lifecycle import (
@@ -5195,6 +5196,7 @@ def execute_monitoring_phase(
         summary["held_monitor_positions_deferred"] = len(monitor_positions)
         summary["held_monitor_defer_reason"] = "urgent_day0_wake"
         return portfolio_dirty, tracker_dirty
+    install_monitor_day0_family_cache(clob)
     _prefetch_held_monitor_orderbooks(
         conn,
         clob,
