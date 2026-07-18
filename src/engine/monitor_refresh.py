@@ -4567,6 +4567,51 @@ def monitor_probability_refresh(
     return pos.p_posterior, pos, False
 
 
+def refresh_exact_one_position(pos: Position) -> EdgeContext:
+    """Build a no-I/O context after settlement truth fixes held value at one."""
+
+    if pos.direction not in {"buy_yes", "buy_no"}:
+        raise ValueError(f"Unknown direction {pos.direction} for trade {pos.trade_id}")
+
+    pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
+    pos.last_monitor_best_bid = None
+    pos.last_monitor_best_ask = None
+    pos.last_monitor_market_vig = None
+    pos.last_monitor_whale_toxicity = False
+    pos.last_monitor_market_price_is_fresh = False
+    for attr in (_GLOBAL_MONITOR_SAMPLES_ATTR, _GLOBAL_MONITOR_ALPHA_ATTR):
+        try:
+            delattr(pos, attr)
+        except AttributeError:
+            pass
+
+    pos.selected_method = SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    pos.last_monitor_prob = 1.0
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = float("nan")
+    _set_day0_zero_probability_exit_authority(pos, False)
+    _append_monitor_validation(pos, SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+    _append_monitor_validation(pos, "day0_hard_fact_probability_recompute_bypassed")
+    _append_monitor_validation(pos, "day0_hard_fact_structural_win_quote_bypassed")
+
+    return EdgeContext(
+        p_raw=np.array([]),
+        p_cal=np.array([]),
+        p_market=np.array([]),
+        p_posterior=1.0,
+        forward_edge=float("nan"),
+        alpha=0.0,
+        confidence_band_upper=float("nan"),
+        confidence_band_lower=float("nan"),
+        entry_provenance=EntryMethod(pos.entry_method),
+        decision_snapshot_id=pos.decision_snapshot_id,
+        n_edges_found=0,
+        n_edges_after_fdr=0,
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+
+
 def refresh_exact_zero_position(
     conn,
     clob: PolymarketClient,

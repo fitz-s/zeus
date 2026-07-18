@@ -1201,7 +1201,6 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
 
     def _run_phase(self, monkeypatch, *, hard_fact_verdict):
         import logging as _logging
-
         import numpy as np
 
         from src.contracts import EdgeContext, EntryMethod
@@ -1330,9 +1329,6 @@ class TestStructuralWinTerminalHold:
         - _summary_risk_level stubbed to return summary_risk_level
         """
         import logging as _logging
-        import numpy as np
-
-        from src.contracts import EdgeContext, EntryMethod
         from src.engine import cycle_runtime
         from src.state.portfolio import ExitDecision as _ExitDecision, Position, PortfolioState
 
@@ -1351,20 +1347,18 @@ class TestStructuralWinTerminalHold:
             def get_best_bid_ask(self, token_id):
                 return 0.60, 0.62, 100.0, 100.0
 
+            def get_clob_market_info(self, condition_id):
+                raise AssertionError(
+                    "structural-win hold must not read venue market metadata"
+                )
+
         class Tracker:
             def record_exit(self, position):
                 pass
 
         def mock_refresh(conn, clob, position):
-            return EdgeContext(
-                p_raw=np.array([]), p_cal=np.array([]),
-                p_market=np.array([position.entry_price]),
-                p_posterior=position.p_posterior,
-                forward_edge=0.0, alpha=0.0,
-                confidence_band_upper=0.0, confidence_band_lower=0.0,
-                entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-                decision_snapshot_id="snap_sw", n_edges_found=1, n_edges_after_fdr=1,
-                market_velocity_1h=0.0, divergence_score=0.0,
+            raise AssertionError(
+                "structural-win hold must not rebuild probability or read a quote"
             )
 
         monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
@@ -1436,6 +1430,8 @@ class TestStructuralWinTerminalHold:
             monkeypatch, evaluate_exit_says_exit=True, summary_risk_level="GREEN",
         )
         assert summary.get("day0_hard_fact_structural_win_holds") == 1
+        assert summary.get("day0_hard_fact_structural_win_quote_bypassed") == 1
+        assert summary.get("day0_hard_fact_probability_refresh_bypassed") == 1
         assert summary.get("day0_hard_fact_exits") is None
         assert not any(getattr(r, "should_exit", False) for r in results), (
             "structural-win hold must block the estimator exit (should_exit must be False)"

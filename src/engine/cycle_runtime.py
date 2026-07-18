@@ -5511,12 +5511,22 @@ def execute_monitoring_phase(
                     deps.logger.warning(
                         "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
                     )
-            closed_market_info = _closed_non_accepting_market_info(
-                clob,
-                pos,
-                conn,
-                decision_time=deps._utcnow(),
-            )
+            if _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+                # Terminal value is already exactly one. Venue metadata cannot
+                # change the hold decision, so only the local close timestamp is
+                # relevant; remote market/book reads would delay unrelated exits.
+                closed_market_info = _closed_by_static_market_end_info(
+                    conn,
+                    pos,
+                    decision_time=deps._utcnow(),
+                )
+            else:
+                closed_market_info = _closed_non_accepting_market_info(
+                    clob,
+                    pos,
+                    conn,
+                    decision_time=deps._utcnow(),
+                )
             # FIX 2b (2026-06-20): split the day0 closed-market pre-emption by
             # evidence source.
             #   * source="clob_market_info" → the VENUE itself reports
@@ -5685,6 +5695,24 @@ def execute_monitoring_phase(
                     )
                     + 1
                 )
+            elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+                from src.engine.monitor_refresh import refresh_exact_one_position
+
+                edge_ctx = refresh_exact_one_position(pos)
+                summary["day0_hard_fact_probability_refresh_bypassed"] = (
+                    summary.get(
+                        "day0_hard_fact_probability_refresh_bypassed",
+                        0,
+                    )
+                    + 1
+                )
+                summary["day0_hard_fact_structural_win_quote_bypassed"] = (
+                    summary.get(
+                        "day0_hard_fact_structural_win_quote_bypassed",
+                        0,
+                    )
+                    + 1
+                )
             else:
                 edge_ctx = refresh_position(conn, clob, pos)
             # === DAY0 HARD-FACT verdict — computed before the exit decision and
@@ -5697,7 +5725,10 @@ def execute_monitoring_phase(
                 ExitContext=ExitContext,
                 portfolio=portfolio,
             )
-            if run_exit_preflight:
+            if run_exit_preflight and not (
+                _hard_fact is not None
+                and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+            ):
                 exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
                     conn=conn,
                     clob=clob,
