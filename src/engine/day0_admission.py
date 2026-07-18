@@ -73,12 +73,16 @@ def day0_live_admission_rejection_reason(ctx: Day0AdmissionContext) -> str | Non
     if ctx.source_health_state not in ctx.allowed_health_states:
         return "DAY0_SOURCE_HEALTH_NOT_ADMISSIBLE"
 
-    # 5) quote must be at least as fresh as the latest observation it prices against.
+    # 5) quote must be STRICTLY newer than the latest observation it prices against.
+    # M-12 (audit 2026-07-18): equality rejects too — a quote captured at the same
+    # instant as the observation availability cannot have priced the post-update
+    # book. This is the ordering property the retired day0_input_correctness module
+    # specified (quote > observation, strict); the live gate now carries it.
     if ctx.quote_time_utc is None:
         return "DAY0_QUOTE_TIME_MISSING"
     if (
         ctx.latest_observation_available_at_utc is not None
-        and ctx.quote_time_utc < ctx.latest_observation_available_at_utc
+        and ctx.quote_time_utc <= ctx.latest_observation_available_at_utc
     ):
         return "DAY0_QUOTE_STALE_VS_OBSERVATION"
 

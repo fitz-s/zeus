@@ -69,6 +69,15 @@ def test_quote_stale_vs_observation() -> None:
     assert day0_live_admission_rejection_reason(stale) == "DAY0_QUOTE_STALE_VS_OBSERVATION"
 
 
+def test_quote_equal_to_observation_rejects_strict_ordering() -> None:
+    # M-12: quote == observation availability cannot have priced the post-update
+    # book; the ordering property is STRICT (quote > observation).
+    equal = _ctx(quote_time_utc=T, latest_observation_available_at_utc=T)
+    assert day0_live_admission_rejection_reason(equal) == "DAY0_QUOTE_STALE_VS_OBSERVATION"
+    newer = _ctx(quote_time_utc=T, latest_observation_available_at_utc=T - timedelta(seconds=1))
+    assert day0_live_admission_rejection_reason(newer) is None
+
+
 def test_post_extreme_quiet_window() -> None:
     assert day0_live_admission_rejection_reason(_ctx(in_post_extreme_quiet_window=True)) == "DAY0_POST_EXTREME_QUIET_WINDOW"
 
