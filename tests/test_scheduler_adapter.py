@@ -71,6 +71,8 @@ def test_executor_class_assignments_by_role() -> None:
     assert by_id["ingest_market_scan"].executor_class == "market_topology_db"
     assert by_id["ingest_k2_forecasts_daily"].executor_class == "forecast_archive_db"
     assert by_id["ingest_opendata_daily_mx2t6"].executor_class == "forecast_source_db"
+    assert by_id["ingest_replacement_availability_poll"].executor_class == "forecast_clock_db"
+    assert by_id["ingest_replacement_maintenance"].executor_class == "derived_db"
     assert by_id["ingest_day0_oracle_anomaly"].executor_class == "oracle_guard_db"
     assert by_id["ingest_k2_obs_fast_tick"].executor_class == "observation_db"
     assert by_id["ingest_tigge_archive_backfill"].executor_class == "backfill_db"
@@ -112,12 +114,20 @@ def test_replacement_availability_poll_uses_fast_source_clock_cadence(monkeypatc
                 return kwargs
         raise AssertionError("ingest_replacement_availability_poll spec missing")
 
+    def _maintenance_kwargs() -> dict:
+        for _fn, trigger, kwargs in ingest_main._ingest_main_job_specs():
+            if kwargs.get("id") == "ingest_replacement_maintenance":
+                assert trigger == "interval"
+                return kwargs
+        raise AssertionError("ingest_replacement_maintenance spec missing")
+
     monkeypatch.delenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, raising=False)
     kwargs = _poll_kwargs()
     assert kwargs["seconds"] == 15
     assert "minutes" not in kwargs
     assert kwargs["misfire_grace_time"] == 120
     assert kwargs["next_run_time"] is not None
+    assert _maintenance_kwargs()["seconds"] == 60
 
     monkeypatch.setenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, "20")
     assert _poll_kwargs()["seconds"] == 20
@@ -218,11 +228,10 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     assert result["status"] == "SOURCE_CLOCK_POLL_CURRENT"
     assert result["source_clock_status"] == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
     assert result["source_clock_updated_sources"] == []
-    assert result["current_target_download"]["status"] == "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"
-    assert result["current_target_download"]["coverage"]["missing_coverage_count"] == 1
-    assert current_target_calls == [{"download_current_targets_enabled": True}]
+    assert result["maintenance_status"] == "REPLACEMENT_MAINTENANCE_DECOUPLED"
+    assert current_target_calls == []
     assert probe_kwargs == [{"advance_cursor": False}]
-    assert call_order == ["probe", "current_targets"]
+    assert call_order == ["probe"]
 
 
 def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) -> None:
@@ -732,23 +741,10 @@ def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
     assert ingest_main._REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC == 341.0
 
 
-def test_replacement_availability_poll_throttles_timeboxed_maintenance(monkeypatch) -> None:
-    """A timeboxed maintenance pass must not repeat on every metadata tick."""
+def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) -> None:
+    """A timeboxed repair must stay off the fast source-clock lane and not repeat early."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
-    import src.data.source_clock_update_probe as source_clock_probe
-
-    class _NoChange:
-        updated_sources = ()
-
-        def as_dict(self):
-            return {
-                "status": "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE",
-                "updated_sources": [],
-                "affected_cities": [],
-                "error": None,
-            }
-
     monkeypatch.setenv(ingest_main.REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV, "1")
     monkeypatch.setattr(
         ingest_main,
@@ -776,9 +772,6 @@ def test_replacement_availability_poll_throttles_timeboxed_maintenance(monkeypat
         "_download_replacement_forecast_current_targets_if_needed",
         _timeboxed,
     )
-    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", lambda **kwargs: _NoChange())
-    monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor", lambda report: ())
-    monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", lambda *a, **k: None)
     monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", lambda cfg: None)
     monkeypatch.setattr(
         prod,
@@ -786,17 +779,62 @@ def test_replacement_availability_poll_throttles_timeboxed_maintenance(monkeypat
         lambda cfg: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 3, "advances_detected": 0},
     )
 
-    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
 
-    assert result["status"] == "SOURCE_CLOCK_POLL_CURRENT"
+    assert result["status"] == "REPLACEMENT_MAINTENANCE_COMPLETED"
     assert result["current_target_download"]["status"] == "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
     assert result["current_target_download"]["timeboxed_incomplete"] is True
     assert result["current_target_download"]["unattempted_target_count"] == 2
     assert result["cycle_advance_seeds_enqueued"] == 3
 
-    second = ingest_main._replacement_availability_poll_tick.__wrapped__()
-    assert second["current_target_download"]["status"] == "CURRENT_TARGET_MAINTENANCE_NOT_DUE"
+    second = ingest_main._replacement_maintenance_tick.__wrapped__()
+    assert second["status"] == "REPLACEMENT_MAINTENANCE_NOT_DUE"
     assert calls == [1.0]
+
+
+def test_replacement_maintenance_isolates_reseed_failures(monkeypatch) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: {"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg: (_ for _ in ()).throw(RuntimeError("fusion busy")),
+    )
+    cycle_calls: list[bool] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg: cycle_calls.append(True)
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 2},
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    assert result["cycle_advance_seeds_enqueued"] == 2
+    assert cycle_calls == [True]
+    assert result["maintenance_errors"][0].startswith("fusion_upgrade:RuntimeError")
 
 
 def test_replacement_availability_fast_poll_caps_scoped_download_under_cadence(monkeypatch) -> None:
@@ -866,6 +904,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
         assert j["executor"] in (
             "source_clock_db",
+            "forecast_clock_db",
             "oracle_guard_db",
             "observation_db",
             "forecast_source_db",
@@ -910,6 +949,8 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
     by_id = {j["id"]: j for j in sched.jobs}
     assert by_id["ingest_day0_metar_source_clock"]["executor"] == "source_clock_db"
+    assert by_id["ingest_replacement_availability_poll"]["executor"] == "forecast_clock_db"
+    assert by_id["ingest_replacement_maintenance"]["executor"] == "derived_db"
     assert "ingest_day0_metar_commit_retry" not in by_id
     assert by_id["ingest_day0_oracle_anomaly"]["executor"] == "oracle_guard_db"
     assert by_id["ingest_harvester_truth_writer"]["executor"] == "settlement_db"

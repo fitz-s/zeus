@@ -180,7 +180,12 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                         "Probe-resolved anchor raw-input fetch + bayes_precision_fusion extras; first fire "
                         "IMMEDIATE at boot (next_run_time=now), then on the fast source-clock cadence "
                         "(default 15s; ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS override); "
-                        "unchanged-source current-target maintenance remains minute-bounded."),
+                        "unchanged-source maintenance is isolated on ingest_replacement_maintenance."),
+    SourceJobSpec("ingest_replacement_maintenance", "ingest_main", "derived", "default", True,
+                  callable_ref="_replacement_maintenance_tick", family="forecast",
+                  misfire_grace_time=120,
+                  notes="minute-bounded current-target repair and broad reseed catch-up; isolated "
+                        "from the 15s replacement publication clock on derived_db"),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,
                   misfire_grace_time=3600, family="forecast",

@@ -10,6 +10,7 @@ assigning each job an EXECUTOR CLASS by intent so the single-writer SQLite lock 
 DB-heavy jobs starve heartbeats:
 
     source_clock_db     — latency-critical source publication -> short live write
+    forecast_clock_db   — replacement forecast publication clock + scoped capture
     oracle_guard_db     — Day0 source disagreement guard
     observation_db      — supplemental observation ingest
     forecast_source_db  — current forecast downloads/materialization
@@ -41,6 +42,7 @@ from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 
 ExecutorClass = Literal[
     "source_clock_db",
+    "forecast_clock_db",
     "oracle_guard_db",
     "observation_db",
     "forecast_source_db",
@@ -63,6 +65,8 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
             return "heartbeat"
         return "diagnostic_io" if spec.role == "diagnostic" else "io"
     if spec.role == "live" or spec.role == "settlement":
+        if spec.job_id == "ingest_replacement_availability_poll":
+            return "forecast_clock_db"
         if spec.job_id in {
             "ingest_day0_metar_source_clock",
             "ingest_day0_metar_commit_retry",
@@ -93,15 +97,6 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
             or spec.job_id == "replacement_forecast_live_materialize"
         ):
             return "forecast_source_db"
-        # Replacement availability poll carries download + materialization work
-        # (cycle-advance reseeds ride it) that can run for HOURS on a backlog.
-        # Incident 2026-06-12: one long poll run monopolized the shared live
-        # lane 13:09->16:07 and starved every observation tick — Denver went
-        # blind for the whole settlement-day heating ramp. Materialization is
-        # derived-class work; the lane-separation rationale ("an ETL job can
-        # never starve live ingest") must apply to it too.
-        if spec.job_id == "ingest_replacement_availability_poll":
-            return "derived_db"
         raise ValueError(
             f"{spec.job_id}: live DB writer has no explicit causal executor lane"
         )
@@ -274,6 +269,7 @@ def registry_executor_pools() -> dict[str, object]:
 
     return {
         "source_clock_db": ThreadPoolExecutor(max_workers=1),
+        "forecast_clock_db": ThreadPoolExecutor(max_workers=1),
         "oracle_guard_db": ThreadPoolExecutor(max_workers=1),
         "observation_db": ThreadPoolExecutor(max_workers=1),
         "forecast_source_db": ThreadPoolExecutor(max_workers=1),
@@ -347,6 +343,7 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
             continue
         if s.executor_class in {
             "source_clock_db",
+            "forecast_clock_db",
             "oracle_guard_db",
             "observation_db",
             "forecast_source_db",

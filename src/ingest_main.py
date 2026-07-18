@@ -608,6 +608,50 @@ def _defer_replacement_maintenance(
     )
 
 
+def _compact_replacement_current_target_report(download_report):
+    if not isinstance(download_report, dict):
+        return None
+    compact = {
+        "status": download_report.get("status"),
+        "available_cycle": download_report.get("available_cycle"),
+        "downloaded_cycle": download_report.get("downloaded_cycle"),
+        "candidate_row_count": download_report.get("candidate_row_count"),
+        "written_row_count": download_report.get("written_row_count"),
+        "target_count": download_report.get("target_count"),
+        "timeout_seconds": download_report.get("timeout_seconds"),
+        "timeboxed_incomplete": download_report.get("timeboxed_incomplete"),
+        "unattempted_target_count": download_report.get("unattempted_target_count"),
+        "max_wall_clock_seconds": download_report.get("max_wall_clock_seconds"),
+        "error": download_report.get("error"),
+        "fusion_upgrade_status": download_report.get("fusion_upgrade_status"),
+        "fusion_upgrade_seeds_enqueued": download_report.get(
+            "fusion_upgrade_seeds_enqueued"
+        ),
+        "cycle_advance_status": download_report.get("cycle_advance_status"),
+        "cycle_advance_seeds_enqueued": download_report.get(
+            "cycle_advance_seeds_enqueued"
+        ),
+    }
+    coverage = download_report.get("coverage")
+    if isinstance(coverage, dict):
+        compact["coverage"] = {
+            key: coverage.get(key)
+            for key in (
+                "status",
+                "target_count",
+                "covered_count",
+                "missing_coverage_count",
+                "can_seed_count",
+                "missing_openmeteo_manifest_count",
+                "day0_observed_extreme_required_count",
+            )
+        }
+    errors = download_report.get("transport_errors")
+    if errors:
+        compact["transport_errors"] = tuple(errors)[:3]
+    return {key: value for key, value in compact.items() if value is not None}
+
+
 def _graceful_shutdown(signum, frame) -> None:
     """SIGTERM handler — wait for in-flight jobs then exit 0.
 
@@ -649,6 +693,7 @@ def _shutdown_scheduler_if_running(scheduler: Any | None, *, wait: bool = True) 
 # ---------------------------------------------------------------------------
 
 _TRUTHFUL_FAIL_STATUSES = frozenset({
+    "REPLACEMENT_MAINTENANCE_PARTIAL",
     "download_failed",
     "empty_ingest",
     "extract_failed",
@@ -1786,6 +1831,96 @@ def _harvester_truth_writer_tick():
     logger.info("harvester_truth_writer_tick: %s", result)
 
 
+@_scheduler_job("ingest_replacement_maintenance")
+def _replacement_maintenance_tick():
+    """Repair unchanged replacement targets without blocking the source clock."""
+    from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+        bayes_precision_fusion_quota_cooldown_seconds,
+    )
+    from src.data.replacement_forecast_production import (  # noqa: PLC0415
+        _download_replacement_forecast_current_targets_if_needed,
+        _enqueue_cycle_advance_reseeds_if_needed,
+        _enqueue_fusion_upgrade_reseeds_if_needed,
+        _replacement_forecast_live_materialization_queue_config,
+    )
+
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    if not bool(cfg.get("download_current_targets_enabled", False)):
+        return None
+    cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+    if cooldown_seconds > 0:
+        _defer_replacement_maintenance(float(cooldown_seconds))
+        return {
+            "status": "REPLACEMENT_MAINTENANCE_QUOTA_COOLDOWN",
+            "cooldown_seconds": cooldown_seconds,
+        }
+    if not _replacement_maintenance_due():
+        return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
+
+    timeout_s = _replacement_current_target_poll_timeout_seconds(
+        _replacement_availability_poll_seconds()
+    )
+    try:
+        download_report = _download_replacement_forecast_current_targets_if_needed(
+            cfg,
+            max_wall_clock_seconds=timeout_s,
+        )
+    except TimeoutError as exc:
+        download_report = {
+            "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+            "timeout_seconds": timeout_s,
+            "error": str(exc)[:240],
+        }
+    except Exception as exc:  # noqa: BLE001 - reseed catch-up remains independent
+        logger.warning(
+            "replacement maintenance current-target repair failed: %s",
+            exc,
+            exc_info=True,
+        )
+        download_report = {
+            "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+            "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+        }
+
+    report: dict[str, object] = {
+        "status": "REPLACEMENT_MAINTENANCE_COMPLETED",
+        "current_target_download": _compact_replacement_current_target_report(
+            download_report
+        ),
+    }
+    maintenance_errors: list[str] = []
+    download_status = str(
+        download_report.get("status") or ""
+        if isinstance(download_report, dict)
+        else ""
+    )
+    if download_status in {
+        "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+        "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+    }:
+        maintenance_errors.append(f"current_target:{download_status}")
+    for prefix, reseed in (
+        ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
+        ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
+    ):
+        try:
+            reseed_report = reseed(cfg)
+        except Exception as exc:  # noqa: BLE001 - isolate independent repair lanes
+            maintenance_errors.append(
+                f"{prefix}:{type(exc).__name__}: {str(exc)[:180]}"
+            )
+            logger.warning("replacement maintenance %s failed: %s", prefix, exc)
+            continue
+        if reseed_report is not None:
+            report[f"{prefix}_status"] = reseed_report.get("status")
+            report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
+    if maintenance_errors:
+        report["status"] = "REPLACEMENT_MAINTENANCE_PARTIAL"
+        report["maintenance_errors"] = tuple(maintenance_errors)
+    logger.info("replacement maintenance report: %s", report)
+    return report
+
+
 @_scheduler_job("ingest_replacement_availability_poll")
 def _replacement_availability_poll_tick():
     """Fast source-clock poll for replacement raw-input fetches.
@@ -1829,49 +1964,6 @@ def _replacement_availability_poll_tick():
         }
         logger.info("replacement source-clock quota cooldown: %s", report)
         return report
-
-    def _compact_current_target_report(download_report):
-        if not isinstance(download_report, dict):
-            return None
-        compact = {
-            "status": download_report.get("status"),
-            "available_cycle": download_report.get("available_cycle"),
-            "downloaded_cycle": download_report.get("downloaded_cycle"),
-            "candidate_row_count": download_report.get("candidate_row_count"),
-            "written_row_count": download_report.get("written_row_count"),
-            "target_count": download_report.get("target_count"),
-            "timeout_seconds": download_report.get("timeout_seconds"),
-            "timeboxed_incomplete": download_report.get("timeboxed_incomplete"),
-            "unattempted_target_count": download_report.get("unattempted_target_count"),
-            "max_wall_clock_seconds": download_report.get("max_wall_clock_seconds"),
-            "error": download_report.get("error"),
-            "fusion_upgrade_status": download_report.get("fusion_upgrade_status"),
-            "fusion_upgrade_seeds_enqueued": download_report.get(
-                "fusion_upgrade_seeds_enqueued"
-            ),
-            "cycle_advance_status": download_report.get("cycle_advance_status"),
-            "cycle_advance_seeds_enqueued": download_report.get(
-                "cycle_advance_seeds_enqueued"
-            ),
-        }
-        coverage = download_report.get("coverage")
-        if isinstance(coverage, dict):
-            compact["coverage"] = {
-                key: coverage.get(key)
-                for key in (
-                    "status",
-                    "target_count",
-                    "covered_count",
-                    "missing_coverage_count",
-                    "can_seed_count",
-                    "missing_openmeteo_manifest_count",
-                    "day0_observed_extreme_required_count",
-                )
-            }
-        errors = download_report.get("transport_errors")
-        if errors:
-            compact["transport_errors"] = tuple(errors)[:3]
-        return {k: v for k, v in compact.items() if v is not None}
 
     def _attach_reseed_reports(
         report: dict[str, object],
@@ -1988,17 +2080,7 @@ def _replacement_availability_poll_tick():
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
-        if _replacement_maintenance_due():
-            current_target_download_compact = _compact_current_target_report(
-                _download_current_targets()
-            )
-            if current_target_download_compact is not None:
-                report["current_target_download"] = current_target_download_compact
-            report = _attach_reseed_reports(report)
-        else:
-            report["current_target_download"] = {
-                "status": "CURRENT_TARGET_MAINTENANCE_NOT_DUE"
-            }
+        report["maintenance_status"] = "REPLACEMENT_MAINTENANCE_DECOUPLED"
         logger.info("replacement source-clock poll current: %s", report)
         return report
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
@@ -2177,7 +2259,7 @@ def _replacement_availability_poll_tick():
             "source_clock_error": source_clock_payload.get("error"),
         }
     report.update(scoped_reseed_summary)
-    source_clock_anchor_compact = _compact_current_target_report(
+    source_clock_anchor_compact = _compact_replacement_current_target_report(
         source_clock_anchor_report
     )
     if source_clock_anchor_compact is not None:
@@ -3004,6 +3086,9 @@ def _ingest_main_job_specs() -> list[tuple]:
             id="ingest_replacement_availability_poll", max_instances=1, coalesce=True,
             misfire_grace_time=max(120, replacement_availability_poll_seconds * 2),
             next_run_time=now)),
+        (_replacement_maintenance_tick, "interval", dict(seconds=60,
+            id="ingest_replacement_maintenance", max_instances=1, coalesce=True,
+            misfire_grace_time=120, next_run_time=now + timedelta(seconds=60))),
     ]
 
     # ECMWF Open Data daily live jobs — conditional on ingest_main owning OpenData (singleton).
