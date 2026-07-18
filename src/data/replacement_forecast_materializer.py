@@ -562,6 +562,83 @@ def _expected_localday_hour_slots(*, city_timezone: str, target_date: date) -> t
     return tuple(slots)
 
 
+def _day0_remaining_center_delta_c(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    computed_at_utc: datetime,
+) -> tuple[float, str | None, float | None]:
+    """(delta_c >= 0, vector_id, hours_remaining) from the anchor family's hourly vector.
+
+    Authority: T0-1 audit §7 2026-07-18. Post-peak the whole-day forecast center no
+    longer describes the remaining-day extreme (served P(new extreme beyond obs)
+    0.314 vs realized 0.070, 4.50x). HIGH: delta = max(whole local day) - max
+    (remaining hours >= computed_at) — how much of the day's forecast peak has
+    already elapsed. LOW: delta = min(remaining) - min(whole day). Clamped >= 0.
+    No remaining grid hours (day effectively over): the extreme can no longer move —
+    the LAST target-day entry is the remaining value (delta = whole range, maximal
+    shrink toward obs). hours_remaining = count of remaining valid grid entries.
+    Fail-open (0.0, None, None) on any absence/error: vector missing, < 2 valid
+    target-day entries, remaining hours all null, unparseable timestamps,
+    timezone failure — absence must leave serving byte-identical.
+    """
+    try:
+        row = conn.execute(
+            "SELECT vector_id, timezone_name, times_json, temps_c_json "
+            "FROM day0_hourly_vectors "
+            "WHERE model = 'ecmwf_ifs' AND lower(city) = lower(?) AND target_date = ? "
+            "AND captured_at <= ? ORDER BY captured_at DESC LIMIT 1",
+            (request.city, _date_text(request.target_date), computed_at_utc.isoformat()),
+        ).fetchone()
+        if row is None:
+            return 0.0, None, None
+        vector_id = str(row[0])
+        tz = ZoneInfo(str(row[1]))
+        times = json.loads(row[2])
+        temps = json.loads(row[3])
+        target = date.fromisoformat(_date_text(request.target_date))
+        # (local-aware time, valid temp or None) for every grid entry on the target
+        # local day. times_json entries are naive LOCAL as served; an aware entry is
+        # converted. Null/non-finite temps stay as grid slots with value None so
+        # "remaining hours exist but temps absent" is distinguishable from "day over".
+        day_entries: list[tuple[datetime, float | None]] = []
+        for raw_time, temp in zip(times, temps):
+            moment = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+            moment = moment.replace(tzinfo=tz) if moment.tzinfo is None else moment.astimezone(tz)
+            if moment.date() != target:
+                continue
+            value = None if temp is None else float(temp)
+            if value is not None and not math.isfinite(value):
+                value = None
+            day_entries.append((moment, value))
+        valid = [(when, value) for when, value in day_entries if value is not None]
+        if len(valid) < 2:
+            return 0.0, None, None
+        remaining_grid_exists = any(when >= computed_at_utc for when, _ in day_entries)
+        remaining_valid = [value for when, value in valid if when >= computed_at_utc]
+        if remaining_grid_exists and not remaining_valid:
+            return 0.0, None, None
+        if remaining_valid:
+            hours_remaining = float(len(remaining_valid))
+            remaining_value = max(remaining_valid) if metric == "high" else min(remaining_valid)
+        else:
+            hours_remaining = 0.0
+            remaining_value = max(valid, key=lambda item: item[0])[1]
+        whole_values = [value for _, value in valid]
+        if metric == "high":
+            delta = max(whole_values) - remaining_value
+        elif metric == "low":
+            delta = remaining_value - min(whole_values)
+        else:
+            return 0.0, None, None
+        if not math.isfinite(delta):
+            return 0.0, None, None
+        return max(0.0, float(delta)), vector_id, hours_remaining
+    except Exception:
+        return 0.0, None, None
+
+
 def _day0_observed_extreme_time(request: ReplacementForecastMaterializeRequest) -> datetime | None:
     value = request.day0_observed_extreme_observation_time
     if value is None:
@@ -3754,6 +3831,12 @@ def _compute_posterior_payload(
     # pre-artifact behavior); the applied (rho, n_eff) when the correction fired.
     _finite_evidence_member_rho_applied: float | None = None
     _finite_evidence_member_n_eff: float | None = None
+    # T0-1 remaining-window Day0 center correction (audit §7 2026-07-18). Inert
+    # (0.0/None) when non-Day0 or the anchor-family hourly vector did not license
+    # a shift; stamped in provenance only when the delta fired (delta > 0).
+    _day0_center_delta_c: float = 0.0
+    _day0_center_vector_id: str | None = None
+    _day0_center_hours_remaining: float | None = None
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
         replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
@@ -3831,6 +3914,30 @@ def _compute_posterior_payload(
                     _city_unit
                 )
             _mu_anchor = float(bayes_precision_fusion_override.anchor_value_c)
+            # T0-1 remaining-window Day0 CENTER correction (audit §7 2026-07-18). Post-peak
+            # the whole-day center over-disperses the remaining-day extreme; shift the Day0
+            # center toward the remaining-window value: HIGH mu - delta, LOW mu + delta.
+            # Applied HERE, before ANY consumer, so the point q, the finite-evidence floors,
+            # and the bootstrap bounds integrate ONE corrected center (one probability world).
+            # Deliberately NOT re-maxed with obs: the day0 support transform absorbs mass
+            # below obs itself — mu below obs is exactly the intended post-peak collapse.
+            # Non-Day0: the delta machinery never runs (byte-identical).
+            if _day0_obs_extreme_c is not None:
+                (
+                    _day0_center_delta_c,
+                    _day0_center_vector_id,
+                    _day0_center_hours_remaining,
+                ) = _day0_remaining_center_delta_c(
+                    conn,
+                    request,
+                    metric=metric,
+                    computed_at_utc=_to_utc(request.computed_at, field_name="computed_at"),
+                )
+                if _day0_center_delta_c > 0.0:
+                    if metric == "high":
+                        _mu_anchor -= _day0_center_delta_c
+                    else:
+                        _mu_anchor += _day0_center_delta_c
             # The settlement σ-floor (city|season|metric) lookup is IMPURE (config + season) and is read
             # ONCE here, then threaded into the pure q builder for BOTH the global and the city carriers
             # (same physical dispersion). It sets the floor provenance fields exactly as before.
@@ -4005,7 +4112,7 @@ def _compute_posterior_payload(
             # world.  Serving global-only draws beside a city-mixed q is forbidden.
             try:
                 _lcb_g, _ucb_g, _samples_g = _build_fused_q_bounds(
-                    mu_star=float(bayes_precision_fusion_override.anchor_value_c),
+                    mu_star=_mu_anchor,
                     center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
                     predictive_sigma_c=_sigma_used,
                     bins=request.bins,
@@ -4019,7 +4126,7 @@ def _compute_posterior_payload(
                 )
                 if _city_sigma_used is not None and _city_rho > 0.0:
                     _lcb_c, _ucb_c, _samples_c = _build_fused_q_bounds(
-                        mu_star=float(bayes_precision_fusion_override.anchor_value_c),
+                        mu_star=_mu_anchor,
                         center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
                         predictive_sigma_c=_city_sigma_used,
                         bins=request.bins,
@@ -4138,6 +4245,11 @@ def _compute_posterior_payload(
             city_score_capital = None
             city_k_eb = None
             city_w_eb = None
+            # T0-1: the corrected Day0 center was discarded with the fused q — the
+            # delta must not stamp provenance on a q it did not shape.
+            _day0_center_delta_c = 0.0
+            _day0_center_vector_id = None
+            _day0_center_hours_remaining = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -4507,6 +4619,12 @@ def _compute_posterior_payload(
                 else "min(observed_low_so_far, remaining_distribution)"
             ),
         }
+        # T0-1 remaining-window center correction (audit §7 2026-07-18): stamped ONLY
+        # when the delta fired; absent = inert (byte-identical provenance otherwise).
+        if _day0_center_delta_c > 0.0:
+            provenance_payload["day0_remaining_center_delta_c"] = float(_day0_center_delta_c)
+            provenance_payload["day0_remaining_vector_id"] = _day0_center_vector_id
+            provenance_payload["day0_remaining_hours"] = _day0_center_hours_remaining
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
     # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
     # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.
