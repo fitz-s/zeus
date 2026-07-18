@@ -654,8 +654,9 @@ def _write_request(path: Path, payload: dict[str, object]) -> None:
 
 def _cycle_advance_seed_priority_map(
     forecast_db: Path | str | None,
+    queue_files: Sequence[Path],
 ) -> dict[str, tuple[int, str]]:
-    """Return filename -> priority for cycle-advance seeds/requests.
+    """Return filename -> priority for queued cycle-advance seeds/requests.
 
     The producer records whether a seed repairs a held-position family in
     ``cycle_advance_enqueues``. The consumer must preserve that priority after a
@@ -663,48 +664,74 @@ def _cycle_advance_seed_priority_map(
     can otherwise spend live cycles on non-held cities while a held position has
     stale belief.
     """
-    if forecast_db is None:
+    if forecast_db is None or not queue_files:
         return {}
     db_path = Path(forecast_db)
     if not db_path.exists():
+        return {}
+    names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
+    for path in queue_files:
+        payload = _load_request_payload_for_coalescing(path)
+        if payload is None:
+            continue
+        cycle = _parse_utc_iso(payload.get("source_cycle_time"))
+        scope = (
+            str(payload.get("city") or "").strip(),
+            str(payload.get("target_date") or "").strip(),
+            str(payload.get("temperature_metric") or "").strip(),
+            "" if cycle is None else cycle.isoformat(),
+        )
+        if all(scope):
+            names_by_scope.setdefault(scope, set()).add(path.name)
+    if not names_by_scope:
         return {}
     try:
         from src.state.db import _connect_read_only  # noqa: PLC0415
 
         conn = _connect_read_only(db_path)
         try:
-            conn.execute("PRAGMA query_only=ON")
-            table = conn.execute(
-                """
-                SELECT 1
-                FROM sqlite_master
-                WHERE type='table' AND name='cycle_advance_enqueues'
-                LIMIT 1
-                """
-            ).fetchone()
-            if table is None:
-                return {}
-            rows = conn.execute(
-                """
-                SELECT seed_file, held_position, enqueued_at
-                FROM cycle_advance_enqueues
-                WHERE seed_file IS NOT NULL AND seed_file != ''
-                """
-            ).fetchall()
+            rows = []
+            scopes = tuple(names_by_scope)
+            for offset in range(0, len(scopes), 200):
+                chunk = scopes[offset : offset + 200]
+                values = ", ".join("(?, ?, ?, ?)" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"""
+                        WITH queued(city, target_date, metric, target_cycle_time) AS (
+                            VALUES {values}
+                        )
+                        SELECT e.city,
+                               e.target_date,
+                               e.metric,
+                               e.target_cycle_time,
+                               e.held_position,
+                               e.enqueued_at
+                        FROM queued AS q
+                        JOIN cycle_advance_enqueues AS e
+                          ON e.city = q.city
+                         AND e.target_date = q.target_date
+                         AND e.metric = q.metric
+                         AND e.target_cycle_time = q.target_cycle_time
+                        """,
+                        tuple(value for scope in chunk for value in scope),
+                    ).fetchall()
+                )
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
         return {}
 
     priority: dict[str, tuple[int, str]] = {}
-    for seed_file, held_position, enqueued_at in rows:
-        name = Path(str(seed_file)).name
-        if not name:
-            continue
+    for row in rows:
+        scope = tuple(str(value or "") for value in row[:4])
+        names = names_by_scope.get(scope, ())
+        held_position, enqueued_at = row[4:]
         value = (0 if int(held_position or 0) == 1 else 1, str(enqueued_at or ""))
-        current = priority.get(name)
-        if current is None or value < current:
-            priority[name] = value
+        for name in names:
+            current = priority.get(name)
+            if current is None or value < current:
+                priority[name] = value
     return priority
 
 
@@ -1132,7 +1159,7 @@ def _prepare_seed_requests(
     seed_files = tuple(path for path in seed_path.glob("*.json") if path.is_file())
     if not seed_files:
         return [], [], ["REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY"]
-    priority = _cycle_advance_seed_priority_map(forecast_db)
+    priority = _cycle_advance_seed_priority_map(forecast_db, seed_files)
     seeds = tuple(
         sorted(
             seed_files,
@@ -1406,7 +1433,7 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             seed_failed_files=tuple(seed_failed),
             reason_codes=tuple(seed_reasons + ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY"]),
         )
-    priority = _cycle_advance_seed_priority_map(forecast_db)
+    priority = _cycle_advance_seed_priority_map(forecast_db, request_files)
     requests = tuple(
         sorted(
             request_files,

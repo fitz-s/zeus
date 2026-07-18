@@ -233,6 +233,7 @@ def _minimal_seed(upgrade: bool) -> dict[str, object]:
         "city": "Beijing",
         "target_date": "2026-06-12",
         "temperature_metric": "high",
+        "source_cycle_time": "2026-06-11T12:00:00+00:00",
         "computed_at": "2026-06-11T15:00:00+00:00",
         "baseline_source_run_id": "b0-run",
         "aifs_source_run_id": "aifs-run",
@@ -487,6 +488,10 @@ def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     conn.execute(
         """
         CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
             seed_file TEXT,
             held_position INTEGER,
             enqueued_at TEXT
@@ -503,10 +508,26 @@ def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     nonheld_seed.write_text(json.dumps(nonheld_payload), encoding="utf-8")
     held_seed.write_text(json.dumps(held_payload), encoding="utf-8")
     conn.executemany(
-        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?)",
+        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
-            (str(nonheld_seed), 0, "2026-06-20T05:00:00+00:00"),
-            (str(held_seed), 1, "2026-06-20T07:00:00+00:00"),
+            (
+                "Busan",
+                "2026-06-12",
+                "high",
+                "2026-06-11T12:00:00+00:00",
+                str(nonheld_seed),
+                0,
+                "2026-06-20T05:00:00+00:00",
+            ),
+            (
+                "Kuala Lumpur",
+                "2026-06-12",
+                "high",
+                "2026-06-11T12:00:00+00:00",
+                str(held_seed),
+                1,
+                "2026-06-20T07:00:00+00:00",
+            ),
         ],
     )
     conn.commit()
@@ -539,6 +560,73 @@ def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     assert built == ["Kuala Lumpur"]
     assert (request_dir / held_seed.name).exists()
     assert not (request_dir / nonheld_seed.name).exists()
+
+
+def test_cycle_priority_reads_only_queued_forecast_scopes(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            seed_file TEXT,
+            held_position INTEGER NOT NULL,
+            enqueued_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX uq_cycle_advance_enqueues_scope_target_cycle
+            ON cycle_advance_enqueues(city, target_date, metric, target_cycle_time);
+        """
+    )
+    conn.executemany(
+        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                f"History {index}",
+                "2026-06-12",
+                "high",
+                "2026-06-11T12:00:00+00:00",
+                str(tmp_path / f"history-{index}.json"),
+                0,
+                "2026-06-11T13:00:00+00:00",
+            )
+            for index in range(100)
+        ]
+        + [
+            (
+                "Paris",
+                "2026-06-12",
+                "low",
+                "2026-06-11T12:00:00+00:00",
+                str(tmp_path / "Paris.current.low.json"),
+                1,
+                "2026-06-11T13:01:00+00:00",
+            )
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    queued = tmp_path / "Paris.current.low.json"
+    queued.write_text(
+        json.dumps(
+            {
+                "city": "Paris",
+                "target_date": "2026-06-12",
+                "temperature_metric": "low",
+                "source_cycle_time": "2026-06-11T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(forecast_db, (queued,))
+
+    assert priority == {queued.name: (0, "2026-06-11T13:01:00+00:00")}
 
 
 def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None:
@@ -1115,7 +1203,7 @@ def test_empty_materialization_queues_skip_cycle_priority_reads(
     request_dir.mkdir()
     seed_dir.mkdir()
 
-    def _unexpected_priority_read(_forecast_db):
+    def _unexpected_priority_read(_forecast_db, _queue_files):
         raise AssertionError("empty queues must not read cycle priority")
 
     monkeypatch.setattr(
