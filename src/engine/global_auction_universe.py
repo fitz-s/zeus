@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time as _time
 from dataclasses import dataclass
@@ -1083,7 +1084,7 @@ def fetch_current_global_books(
     batch_size: int = 500,
     book_fetch_workers: int = 1,
 ) -> dict[str, Mapping[str, object]]:
-    """Fetch one bounded CLOB book universe without interpreting market metadata."""
+    """Fetch bounded CLOB chunks; failed chunks remain explicitly unavailable."""
 
     if not 1 <= batch_size <= 500 or not 1 <= book_fetch_workers <= 4:
         raise ValueError("GLOBAL_BOOK_FETCH_CONTRACT_INVALID")
@@ -1101,12 +1102,24 @@ def fetch_current_global_books(
 
     books: dict[str, Mapping[str, object]] = {}
 
+    def fetch(chunk: list[str]) -> Mapping[str, Mapping[str, object]]:
+        try:
+            return get_books(chunk)
+        except Exception as exc:  # noqa: BLE001 - external public-book boundary
+            logging.getLogger(__name__).warning(
+                "global CLOB book chunk unavailable: tokens=%d error=%s:%s",
+                len(chunk),
+                type(exc).__name__,
+                exc,
+            )
+            return {}
+
     def merge(batch: Mapping[str, Mapping[str, object]]) -> None:
         books.update(_validated_global_book_batch(batch))
 
     if len(chunks) == 1 or book_fetch_workers == 1:
         for chunk in chunks:
-            merge(get_books(chunk))
+            merge(fetch(chunk))
         return books
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1115,7 +1128,7 @@ def fetch_current_global_books(
         max_workers=min(book_fetch_workers, len(chunks)),
         thread_name_prefix="global-clob-books",
     ) as executor:
-        futures = tuple(executor.submit(get_books, chunk) for chunk in chunks)
+        futures = tuple(executor.submit(fetch, chunk) for chunk in chunks)
         for future in as_completed(futures):
             merge(future.result())
     return books

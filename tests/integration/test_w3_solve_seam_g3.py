@@ -9164,7 +9164,7 @@ def test_current_global_book_epoch_one_chunk_stays_synchronous():
     assert called_threads == [caller_thread]
 
 
-def test_current_global_book_epoch_rejects_parallel_chunk_error():
+def test_current_global_book_epoch_isolates_parallel_chunk_error():
     probability = _current_global_book_probability()
     failed_token = probability.bindings[0].no_token_id
 
@@ -9185,16 +9185,22 @@ def test_current_global_book_epoch_rejects_parallel_chunk_error():
 
     at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
-    with pytest.raises(RuntimeError, match="chunk failure"):
-        capture_current_global_book_epoch(
-            _global_book_metadata_conn(probability),
-            probability_witnesses={probability.family_key: probability},
-            get_books=books,
-            clock=lambda: next(times),
-            max_age=_dt.timedelta(seconds=30),
-            batch_size=1,
-            book_fetch_workers=2,
-        )
+    epoch = capture_current_global_book_epoch(
+        _global_book_metadata_conn(probability),
+        probability_witnesses={probability.family_key: probability},
+        get_books=books,
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        batch_size=1,
+        book_fetch_workers=2,
+    )
+
+    state_by_token = {state[4]: state for state in epoch.asset_states}
+    assert state_by_token[failed_token][5] == "BOOK_UNAVAILABLE"
+    assert {
+        state[5] for token, state in state_by_token.items() if token != failed_token
+    } == {"EXECUTABLE"}
+    assert failed_token not in {asset.token_id for asset in epoch.assets}
 
 
 def test_current_gamma_identity_fills_missing_no_without_changing_q():
