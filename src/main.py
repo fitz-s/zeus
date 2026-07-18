@@ -1288,7 +1288,7 @@ def _assert_cascade_liveness_contract(scheduler) -> None:
 _heartbeat_fails = 0
 
 def _write_heartbeat() -> None:
-    """Write a heartbeat JSON to state/ every 60s so operators can detect silent crashes."""
+    """Write the coarse process heartbeat without consulting runtime state."""
     global _heartbeat_fails
     from src.config import state_path
     path = state_path("daemon-heartbeat.json")
@@ -1304,13 +1304,6 @@ def _write_heartbeat() -> None:
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
         tmp.replace(path)
-        # Keep operator status freshness independent of the long chain/monitor job.
-        # The pulse is derived/read-only visibility; failure must not mask heartbeat.
-        try:
-            from src.observability.status_summary import write_cycle_pulse
-            write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
-        except Exception:
-            pass
         _heartbeat_fails = 0
     except Exception as exc:
         _heartbeat_fails += 1
@@ -1337,7 +1330,9 @@ def _live_health_composite_cycle() -> None:
         return
 
     from src.control.live_health import compute_composite_live_health
+    from src.observability.status_summary import write_cycle_pulse
 
+    write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
     compute_composite_live_health()
 
 
@@ -6396,6 +6391,7 @@ def main():
             "default": _APThreadPoolExecutor(20),
             "reactor": _APThreadPoolExecutor(2),
             "observability": _APThreadPoolExecutor(1),
+            "heartbeat": _APThreadPoolExecutor(2),
         }
     except ModuleNotFoundError:
         if BlockingScheduler is None or getattr(BlockingScheduler, "__module__", "").startswith("apscheduler"):
@@ -6577,8 +6573,15 @@ def main():
         max_instances=1,
         coalesce=True,
     )
-    scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
-                      max_instances=1, coalesce=True)
+    scheduler.add_job(
+        _write_heartbeat,
+        "interval",
+        seconds=60,
+        id="heartbeat",
+        max_instances=1,
+        coalesce=True,
+        executor="heartbeat",
+    )
     scheduler.add_job(
         _live_health_composite_cycle,
         "interval",
@@ -6619,6 +6622,7 @@ def main():
         id="venue_heartbeat",
         max_instances=1,
         coalesce=True,
+        executor="heartbeat",
     )
 
     # Loaded-code/worktree observability; never a submit or process-liveness gate.

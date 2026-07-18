@@ -130,12 +130,12 @@ def test_exit_lifecycle_commits_before_live_venue_io():
 
 
 def test_heartbeat_does_not_block_on_live_health():
-    """Heartbeat freshness must not depend on composite live-health DB scans."""
+    """Heartbeat freshness must not depend on any DB-derived status scan."""
 
     import src.main as main
 
     source = inspect.getsource(main._write_heartbeat)
-    assert "write_cycle_pulse" in source
+    assert "write_cycle_pulse" not in source
     assert "compute_composite_live_health" not in source
 
 
@@ -146,10 +146,21 @@ def test_live_health_composite_runs_as_separate_scheduler_job():
 
     main_source = inspect.getsource(main.main)
     health_job_source = inspect.getsource(main._live_health_composite_cycle)
+    assert "write_cycle_pulse" in health_job_source
     assert "compute_composite_live_health" in health_job_source
     assert "_live_health_composite_cycle" in main_source
     assert 'id="live_health_composite"' in main_source
     assert 'executor="observability"' in main_source
+
+
+def test_heartbeat_jobs_have_a_dedicated_executor():
+    """Business jobs cannot queue process or venue-heartbeat supervision."""
+
+    import src.main as main
+
+    source = inspect.getsource(main.main)
+    assert '"heartbeat": _APThreadPoolExecutor(2)' in source
+    assert source.count('executor="heartbeat"') == 2
 
 
 def test_live_health_composite_yields_to_active_entry_reactor(monkeypatch):
@@ -170,6 +181,33 @@ def test_live_health_composite_yields_to_active_entry_reactor(monkeypatch):
     )
 
     assert main._live_health_composite_cycle.__wrapped__() is None
+
+
+def test_live_health_composite_refreshes_status_before_evaluation(monkeypatch):
+    """The isolated observability lane evaluates the status cut it just wrote."""
+
+    import src.control.live_health as live_health
+    import src.main as main
+    import src.observability.status_summary as status_summary
+
+    calls = []
+    monkeypatch.setattr(main, "_defer_for_active_entry_reactor", lambda _name: False)
+    monkeypatch.setattr(
+        status_summary,
+        "write_cycle_pulse",
+        lambda payload: calls.append(("pulse", payload)),
+    )
+    monkeypatch.setattr(
+        live_health,
+        "compute_composite_live_health",
+        lambda: calls.append(("health", None)),
+    )
+
+    assert main._live_health_composite_cycle.__wrapped__() is None
+    assert calls == [
+        ("pulse", {"mode": "heartbeat_pulse", "heartbeat": True}),
+        ("health", None),
+    ]
 
 
 def test_scheduler_job_marks_running_before_completion(monkeypatch):
