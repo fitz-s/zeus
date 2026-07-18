@@ -15,8 +15,10 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 import uuid
+from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -4501,6 +4503,118 @@ def _position_held_token_id(pos) -> str:
     return str(getattr(pos, "token_id", "") or getattr(pos, "no_token_id", "") or "")
 
 
+def _held_monitor_urgency_rank(pos) -> int:
+    """Keep canonical exit urgency ahead of local/network throughput classes."""
+
+    state = _position_state_value(pos)
+    if state == "pending_exit":
+        return 0
+    if state == "day0_window":
+        return 1
+    return 2
+
+
+def _held_monitor_schedule_key(
+    pos,
+    *,
+    dead_bin_position_ids: frozenset[int],
+    selected_urgent_position_ids: frozenset[int],
+    has_selected_urgent: bool,
+    reserved_local_position_id: int | None,
+    reserved_network_position_id: int | None,
+    structural_win_position_ids: frozenset[int],
+    network_book_tokens: frozenset[str],
+) -> tuple[int, int]:
+    position_id = id(pos)
+    urgency = _held_monitor_urgency_rank(pos)
+    network_dependent = (
+        position_id not in structural_win_position_ids
+        and _position_held_token_id(pos) in network_book_tokens
+    )
+    if position_id in selected_urgent_position_ids:
+        return (-3 if position_id in dead_bin_position_ids else -2), urgency
+    if has_selected_urgent:
+        if position_id == reserved_network_position_id:
+            return -1, 0
+        if position_id in dead_bin_position_ids or urgency < 2:
+            return 0, urgency
+        return 1, int(network_dependent)
+    if position_id == reserved_local_position_id:
+        return 0, 0
+    if position_id == reserved_network_position_id:
+        return 0, 1
+    return 1, 1 if network_dependent else 0
+
+
+_HELD_MONITOR_CURSOR_LOCK = threading.Lock()
+_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE: dict[str, str] = {}
+
+
+def _held_monitor_stable_position_key(pos) -> str:
+    return "|".join(
+        (
+            str(getattr(pos, "trade_id", "") or ""),
+            str(getattr(pos, "condition_id", "") or ""),
+            _position_held_token_id(pos),
+        )
+    )
+
+
+def _reserve_held_monitor_positions(
+    lane: str,
+    positions,
+    *,
+    limit: int,
+) -> list:
+    """Select a process-owned, thread-safe round-robin slice by stable key."""
+
+    if limit <= 0 or not positions:
+        return []
+    ordered = sorted(positions, key=_held_monitor_stable_position_key)
+    keyed = [(_held_monitor_stable_position_key(pos), pos) for pos in ordered]
+    keys = [key for key, _pos in keyed]
+    take = min(limit, len(keyed))
+    with _HELD_MONITOR_CURSOR_LOCK:
+        last_key = _HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE.get(lane, "")
+        start = bisect_right(keys, last_key) % len(keyed)
+        selected = [keyed[(start + offset) % len(keyed)] for offset in range(take)]
+        _HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE[lane] = selected[-1][0]
+    return [pos for _key, pos in selected]
+
+
+def _reserve_active_network_monitor_position(positions) -> object | None:
+    """Round-robin one ordinary network position through the cycle budget."""
+
+    selected = _reserve_held_monitor_positions(
+        "active_network",
+        positions,
+        limit=1,
+    )
+    return selected[0] if selected else None
+
+
+def _reserve_urgent_monitor_positions(dead_bin_positions, urgent_positions) -> list:
+    if dead_bin_positions and urgent_positions:
+        return [
+            *_reserve_held_monitor_positions(
+                "dead_bin",
+                dead_bin_positions,
+                limit=1,
+            ),
+            *_reserve_held_monitor_positions(
+                "canonical_urgent",
+                urgent_positions,
+                limit=1,
+            ),
+        ]
+    lane, positions = (
+        ("dead_bin", dead_bin_positions)
+        if dead_bin_positions
+        else ("canonical_urgent", urgent_positions)
+    )
+    return _reserve_held_monitor_positions(lane, positions, limit=2)
+
+
 def _fresh_local_held_monitor_orderbooks(
     conn,
     positions,
@@ -4611,37 +4725,31 @@ def _prefetch_held_monitor_orderbooks(
     summary["held_monitor_orderbooks_network_requested"] = len(missing_token_ids)
     if local_only or not missing_token_ids or getter is None:
         installed = install_monitor_orderbook_prefetch(clob, local_books)
+        summary["held_monitor_orderbook_prefetch_installed"] = installed
         summary["held_monitor_orderbooks_prefetched"] = (
             len(local_books) if installed else 0
         )
-        return frozenset(missing_token_ids)
+        return frozenset(missing_token_ids if installed else token_ids)
     try:
         network_books = getter(missing_token_ids)
         if not isinstance(network_books, dict):
             raise TypeError("batch orderbook response must be a mapping")
-    except Exception as exc:  # noqa: BLE001 - defer ordinary quotes after one batch attempt.
+    except Exception as exc:  # noqa: BLE001 - one failed batch must not fan out.
         summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
-        installed = install_monitor_orderbook_prefetch(
-            clob,
-            local_books,
-            attempted_token_ids=missing_token_ids,
-        )
-        summary["held_monitor_orderbooks_prefetched"] = (
-            len(local_books) if installed else 0
-        )
+        network_books = {}
         deps.logger.warning(
             "held monitor batch orderbook prefetch failed; deferring ordinary quote reads: %s",
             exc,
         )
-        return frozenset(missing_token_ids)
     books = {**local_books, **network_books}
     installed = install_monitor_orderbook_prefetch(
         clob,
         books,
         attempted_token_ids=missing_token_ids,
     )
+    summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
-    return frozenset(missing_token_ids)
+    return frozenset(missing_token_ids if installed else token_ids)
 
 
 def _blocking_review_fact_for_position(portfolio, pos):
@@ -5039,11 +5147,11 @@ def _execution_stub(candidate, decision, result, city, mode, *, deps):
     )
 
 
-def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary: str) -> None:
+def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary: str) -> bool:
     """Commit monitor writes at bounded points so live price/decision writers can run."""
 
     if conn is None:
-        return
+        return True
     try:
         conn.commit()
     except Exception as exc:  # noqa: BLE001
@@ -5058,10 +5166,12 @@ def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary:
             boundary,
             exc,
         )
+        return False
     else:
         summary["monitor_write_lock_releases"] = (
             summary.get("monitor_write_lock_releases", 0) + 1
         )
+        return True
 
 
 
@@ -5235,6 +5345,12 @@ def execute_monitoring_phase(
         if getattr(durable_hard_facts.get(id(pos)), "action", None)
         == "HOLD_STRUCTURAL_WIN"
     )
+    dead_bin_position_ids = frozenset(
+        id(pos)
+        for pos in monitor_positions
+        if getattr(durable_hard_facts.get(id(pos)), "action", None)
+        == "EXIT_DEAD_BIN"
+    )
     quote_positions = [
         pos for pos in monitor_positions if id(pos) not in structural_win_position_ids
     ]
@@ -5255,11 +5371,11 @@ def execute_monitoring_phase(
     local_book_tokens = frozenset(
         _position_held_token_id(pos) for pos in quote_positions
     ) - network_book_tokens
-    defer_network_gaps = bool(
+    local_first_network_gap = bool(
         defer_partial_orderbook_gaps and local_book_tokens and network_book_tokens
     )
-    if defer_network_gaps:
-        summary["held_monitor_partial_orderbook_gaps_deferred"] = len(
+    if local_first_network_gap:
+        summary["held_monitor_partial_orderbook_gaps_scheduled_after_local"] = len(
             network_book_tokens
         )
     network_positions = [
@@ -5267,18 +5383,106 @@ def execute_monitoring_phase(
         for pos in quote_positions
         if _position_held_token_id(pos) in network_book_tokens
     ]
+    ordinary_active_network_positions = [
+        pos
+        for pos in network_positions
+        if id(pos) not in dead_bin_position_ids
+        and _held_monitor_urgency_rank(pos) == 2
+    ]
+    reserved_network_position = _reserve_active_network_monitor_position(
+        ordinary_active_network_positions,
+    )
+    reserved_network_position_id = (
+        id(reserved_network_position)
+        if reserved_network_position is not None
+        else None
+    )
+    dead_bin_positions = [
+        pos for pos in monitor_positions if id(pos) in dead_bin_position_ids
+    ]
+    canonical_urgent_positions = [
+        pos
+        for pos in monitor_positions
+        if id(pos) not in dead_bin_position_ids
+        and _held_monitor_urgency_rank(pos) < 2
+    ]
+    selected_urgent_positions = _reserve_urgent_monitor_positions(
+        dead_bin_positions,
+        canonical_urgent_positions,
+    )
+    selected_urgent_position_ids = frozenset(
+        id(pos) for pos in selected_urgent_positions
+    )
+    has_selected_urgent = bool(selected_urgent_positions)
+    ordinary_active_local_positions = [
+        pos
+        for pos in monitor_positions
+        if _held_monitor_urgency_rank(pos) == 2
+        and _position_held_token_id(pos) not in network_book_tokens
+    ]
+    reserved_local_positions = (
+        []
+        if has_selected_urgent
+        else _reserve_held_monitor_positions(
+            "active_local",
+            ordinary_active_local_positions,
+            limit=1,
+        )
+    )
+    reserved_local_position = (
+        reserved_local_positions[0] if reserved_local_positions else None
+    )
+    reserved_local_position_id = (
+        id(reserved_local_position) if reserved_local_position is not None else None
+    )
+    summary["held_monitor_active_local_progress_position"] = (
+        getattr(reserved_local_position, "trade_id", "")
+        if reserved_local_position is not None
+        else ""
+    )
+    summary["held_monitor_active_network_progress_position"] = (
+        getattr(reserved_network_position, "trade_id", "")
+        if reserved_network_position is not None
+        else ""
+    )
+    summary["held_monitor_budget_urgent_positions"] = [
+        str(getattr(pos, "trade_id", "") or "")
+        for pos in selected_urgent_positions
+    ]
 
-    # A stale or inactive token must not hold locally executable positions
-    # behind one blocking CLOB read. Preserve order within each class while
-    # moving structural/local-ready work ahead of network-dependent work.
+    # Canonical lifecycle urgency is the first ordering key.  Within the
+    # pending-exit and Day0 tranches, start the network batch before consuming
+    # local work: otherwise a short monitor budget can starve an urgent held
+    # position indefinitely.  Ordinary active positions retain local-first
+    # throughput once all urgent positions have had their batch opportunity.
     monitor_positions = sorted(
         monitor_positions,
-        key=lambda pos: (
-            1
-            if id(pos) not in structural_win_position_ids
-            and _position_held_token_id(pos) in network_book_tokens
-            else 0
+        key=lambda pos: _held_monitor_schedule_key(
+            pos,
+            dead_bin_position_ids=dead_bin_position_ids,
+            selected_urgent_position_ids=selected_urgent_position_ids,
+            has_selected_urgent=has_selected_urgent,
+            reserved_local_position_id=reserved_local_position_id,
+            reserved_network_position_id=reserved_network_position_id,
+            structural_win_position_ids=structural_win_position_ids,
+            network_book_tokens=network_book_tokens,
         ),
+    )
+    budget_guaranteed_position_ids = frozenset(
+        {
+            *selected_urgent_position_ids,
+            *(
+                position_id
+                for position_id in (
+                    reserved_local_position_id,
+                    reserved_network_position_id,
+                )
+                if position_id is not None
+            ),
+        }
+    )
+    summary["held_monitor_budget_guaranteed_positions"] = len(
+        budget_guaranteed_position_ids
     )
     summary["held_monitor_local_ready_positions"] = sum(
         1
@@ -5288,6 +5492,7 @@ def execute_monitoring_phase(
         or _position_held_token_id(pos) not in network_book_tokens
     )
     network_prefetch_started = False
+    network_prefetch_unavailable = False
 
     for position_index, pos in enumerate(monitor_positions):
         if urgent_preemption_requested():
@@ -5296,12 +5501,24 @@ def execute_monitoring_phase(
             summary["held_monitor_positions_deferred"] = deferred_count
             summary["held_monitor_defer_reason"] = "urgent_day0_wake"
             break
-        if time.monotonic() >= monitor_deadline:
+        monitor_deadline_expired = time.monotonic() >= monitor_deadline
+        if (
+            monitor_deadline_expired
+            and id(pos) not in budget_guaranteed_position_ids
+        ):
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:
                 summary["held_monitor_positions_deferred"] = deferred_count
                 summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
+                summary["held_monitor_deadline_deferred_positions"] = deferred_count
+                summary["held_monitor_deadline_defer_reason"] = (
+                    "MONITOR_DEADLINE_EXPIRED"
+                )
             break
+        if monitor_deadline_expired:
+            summary["held_monitor_budget_bypass_scanned"] = (
+                summary.get("held_monitor_budget_bypass_scanned", 0) + 1
+            )
         summary["held_monitor_positions_scanned"] = (
             summary.get("held_monitor_positions_scanned", 0) + 1
         )
@@ -5479,8 +5696,8 @@ def execute_monitoring_phase(
             continue
 
         held_token_id = _position_held_token_id(pos)
-        if not network_prefetch_started and held_token_id in network_book_tokens:
-            if defer_network_gaps:
+        if held_token_id in network_book_tokens:
+            if network_prefetch_unavailable:
                 summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
                     summary.get(
                         "held_monitor_positions_deferred_for_orderbook_gap",
@@ -5489,43 +5706,82 @@ def execute_monitoring_phase(
                     + 1
                 )
                 continue
-            # Local-ready decisions may have written lifecycle facts. Commit
-            # before the optional network wait so unrelated writers are never
-            # held behind CLOB I/O.
-            _release_monitor_write_lock_boundary(
-                conn,
-                summary,
-                deps,
-                boundary="before_network_orderbook_prefetch",
-            )
-            network_prefetch_started = True
-            network_prefetch: dict = {}
-            _prefetch_held_monitor_orderbooks(
-                conn,
-                clob,
-                network_positions,
-                network_prefetch,
-                now_utc=monitor_now_utc,
-                deps=deps,
-            )
-            summary["held_monitor_orderbooks_prefetched"] = (
-                int(summary.get("held_monitor_orderbooks_prefetched", 0) or 0)
-                + int(
-                    network_prefetch.get(
-                        "held_monitor_orderbooks_prefetched",
-                        0,
+            if not network_prefetch_started:
+                # Local lifecycle writes must be durable before optional CLOB
+                # I/O.  A failed commit is a typed deferral, never permission
+                # to call the batch getter against an uncertain write state.
+                if not _release_monitor_write_lock_boundary(
+                    conn,
+                    summary,
+                    deps,
+                    boundary="before_network_orderbook_prefetch",
+                ):
+                    network_prefetch_unavailable = True
+                    summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                        "MONITOR_WRITE_COMMIT_FAILED"
                     )
-                    or 0
+                    summary["held_monitor_positions_deferred_for_commit_failure"] = (
+                        summary.get(
+                            "held_monitor_positions_deferred_for_commit_failure",
+                            0,
+                        )
+                        + 1
+                    )
+                    continue
+                network_prefetch_started = True
+                network_prefetch: dict = {}
+                _prefetch_held_monitor_orderbooks(
+                    conn,
+                    clob,
+                    network_positions,
+                    network_prefetch,
+                    now_utc=monitor_now_utc,
+                    deps=deps,
                 )
-            )
-            if error := network_prefetch.get("held_monitor_orderbook_prefetch_error"):
-                summary["held_monitor_orderbook_prefetch_error"] = error
-            if urgent_preemption_requested():
-                deferred_count = len(monitor_positions) - position_index
-                summary["held_monitor_preempted"] = True
-                summary["held_monitor_positions_deferred"] = deferred_count
-                summary["held_monitor_defer_reason"] = "urgent_day0_wake"
-                break
+                summary["held_monitor_orderbooks_prefetched"] = (
+                    int(summary.get("held_monitor_orderbooks_prefetched", 0) or 0)
+                    + int(
+                        network_prefetch.get(
+                            "held_monitor_orderbooks_prefetched",
+                            0,
+                        )
+                        or 0
+                    )
+                )
+                if error := network_prefetch.get("held_monitor_orderbook_prefetch_error"):
+                    summary["held_monitor_orderbook_prefetch_error"] = error
+                    network_prefetch_unavailable = True
+                    summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                        "ORDERBOOK_BATCH_UNAVAILABLE"
+                    )
+                if not network_prefetch.get(
+                    "held_monitor_orderbook_prefetch_installed",
+                    False,
+                ):
+                    # Some test/minimal clients cannot retain cycle-local
+                    # attributes.  They are not local-ready and cannot claim
+                    # prefetched depth, but the normal one-position monitor
+                    # fallback remains available.
+                    summary["held_monitor_orderbook_prefetch_unavailable"] = (
+                        "ORDERBOOK_PREFETCH_INSTALL_FAILED"
+                    )
+                if network_prefetch_unavailable:
+                    summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
+                        summary.get(
+                            "held_monitor_positions_deferred_for_orderbook_gap",
+                            0,
+                        )
+                        + 1
+                    )
+                    continue
+                if urgent_preemption_requested():
+                    # This position is already counted as scanned above; only
+                    # the unvisited tail is deferred.
+                    deferred_count = len(monitor_positions) - position_index - 1
+                    summary["held_monitor_preempted"] = True
+                    summary["held_monitor_positions_deferred"] = deferred_count
+                    summary["held_monitor_defer_reason"] = "urgent_day0_wake"
+                    break
 
         hours_to_settlement = None
         monitor_result_written = False

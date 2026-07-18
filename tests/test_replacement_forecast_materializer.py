@@ -632,6 +632,35 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
     assert provenance["q_lcb_json_role"] == "fused_center_bootstrap_lcb"
 
 
+def test_prepared_materialization_keeps_compute_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+
+    conn.execute("BEGIN")
+    prepared = materializer_mod.prepare_replacement_forecast_live(conn, _request())
+    assert isinstance(
+        prepared,
+        materializer_mod.PreparedReplacementForecastMaterialization,
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM deterministic_forecast_anchors"
+    ).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    conn.rollback()
+
+    conn.execute("BEGIN IMMEDIATE")
+    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.commit()
+
+    assert result.ok is True
+    assert conn.execute(
+        "SELECT COUNT(*) FROM deterministic_forecast_anchors"
+    ).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
+
+
 def test_materializer_lifts_computed_at_to_source_run_possession(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
     _ensure_source_run_table(conn)
@@ -1023,6 +1052,100 @@ def test_materialize_script_publishes_family_wake_after_commit(monkeypatch) -> N
             ),
         }
     ]
+
+
+def test_materialize_script_computes_before_acquiring_writer_lock(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE frontier (value INTEGER NOT NULL)")
+    conn.commit()
+    trace: list[str] = []
+    conn.set_trace_callback(trace.append)
+    prepared = object()
+
+    monkeypatch.setattr(
+        cli,
+        "prepare_replacement_forecast_live",
+        lambda _conn, _request: prepared,
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda _conn, value: materializer_mod.ReplacementForecastMaterializeResult(
+            status="READY",
+            reason_codes=(),
+            posterior_id=1,
+            anchor_id=1,
+            readiness_id="ready-1",
+        )
+        if value is prepared
+        else pytest.fail("unexpected prepared value"),
+    )
+
+    result = cli._commit_from_read_snapshot(conn, SimpleNamespace(
+        city="London",
+        target_date=date(2026, 7, 19),
+        temperature_metric="high",
+    ))
+    conn.close()
+
+    statements = [statement.upper() for statement in trace]
+    assert result.ok is True
+    assert statements.index("BEGIN") < statements.index("ROLLBACK")
+    assert statements.index("ROLLBACK") < statements.index("BEGIN IMMEDIATE")
+
+
+def test_materialize_script_recomputes_when_snapshot_changes(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    writer = sqlite3.connect(db_path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.execute("CREATE TABLE frontier (value INTEGER NOT NULL)")
+    reader.commit()
+    prepared_values: list[int] = []
+    written_values: list[int] = []
+
+    def _prepare(conn, _request):
+        value = int(conn.execute("SELECT COUNT(*) FROM frontier").fetchone()[0])
+        prepared_values.append(value)
+        if value == 0:
+            writer.execute("INSERT INTO frontier (value) VALUES (1)")
+            writer.commit()
+        return value
+
+    def _write(_conn, value):
+        written_values.append(value)
+        return materializer_mod.ReplacementForecastMaterializeResult(
+            status="READY",
+            reason_codes=(),
+            posterior_id=1,
+            anchor_id=1,
+            readiness_id="ready-1",
+        )
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(cli, "write_prepared_replacement_forecast_live", _write)
+
+    result = cli._commit_from_read_snapshot(reader, SimpleNamespace(
+        city="London",
+        target_date=date(2026, 7, 19),
+        temperature_metric="high",
+    ))
+    reader.close()
+    writer.close()
+
+    assert result.ok is True
+    assert prepared_values == [0, 1]
+    assert written_values == [1]
 
 
 def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) -> None:

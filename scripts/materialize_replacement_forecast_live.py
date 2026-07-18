@@ -31,12 +31,17 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (  # noqa: E402
 )
 from src.data.replacement_forecast_materializer import (  # noqa: E402
     ReplacementForecastMaterializeRequest,
+    ReplacementForecastMaterializeResult,
+    _ensure_replacement_identity_columns,
     materialize_replacement_forecast_live,
+    prepare_replacement_forecast_live,
+    write_prepared_replacement_forecast_live,
 )
 from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifest_to_db  # noqa: E402
 
 
 UTC = timezone.utc
+_SNAPSHOT_RETRY_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -161,6 +166,98 @@ def _publish_materialization_wake(
     return True
 
 
+def _data_version(conn) -> int:
+    return int(conn.execute("PRAGMA data_version").fetchone()[0])
+
+
+def _prepare_live_schema_and_manifest(
+    conn,
+    *,
+    init_schema: bool,
+    schema_ready: bool,
+    payload: Mapping[str, Any],
+    base_dir: Path,
+    anchor_artifact_id: int | None,
+) -> int | None:
+    if schema_ready and "openmeteo_manifest_json" not in payload:
+        return anchor_artifact_id
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if init_schema:
+            from src.state.db import _create_readiness_state
+            from src.state.schema.v2_schema import (
+                ensure_replacement_forecast_live_schema,
+            )
+
+            ensure_replacement_forecast_live_schema(conn)
+            _create_readiness_state(conn)
+        if not schema_ready:
+            _ensure_replacement_identity_columns(conn)
+        if "openmeteo_manifest_json" in payload:
+            anchor_artifact_id = write_manifest_to_db(
+                conn,
+                read_manifest(
+                    _resolve_input_path(
+                        payload["openmeteo_manifest_json"],
+                        base_dir=base_dir,
+                    )
+                ),
+                root=ROOT,
+            )
+        conn.commit()
+        return anchor_artifact_id
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def _commit_from_read_snapshot(
+    conn,
+    request: ReplacementForecastMaterializeRequest,
+) -> ReplacementForecastMaterializeResult:
+    for _attempt in range(_SNAPSHOT_RETRY_LIMIT):
+        version = _data_version(conn)
+        conn.execute("BEGIN")
+        try:
+            prepared = prepare_replacement_forecast_live(conn, request)
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+        if isinstance(prepared, ReplacementForecastMaterializeResult):
+            return prepared
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if _data_version(conn) != version:
+                conn.rollback()
+                continue
+            result = write_prepared_replacement_forecast_live(conn, prepared)
+            conn.commit()
+            return result
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+    logging.getLogger(__name__).warning(
+        "forecast DB changed during %s snapshot retries; using serialized fallback for %s %s %s",
+        _SNAPSHOT_RETRY_LIMIT,
+        request.city,
+        request.target_date,
+        request.temperature_metric,
+    )
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        result = materialize_replacement_forecast_live(conn, request)
+        conn.commit()
+        return result
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 def _materialize(
     input_json: Path,
     *,
@@ -168,6 +265,7 @@ def _materialize(
     init_schema: bool,
     conn=None,
     publish_wake: bool = True,
+    schema_ready: bool = False,
 ) -> tuple[int, dict[str, object]]:
     payload = _load_json(input_json)
     if not isinstance(payload, Mapping):
@@ -282,39 +380,44 @@ def _materialize(
 
         conn = get_forecasts_connection(write_class="live")
     try:
-        # BEGIN IMMEDIATE (not deferred): this is a WRITE transaction (manifests +
-        # posteriors). zeus-forecasts.db runs in rollback-journal (delete) mode, so a
-        # deferred BEGIN takes a SHARED lock on the first SELECT and then tries to
-        # upgrade to EXCLUSIVE on the first INSERT. Taking the write lock up front
-        # makes busy_timeout effective while readers remain unaffected.
-        conn.execute("BEGIN IMMEDIATE")
-        if init_schema:
-            from src.state.db import _create_readiness_state
-            from src.state.schema.v2_schema import (
-                ensure_replacement_forecast_live_schema,
-            )
-
-            ensure_replacement_forecast_live_schema(conn)
-            _create_readiness_state(conn)
-        if "openmeteo_manifest_json" in payload:
-            anchor_artifact_id = write_manifest_to_db(
-                conn,
-                read_manifest(
-                    _resolve_input_path(
-                        payload["openmeteo_manifest_json"],
-                        base_dir=base_dir,
-                    )
-                ),
-                root=ROOT,
-            )
-        if anchor_artifact_id is not None:
-            request = replace(request, anchor_artifact_id=anchor_artifact_id)
-        result = materialize_replacement_forecast_live(conn, request)
         if commit:
-            conn.commit()
+            anchor_artifact_id = _prepare_live_schema_and_manifest(
+                conn,
+                init_schema=init_schema,
+                schema_ready=schema_ready,
+                payload=payload,
+                base_dir=base_dir,
+                anchor_artifact_id=anchor_artifact_id,
+            )
+            if anchor_artifact_id is not None:
+                request = replace(request, anchor_artifact_id=anchor_artifact_id)
+            result = _commit_from_read_snapshot(conn, request)
             if result.ok and publish_wake:
                 wake_published = _publish_materialization_wake(request)
         else:
+            conn.execute("BEGIN IMMEDIATE")
+            if init_schema:
+                from src.state.db import _create_readiness_state
+                from src.state.schema.v2_schema import (
+                    ensure_replacement_forecast_live_schema,
+                )
+
+                ensure_replacement_forecast_live_schema(conn)
+                _create_readiness_state(conn)
+            if "openmeteo_manifest_json" in payload:
+                anchor_artifact_id = write_manifest_to_db(
+                    conn,
+                    read_manifest(
+                        _resolve_input_path(
+                            payload["openmeteo_manifest_json"],
+                            base_dir=base_dir,
+                        )
+                    ),
+                    root=ROOT,
+                )
+            if anchor_artifact_id is not None:
+                request = replace(request, anchor_artifact_id=anchor_artifact_id)
+            result = materialize_replacement_forecast_live(conn, request)
             conn.rollback()
     except Exception:
         if conn.in_transaction:
@@ -349,6 +452,7 @@ def _run_one(
     conn=None,
     capture_logs: bool = False,
     publish_wake: bool = True,
+    schema_ready: bool = False,
 ) -> tuple[int, str, str]:
     log_output = StringIO()
     handler: logging.Handler | None = None
@@ -363,6 +467,7 @@ def _run_one(
             init_schema=init_schema,
             conn=conn,
             publish_wake=publish_wake,
+            schema_ready=schema_ready,
         )
         return returncode, json.dumps(response, sort_keys=True) + "\n", log_output.getvalue()
     except Exception as exc:
@@ -441,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
                     conn=conn,
                     capture_logs=True,
                     publish_wake=True,
+                    schema_ready=index > 0,
                 )
                 _print_batch_envelope(input_json, returncode, stdout, stderr)
         finally:

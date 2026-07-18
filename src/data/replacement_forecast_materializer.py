@@ -159,6 +159,16 @@ class ReplacementForecastMaterializeResult:
         return self.status == READY_STATUS
 
 
+@dataclass(frozen=True)
+class PreparedReplacementForecastMaterialization:
+    """Read-snapshot result awaiting a short, revalidated write transaction."""
+
+    request: ReplacementForecastMaterializeRequest
+    metric: str
+    posterior: "_PosteriorComputeResult"
+    anchor_id: int | None = None
+
+
 def _to_utc(value: datetime | str, *, field_name: str) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -693,7 +703,6 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
     metric = _metric(request.temperature_metric)
     computed_at = _to_utc(request.computed_at, field_name="computed_at")
     request_source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time")
-    target_date_value = date.fromisoformat(_date_text(request.target_date))
     reasons: list[str] = []
     dependency_times = [
         ("baseline_b0", _to_utc(request.baseline_source_available_at, field_name="baseline_source_available_at")),
@@ -5105,14 +5114,13 @@ def _readiness_cert_cycle_regression_reasons(
     return ()
 
 
-def materialize_replacement_forecast_live(
+def _validated_replacement_forecast_request(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
-) -> ReplacementForecastMaterializeResult:
-    """Write anchor, posterior, and readiness rows for replacement live use."""
+) -> ReplacementForecastMaterializeResult | tuple[ReplacementForecastMaterializeRequest, str]:
+    """Apply the read-only guards and return the honest materialization clock."""
 
     metric = _metric(request.temperature_metric)
-    _ensure_replacement_identity_columns(conn)
     prewrite_reasons = _prewrite_block_reasons(request)
     if prewrite_reasons:
         return ReplacementForecastMaterializeResult(
@@ -5163,21 +5171,61 @@ def materialize_replacement_forecast_live(
             anchor_id=None,
             readiness_id=None,
         )
-    anchor_id = _insert_anchor(conn, request, metric=metric)
-    posterior_result = _compute_posterior_payload(conn, request, metric=metric, anchor_id=anchor_id)
-    if not posterior_result.live_eligible:
+    return request, metric
+
+
+def prepare_replacement_forecast_live(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> ReplacementForecastMaterializeResult | PreparedReplacementForecastMaterialization:
+    """Compute one family without writing or requiring the SQLite writer lock."""
+
+    validated = _validated_replacement_forecast_request(conn, request)
+    if isinstance(validated, ReplacementForecastMaterializeResult):
+        return validated
+    request, metric = validated
+    posterior = _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
+    return PreparedReplacementForecastMaterialization(
+        request=request,
+        metric=metric,
+        posterior=posterior,
+    )
+
+
+def write_prepared_replacement_forecast_live(
+    conn: sqlite3.Connection,
+    prepared: PreparedReplacementForecastMaterialization,
+) -> ReplacementForecastMaterializeResult:
+    """Persist a prepared family after the caller revalidates its DB snapshot."""
+
+    request = prepared.request
+    metric = prepared.metric
+    monotone_reasons = _cycle_monotone_block_reasons(conn, request, metric=metric)
+    if monotone_reasons:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=monotone_reasons,
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
+    anchor_id = prepared.anchor_id
+    if anchor_id is None:
+        anchor_id = _insert_anchor(conn, request, metric=metric)
+    posterior = prepared.posterior
+    if not posterior.live_eligible:
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
             reason_codes=(
                 (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
-                + _posterior_block_sub_reason_codes(posterior_result)
+                + _posterior_block_sub_reason_codes(posterior)
             ),
             posterior_id=None,
             anchor_id=anchor_id,
             readiness_id=None,
         )
     posterior_id = _write_posterior_row(
-        conn, request, metric=metric, anchor_id=anchor_id, result=posterior_result
+        conn, request, metric=metric, anchor_id=anchor_id, result=posterior
     )
     readiness = _build_readiness(request, metric=metric, posterior_id=posterior_id, anchor_id=anchor_id)
     # CERTIFICATE-BOUNDARY monotone guard (belt-and-suspenders to _cycle_monotone_block_reasons
@@ -5228,4 +5276,33 @@ def materialize_replacement_forecast_live(
         posterior_id=posterior_id,
         anchor_id=anchor_id,
         readiness_id=readiness.readiness_id,
+    )
+
+
+def materialize_replacement_forecast_live(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> ReplacementForecastMaterializeResult:
+    """Write anchor, posterior, and readiness rows for replacement live use."""
+
+    _ensure_replacement_identity_columns(conn)
+    validated = _validated_replacement_forecast_request(conn, request)
+    if isinstance(validated, ReplacementForecastMaterializeResult):
+        return validated
+    request, metric = validated
+    anchor_id = _insert_anchor(conn, request, metric=metric)
+    posterior = _compute_posterior_payload(
+        conn,
+        request,
+        metric=metric,
+        anchor_id=anchor_id,
+    )
+    return write_prepared_replacement_forecast_live(
+        conn,
+        PreparedReplacementForecastMaterialization(
+            request=request,
+            metric=metric,
+            posterior=posterior,
+            anchor_id=anchor_id,
+        ),
     )

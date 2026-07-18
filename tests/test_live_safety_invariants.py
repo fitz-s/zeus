@@ -349,7 +349,15 @@ def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monk
             ],
             2,
         ),
-        (True, ["refresh:local-ready"], 1),
+        (
+            True,
+            [
+                "refresh:local-ready",
+                "network_fetch",
+                "refresh:network-dependent",
+            ],
+            2,
+        ),
     ),
 )
 def test_monitoring_phase_processes_local_books_before_blocking_network_fetch(
@@ -478,8 +486,913 @@ def test_monitoring_phase_processes_local_books_before_blocking_network_fetch(
     assert events == expected_events
     assert summary["held_monitor_local_ready_positions"] == 1
     assert summary["held_monitor_orderbooks_prefetched"] == prefetched
-    assert summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0) == int(
+    assert summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0) == 0
+    assert summary.get(
+        "held_monitor_partial_orderbook_gaps_scheduled_after_local",
+        0,
+    ) == int(
         defer_partial_gaps
+    )
+
+
+def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
+    monkeypatch,
+):
+    """Known dead-bin urgency outranks the ordinary local/network tranches."""
+    from src.engine import cycle_runtime
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    local_active = _make_position(
+        trade_id="local-active-before-hard-fact",
+        city="Chicago",
+        target_date="2026-07-02",
+        token_id="local-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    network_dead_bin = _make_position(
+        trade_id="network-active-dead-bin",
+        city="Chicago",
+        target_date="2026-07-02",
+        token_id="network-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    second_network_dead_bin = _make_position(
+        trade_id="second-network-active-dead-bin",
+        city="Chicago",
+        target_date="2026-07-02",
+        token_id="second-network-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    events: list[str] = []
+
+    class Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            events.append("network_fetch")
+            assert tuple(token_ids) == (
+                "network-token",
+                "second-network-token",
+            )
+            return {
+                "network-token": {
+                    "asset_id": "network-token",
+                    "bids": [{"price": "0.31", "size": "20"}],
+                    "asks": [{"price": "0.33", "size": "20"}],
+                },
+                "second-network-token": {
+                    "asset_id": "second-network-token",
+                    "bids": [{"price": "0.29", "size": "20"}],
+                    "asks": [{"price": "0.31", "size": "20"}],
+                },
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda _conn, _positions, **_kwargs: {
+            "local-token": {
+                "asset_id": "local-token",
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda **kwargs: (
+            HardFactVerdict(
+                action="EXIT_DEAD_BIN",
+                reason="observed extreme makes held YES impossible",
+                metric="high",
+                rounded_extreme=35.0,
+                source="durable_observation_instants",
+            )
+            if kwargs["position"] is network_dead_bin
+            or kwargs["position"] is second_network_dead_bin
+            else None
+        ),
+    )
+
+    def fake_refresh(_conn, _clob, position):
+        events.append(f"refresh:{position.trade_id}")
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    monitor_results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: monitor_results.append(result)},
+    )()
+    deps = _monitor_test_deps("test_monitor_active_network_hard_fact")
+    deps.cities_by_name = {
+        "Chicago": type("City", (), {"timezone": "America/Chicago"})()
+    }
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        Clob(),
+        _make_portfolio(
+            network_dead_bin,
+            local_active,
+            second_network_dead_bin,
+        ),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+        exit_order_submit_enabled=False,
+        defer_partial_orderbook_gaps=True,
+    )
+
+    assert events == ["network_fetch", "refresh:local-active-before-hard-fact"]
+    assert summary["held_monitor_partial_orderbook_gaps_scheduled_after_local"] == 2
+    assert summary["day0_hard_fact_direct_exit_decisions"] == 2
+    assert summary["exits_suppressed_no_submit"] == 2
+    dead_bin_result = next(
+        result
+        for result in monitor_results
+        if result.position_id == "network-active-dead-bin"
+    )
+    assert dead_bin_result.should_exit is True
+    assert dead_bin_result.exit_reason.startswith("DAY0_HARD_FACT_BIN_DEAD")
+
+
+def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
+    monkeypatch,
+):
+    """Preclassified terminal loss keeps its exit slot after budget expiry."""
+    from src.engine import cycle_runtime
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    dead_bin = _make_position(
+        trade_id="budget-guaranteed-network-dead-bin",
+        city="Chicago",
+        target_date="2026-07-02",
+        token_id="dead-network-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    local_positions = [
+        _make_position(
+            trade_id=f"budget-local-{index}",
+            token_id=f"local-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    events: list[str] = []
+
+    class Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            events.append("network_fetch")
+            assert tuple(token_ids) == ("dead-network-token",)
+            return {
+                "dead-network-token": {
+                    "asset_id": "dead-network-token",
+                    "bids": [{"price": "0.21", "size": "20"}],
+                    "asks": [{"price": "0.23", "size": "20"}],
+                }
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda _conn, _positions, **_kwargs: {
+            f"local-token-{index}": {
+                "asset_id": f"local-token-{index}",
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+            for index in range(2)
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda **kwargs: (
+            HardFactVerdict(
+                action="EXIT_DEAD_BIN",
+                reason="durable extreme killed held YES",
+                metric="high",
+                rounded_extreme=36.0,
+                source="durable_observation_instants",
+            )
+            if kwargs["position"] is dead_bin
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("expired ordinary local positions must defer")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    clock_calls = {"count": 0}
+
+    def exhausted_clock():
+        clock_calls["count"] += 1
+        return 0.0 if clock_calls["count"] == 1 else 1.0
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", exhausted_clock)
+    monitor_results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: monitor_results.append(result)},
+    )()
+    deps = _monitor_test_deps("test_monitor_dead_bin_budget_guarantee")
+    deps.cities_by_name = {
+        "Chicago": type("City", (), {"timezone": "America/Chicago"})()
+    }
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        Clob(),
+        _make_portfolio(*local_positions, dead_bin),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+        exit_order_submit_enabled=False,
+        held_position_monitor_budget_seconds=0.5,
+        defer_partial_orderbook_gaps=True,
+    )
+
+    assert events == ["network_fetch"]
+    assert summary["day0_hard_fact_direct_exit_decisions"] == 1
+    assert summary["held_monitor_positions_deferred"] == 2
+    assert monitor_results[0].position_id == dead_bin.trade_id
+    assert monitor_results[0].should_exit is True
+
+
+def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
+    """Mixed urgent lanes each advance within the three-position hard cap."""
+    from src.engine import cycle_runtime
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
+        {},
+    )
+    dead_bins = [
+        _make_position(
+            trade_id=f"rotating-dead-bin-{index}",
+            city="Chicago",
+            target_date="2026-07-02",
+            token_id=f"dead-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(3)
+    ]
+    canonical_urgent = [
+        _make_position(
+            trade_id=f"rotating-canonical-urgent-{index}",
+            city="Chicago",
+            target_date="2026-07-02",
+            token_id=f"canonical-urgent-token-{index}",
+            direction="buy_yes",
+            state="day0_window",
+            chain_state="synced",
+        )
+        for index in range(3)
+    ]
+    ordinary_network = _make_position(
+        trade_id="urgent-cycle-ordinary-network",
+        token_id="ordinary-network-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+
+    class Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.25", "size": "20"}],
+                    "asks": [{"price": "0.27", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda **kwargs: (
+            HardFactVerdict(
+                action="EXIT_DEAD_BIN",
+                reason="durable extreme killed held YES",
+                metric="high",
+                rounded_extreme=36.0,
+                source="durable_observation_instants",
+            )
+            if str(kwargs["position"].trade_id).startswith("rotating-dead-bin-")
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: _monitor_test_edge_context(position),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    deps = _monitor_test_deps("test_monitor_urgent_bypass_cap")
+    deps.cities_by_name = {
+        "Chicago": type("City", (), {"timezone": "America/Chicago"})()
+    }
+    summaries = []
+    for _cycle in range(3):
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            Clob(),
+            _make_portfolio(*dead_bins, *canonical_urgent, ordinary_network),
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=deps,
+            run_exit_preflight=False,
+            exit_order_submit_enabled=False,
+            held_position_monitor_budget_seconds=0.0,
+            defer_partial_orderbook_gaps=True,
+        )
+        summaries.append(summary)
+
+    assert [summary["held_monitor_budget_urgent_positions"] for summary in summaries] == [
+        ["rotating-dead-bin-0", "rotating-canonical-urgent-0"],
+        ["rotating-dead-bin-1", "rotating-canonical-urgent-1"],
+        ["rotating-dead-bin-2", "rotating-canonical-urgent-2"],
+    ]
+    assert all(summary["held_monitor_budget_guaranteed_positions"] == 3 for summary in summaries)
+    assert all(summary["held_monitor_budget_bypass_scanned"] == 3 for summary in summaries)
+    assert all(summary["held_monitor_budget_bypass_scanned"] <= 3 for summary in summaries)
+    assert all(summary["held_monitor_deadline_deferred_positions"] == 4 for summary in summaries)
+    assert all(
+        summary["held_monitor_deadline_defer_reason"] == "MONITOR_DEADLINE_EXPIRED"
+        for summary in summaries
+    )
+
+
+def test_monitoring_phase_reserves_one_active_network_progress_slot(monkeypatch):
+    """Zero-budget cycles advance one local and one network lane position."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
+        {},
+    )
+    local_positions = [
+        _make_position(
+            trade_id=f"bounded-local-{index}",
+            token_id=f"local-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(3)
+    ]
+    network_positions = [
+        _make_position(
+            trade_id=f"bounded-network-{index}",
+            token_id=f"network-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    events: list[str] = []
+
+    class Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            events.append("network_fetch")
+            assert tuple(token_ids) == ("network-token-0", "network-token-1")
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda _conn, _positions, **_kwargs: {
+            f"local-token-{index}": {
+                "asset_id": f"local-token-{index}",
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+            for index in range(3)
+        },
+    )
+
+    def fake_refresh(_conn, _clob, position):
+        events.append(f"refresh:{position.trade_id}")
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    summaries = []
+    for _cycle in range(3):
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            Clob(),
+            _make_portfolio(*local_positions, *network_positions),
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=_monitor_test_deps("test_monitor_bounded_network_progress"),
+            run_exit_preflight=False,
+            held_position_monitor_budget_seconds=0.0,
+            defer_partial_orderbook_gaps=True,
+        )
+        summaries.append(summary)
+
+    assert events == [
+        "refresh:bounded-local-0",
+        "network_fetch",
+        "refresh:bounded-network-0",
+        "refresh:bounded-local-1",
+        "network_fetch",
+        "refresh:bounded-network-1",
+        "refresh:bounded-local-2",
+        "network_fetch",
+        "refresh:bounded-network-0",
+    ]
+    assert [
+        summary["held_monitor_active_local_progress_position"]
+        for summary in summaries
+    ] == ["bounded-local-0", "bounded-local-1", "bounded-local-2"]
+    assert [
+        summary["held_monitor_active_network_progress_position"]
+        for summary in summaries
+    ] == ["bounded-network-0", "bounded-network-1", "bounded-network-0"]
+    assert all(summary["held_monitor_budget_guaranteed_positions"] == 2 for summary in summaries)
+    assert all(summary["held_monitor_budget_bypass_scanned"] <= 2 for summary in summaries)
+    assert all(summary["held_monitor_positions_deferred"] == 3 for summary in summaries)
+
+
+def test_monitoring_phase_network_round_robin_survives_new_no_attr_clients(
+    monkeypatch,
+):
+    """Process-owned cursor advances when every cycle constructs a new client."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
+        {},
+    )
+    positions = [
+        _make_position(
+            trade_id=f"cross-cycle-network-{index}",
+            token_id=f"cross-cycle-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(3)
+    ]
+    events: list[str] = []
+
+    class NoAttrClob:
+        __slots__ = ()
+
+        def get_orderbook_snapshots(self, token_ids):
+            events.append("network_fetch")
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def fake_refresh(_conn, _clob, position):
+        events.append(f"refresh:{position.trade_id}")
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    summaries = []
+    for _cycle in range(2):
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            NoAttrClob(),
+            _make_portfolio(*positions),
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=_monitor_test_deps("test_monitor_cross_cycle_round_robin"),
+            run_exit_preflight=False,
+            held_position_monitor_budget_seconds=0.0,
+            defer_partial_orderbook_gaps=True,
+        )
+        summaries.append(summary)
+
+    assert [
+        summary["held_monitor_active_network_progress_position"]
+        for summary in summaries
+    ] == ["cross-cycle-network-0", "cross-cycle-network-1"]
+    assert events == [
+        "network_fetch",
+        "refresh:cross-cycle-network-0",
+        "network_fetch",
+        "refresh:cross-cycle-network-1",
+    ]
+    assert all(summary["held_monitor_budget_bypass_scanned"] == 1 for summary in summaries)
+
+
+def test_monitoring_phase_network_pending_exit_precedes_local_active_under_budget(
+    monkeypatch,
+):
+    """A local active position cannot consume the only monitor slice first."""
+    from src.engine import cycle_runtime
+
+    pending_exit = _make_position(
+        trade_id="network-pending-exit",
+        token_id="network-token",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="synced",
+    )
+    local_active = _make_position(
+        trade_id="local-active",
+        token_id="local-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    events: list[str] = []
+
+    class Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            events.append("network_fetch")
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda _conn, _positions, **_kwargs: {
+            "local-token": {
+                "asset_id": "local-token",
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+        },
+    )
+    clock = iter((0.0, 0.0, 0.6))
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: next(clock))
+
+    def fake_refresh(_conn, _clob, position):
+        events.append(f"refresh:{position.trade_id}")
+        position.last_monitor_prob = 0.61
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.12
+        position.last_monitor_market_price = 0.49
+        position.last_monitor_market_price_is_fresh = True
+        return SimpleNamespace(
+            p_market=np.array([0.49]),
+            p_posterior=0.61,
+            forward_edge=0.12,
+            confidence_band_lower=0.08,
+            confidence_band_upper=0.16,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    summary = {"monitors": 0, "exits": 0}
+    deps = _monitor_test_deps("test_monitor_urgent_network_first")
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        Clob(),
+        _make_portfolio(local_active, pending_exit),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=0.5,
+    )
+
+    assert events == ["network_fetch", "refresh:network-pending-exit"]
+    assert summary["held_monitor_positions_scanned"] == 1
+    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
+
+
+def test_monitoring_phase_commit_failure_defers_network_without_getter(monkeypatch):
+    """An uncommitted monitor write must never cross into CLOB I/O."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="network-after-commit-failure",
+        token_id="network-token",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="synced",
+    )
+
+    class CommitFailingConn:
+        def commit(self):
+            raise RuntimeError("commit unavailable")
+
+    class Clob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise AssertionError("getter must not run after commit failure")
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [pos],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("network-deferred position must not refresh")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.release_pending_exit_without_order_if_retryable",
+        lambda *_args, **_kwargs: False,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        CommitFailingConn(),
+        Clob(),
+        _make_portfolio(pos),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_commit_failure"),
+        run_exit_preflight=False,
+    )
+
+    assert summary["held_monitor_orderbook_prefetch_defer_reason"] == (
+        "MONITOR_WRITE_COMMIT_FAILED"
+    )
+    assert summary["held_monitor_positions_deferred_for_commit_failure"] == 1
+
+
+def test_monitoring_phase_urgent_wake_counts_only_unvisited_tail(monkeypatch):
+    """A wake after the batch cannot count the already-scanned position twice."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="wake-during-network-prefetch",
+        token_id="network-token",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="synced",
+    )
+
+    class Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+    calls = {"count": 0}
+
+    def urgent_wake():
+        calls["count"] += 1
+        return calls["count"] >= 4
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        Clob(),
+        _make_portfolio(pos),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_urgent_summary"),
+        run_exit_preflight=False,
+        should_preempt_for_urgent_day0=urgent_wake,
+    )
+
+    assert summary["held_monitor_preempted"] is True
+    assert summary["held_monitor_positions_scanned"] == 1
+    assert summary["held_monitor_positions_deferred"] == 0
+    assert (
+        summary["held_monitor_positions_scanned"]
+        + summary["held_monitor_positions_deferred"]
+        == summary["held_monitor_candidates"]
+    )
+
+
+def test_monitoring_phase_prefetch_install_failure_is_not_local_ready(monkeypatch):
+    """A CLOB that cannot retain the cache must not be credited with local quotes."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="uninstallable-prefetch",
+        token_id="local-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+
+    class Clob:
+        __slots__ = ()
+
+        def get_orderbook_snapshots(self, token_ids):
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {
+            "local-token": {
+                "asset_id": "local-token",
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: _monitor_test_edge_context(position),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        Clob(),
+        _make_portfolio(pos),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_prefetch_install"),
+        run_exit_preflight=False,
+    )
+
+    assert summary["held_monitor_local_ready_positions"] == 0
+    assert summary["held_monitor_orderbooks_prefetched"] == 0
+    assert summary["held_monitor_orderbook_prefetch_unavailable"] == (
+        "ORDERBOOK_PREFETCH_INSTALL_FAILED"
+    )
+
+
+def _monitor_test_artifact():
+    return type(
+        "Artifact",
+        (),
+        {
+            "add_monitor_result": lambda self, _result: None,
+            "add_exit": lambda self, *_args: None,
+        },
+    )()
+
+
+def _monitor_test_tracker():
+    return type("Tracker", (), {"record_exit": lambda self, _position: None})()
+
+
+def _monitor_test_deps(logger_name: str):
+    return type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger(logger_name),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(
+                lambda: datetime(2026, 7, 2, 18, 0, tzinfo=timezone.utc)
+            ),
+        },
+    )
+
+
+def _monitor_test_edge_context(position):
+    position.last_monitor_prob = 0.61
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.12
+    position.last_monitor_market_price = 0.49
+    position.last_monitor_market_price_is_fresh = True
+    return SimpleNamespace(
+        p_market=np.array([0.49]),
+        p_posterior=0.61,
+        forward_edge=0.12,
+        confidence_band_lower=0.08,
+        confidence_band_upper=0.16,
     )
 
 
