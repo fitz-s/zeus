@@ -523,8 +523,19 @@ def _durable_observation_instants_summary(
             continue
         if n_rows <= 0 or (high_raw is None and low_raw is None):
             continue
-        high = float(high_raw) if high_raw is not None else None
-        low = float(low_raw) if low_raw is not None else None
+        # M-8 (audit 2026-07-18): settlement-round the durable extremes before any
+        # grid comparison — the WU/METAR sibling paths round, and the market settles
+        # on the rounded integer. A raw 26.4 vs a 26 bin must read as 26 (inside,
+        # winnable), never as beyond-the-edge dead.
+        try:
+            from src.contracts.settlement_semantics import SettlementSemantics
+
+            _round = SettlementSemantics.for_city(city).round_single
+        except Exception:  # noqa: BLE001 — semantics unavailable: raw value fail-soft
+            def _round(value: float) -> float:
+                return value
+        high = float(_round(float(high_raw))) if high_raw is not None else None
+        low = float(_round(float(low_raw))) if low_raw is not None else None
         return DurableObservationExtremes(
             high=high,
             low=low,

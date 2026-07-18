@@ -470,6 +470,37 @@ class TestSourceDiscipline:
         assert belief is not None
         assert belief.held_side_prob == pytest.approx(1.0)
 
+    def test_durable_fractional_extreme_is_settlement_rounded_before_verdict(self, monkeypatch):
+        """M-8 (audit 2026-07-18): a sub-degree durable running extreme must pass
+        SettlementSemantics.round_single before the grid comparison. Raw 26.4 vs a
+        26 bin would declare it dead; settlement rounds 26.4 -> 26 (inside, still
+        winnable). The durable lane must agree with how the market actually settles."""
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
+            lambda city, target_date, now: (None, None),
+        )
+        _set_metar_memo(monkeypatch, None)
+        conn = self._observation_instants_conn()
+        conn.execute(
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("Tokyo", "2026-06-10", "wu_icao_history", "Asia/Tokyo",
+             "2026-06-10T14:00:00+09:00", "2026-06-10T05:00:00+00:00",
+             26.4, 20.0, "VERIFIED", "OK", None),
+        )
+        verdict = evaluate_hard_fact_exit(
+            position=_position(bin_label="26°C on June 10?"),
+            city=_tokyo(), now=NOW, world_conn=conn,
+        )
+        # 26.4 rounds to 26 -> extreme INSIDE the held bin -> not a hard fact
+        assert verdict is None
+        # but a genuinely-beyond fractional value still kills: 26.6 -> 27 > 26
+        conn.execute("UPDATE observation_instants SET running_max = 26.6")
+        verdict = evaluate_hard_fact_exit(
+            position=_position(bin_label="26°C on June 10?"),
+            city=_tokyo(), now=NOW, world_conn=conn,
+        )
+        assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
+
     def test_durable_observation_instants_respects_local_date_and_now_floor(self, monkeypatch):
         """The durable lane must not repeat the UTC-date floor bug: target_date is
         the city-local date, while future UTC observations must still be ignored."""
