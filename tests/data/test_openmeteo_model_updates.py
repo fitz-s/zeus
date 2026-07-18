@@ -1,5 +1,5 @@
 # Created: 2026-06-25
-# Last reused/audited: 2026-06-25
+# Last reused/audited: 2026-07-18
 
 from datetime import UTC, datetime
 
@@ -193,7 +193,10 @@ def test_source_clock_probe_filters_nbm_metadata_runs_not_served_by_single_runs(
     assert not cursor_path.exists()
     assert not source_clock_metadata_run_is_single_runs_served("ncep_nbm_conus", 5)
     assert source_clock_metadata_run_is_single_runs_served("ncep_nbm_conus", 6)
-    assert source_clock_metadata_run_is_single_runs_served("gfs_hrrr", 5)
+    assert not source_clock_metadata_run_is_single_runs_served("gfs_hrrr", 1)
+    assert source_clock_metadata_run_is_single_runs_served("gfs_hrrr", 3)
+    assert not source_clock_metadata_run_is_single_runs_served("met_nordic", 2)
+    assert source_clock_metadata_run_is_single_runs_served("met_nordic", 3)
 
 
 def test_source_clock_openmeteo_model_ids_match_api_parameters() -> None:

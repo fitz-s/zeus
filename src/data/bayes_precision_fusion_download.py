@@ -333,6 +333,11 @@ MODEL_PUBLISH_CYCLE_HOURS: dict[str, frozenset[int]] = {
     "jma_seamless": frozenset({0, 12}),   # JMA GSM/seamless init 00/12Z only
     "gem_global":   frozenset({0, 12}),   # CMC GDPS 00/12Z only
     "italiameteo_icon_2i": frozenset({0, 12}),
+    # The model-updates feed advances hourly, but Single Runs currently stores
+    # these regional products only on the 3-hour grid. Off-grid metadata runs
+    # return HTTP 400 and must not occupy the 15-second source-clock lane.
+    "gfs_hrrr": frozenset(range(0, 24, 3)),
+    "met_nordic": frozenset(range(0, 24, 3)),
 }
 _ALL_CYCLES: frozenset[int] = frozenset({0, 6, 12, 18})
 SOURCE_CLOCK_STANDARD_CYCLE_MODELS: frozenset[str] = frozenset(
@@ -341,6 +346,10 @@ SOURCE_CLOCK_STANDARD_CYCLE_MODELS: frozenset[str] = frozenset(
         # single-runs Forecast API rejects off-standard runs observed live
         # (for example 2026-06-26T05:00Z returned HTTP 400 for CONUS cities).
         "ncep_nbm_conus",
+        # Model Updates exposes hourly rolling products while Single Runs
+        # exposes only their 3-hour archived initialization cycles.
+        "gfs_hrrr",
+        "met_nordic",
     }
 )
 
