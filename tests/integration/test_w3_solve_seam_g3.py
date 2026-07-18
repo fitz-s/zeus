@@ -3092,6 +3092,40 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert all(kwargs["forecast_conn"] is forecast for kwargs in prepared_with)
     assert all(kwargs["topology_conn"] is topology for kwargs in prepared_with)
     assert all(kwargs["observation_conn"] is world for kwargs in prepared_with)
+
+    def locked_prepare(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        locked_prepare,
+    )
+    locked_receipt = captured["prepare_event"](
+        event,
+        _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
+    )
+    assert locked_receipt.reason == (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "TransientFamilyAuthorityUnavailable:database is locked"
+    )
+
+    def schema_prepare(*_args, **_kwargs):
+        raise sqlite3.OperationalError("no such table: readiness_state")
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        schema_prepare,
+    )
+    schema_receipt = captured["prepare_event"](
+        event,
+        _dt.datetime(2026, 7, 10, 8, 13, tzinfo=_dt.timezone.utc),
+    )
+    assert schema_receipt.reason == (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:OperationalError:"
+        "no such table: readiness_state"
+    )
     policy = captured["candidate_policy_rejection_resolver"]
     low_price = SimpleNamespace(
         action="BUY",
@@ -11251,7 +11285,23 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     }
 
 
-def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
+@pytest.mark.parametrize(
+    "ineligible_reason",
+    (
+        (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+            "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM"
+        ),
+        (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            "TransientFamilyAuthorityUnavailable:database is locked"
+        ),
+    ),
+)
+def test_global_batch_excludes_typed_current_q_ineligible_family(
+    monkeypatch,
+    ineligible_reason,
+):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
     event_b = _global_scope_event(city="Beta", source_run_id="run-b")
@@ -11275,11 +11325,6 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
     )
     calls = {"venue": 0, "ineligible_prepare": 0}
     persisted = {}
-    ineligible_reason = (
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM"
-    )
-
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
     )
@@ -11465,7 +11510,20 @@ def test_global_batch_preserves_single_family_current_q_failure(monkeypatch):
     )
 
 
-def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch):
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:RuntimeError:boom",
+        (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:OperationalError:"
+            "no such table: readiness_state"
+        ),
+    ),
+)
+def test_global_batch_rejects_unexpected_probability_prepare_failure(
+    monkeypatch,
+    reason,
+):
     import src.data.replacement_input_hwm as input_hwm
 
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
@@ -11473,7 +11531,6 @@ def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch
     scope = current_global_auction_scope_from_events(
         (event,), captured_at_utc=decision_at
     )
-    reason = "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:RuntimeError:boom"
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
     )

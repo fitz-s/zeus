@@ -1310,13 +1310,16 @@ def _begin_selection_read_snapshot(
 
 
 def _current_probability_ineligible(receipt: EventSubmissionReceipt) -> bool:
-    """A typed ValueError means this family has no current q certificate."""
+    """Return whether only this family lacks a current q certificate."""
 
-    return (
-        receipt.prepared_global_family is None
-        and str(receipt.reason or "").startswith(
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
-        )
+    if receipt.prepared_global_family is not None:
+        return False
+    reason = str(receipt.reason or "")
+    return reason.startswith(
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+    ) or reason.startswith(
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "TransientFamilyAuthorityUnavailable:"
     )
 
 

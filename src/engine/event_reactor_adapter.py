@@ -6218,13 +6218,19 @@ def event_bound_live_adapter_from_trade_conn(
                 cache_metadata_out=cache_metadata_out,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
+            failure_type = type(exc).__name__
+            if (
+                isinstance(exc, sqlite3.OperationalError)
+                and _is_sqlite_lock_error(exc)
+            ):
+                failure_type = "TransientFamilyAuthorityUnavailable"
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
                 event.causal_snapshot_id,
                 reason=(
                     "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-                    f"{type(exc).__name__}:{exc}"
+                    f"{failure_type}:{exc}"
                 ),
                 proof_accepted=False,
             )
