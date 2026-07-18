@@ -128,3 +128,22 @@ Alternative rejected by consult: joint availability-aware stacking/EMOS over eve
 - Fail-closed freshness; no stale-as-fresh. No shadow modes. No gate accretion / over-engineering. Minimal machinery.
 - Only settlement-source accuracy backtest allowed; strictly walk-forward otherwise.
 - Live branch advances continuously; merge worktree results promptly to main tree.
+
+## T0-1 FIX DESIGN (2026-07-18, Fable session; CONFIRMED tier0 per audit §7 erratum)
+Defect: Day0 served q integrates whole-day Normal; post-peak P(new-extreme-beyond-obs)
+served 0.314 vs realized 0.070 (4.50x), LOW eve 0.409 vs 0.000. Evidence:
+day0_mechanism_first_principles_audit.md §7 + day0_percity_diurnal_timing.md.
+Design (slice 1, remaining-window CENTER correction, DB-only, fail-open):
+- Data: day0_hourly_vectors (model='ecmwf_ifs', anchor family; times_json UTC + temps_c_json),
+  latest causal capture <= computed_at for (city, target_date).
+- delta_high = max(h over whole local day) - max(h over remaining hours >= computed_at);
+  mu_r = mu*_corrected - delta_high. LOW symmetric: delta_low = min_rem - min_whole;
+  mu_r = mu* + delta_low. delta >= 0 by construction; clamp negatives to 0.
+- Apply mu_r ONLY when _day0_obs_extreme_c is not None, to BOTH _build_scaled_normal_uniform_q
+  (point q) and _build_fused_q_bounds (mu_star) AND the finite-evidence floor mu (one
+  probability world). Sigma unchanged (slice 2 = persisted remaining members narrowing).
+- Fail-open: vector absent/stale/unparseable/timezone error -> delta=0 (byte-identical).
+- Provenance: stamp day0_remaining_center_delta_c + vector_id + hours_remaining when fired.
+- Non-day0 path byte-identical. HK oracle_truncate preimage untouched (transform handles).
+Status: implementer dispatched (worktree). Baseline: tests/test_finite_evidence_probability_symmetry.py
++ test_staleness_variance_serving.py + materializer suites green at ceb55a796/cf2405d9f.
