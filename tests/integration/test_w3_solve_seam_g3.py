@@ -2706,13 +2706,31 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         deterministic.probability_witness.witness_identity
     )
 
+    selected_dead_payload: dict[str, object] = {}
+    selected_dead = era._prepare_current_global_probability_family(
+        deterministic_event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=2),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=selected_dead_payload,
+        required_condition_id="c0",
+    )
+    assert remaining_day_calls == 1
+    assert isinstance(
+        selected_dead.probability_witness,
+        DeterministicBinPayoffWitness,
+    )
+    assert dict(selected_dead.probability_witness.exact_yes_payoffs) == exact_payoffs
+
     held_unknown_payload: dict[str, object] = {}
     held_unknown = era._prepare_current_global_probability_family(
         deterministic_event,
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=2),
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=3),
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=held_unknown_payload,
         required_condition_id="c1",

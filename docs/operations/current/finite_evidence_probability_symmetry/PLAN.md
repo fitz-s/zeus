@@ -561,3 +561,22 @@ Singapore remains `q_ucb=0.308017` and `NO q_lcb=0.691983 > 0.552420`; it was
 already an explicitly bounded stochastic risk and is not falsely rewritten by
 the disagreement correction. Focused probability and revision tests pass
 `20/20`; the three open/in-flight entry endowment antibodies pass `3/3`.
+
+## 2026-07-18 selected Day0 deterministic-payoff preflight
+
+The first post-deploy complete auction selected Shenzhen July 18 HIGH 30C NO,
+then preflight rejected it as `DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`. Current
+authorized station evidence had already observed 31C, making the exact 30C bin
+pathwise impossible: its YES payoff is zero and NO payoff is one regardless of
+any remaining-hour forecast.
+
+The global probability path already builds a `DeterministicBinPayoffWitness`
+for that first-principles fact, but selected-bin preflight compared the required
+bin-id string with the full `(bin_id, payoff)` tuple collection. That comparison
+can never match, so the selected dead bin fell through to the unrelated
+remaining-day probability path. The repair compares like types: required bin id
+against the set of deterministic bin ids. Still-live bins continue to require a
+current remaining-day witness; source, observation, topology, and submit checks
+are unchanged. Acceptance requires the selected dead-bin witness to avoid the
+remaining-day reader, a still-live sibling to keep using it, symmetric HIGH/LOW
+hard-fact tests, the full W3 seam, compilation, and `git diff --check`.

@@ -27484,8 +27484,9 @@ def _prepare_current_global_probability_family(
                 family=family,
                 payload=payload,
             )
+            exact_bin_ids = {bin_id for bin_id, _payoff in exact_yes_payoffs}
             if exact_yes_payoffs and (
-                required_bin_id is None or required_bin_id in exact_yes_payoffs
+                required_bin_id is None or required_bin_id in exact_bin_ids
             ):
                 probability_authority = "day0_deterministic_bin_payoff_v1"
                 source_truth_identity = stable_hash(
