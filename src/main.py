@@ -3817,7 +3817,7 @@ def _reactor_wake_event_state(
             WITH requested(event_id) AS (VALUES {requested})
             SELECT p.event_id, p.processing_status, p.claimed_at
               FROM requested r
-              JOIN opportunity_event_processing p
+              LEFT JOIN opportunity_event_processing p
                 ON p.consumer_name = 'edli_reactor_v1'
                AND p.event_id = r.event_id
             """,
@@ -3833,13 +3833,20 @@ def _reactor_wake_event_state(
     finally:
         if conn is not None:
             conn.close()
-    if len(rows) != len(clean_event_ids):
-        return _ReactorWakeEventState(ready=True, finished=False)
     now = (decision_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
     ready = False
     deferred = False
     terminal = False
+    missing = 0
     for _event_id, status, claimed_at in rows:
+        if status is None:
+            # Wakes are non-authoritative scheduling hints. A producer crash or
+            # pre-write debounce may leave an ID with no canonical processing
+            # row; replaying that hint can never create work and must not pin the
+            # whole durable queue behind it.
+            terminal = True
+            missing += 1
+            continue
         status = str(status)
         if status == "processing":
             ready = True
@@ -3861,6 +3868,12 @@ def _reactor_wake_event_state(
             ready = True
         else:
             deferred = True
+    if missing:
+        logger.warning(
+            "EDLI wake retired %d non-canonical event hints; canonical event state "
+            "remains authoritative",
+            missing,
+        )
     return _ReactorWakeEventState(
         ready=ready,
         finished=not ready and (deferred or bool(rows)),

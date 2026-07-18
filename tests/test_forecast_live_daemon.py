@@ -1501,6 +1501,26 @@ def test_reactor_wake_completed_event_needs_no_reactor_cycle(monkeypatch) -> Non
     assert conn.execute_count == 1
 
 
+def test_reactor_wake_missing_processing_hint_does_not_pin_queue(monkeypatch) -> None:
+    import src.main as main
+
+    class _Conn:
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchall(self):
+            return [(None, None, None)]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main, "get_world_connection_read_only", _Conn)
+
+    assert main._reactor_wake_event_state(("missing-event",)) == (
+        main._ReactorWakeEventState(ready=False, finished=True, terminal=True)
+    )
+
+
 def test_reactor_wake_event_state_uses_composite_key_lookup(monkeypatch) -> None:
     import src.main as main
 

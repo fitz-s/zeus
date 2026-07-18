@@ -1124,9 +1124,13 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
         assert len(events) == 1
         assert events[0].event_id == "evt-price-1"
         order.append("write:redecision")
-        return 1
+        return ("evt-price-1",)
 
-    monkeypatch.setattr(router, "_edli_write_price_channel_redecision_events", write)
+    monkeypatch.setattr(
+        router,
+        "_edli_write_price_channel_redecision_event_ids",
+        write,
+    )
     monkeypatch.setattr(
         reactor_wake,
         "publish_reactor_wake",
@@ -1537,6 +1541,36 @@ def test_price_channel_redecision_writer_claims_one_pending_event_per_family():
         "SELECT COUNT(*) FROM opportunity_events WHERE entity_key = ?",
         (first.entity_key,),
     ).fetchone()[0] == 1
+
+
+def test_price_channel_redecision_writer_returns_only_committed_event_ids():
+    from src.events.opportunity_event import make_opportunity_event
+    from src.events.price_channel_redecision_router import (
+        _edli_write_price_channel_redecision_event_ids,
+    )
+    from src.state.db import init_schema
+
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+
+    def event(source: str, at: str):
+        return make_opportunity_event(
+            event_type="EDLI_REDECISION_PENDING",
+            entity_key="Paris|2026-07-18|high",
+            source=source,
+            observed_at=at,
+            available_at=at,
+            received_at=at,
+            payload={"source": source},
+        )
+
+    first = event("price:a", "2026-07-18T09:00:00+00:00")
+    debounced = event("price:b", "2026-07-18T09:00:01+00:00")
+
+    assert _edli_write_price_channel_redecision_event_ids(
+        world,
+        [first, debounced],
+    ) == (first.event_id,)
 
 
 def _seed_committed_denver_2026_06_20(forecasts_conn) -> None:

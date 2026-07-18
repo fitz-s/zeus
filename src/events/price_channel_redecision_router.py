@@ -640,6 +640,15 @@ def _edli_emit_price_channel_redecisions_for_events(
 def _edli_write_price_channel_redecision_events(world_conn, events) -> int:
     """Atomically debounce and write one pending redecision per family."""
 
+    return len(_edli_write_price_channel_redecision_event_ids(world_conn, events))
+
+
+def _edli_write_price_channel_redecision_event_ids(
+    world_conn,
+    events,
+) -> tuple[str, ...]:
+    """Write debounced events and return only IDs committed by this call."""
+
     from src.events.event_writer import EventWriter
 
     claimed = _edli_pending_redecision_entity_keys(world_conn)
@@ -651,7 +660,7 @@ def _edli_write_price_channel_redecision_events(world_conn, events) -> int:
         claimed.add(entity_key)
         admitted.append(event)
     emitted = EventWriter(world_conn).write_many(admitted)
-    return sum(1 for result in emitted if result.inserted)
+    return tuple(result.event_id for result in emitted if result.inserted)
 
 
 class _PriceChannelRedecisionSink:
@@ -721,30 +730,25 @@ class _PriceChannelRedecisionSink:
         with _edli_price_channel_world_write_connection(
             owner="price_channel_redecision_emit"
         ) as world_write:
-            emitted = _edli_write_price_channel_redecision_events(
+            emitted_event_ids = _edli_write_price_channel_redecision_event_ids(
                 world_write,
                 events_to_emit,
             )
             world_write.commit()
-        if emitted:
+        if emitted_event_ids:
             from src.runtime.reactor_wake import publish_reactor_wake
 
-            event_ids = tuple(
-                event_id
-                for event in events_to_emit
-                if (event_id := str(getattr(event, "event_id", "") or "").strip())
-            )
             publish_reactor_wake(
                 source="price_channel_redecision_router",
                 reason="market_price_advanced",
-                event_ids=event_ids,
+                event_ids=emitted_event_ids,
             )
             logger.info(
                 "EDLI market-channel price trigger emitted redecision events=%d "
                 "quote_events=%d reactor_wake_events=%d",
-                emitted,
+                len(emitted_event_ids),
                 len(events),
-                len(event_ids),
+                len(emitted_event_ids),
             )
 
     def close(self) -> None:
