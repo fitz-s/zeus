@@ -273,7 +273,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         ),
         probability_ineligible_by_family={
             "family-q-missing": (
-                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
                 "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED"
             )
         },
@@ -386,7 +387,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         )
     assert summary["probability_ineligible_by_family"] == {
         "family-q-missing": (
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            "FamilyAuthorityUnavailable:"
             "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED"
         )
     }
@@ -3126,6 +3128,23 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:OperationalError:"
         "no such table: readiness_state"
     )
+
+    def contract_prepare(*_args, **_kwargs):
+        raise ValueError("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        contract_prepare,
+    )
+    contract_receipt = captured["prepare_event"](
+        event,
+        _dt.datetime(2026, 7, 10, 8, 14, tzinfo=_dt.timezone.utc),
+    )
+    assert contract_receipt.reason == (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_PROBABILITY_DECISION_TIME_NAIVE"
+    )
     policy = captured["candidate_policy_rejection_resolver"]
     low_price = SimpleNamespace(
         action="BUY",
@@ -3475,7 +3494,8 @@ def test_live_adapter_excludes_closed_forecast_family_before_probability_prepare
     assert receipt.prepared_global_family is None
     assert receipt.reason is not None
     assert receipt.reason.startswith(
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:"
         "EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day:"
     )
 
@@ -5671,7 +5691,8 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         (
             "GLOBAL_FAMILY_INELIGIBLE:"
             "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-            "ValueError:GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+            "FamilyAuthorityUnavailable:"
+            "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
             "BLOCKED",
         ),
         (
@@ -10467,7 +10488,10 @@ def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason="GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:test",
+            reason=(
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:test"
+            ),
             proof_accepted=False,
         )
 
@@ -10490,7 +10514,8 @@ def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
     assert prepared == [held_event]
     assert result.receipts[held_event.event_id].reason == (
         "GLOBAL_FAMILY_INELIGIBLE:"
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:test"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:test"
     )
 
 
@@ -11286,21 +11311,30 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
 
 
 @pytest.mark.parametrize(
-    "ineligible_reason",
+    ("ineligible_reason", "through_adapter"),
     (
         (
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
-            "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM"
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+                "REPLACEMENT_RAW_INPUT_HWM"
+            ),
+            False,
         ),
         (
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-            "TransientFamilyAuthorityUnavailable:database is locked"
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "TransientFamilyAuthorityUnavailable:database is locked"
+            ),
+            True,
         ),
     ),
 )
 def test_global_batch_excludes_typed_current_q_ineligible_family(
     monkeypatch,
     ineligible_reason,
+    through_adapter,
 ):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -11376,6 +11410,44 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
             prepared_global_family=prepared_b,
         )
 
+    prepare_event = prepare
+    if through_adapter:
+        captured = {}
+        process_batch = global_batch_runtime.process_current_global_batch
+        monkeypatch.setattr(era, "_forecast_lane_phase_admits", lambda _proof: True)
+        monkeypatch.setattr(
+            global_batch_runtime,
+            "process_current_global_batch",
+            lambda events, **kwargs: captured.update(kwargs)
+            or SimpleNamespace(events=tuple(events)),
+        )
+        adapter = era.event_bound_live_adapter_from_trade_conn(
+            sqlite3.connect(":memory:"),
+            get_current_level=lambda: era.RiskLevel.GREEN,
+            forecast_conn=sqlite3.connect(":memory:"),
+            topology_conn=sqlite3.connect(":memory:"),
+            calibration_conn=sqlite3.connect(":memory:"),
+        )
+        adapter.process_global_batch((event_a, event_b), decision_at)
+        monkeypatch.setattr(
+            global_batch_runtime,
+            "process_current_global_batch",
+            process_batch,
+        )
+
+        def prepare_family(event, **_kwargs):
+            if event.event_id == event_a.event_id:
+                calls["ineligible_prepare"] += 1
+                raise sqlite3.OperationalError("database is locked")
+            return prepared_b
+
+        monkeypatch.setattr(
+            era,
+            "_prepare_current_global_probability_family",
+            prepare_family,
+        )
+        prepare_event = captured["prepare_event"]
+
     def actuate(winner, chosen, _at):
         assert winner.event_id == event_b.event_id
         assert chosen is actuation
@@ -11395,7 +11467,7 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         forecast_conn=object(),
         trade_conn=object(),
         payload_reader=lambda current: json.loads(current.payload_json),
-        prepare_event=prepare,
+        prepare_event=prepare_event,
         actuate_winner=actuate,
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
@@ -11425,7 +11497,8 @@ def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
         (event_a, event_b), captured_at_utc=decision_at
     )
     reason = (
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:"
         "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM"
     )
     monkeypatch.setattr(
@@ -11478,7 +11551,8 @@ def test_global_batch_preserves_single_family_current_q_failure(monkeypatch):
         (event,), captured_at_utc=decision_at
     )
     reason = (
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:"
         "EVENT_BOUND_MARKET_TOPOLOGY_MISSING"
     )
     monkeypatch.setattr(
@@ -11514,6 +11588,10 @@ def test_global_batch_preserves_single_family_current_q_failure(monkeypatch):
     "reason",
     (
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:RuntimeError:boom",
+        (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+            "GLOBAL_PROBABILITY_DECISION_TIME_NAIVE"
+        ),
         (
             "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:OperationalError:"
             "no such table: readiness_state"

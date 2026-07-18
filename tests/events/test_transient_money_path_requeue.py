@@ -170,7 +170,8 @@ def test_global_topology_ineligible_refreshes_family_and_uses_retry_floor():
     refreshed = []
     reason = (
         "GLOBAL_FAMILY_INELIGIBLE:"
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:"
         "EVENT_BOUND_MARKET_TOPOLOGY_MISSING"
     )
 

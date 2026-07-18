@@ -1316,7 +1316,8 @@ def _current_probability_ineligible(receipt: EventSubmissionReceipt) -> bool:
         return False
     reason = str(receipt.reason or "")
     return reason.startswith(
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "FamilyAuthorityUnavailable:"
     ) or reason.startswith(
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
         "TransientFamilyAuthorityUnavailable:"

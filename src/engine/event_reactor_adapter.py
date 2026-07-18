@@ -358,6 +358,21 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
     }
 )
+_GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
+    {
+        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
+        "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING",
+        "GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING",
+        "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+        "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
+    }
+)
+_GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_PREFIXES = (
+    "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:",
+)
+_FAMILY_AUTHORITY_UNAVAILABLE = "FamilyAuthorityUnavailable"
+_TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE = "TransientFamilyAuthorityUnavailable"
 
 
 def _global_current_gamma_client(*, timeout_seconds: float):
@@ -436,7 +451,10 @@ def _global_probability_family_cache_revision(
 def _cacheable_global_probability_ineligible(
     receipt: EventSubmissionReceipt,
 ) -> bool:
-    prefix = "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+    prefix = (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        f"{_FAMILY_AUTHORITY_UNAVAILABLE}:"
+    )
     reason = str(receipt.reason or "")
     return (
         receipt.prepared_global_family is None
@@ -6223,7 +6241,9 @@ def event_bound_live_adapter_from_trade_conn(
                 isinstance(exc, sqlite3.OperationalError)
                 and _is_sqlite_lock_error(exc)
             ):
-                failure_type = "TransientFamilyAuthorityUnavailable"
+                failure_type = _TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE
+            elif _is_global_probability_family_unavailable(exc):
+                failure_type = _FAMILY_AUTHORITY_UNAVAILABLE
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -7026,7 +7046,8 @@ def event_bound_live_adapter_from_trade_conn(
                         target_date=str(payload.get("target_date") or "") or None,
                         metric=str(payload.get("metric") or "") or None,
                         reason=(
-                            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+                            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                            f"{_FAMILY_AUTHORITY_UNAVAILABLE}:"
                             f"EVENT_BOUND_MARKET_PHASE_CLOSED:{phase}:"
                             f"{phase_evidence.phase_source}"
                         ),
@@ -8585,6 +8606,15 @@ def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
         "database is locked" in message
         or "database table is locked" in message
         or "database is busy" in message
+    )
+
+
+def _is_global_probability_family_unavailable(exc: Exception) -> bool:
+    if not isinstance(exc, ValueError):
+        return False
+    reason = str(exc)
+    return reason in _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS or reason.startswith(
+        _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_PREFIXES
     )
 
 
@@ -10321,7 +10351,8 @@ def _global_preflight_block_status(reason: str) -> str:
             (
                 "GLOBAL_FAMILY_INELIGIBLE:"
                 "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-                "ValueError:GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"
             ),
             (
                 "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"

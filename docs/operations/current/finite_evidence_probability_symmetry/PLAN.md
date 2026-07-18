@@ -463,22 +463,27 @@ that already have current probability and book authority.
 The fault boundary for this slice is one weather family.  A recognized SQLite
 `locked`/`busy` failure makes only that family's current authority unavailable
 for the epoch, records the exact exclusion in the global receipt, and continues
-selection over the remaining complete admissible set.  Unknown `OperationalError`,
-schema drift, and every unclassified exception remain
+selection over the remaining complete admissible set.  Family-local missing
+current authority uses an explicit `FamilyAuthorityUnavailable` reason allowlist;
+generic `ValueError`, unknown `OperationalError`, schema drift, malformed
+identity/time/simplex contracts, and every unclassified exception remain
 whole-epoch fail-closed.  No stale probability fallback, synthetic q, risk-gate
 relaxation, DB mutation, or venue action is permitted.
 
 Files: `src/engine/event_reactor_adapter.py`,
 `src/engine/global_batch_runtime.py`,
-`tests/integration/test_w3_solve_seam_g3.py`, and this plan.  Acceptance requires
-an adapter-level lock classification antibody, a two-family counterexample where
-the unaffected family still wins, preservation of whole-epoch rejection for an
-unknown preparation error, focused tests, planning-lock, compilation, and
+`tests/integration/test_w3_solve_seam_g3.py`,
+`tests/events/test_transient_money_path_requeue.py`, and this plan.  Acceptance
+requires an adapter-to-batch two-family counterexample where the unaffected
+family still wins, preservation of whole-epoch rejection for contract, schema,
+and unknown preparation errors, focused tests, planning-lock, compilation, and
 `git diff --check`.  Deployment remains operator-only.
 
-Verification: the full W3 global-auction seam passes `195/195`; the focused
-qkernel gate passes `56/56`; lock/schema/unknown-error counterexamples pass
-`7/7`; planning-lock, compilation, and `git diff --check` pass.  The existing
-repo-wide source registry check still reports unrelated baseline drift.  No
-canonical DB was copied or mutated, and no process restart, config change, or
-venue action was performed.
+Verification: independent review found and closed the original generic
+`ValueError` downgrade gap.  The final full W3 global-auction seam passes
+`197/197`; the money-path retry suite passes `43/43`; the focused adapter-to-batch
+lock and contract/schema/unknown-error counterexamples pass `12/12`.
+Planning-lock, compilation, and `git diff --check` pass.  The existing repo-wide
+source registry check still reports unrelated baseline drift.  No canonical DB
+was copied or mutated, and no process restart, config change, or venue action was
+performed.
