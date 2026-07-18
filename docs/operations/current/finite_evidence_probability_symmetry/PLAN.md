@@ -511,3 +511,11 @@ recovery, and no regression to future-retry wake retirement.  The complete wake
 listener suite passes `79/79`; the focused periodic-monitor preemption antibody
 passes `1/1`; compilation and `git diff --check` pass.  No runtime process,
 canonical DB, config, or venue state was changed.
+
+The same trace found a redundant lock wait at the lane boundary: an urgent Day0
+monitor waited up to 30 seconds for the active reactor even though the durable
+wake already retries and the active reactor observes the urgent preemption flag.
+Urgent handoff acquisition is now non-blocking; periodic monitor handoff retains
+the existing 30-second bound.  This prevents the wake listener itself from being
+occupied for tens of seconds while preserving mutual exclusion and durable
+retry.  The targeted-handoff antibody proves a zero-second timeout.

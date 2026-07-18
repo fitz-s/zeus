@@ -5930,13 +5930,14 @@ def _exit_monitor_cycle(
     # Claim exit priority before waiting. New reactor ticks defer on this Event;
     # the current reactor finishes without a competing SQLite traversal.
     _held_position_monitor_active.set()
+    handoff_timeout = 0.0 if urgent_day0 else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
     reactor_idle = _edli_reactor_active_lock.acquire(
-        timeout=_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+        timeout=handoff_timeout
     )
     if not reactor_idle:
         logger.warning(
             "exit_monitor deferred: active EDLI reactor did not finish within %.1fs",
-            _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS,
+            handoff_timeout,
         )
         _held_position_monitor_active.clear()
         return False

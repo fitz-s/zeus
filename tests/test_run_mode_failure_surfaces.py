@@ -5788,8 +5788,11 @@ def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
     import src.execution.exit_lifecycle as exit_module
     import src.main as main_module
 
+    handoff_timeouts: list[float] = []
+
     class ReactorGate:
         def acquire(self, *, timeout: float) -> bool:
+            handoff_timeouts.append(timeout)
             return True
 
         def release(self) -> None:
@@ -5811,6 +5814,7 @@ def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
 
     assert main_module._held_position_monitor_active.is_set() is False
     assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+    assert handoff_timeouts == [0.0]
 
 
 def test_urgent_exit_monitor_yields_to_newer_day0_wake(monkeypatch) -> None:
