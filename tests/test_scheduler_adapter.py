@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-18; last_reused=2026-07-18
 # Purpose: Executor-class assignment (no DB writer on file-only executor; UMA->backfill_db).
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-07-17
+# Last reused or audited: 2026-07-18
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -395,6 +395,85 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["reseed_maintenance_status"] == (
         "SOURCE_COMMIT_RESEEDS_PUBLISHED"
     )
+
+
+def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatch) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    class _Changed:
+        updated_sources = ("ecmwf_ifs",)
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                "updated_sources": ["ecmwf_ifs"],
+                "affected_cities": ["Shanghai"],
+                "error": None,
+            }
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: calls.append("probe") or _Changed(),
+    )
+
+    def _anchor(_cfg, **kwargs):
+        calls.append("anchor")
+        assert kwargs == {"max_wall_clock_seconds": 10.0}
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "written_manifest_count": 2,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _anchor,
+    )
+
+    def _scoped(_cfg, **_kwargs):
+        calls.append("scoped_download")
+        assert calls[:3] == ["probe", "anchor", "scoped_download"]
+        return {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "written_row_count": 0,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
+        _scoped,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg: None,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg: None,
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "source_clock_scoped_download_cursor_sources",
+        lambda _report: (),
+    )
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["source_clock_anchor_download"] == {
+        "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+    }
+    assert calls == ["probe", "anchor", "scoped_download"]
 
 
 def test_source_commit_reseed_triggers_share_one_manifest_snapshot(

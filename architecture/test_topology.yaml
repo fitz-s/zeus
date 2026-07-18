@@ -363,7 +363,7 @@ test_trust_policy:
     tests/test_source_job_registry.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_opendata_ownership_singleton.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_backfill_watermarks.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-07-17", note: "Scheduler wiring plus source-clock committed-scope materialization before full fanout completion."}
+    tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-07-18", note: "Scheduler wiring plus source-clock anchor-first capture and committed-scope materialization before full fanout completion."}
     tests/test_temporal_provenance_and_lanes.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # PR #329 D: persisted source_time_frontier (schema 7 + idempotent + backfill-safe writer).
     tests/test_frontier_store.py: {created: "2026-05-24", last_used: "2026-05-24"}

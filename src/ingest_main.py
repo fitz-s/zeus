@@ -1903,13 +1903,27 @@ def _replacement_availability_poll_tick():
                 }
         return report
 
-    def _download_current_targets():
-        current_target_timeout = _replacement_current_target_poll_timeout_seconds(
-            _replacement_availability_poll_seconds()
+    def _download_current_targets(
+        *,
+        max_wall_clock_seconds: float | None = None,
+        required_scopes: tuple[tuple[str, str, str], ...] | None = None,
+    ):
+        current_target_timeout = (
+            _replacement_current_target_poll_timeout_seconds(
+                _replacement_availability_poll_seconds()
+            )
+            if max_wall_clock_seconds is None
+            else max(0.0, float(max_wall_clock_seconds))
         )
         try:
+            kwargs: dict[str, object] = {
+                "max_wall_clock_seconds": current_target_timeout,
+            }
+            if required_scopes is not None:
+                kwargs["required_scopes"] = required_scopes
             return _download_replacement_forecast_current_targets_if_needed(
-                cfg, max_wall_clock_seconds=current_target_timeout
+                cfg,
+                **kwargs,
             )
         except TimeoutError as exc:
             report = {
@@ -1956,6 +1970,19 @@ def _replacement_availability_poll_tick():
         logger.info("replacement source-clock poll current: %s", report)
         return report
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
+    source_clock_anchor_report = None
+    if "ecmwf_ifs" in source_clock_report.updated_sources:
+        # The current provider center is the first q input and already has a
+        # run-authoritative live-API ladder. Capture it before waiting for the
+        # slower Single Runs archive used by the multimodel BPF inputs.
+        source_clock_anchor_report = _download_current_targets(
+            max_wall_clock_seconds=min(
+                10.0,
+                _replacement_current_target_poll_timeout_seconds(
+                    _replacement_availability_poll_seconds()
+                ),
+            )
+        )
     notified_source_scopes: set[tuple[str, str, str, str]] = set()
     anchor_scopes_attempted: set[tuple[str, str, str]] = set()
     fallback_reseed_published = False
@@ -2074,6 +2101,11 @@ def _replacement_availability_poll_tick():
             "source_clock_error": source_clock_payload.get("error"),
         }
     report.update(scoped_reseed_summary)
+    source_clock_anchor_compact = _compact_current_target_report(
+        source_clock_anchor_report
+    )
+    if source_clock_anchor_compact is not None:
+        report["source_clock_anchor_download"] = source_clock_anchor_compact
     # No raw input can land while the provider quota is cooling down. Run one
     # catch-up scan, then suppress identical JSON-heavy reseed scans until the
     # downloader can make progress again.
