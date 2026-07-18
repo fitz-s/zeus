@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 
+from src.calibration.emos import bin_probability_settlement
 from src.data.replacement_forecast_materializer import (
     FAR_TAIL_LCB_FLOOR,
     _build_fused_q_bounds,
@@ -72,6 +73,82 @@ def test_current_tail_floor_combines_member_limit_and_moment_ambiguity() -> None
     )["39C"]
     assert math.isclose(one_hit_floor, _finite_evidence_binomial_ucb(1, 51))
     assert one_hit_floor > floors["39C"]
+
+
+def test_current_band_preserves_provider_and_ensemble_center_scenarios() -> None:
+    """Center disagreement must widen bounds, not erase a center-bin possibility."""
+
+    bins = [
+        _Bin("low", None, 32.0),
+        _Bin("33C", 33.0, 33.0),
+        _Bin("34C", 34.0, 34.0),
+        _Bin("35C", 35.0, 35.0),
+        _Bin("36C", 36.0, 36.0),
+        _Bin("high", 37.0, None),
+    ]
+    members = [32.2 + 0.032 * index for index in range(51)]
+    member_mean = sum(members) / len(members)
+    within = math.sqrt(
+        sum((value - member_mean) ** 2 for value in members) / len(members)
+    )
+    mu = 36.0
+    predictive_sigma = math.hypot(within, member_mean - mu)
+    q_target = bin_probability_settlement(
+        mu,
+        predictive_sigma,
+        36.0,
+        36.0,
+        half_step=0.5,
+        rounding_rule="wmo_half_up",
+    )
+    provider_scenario = bin_probability_settlement(
+        mu,
+        within,
+        36.0,
+        36.0,
+        half_step=0.5,
+        rounding_rule="wmo_half_up",
+    )
+    q_point = {
+        bin_.bin_id: bin_probability_settlement(
+            mu,
+            predictive_sigma,
+            bin_.lower_c,
+            bin_.upper_c,
+            half_step=0.5,
+            rounding_rule="wmo_half_up",
+        )
+        for bin_ in bins
+    }
+
+    floors = _current_evidence_tail_ucb_floors(
+        mu_star=mu,
+        predictive_sigma_c=predictive_sigma,
+        bins=bins,
+        half_step=0.5,
+        rounding_rule="wmo_half_up",
+        members_c=members,
+    )
+    _, ucb, samples = _build_fused_q_bounds(
+        mu_star=mu,
+        center_sigma_c=0.05,
+        predictive_sigma_c=predictive_sigma,
+        bins=bins,
+        half_step=0.5,
+        q_point=q_point,
+        n_draws=400,
+        rounding_rule="wmo_half_up",
+        evidence_members_c=members,
+        return_samples=True,
+    )
+
+    assert math.isclose(q_point["36C"], q_target, abs_tol=1e-15)
+    assert provider_scenario > q_target * 4.0
+    assert floors["36C"] >= provider_scenario - 1e-12
+    assert ucb["36C"] >= provider_scenario - 1e-12
+    assert 1.0 - ucb["36C"] < 0.60
+    rows = zip(*(samples[bin_.bin_id] for bin_ in bins), strict=True)
+    assert all(math.isclose(sum(row), 1.0, abs_tol=1e-12) for row in rows)
 
 
 def test_source_clock_band_is_symmetric_coherent_and_has_no_historical_floor() -> None:

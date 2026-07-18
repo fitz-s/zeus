@@ -2874,18 +2874,28 @@ def _current_evidence_tail_ucb_floors(
     day0_observed_extreme_c: float | None = None,
     day0_metric: str | None = None,
 ) -> dict[str, float]:
-    """Per-bin UCB floors from exact member hits and current first two moments.
+    """Per-bin UCB floors from members, moments, and evidenced center scenarios.
 
     ``metric`` selects the fitted member-dependence rho for the CP term (see
     ``_finite_evidence_binomial_ucb``); the Cantelli moment term is untouched.
+
+    The provider center and the current ENS-member center are distinct observed
+    estimates of the same settlement quantity. Folding their displacement into
+    one wider Normal is valid for the served point q, but it can make an exact bin
+    near either center look implausible under *every* bootstrap draw. Preserve
+    both current-evidence worlds in the executable ambiguity band by integrating
+    each center with the observed within-ensemble spread and taking their per-bin
+    maximum as an additional UCB floor. This changes no point q and uses no
+    historical residual, fitted mixture, market price, or constant floor.
 
     When ``day0_observed_extreme_c`` is set, bins the Day0 support transform makes
     settlement-IMPOSSIBLE (HIGH: upper preimage <= obs; LOW: lower preimage >= obs —
     the exact predicate ``_build_fused_q_bounds`` zeroes) get a 0.0 floor: the
     absorbed obs already removes them, so the forecast ambiguity band must not lift
-    them off zero. The remaining POSSIBLE bins keep the ordinary member/moment floor.
+    them off zero. The remaining POSSIBLE bins keep the member/moment/scenario floor.
     """
 
+    from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
     from src.contracts.settlement_semantics import settlement_preimage_offsets  # noqa: PLC0415
 
     mu = float(mu_star)
@@ -2905,6 +2915,10 @@ def _current_evidence_tail_ucb_floors(
         rounding_rule=rounding_rule,
         members_c=members,
     )
+    member_mean = sum(members) / len(members)
+    within_sigma = math.sqrt(
+        sum((value - member_mean) ** 2 for value in members) / len(members)
+    )
     variance = sigma * sigma
     day0_obs = (
         None
@@ -2912,6 +2926,46 @@ def _current_evidence_tail_ucb_floors(
         else float(day0_observed_extreme_c)
     )
     day0_dir = str(day0_metric or "").lower() if day0_obs is not None else None
+
+    def _component_mass(bin_: object, *, center: float) -> float:
+        if within_sigma > 0.0:
+            if day0_obs is not None:
+                return _day0_conditioned_bin_probability(
+                    metric=str(day0_dir),
+                    observed_extreme_c=day0_obs,
+                    mu=center,
+                    sigma=within_sigma,
+                    bin_low_c=bin_.lower_c,
+                    bin_high_c=bin_.upper_c,
+                    half_step=half_step,
+                    rounding_rule=rounding_rule,
+                )
+            return bin_probability_settlement(
+                center,
+                within_sigma,
+                bin_.lower_c,
+                bin_.upper_c,
+                half_step=half_step,
+                rounding_rule=rounding_rule,
+            )
+
+        # A flat ensemble is a deterministic current scenario, not a reason to
+        # invent epsilon variance. Apply the same Day0 absorbing transform, then
+        # test its settlement preimage exactly.
+        final = center
+        if day0_obs is not None:
+            if day0_dir == "high":
+                final = max(day0_obs, center)
+            elif day0_dir == "low":
+                final = min(day0_obs, center)
+            else:
+                raise ValueError(
+                    f"day0_metric must be high or low when Day0 evidence is set, got {day0_metric!r}"
+                )
+        low = None if bin_.lower_c is None else float(bin_.lower_c) + low_off
+        high = None if bin_.upper_c is None else float(bin_.upper_c) + high_off
+        return float((low is None or final >= low) and (high is None or final < high))
+
     floors: dict[str, float] = {}
     for bin_ in bins:
         low = None if bin_.lower_c is None else float(bin_.lower_c) + low_off
@@ -2937,7 +2991,11 @@ def _current_evidence_tail_ucb_floors(
             len(members),
             metric=metric,
         )
-        floors[str(bin_.bin_id)] = max(sample_ucb, moment)
+        component = max(
+            _component_mass(bin_, center=mu),
+            _component_mass(bin_, center=member_mean),
+        )
+        floors[str(bin_.bin_id)] = max(sample_ucb, moment, component)
     return floors
 
 
@@ -3469,16 +3527,19 @@ def _build_fused_q_bounds(
     if np.any(_safe):
         probs[_safe, :] = probs[_safe, :] / _row_sums[_safe, :]
 
-    # FINITE CURRENT-EVIDENCE TAIL BAND. Center bootstrap alone conditions on a
+    # FINITE CURRENT-EVIDENCE AMBIGUITY BAND. Center bootstrap alone conditions on a
     # Normal family and can make a far-bin q_ucb arbitrarily close to zero. With
     # N observed members, exact settlement-preimage hits give a Clopper-Pearson
     # UCB (zero hits still licenses 1-alpha^(1/N)); trusting only the current mean
     # and variance also licenses the one-sided Cantelli ambiguity mass
-    # sigma^2/(sigma^2+gap^2). Use the larger per-bin value.
+    # sigma^2/(sigma^2+gap^2). It can also erase provider-vs-ENS center
+    # disagreement by turning it into one wider Normal. Keep both observed
+    # centers as within-spread probability scenarios. Use the largest per-bin
+    # value from the member, moment, and component-preserving terms.
     # Encode it inside coherent simplex rows so lower-CVaR and scalar bounds see
     # one probability world. On Day0 the absorbed obs removes the IMPOSSIBLE bins
     # (their floor is masked to 0 inside the floor helper); the remaining POSSIBLE
-    # bins are still finite current evidence and keep the member/moment tail floor.
+    # bins are still finite current evidence and keep the member/moment/scenario floor.
     if evidence_members_c is not None:
         finite_floors = _current_evidence_tail_ucb_floors(
             mu_star=mu_star,

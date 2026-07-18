@@ -519,3 +519,45 @@ Urgent handoff acquisition is now non-blocking; periodic monitor handoff retains
 the existing 30-second bound.  This prevents the wake listener itself from being
 occupied for tens of seconds while preserving mutual exclusion and durable
 retry.  The targeted-handoff antibody proves a zero-second timeout.
+
+## 2026-07-18 current-center scenario preservation
+
+Four live losing NO certificates exposed a probability-geometry defect rather
+than a YES/NO complement defect. Manila, Panama, and Taipei served target-bin
+YES upper bounds almost identical to their point estimates even though the
+current provider center sat near the eventual winning exact bin and the ENS
+center materially disagreed. The old executable band folded that disagreement
+into one wide predictive Normal, then bootstrapped only the provider center;
+for an exact bin near that center, extra width lowers its mass and therefore
+cannot express the competing current-evidence world. Singapore already carried
+a materially wide target YES upper bound and remains an acknowledged stochastic
+loss, not a sign/complement error.
+
+The correction preserves the strategy-of-record point q and changes only its
+current-evidence ambiguity band. In addition to exact-member CP and Cantelli
+floors, every bin now receives the maximum probability licensed by two observed
+current scenarios: provider center plus ENS within-spread, and ENS center plus
+the same within-spread. The existing coherent-simplex stress carrier transports
+those marginal UCB requirements into symmetric YES/NO bounds and lower-CVaR.
+No historical fit, price anchor, constant probability floor, or admission gate
+is introduced. Both same-cycle and transported-shape revision identities bump
+so stale rows must be naturally rematerialized before money-path use.
+
+Acceptance requires a regression proving point q is unchanged while provider-
+center exact-bin mass widens q_ucb enough to reject the mirrored NO at its old
+cost; coherent sample rows must still sum to one; the four frozen live cases
+must be replayed read-only; focused probability, cycle-policy, and global Kelly
+endowment tests must pass; then standard live deploy must load the committed SHA
+and produce the new semantics revision without forced orders.
+
+Read-only replay against the exact four entry posterior identities proves the
+change is selective. The target-bin YES point q remains byte-for-byte unchanged.
+Manila q_ucb widens `0.239724 -> 0.558916`, so mirrored NO q_lcb becomes
+`0.441084 < 0.568891` executable cost; Panama widens
+`0.216604 -> 0.640282`, so NO becomes `0.359718 < 0.631780`; Taipei widens
+`0.131232 -> 0.616159`, so NO becomes `0.383841 < 0.602095`. All three old
+orders therefore fail the robust probability objective before Kelly sizing.
+Singapore remains `q_ucb=0.308017` and `NO q_lcb=0.691983 > 0.552420`; it was
+already an explicitly bounded stochastic risk and is not falsely rewritten by
+the disagreement correction. Focused probability and revision tests pass
+`20/20`; the three open/in-flight entry endowment antibodies pass `3/3`.
