@@ -185,3 +185,25 @@ QUEUED (design-first, not rushed inline):
   last 3 settled days; live serving forward-only, fail-open on missing vector.
 - Slice 2 queue (needs more live vector days): sigma narrowing from persisted
   remaining members; revisit LOW day cell + Shenzhen-style per-row misses.
+
+## PARALLEL WAVE (2026-07-18 23:0x, operator: sub-hourly precision + faster-than-market + clear queue)
+DECISION — slice-2 sigma narrowing NOT BUILT: byte-exact replay (5c0e87fd8) shows
+center-only correction already lands post-peak 0.98 / peak 1.00; no residual
+empirical over-dispersion gap for a sigma term to close. Building it would
+under-disperse (push ratios below 1) and add machinery with no measured defect.
+Revisit ONLY if wider vector coverage shows a stratum the center delta misses.
+DISPATCHED (worktrees, disjoint file ownership):
+- [ ] impl-day0-subhourly: 5-min interpolation of the remaining-window delta
+      (partial-hour exact; fractional hours_remaining) — materializer helper only.
+- [ ] impl-day0-coverage: M-2/H-3 GAP_SUSPECT coverage (mid-day hole vs per-city
+      extreme window; entry fail-closed, monitor bound-only) + M-1 stale-bound
+      margin on monitor belief — day0_observation_reader.py + monitor_refresh.py.
+- [ ] impl-day0-breakers: M-3 final-localday no-entry window computed (quiet window
+      judged: implement or delete with argument) + M-7 wire the 5-state source-health
+      classifier (HK wu_station=None path pinned) — reactor admission region + day0_admission.py.
+- [ ] impl-verifier-reproof: M-13 verifier re-proves impossible-bin q==0 +
+      metric orientation from primitives — decision_kernel/verifier.py only.
+- [ ] proof-day0-latency (read-only): obs-print -> event -> posterior -> submit ->
+      book-reprice hop-by-hop latency measurement; ranked slowest-hop verdict.
+Landing protocol: each reports SHA; orchestrator cherry-picks onto live tip one at a
+time, runs the union of their suites + materializer baseline between picks.
