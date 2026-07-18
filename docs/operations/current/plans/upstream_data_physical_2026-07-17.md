@@ -147,3 +147,29 @@ Design (slice 1, remaining-window CENTER correction, DB-only, fail-open):
 - Non-day0 path byte-identical. HK oracle_truncate preimage untouched (transform handles).
 Status: implementer dispatched (worktree). Baseline: tests/test_finite_evidence_probability_symmetry.py
 + test_staleness_variance_serving.py + materializer suites green at ceb55a796/cf2405d9f.
+
+## DAY0 AUDIT FIX QUEUE STATUS (2026-07-18 late, Fable session)
+LANDED (each TDD, suites green, coworker-interleaved tree — pathspec commits):
+- [x] H-1 cancel sweep durable truth (world_conn=conn)  ceb55a796
+- [x] H-2 submit-time bin-death recheck (day0_entry_bin_still_alive -> DAY0_SUBMIT_TIME_BIN_DEAD seam gate)  ceb55a796
+- [x] M-8 durable extreme settlement-rounded pre-verdict  4a3379783
+- [x] M-12 strict quote>observation ordering; dead input-correctness module deleted  7eb03a29a
+- [x] T0-1 audit trail: §7 erratum (T0-1 CONFIRMED tier0; §6 refutation was C-unit
+      point-bin parser bug)  cf2405d9f; design a755c1c4d
+IN FLIGHT (background):
+- [ ] T0-1 slice 1 implementer (worktree): remaining-window center delta from
+      day0_hourly_vectors (ecmwf_ifs anchor family) applied to _mu_anchor on the
+      Day0 path only; one probability world (point q + floors + bounds).
+- [ ] T0-1 replay validator (read-only): corrected-center replay vs settled history;
+      accept if post-peak HIGH ratio <=2.0 and pre-peak within [0.6,1.4] of uncorrected.
+QUEUED (design-first, not rushed inline):
+- [ ] M-2/H-3 gap detector: TWO coverage vocabularies exist (observation_client
+      WINDOW_INCOMPLETE vs day0_observation_reader OK/LOW/NO_DATA). Design: compute
+      max inter-sample gap in BOTH producers; degrade only when the hole overlaps the
+      metric's per-city empirical peak/trough window (percity_windows.json from
+      day0_percity_diurnal_timing.md — HIGH 12-16 holds 49/50; LOW trough 3-5am for
+      27/50). This is also the H-3 mitigation for single-pipeline NOAA/HKO cities.
+- [ ] M-1 stale-bound uncertainty margin in monitor belief; M-3 dead circuit breakers
+      (compute or delete); M-7 OK_FAST_ONLY unreachable (wire classifier or narrow
+      policy); M-13 verifier re-proves conditioning from primitives. T0-1 slice 2:
+      persisted remaining-member sigma narrowing (after slice-1 validation).
