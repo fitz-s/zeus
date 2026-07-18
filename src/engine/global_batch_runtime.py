@@ -2106,8 +2106,6 @@ def process_current_global_batch(
             }
         if cancelled("book_epoch_fence"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
-        if superseded("book_epoch_fence"):
-            return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         # The complete q/book/wealth cut is immutable from this point forward.
         # Later global wakes belong to the next epoch. Consulting them again
         # below would starve actuation whenever unrelated books update

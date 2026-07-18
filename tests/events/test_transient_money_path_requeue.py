@@ -246,6 +246,21 @@ def test_qkernel_actual_submit_quality_floor_is_terminal_for_same_event():
     )
 
 
+def test_global_preflight_wrapper_preserves_inner_terminal_disposition():
+    assert not _is_transient_money_path_reason(
+        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
+        "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+        "unit_price_out_of_bounds:live order unit price outside absolute "
+        "[0.05, 0.95] submit band: price=0.9990999"
+    )
+
+
+def test_global_preflight_wrapper_preserves_inner_transient_disposition():
+    assert _is_transient_money_path_reason(
+        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:EXECUTABLE_SNAPSHOT_STALE"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reactor-level relationship tests
 # ---------------------------------------------------------------------------

@@ -4198,6 +4198,13 @@ TERMINAL_MONEY_PATH_REASONS: frozenset[str] = (
     _registry_terminal_money_path_reasons() | _RUNTIME_TERMINAL_MONEY_PATH_REASONS
 )
 
+# These wrappers add batch disposition context but no retry semantics of their
+# own. Classify their inner reason so a completed economic rejection is not
+# turned into an unknown-base transient and replayed on every fresh wake.
+_TRANSPARENT_MONEY_PATH_REASON_WRAPPERS: frozenset[str] = frozenset({
+    "GLOBAL_PREFLIGHT_BATCH_BLOCKED",
+})
+
 
 def _money_path_reason_base(reason: str) -> str:
     """The classifier key for a reason: text before the first ':' (the qualified
@@ -4347,10 +4354,11 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
          a transient cause ANYWHERE in the chain means "re-decide on a fresh
          substrate" and wins. This is an EXPLICIT segment membership check, not a
          substring scan — each segment is matched against the closed transient set.
-      3. EDLI_LIVE_CERTIFICATE_BUILD_FAILED:* -> named sub-classifier
+      3. Transparent batch wrapper -> classify its inner reason.
+      4. EDLI_LIVE_CERTIFICATE_BUILD_FAILED:* -> named sub-classifier
          (would_cross_book / db-lock = TRANSIENT; else TERMINAL).
-      4. base in TERMINAL_MONEY_PATH_REASONS  -> TERMINAL.
-      5. UNKNOWN base -> LOUD log + default TRANSIENT (fail-open to requeue).
+      5. base in TERMINAL_MONEY_PATH_REASONS  -> TERMINAL.
+      6. UNKNOWN base -> LOUD log + default TRANSIENT (fail-open to requeue).
          A renamed/misspelled reason must never silently terminal-burn a
          live-positive-EV event; the loud log is the antibody that gets the
          table fixed. The event still terminalizes correctly later via an
@@ -4366,6 +4374,9 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
     if any(seg in TRANSIENT_MONEY_PATH_REASONS for seg in segments):
         return True
     base = _money_path_reason_base(reason)
+    if base in _TRANSPARENT_MONEY_PATH_REASON_WRAPPERS:
+        inner = reason.partition(":")[2].strip()
+        return _is_transient_money_path_reason(inner)
     if base == "EDLI_LIVE_CERTIFICATE_BUILD_FAILED":
         return _certificate_build_failed_is_transient(reason)
     if base in TERMINAL_MONEY_PATH_REASONS:
