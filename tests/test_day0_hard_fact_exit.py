@@ -843,8 +843,7 @@ class TestRestingOrderCancel:
         """H-2 (Day0 first-principles audit 2026-07-18): the submit-time re-check.
         A selected Day0 bin whose survival edge the running extreme has crossed in
         the select→submit window must be refused at submit (False); an alive bin,
-        a missing extreme (fail-soft), and a paused family (anomaly lane owns it)
-        all return True (no NEW authority to block on)."""
+        or missing extreme abstains, while a current anomaly pause refuses submit."""
         _set_metar_memo(monkeypatch, 26)
         # dead: extreme 26 beyond 25-point bin for buy_yes
         assert day0_entry_bin_still_alive(
@@ -868,21 +867,47 @@ class TestRestingOrderCancel:
         ) is False
         # no extreme available: fail-soft True (existing gates own freshness)
         _set_metar_memo(monkeypatch, None)
-        monkeypatch.setattr(
-            "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
-            lambda city, target_date, now: (None, None),
-        )
         assert day0_entry_bin_still_alive(
             city=_tokyo(), target_date="2026-06-10", metric="high",
             direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
         ) is True
-        # paused family: anomaly lane owns the family; this gate abstains
+        # paused family: a pause appearing after selection must refuse final submit
         _set_metar_memo(monkeypatch, 26)
         flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="test")
         assert day0_entry_bin_still_alive(
             city=_tokyo(), target_date="2026-06-10", metric="high",
             direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
-        ) is True
+        ) is False
+
+    def test_entry_bin_submit_recheck_uses_durable_truth_without_network(self, monkeypatch):
+        """Cold submit reads the caller's durable monotone fact and never fetches WU."""
+
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("submit recheck must not call WU")
+            ),
+        )
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """CREATE TABLE observation_instants (
+                city TEXT, target_date TEXT, source TEXT, timezone_name TEXT,
+                local_timestamp TEXT, utc_timestamp TEXT, running_max REAL,
+                running_min REAL, authority TEXT, causality_status TEXT,
+                temperature_metric TEXT)"""
+        )
+        conn.execute(
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("Tokyo", "2026-06-10", "wu_icao_history", "Asia/Tokyo",
+             "2026-06-10T13:00:00+09:00", "2026-06-10T04:00:00+00:00",
+             26.0, 20.0, "VERIFIED", "OK", None),
+        )
+
+        assert day0_entry_bin_still_alive(
+            city=_tokyo(), target_date="2026-06-10", metric="high",
+            direction="buy_yes", bin_low=25.0, bin_high=25.0, now=NOW,
+            world_conn=conn,
+        ) is False
 
     def test_cancel_sweep_consults_durable_observation_instants_when_memos_cold(self, monkeypatch):
         """H-1 (Day0 first-principles audit 2026-07-18): after a restart the WU-API

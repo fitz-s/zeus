@@ -15660,6 +15660,7 @@ def _day0_live_submit_admission_rejection_reason(
     authority_witness: PreSubmitAuthorityWitness,
     order_mode: str,
     decision_time: datetime,
+    world_conn: sqlite3.Connection | None = None,
 ) -> str | None:
     """Apply the Day0 live-admission predicate at the final submit seam."""
 
@@ -15748,6 +15749,7 @@ def _day0_live_submit_admission_rejection_reason(
                 bin_low=_h2_low,
                 bin_high=_h2_high,
                 now=decision_time,
+                world_conn=world_conn,
             ):
                 return "DAY0_SUBMIT_TIME_BIN_DEAD"
     ctx = Day0AdmissionContext(
@@ -15938,6 +15940,7 @@ def _build_live_execution_command_certificates(
             authority_witness=authority_witness,
             order_mode=order_mode,
             decision_time=decision_time,
+            world_conn=trade_conn,
         )
         if day0_admission_rejection is not None:
             raise ValueError(f"DAY0_LIVE_ADMISSION_REJECTED:{day0_admission_rejection}")

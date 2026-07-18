@@ -581,6 +581,7 @@ def test_day0_submit_gate_hard_fact_recheck_receives_submit_context(monkeypatch)
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.day0_entry_bin_still_alive", _spy
     )
+    world_conn = object()
     reason = _day0_live_submit_admission_rejection_reason(
         event=_day0_event_payload(),
         actionable_payload=_day0_action_payload(
@@ -590,6 +591,7 @@ def test_day0_submit_gate_hard_fact_recheck_receives_submit_context(monkeypatch)
         authority_witness=_day0_submit_witness(),
         order_mode="MAKER",
         decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+        world_conn=world_conn,
     )
     # alive verdict (spy True) does NOT admit by itself — the later gates still
     # run (this buy_no fails one-bin stress), proving the re-check only ADDS a veto.
@@ -600,6 +602,7 @@ def test_day0_submit_gate_hard_fact_recheck_receives_submit_context(monkeypatch)
     assert float(seen["bin_low"]) == 32.0 and float(seen["bin_high"]) == 33.0
     assert getattr(seen["city"], "name", "") == "Manila"
     assert seen["now"] == datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
+    assert seen["world_conn"] is world_conn
 
 
 @pytest.mark.parametrize(

@@ -559,6 +559,7 @@ def settlement_grade_effective_extreme(
     metric: str,
     now: datetime,
     world_conn: Any = None,
+    durable_only: bool = False,
 ) -> tuple[Optional[float], str]:
     """(effective_extreme, source) for hard-fact decisions, margin-adjusted.
 
@@ -574,7 +575,11 @@ def settlement_grade_effective_extreme(
     """
     city_name = str(getattr(city, "name", "") or "")
     unit = str(getattr(city, "settlement_unit", "F") or "F").upper()
-    wu_high, wu_low = _wu_rounded_extremes(city, target_date, now=now)
+    wu_high, wu_low = (
+        (None, None)
+        if durable_only
+        else _wu_rounded_extremes(city, target_date, now=now)
+    )
     durable_high, durable_low, durable_source = _durable_observation_instants_extremes(
         city=city,
         target_date=target_date,
@@ -635,11 +640,10 @@ def day0_entry_bin_still_alive(
 
     Selection-time truth != submit-time truth: between selection and submit the
     running extreme can cross the selected bin's survival edge. This asks the SAME
-    settlement-grade extreme + verdict the exit/cancel lanes use whether the entry
-    side is now structurally DEAD. Returns False ONLY on a positive dead verdict
-    (EXIT_DEAD_BIN for this side); True on no-extreme / paused family / any error —
-    freshness and anomaly authority stay with their own gates, this one only adds
-    the absorbing-boundary fact.
+    durable settlement-grade extreme + verdict the exit/cancel lanes use whether
+    the entry side is now structurally DEAD. The final submit seam must not add a
+    network request: durable monotone extrema are sufficient to prove death, while
+    absence of such a fact abstains. A current anomaly pause also refuses submit.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     try:
@@ -647,10 +651,11 @@ def day0_entry_bin_still_alive(
 
         city_name = str(getattr(city, "name", "") or "")
         if is_day0_family_paused(city_name, target_date, now=moment):
-            return True
+            return False
         effective, _source = settlement_grade_effective_extreme(
             city=city, target_date=target_date, metric=metric, now=moment,
             world_conn=world_conn,
+            durable_only=True,
         )
         if effective is None:
             return True
