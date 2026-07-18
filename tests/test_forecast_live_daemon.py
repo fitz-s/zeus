@@ -1082,6 +1082,52 @@ def test_reactor_wake_queue_skips_locally_owned_attempt(tmp_path) -> None:
     )
 
 
+def test_reactor_wake_queue_parses_only_new_immutable_files(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    for index in range(3):
+        reactor_wake.publish_reactor_wake(
+            source="price",
+            reason="market_price_advanced",
+            path=path,
+            wake_id=f"wake-{index}",
+            published_at=datetime(
+                2026, 7, 16, 12, 0, index, tzinfo=timezone.utc
+            ),
+        )
+    queue_dir = reactor_wake._wake_queue_dir(path)
+    with reactor_wake._WAKE_QUEUE_CACHE_LOCK:
+        reactor_wake._WAKE_QUEUE_CACHE.pop(queue_dir, None)
+        reactor_wake._WAKE_QUEUE_REVISIONS.pop(queue_dir, None)
+    original_read = reactor_wake._read_reactor_wake_path
+    parsed: list[Path] = []
+
+    def record_read(queue_file: Path):
+        parsed.append(queue_file)
+        return original_read(queue_file)
+
+    monkeypatch.setattr(reactor_wake, "_read_reactor_wake_path", record_read)
+
+    assert reactor_wake.read_reactor_wake(path=path) is not None
+    assert len(parsed) == 3
+    assert reactor_wake.read_reactor_wake(path=path) is not None
+    assert len(parsed) == 3
+
+    reactor_wake.publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="wake-new",
+        published_at=datetime(2026, 7, 16, 12, 1, tzinfo=timezone.utc),
+    )
+    assert reactor_wake.read_reactor_wake(path=path) is not None
+    assert len(parsed) == 4
+
+
 def test_reactor_wake_coalesces_same_reason_until_ordering_barrier(tmp_path) -> None:
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wakes,

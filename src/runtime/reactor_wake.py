@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import tempfile
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -25,6 +26,9 @@ URGENT_WAKE_REASONS = frozenset(
         "market_price_advanced",
     }
 )
+_WAKE_QUEUE_CACHE_LOCK = threading.Lock()
+_WAKE_QUEUE_CACHE: dict[Path, dict[Path, ReactorWake | None]] = {}
+_WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
 
 
 @dataclass(frozen=True)
@@ -248,16 +252,66 @@ def _read_reactor_wake_path(path: Path) -> ReactorWake | None:
     return wake
 
 
-def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
+def _wake_queue_revision(
+    queue_dir: Path,
+    *,
+    path: Path | None,
+) -> tuple[int, ...] | None:
     try:
-        queue_files = sorted(_wake_queue_dir(path).glob("*.json"))
+        stat = queue_dir.stat()
+    except OSError:
+        return None
+    try:
+        legacy = _wake_path(path).stat()
+        legacy_revision = (legacy.st_ino, legacy.st_mtime_ns, legacy.st_size)
+    except OSError:
+        legacy_revision = (0, 0, 0)
+    return (
+        stat.st_ino,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        *legacy_revision,
+    )
+
+
+def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
+    """Read immutable queue files once, then refresh only on durable revision change."""
+
+    queue_dir = _wake_queue_dir(path)
+    revision = _wake_queue_revision(queue_dir, path=path)
+    if revision is None:
+        return []
+    cached_snapshot: dict[Path, ReactorWake | None] | None = None
+    with _WAKE_QUEUE_CACHE_LOCK:
+        if _WAKE_QUEUE_REVISIONS.get(queue_dir) == revision:
+            cached_snapshot = _WAKE_QUEUE_CACHE.get(queue_dir, {})
+    if cached_snapshot is not None:
+        return [
+            (queue_file, wake)
+            for queue_file, wake in cached_snapshot.items()
+            if wake is not None
+        ]
+    try:
+        queue_files = sorted(queue_dir.glob("*.json"))
     except OSError:
         return []
-    return [
-        (queue_file, wake)
-        for queue_file in queue_files
-        if (wake := _read_reactor_wake_path(queue_file)) is not None
-    ]
+    with _WAKE_QUEUE_CACHE_LOCK:
+        cached = dict(_WAKE_QUEUE_CACHE.get(queue_dir, {}))
+    fresh: dict[Path, ReactorWake | None] = {}
+    for queue_file in queue_files:
+        fresh[queue_file] = (
+            cached[queue_file]
+            if queue_file in cached
+            else _read_reactor_wake_path(queue_file)
+        )
+    current_revision = _wake_queue_revision(queue_dir, path=path)
+    with _WAKE_QUEUE_CACHE_LOCK:
+        _WAKE_QUEUE_CACHE[queue_dir] = fresh
+        if current_revision == revision:
+            _WAKE_QUEUE_REVISIONS[queue_dir] = revision
+        else:
+            _WAKE_QUEUE_REVISIONS.pop(queue_dir, None)
+    return [(queue_file, wake) for queue_file, wake in fresh.items() if wake is not None]
 
 
 def read_reactor_wake(
