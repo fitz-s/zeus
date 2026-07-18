@@ -647,6 +647,23 @@ def _current_global_book_asset_state(
     CurrentGlobalBookAsset | None,
     CurrentGlobalSellAsset | None,
 ]:
+    unavailable_reason = str(
+        metadata.get("_global_current_gamma_unavailable") or ""
+    ).strip()
+    if unavailable_reason:
+        state = (
+            family_key,
+            bin_id,
+            condition_id,
+            side,
+            token_id,
+            "VENUE_METADATA_UNAVAILABLE",
+            "metadata-unavailable:"
+            + hashlib.sha256(unavailable_reason.encode("utf-8")).hexdigest(),
+            "",
+            "",
+        )
+        return state, None, None
     if not metadata.get("_global_current_gamma") and bool(
         metadata.get("snapshot_invalidated")
     ):
@@ -1275,8 +1292,9 @@ def bind_current_global_probability_tokens(
     checked_at_utc: datetime | None = None,
     max_workers: int = 8,
     metadata_sink: dict[tuple[str, str], Mapping[str, object]] | None = None,
+    isolate_metadata_failures: bool = False,
 ) -> Mapping[str, FamilyPayoffWitness]:
-    """Bind tokens and, when requested, current Gamma tradeability metadata."""
+    """Bind current Gamma metadata, optionally containing failures by family."""
 
     missing_by_family = {
         family_key: witness
@@ -1357,6 +1375,49 @@ def bind_current_global_probability_tokens(
     from concurrent.futures import ThreadPoolExecutor
     from src.data.market_scanner import _boolish_market_field, _extract_outcomes
 
+    family_errors: dict[str, str] = {}
+
+    def _record_family_error(family_key: str, exc: object) -> None:
+        reason = (
+            str(exc)
+            if isinstance(exc, ValueError) and str(exc)
+            else f"{type(exc).__name__}:{exc}"
+        )
+        family_errors.setdefault(family_key, reason)
+        logging.getLogger(__name__).warning(
+            "global Gamma metadata unavailable: family=%s reason=%s",
+            family_key,
+            reason,
+        )
+
+    def _mark_family_metadata_unavailable(
+        family_key: str,
+        witness: FamilyPayoffWitness,
+    ) -> None:
+        if metadata_sink is None:
+            return
+        reason = family_errors[family_key]
+        for binding in witness.bindings:
+            yes = str(binding.yes_token_id or "").strip()
+            no = str(binding.no_token_id or "").strip()
+            if not yes or not no:
+                continue
+            base = {
+                "condition_id": binding.condition_id,
+                "yes_token_id": yes,
+                "no_token_id": no,
+                "_global_current_gamma": True,
+                "_global_current_gamma_unavailable": reason,
+            }
+            metadata_sink[(binding.condition_id, yes)] = {
+                **base,
+                "selected_outcome_token_id": yes,
+            }
+            metadata_sink[(binding.condition_id, no)] = {
+                **base,
+                "selected_outcome_token_id": no,
+            }
+
     def _family_slug(witness: FamilyPayoffWitness) -> str:
         condition_ids = tuple(binding.condition_id for binding in witness.bindings)
         placeholders = ",".join("?" for _ in condition_ids)
@@ -1417,17 +1478,74 @@ def bind_current_global_probability_tokens(
                 )
             return out
 
-        market_by_condition = _market_map(
-            get_gamma_markets(condition_ids),
-            requested_conditions,
-            require_complete=False,
-        )
+        condition_family = {
+            binding.condition_id: family_key
+            for family_key, witness in remote_work_by_family.items()
+            for binding in witness.bindings
+        }
+
+        def _isolated_market_map(
+            rows: Sequence[Mapping[str, object]],
+        ) -> dict[str, Mapping[str, object]]:
+            out: dict[str, Mapping[str, object]] = {}
+            for market in rows:
+                if not isinstance(market, Mapping):
+                    logging.getLogger(__name__).warning(
+                        "global Gamma ignored unattributed malformed market"
+                    )
+                    continue
+                condition_id = str(market.get("conditionId") or "").strip()
+                family_key = condition_family.get(condition_id)
+                if family_key is None:
+                    logging.getLogger(__name__).warning(
+                        "global Gamma ignored unexpected market: condition=%s",
+                        condition_id or "<missing>",
+                    )
+                    continue
+                if condition_id in out:
+                    _record_family_error(
+                        family_key,
+                        ValueError(
+                            "GLOBAL_CURRENT_GAMMA_MARKET_AMBIGUOUS:"
+                            f"{condition_id}"
+                        ),
+                    )
+                    out.pop(condition_id, None)
+                    continue
+                if family_key not in family_errors:
+                    out[condition_id] = market
+            return out
+
+        if isolate_metadata_failures:
+            try:
+                batch_rows = get_gamma_markets(condition_ids)
+            except Exception as exc:  # noqa: BLE001 - shared Gamma boundary
+                for family_key in remote_work_by_family:
+                    _record_family_error(family_key, exc)
+                batch_rows = ()
+            market_by_condition = _isolated_market_map(batch_rows)
+        else:
+            market_by_condition = _market_map(
+                get_gamma_markets(condition_ids),
+                requested_conditions,
+                require_complete=False,
+            )
         batch_missing = requested_conditions.difference(market_by_condition)
         if batch_missing and get_gamma_event is None:
-            raise ValueError(
-                "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
-                + ",".join(sorted(batch_missing))
-            )
+            if not isolate_metadata_failures:
+                raise ValueError(
+                    "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
+                    + ",".join(sorted(batch_missing))
+                )
+            for condition_id in batch_missing:
+                family_key = condition_family[condition_id]
+                _record_family_error(
+                    family_key,
+                    ValueError(
+                        "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
+                        f"{condition_id}"
+                    ),
+                )
 
         def _family_event_map(
             family_key: str,
@@ -1458,6 +1576,8 @@ def bind_current_global_probability_tokens(
             return event_by_id, metadata_ambiguous
 
         for family_key, witness in remote_work_by_family.items():
+            if family_key in family_errors:
+                continue
             family_condition_ids = tuple(
                 binding.condition_id for binding in witness.bindings
             )
@@ -1465,20 +1585,36 @@ def bind_current_global_probability_tokens(
                 market_by_condition
             )
             if missing_family_conditions:
-                event = get_gamma_event(_family_slug(witness))
+                try:
+                    event = get_gamma_event(_family_slug(witness))
+                except Exception as exc:  # noqa: BLE001 - family Gamma boundary
+                    if not isolate_metadata_failures:
+                        raise
+                    _record_family_error(family_key, exc)
+                    continue
                 if not isinstance(event, Mapping):
-                    raise ValueError(
+                    error = ValueError(
                         f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}"
                     )
+                    if not isolate_metadata_failures:
+                        raise error
+                    _record_family_error(family_key, error)
+                    continue
                 events[family_key] = event
                 continue
             family_markets = tuple(
                 market_by_condition[binding.condition_id]
                 for binding in witness.bindings
             )
-            event_by_id, metadata_ambiguous = _family_event_map(
-                family_key, family_markets
-            )
+            try:
+                event_by_id, metadata_ambiguous = _family_event_map(
+                    family_key, family_markets
+                )
+            except ValueError as exc:
+                if not isolate_metadata_failures:
+                    raise
+                _record_family_error(family_key, exc)
+                continue
             if metadata_ambiguous:
                 # A family can straddle the public Gamma batch boundary.  Its
                 # embedded event decoration may then come from two adjacent API
@@ -1486,25 +1622,39 @@ def bind_current_global_probability_tokens(
                 # Recapture that exact family once in one request; never accept
                 # the mixed snapshot and never fall back to cached metadata.
                 family_expected = frozenset(family_condition_ids)
-                refreshed = _market_map(
-                    get_gamma_markets(family_condition_ids), family_expected
-                )
-                family_markets = tuple(
-                    refreshed[condition_id]
-                    for condition_id in family_condition_ids
-                )
-                event_by_id, metadata_ambiguous = _family_event_map(
-                    family_key, family_markets
-                )
+                try:
+                    refreshed = _market_map(
+                        get_gamma_markets(family_condition_ids), family_expected
+                    )
+                    family_markets = tuple(
+                        refreshed[condition_id]
+                        for condition_id in family_condition_ids
+                    )
+                    event_by_id, metadata_ambiguous = _family_event_map(
+                        family_key, family_markets
+                    )
+                except Exception as exc:  # noqa: BLE001 - family Gamma recapture
+                    if not isolate_metadata_failures:
+                        raise
+                    _record_family_error(family_key, exc)
+                    continue
                 if metadata_ambiguous:
-                    raise ValueError(
+                    error = ValueError(
                         "GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS:"
                         f"{family_key}"
                     )
+                    if not isolate_metadata_failures:
+                        raise error
+                    _record_family_error(family_key, error)
+                    continue
             if len(event_by_id) != 1:
-                raise ValueError(
+                error = ValueError(
                     f"GLOBAL_CURRENT_GAMMA_EVENT_IDENTITY_AMBIGUOUS:{family_key}"
                 )
+                if not isolate_metadata_failures:
+                    raise error
+                _record_family_error(family_key, error)
+                continue
             event = next(iter(event_by_id.values()))
             events[family_key] = {
                 **event,
@@ -1520,7 +1670,12 @@ def bind_current_global_probability_tokens(
             )
             if tokens_bound and not refresh_metadata:
                 continue
-            slug_by_family[family_key] = _family_slug(witness)
+            try:
+                slug_by_family[family_key] = _family_slug(witness)
+            except ValueError as exc:
+                if not isolate_metadata_failures:
+                    raise
+                _record_family_error(family_key, exc)
         if slug_by_family:
             if get_gamma_event is None:
                 raise ValueError("GLOBAL_GAMMA_EVENT_READER_MISSING")
@@ -1534,11 +1689,20 @@ def bind_current_global_probability_tokens(
                     for family_key, slug in slug_by_family.items()
                 }
                 for family_key, future in futures.items():
-                    events[family_key] = future.result()
+                    try:
+                        events[family_key] = future.result()
+                    except Exception as exc:  # noqa: BLE001 - family Gamma boundary
+                        if not isolate_metadata_failures:
+                            raise
+                        _record_family_error(family_key, exc)
 
     rebound: dict[str, FamilyPayoffWitness] = {}
     for family_key, witness in probability_witnesses.items():
         if family_key not in work_by_family:
+            rebound[family_key] = witness
+            continue
+        if family_key in family_errors:
+            _mark_family_metadata_unavailable(family_key, witness)
             rebound[family_key] = witness
             continue
         event = events.get(family_key)
@@ -1547,16 +1711,35 @@ def bind_current_global_probability_tokens(
             and event is None
             and family_key not in local_metadata_family_keys
         ):
-            raise ValueError(f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}")
+            error = ValueError(f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}")
+            if not isolate_metadata_failures:
+                raise error
+            _record_family_error(family_key, error)
+            _mark_family_metadata_unavailable(family_key, witness)
+            rebound[family_key] = witness
+            continue
         condition_ids = {binding.condition_id for binding in witness.bindings}
         token_map = {
             condition_id: pair
             for condition_id, pair in local_tokens.items()
             if condition_id in condition_ids
         }
+        family_metadata_sink = (
+            {} if isolate_metadata_failures and metadata_sink is not None
+            else metadata_sink
+        )
         if event is not None:
             metadata_conditions: set[str] = set()
-            for outcome in _extract_outcomes(dict(event)):
+            try:
+                outcomes = _extract_outcomes(dict(event))
+            except Exception as exc:  # noqa: BLE001 - family metadata parser
+                if not isolate_metadata_failures:
+                    raise
+                _record_family_error(family_key, exc)
+                _mark_family_metadata_unavailable(family_key, witness)
+                rebound[family_key] = witness
+                continue
+            for outcome in outcomes:
                 condition_id = str(outcome.get("condition_id") or "").strip()
                 yes = str(outcome.get("token_id") or "").strip()
                 no = str(outcome.get("no_token_id") or "").strip()
@@ -1564,21 +1747,35 @@ def bind_current_global_probability_tokens(
                     pair = (yes, no)
                     previous = token_map.get(condition_id)
                     if previous is not None and previous != pair:
-                        raise ValueError(
+                        error = ValueError(
                             f"GLOBAL_TOKEN_IDENTITY_CONFLICT:{condition_id}"
                         )
+                        if not isolate_metadata_failures:
+                            raise error
+                        _record_family_error(family_key, error)
+                        break
                     token_map[condition_id] = pair
-                    if metadata_sink is not None:
+                    if family_metadata_sink is not None:
                         raw = outcome.get("gamma_market_raw")
                         if not isinstance(raw, Mapping):
-                            raise ValueError(
+                            error = ValueError(
                                 f"GLOBAL_GAMMA_MARKET_METADATA_MISSING:{condition_id}"
                             )
-                        fee_details = fee_details_from_gamma_fee_schedule(
-                            raw.get("feeSchedule"),
-                            source="global_current_gamma_fee_schedule",
-                            fee_type=str(raw.get("feeType") or "") or None,
-                        )
+                            if not isolate_metadata_failures:
+                                raise error
+                            _record_family_error(family_key, error)
+                            break
+                        try:
+                            fee_details = fee_details_from_gamma_fee_schedule(
+                                raw.get("feeSchedule"),
+                                source="global_current_gamma_fee_schedule",
+                                fee_type=str(raw.get("feeType") or "") or None,
+                            )
+                        except Exception as exc:  # noqa: BLE001 - family fee metadata
+                            if not isolate_metadata_failures:
+                                raise
+                            _record_family_error(family_key, exc)
+                            break
                         enable_orderbook = _boolish_market_field(
                             raw,
                             "enableOrderBook",
@@ -1645,23 +1842,51 @@ def bind_current_global_probability_tokens(
                             "_global_current_gamma": True,
                         }
                         metadata_conditions.add(condition_id)
-                        metadata_sink[(condition_id, yes)] = {
+                        family_metadata_sink[(condition_id, yes)] = {
                             **base,
                             "selected_outcome_token_id": yes,
                         }
-                        metadata_sink[(condition_id, no)] = {
+                        family_metadata_sink[(condition_id, no)] = {
                             **base,
                             "selected_outcome_token_id": no,
                         }
-            if metadata_sink is not None and metadata_conditions != condition_ids:
+            if family_key in family_errors:
+                _mark_family_metadata_unavailable(family_key, witness)
+                rebound[family_key] = witness
+                continue
+            if (
+                family_metadata_sink is not None
+                and metadata_conditions != condition_ids
+            ):
                 missing = ",".join(sorted(condition_ids - metadata_conditions))
-                raise ValueError(
+                error = ValueError(
                     f"GLOBAL_CURRENT_GAMMA_METADATA_INCOMPLETE:{family_key}:{missing}"
                 )
-        rebound[family_key] = _rebind_probability_witness_tokens(
-            witness,
-            token_map_by_condition=token_map,
-        )
+                if not isolate_metadata_failures:
+                    raise error
+                _record_family_error(family_key, error)
+                _mark_family_metadata_unavailable(family_key, witness)
+                rebound[family_key] = witness
+                continue
+        try:
+            bound = _rebind_probability_witness_tokens(
+                witness,
+                token_map_by_condition=token_map,
+            )
+        except Exception as exc:  # noqa: BLE001 - family token binding boundary
+            if not isolate_metadata_failures:
+                raise
+            _record_family_error(family_key, exc)
+            _mark_family_metadata_unavailable(family_key, witness)
+            rebound[family_key] = witness
+            continue
+        if (
+            isolate_metadata_failures
+            and metadata_sink is not None
+            and family_metadata_sink is not None
+        ):
+            metadata_sink.update(family_metadata_sink)
+        rebound[family_key] = bound
     return rebound
 
 

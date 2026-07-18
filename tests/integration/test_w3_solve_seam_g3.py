@@ -336,6 +336,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "EXECUTABLE": 0,
             "NO_ASK": 2,
             "VENUE_METADATA_STALE": 0,
+            "VENUE_METADATA_UNAVAILABLE": 0,
             "VENUE_NOT_EXECUTABLE": 0,
         },
         "YES": {
@@ -343,6 +344,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "EXECUTABLE": 1,
             "NO_ASK": 0,
             "VENUE_METADATA_STALE": 0,
+            "VENUE_METADATA_UNAVAILABLE": 0,
             "VENUE_NOT_EXECUTABLE": 1,
         },
     }
@@ -9679,6 +9681,165 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
                 2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc
             ),
         )
+
+
+def test_current_gamma_isolates_malformed_family_without_shrinking_universe(
+    monkeypatch,
+):
+    probability = _current_global_book_probability()
+    family_bad = SimpleNamespace(
+        family_key="family-bad",
+        bindings=tuple(probability.bindings[:1]),
+    )
+    family_good = SimpleNamespace(
+        family_key="family-good",
+        bindings=tuple(probability.bindings[1:]),
+    )
+    assert family_good.bindings
+    monkeypatch.setattr(
+        universe,
+        "_rebind_probability_witness_tokens",
+        lambda witness, **_kwargs: witness,
+    )
+    monkeypatch.setattr(
+        universe,
+        "actionable_family_payoff_bindings",
+        lambda witness: witness.bindings,
+    )
+
+    def gamma_market(binding, family_key, *, malformed=False):
+        market = {
+            "conditionId": binding.condition_id,
+            "id": f"market-{binding.condition_id}",
+            "clobTokenIds": [binding.yes_token_id, binding.no_token_id],
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": ["0.5", "0.5"],
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+            "active": True,
+            "closed": False,
+            "feeSchedule": {
+                "exponent": 1,
+                "rate": 0.05,
+                "takerOnly": True,
+                "rebateRate": 0.25,
+            },
+            "orderPriceMinTickSize": "0.01",
+            "orderMinSize": "5",
+        }
+        if not malformed:
+            market["events"] = [
+                {
+                    "id": f"event-{family_key}",
+                    "slug": f"slug-{family_key}",
+                    "endDate": "2026-07-14T12:00:00Z",
+                }
+            ]
+        return market
+
+    batch = (
+        gamma_market(family_bad.bindings[0], family_bad.family_key, malformed=True),
+        *(
+            gamma_market(binding, family_good.family_key)
+            for binding in family_good.bindings
+        ),
+    )
+    metadata = {}
+    rebound = universe.bind_current_global_probability_tokens(
+        sqlite3.connect(":memory:"),
+        probability_witnesses={
+            family_bad.family_key: family_bad,
+            family_good.family_key: family_good,
+        },
+        get_gamma_event=lambda _slug: pytest.fail(
+            "complete batch must not amplify into event requests"
+        ),
+        get_gamma_markets=lambda _conditions: batch,
+        metadata_sink=metadata,
+        isolate_metadata_failures=True,
+    )
+
+    assert set(rebound) == {family_bad.family_key, family_good.family_key}
+    assert {
+        row.get("_global_current_gamma_unavailable")
+        for (condition_id, _token), row in metadata.items()
+        if condition_id == family_bad.bindings[0].condition_id
+    } == {f"GLOBAL_CURRENT_GAMMA_EVENT_INVALID:{family_bad.family_key}"}
+    assert all(
+        not row.get("_global_current_gamma_unavailable")
+        for (condition_id, _token), row in metadata.items()
+        if condition_id in {
+            binding.condition_id for binding in family_good.bindings
+        }
+    )
+
+    requested = []
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+    epoch = capture_current_global_book_epoch(
+        _global_book_metadata_conn(probability),
+        probability_witnesses={
+            family_bad.family_key: family_bad,
+            family_good.family_key: family_good,
+        },
+        get_books=lambda tokens: (
+            requested.extend(tokens)
+            or {
+                token: {
+                    "asset_id": token,
+                    "bids": [{"price": "0.20", "size": "100"}],
+                    "asks": [{"price": "0.30", "size": "100"}],
+                }
+                for token in tokens
+            }
+        ),
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        metadata_overrides=metadata,
+    )
+    assert not set(requested).intersection(
+        {
+            family_bad.bindings[0].yes_token_id,
+            family_bad.bindings[0].no_token_id,
+        }
+    )
+    assert {
+        state[5]
+        for state in epoch.asset_states
+        if state[0] == family_bad.family_key
+    } == {"VENUE_METADATA_UNAVAILABLE"}
+    assert {
+        state[5]
+        for state in epoch.asset_states
+        if state[0] == family_good.family_key
+    } == {"EXECUTABLE"}
+
+    timeout_metadata = {}
+    timeout_event_calls = []
+
+    def timeout_markets(_conditions):
+        raise TimeoutError("batch timed out")
+
+    timeout_rebound = universe.bind_current_global_probability_tokens(
+        sqlite3.connect(":memory:"),
+        probability_witnesses={
+            family_bad.family_key: family_bad,
+            family_good.family_key: family_good,
+        },
+        get_gamma_event=lambda slug: timeout_event_calls.append(slug),
+        get_gamma_markets=timeout_markets,
+        metadata_sink=timeout_metadata,
+        isolate_metadata_failures=True,
+    )
+    assert set(timeout_rebound) == {family_bad.family_key, family_good.family_key}
+    assert timeout_event_calls == []
+    assert len(timeout_metadata) == 2 * sum(
+        len(family.bindings) for family in (family_bad, family_good)
+    )
+    assert {
+        row.get("_global_current_gamma_unavailable")
+        for row in timeout_metadata.values()
+    } == {"TimeoutError:batch timed out"}
 
 
 def test_global_scope_is_independent_of_the_reactor_page_and_current_q_identity():
