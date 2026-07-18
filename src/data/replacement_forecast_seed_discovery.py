@@ -615,6 +615,46 @@ def _seed_target_sort_key(
     )
 
 
+def _unchanged_blocked_seed_attempt(
+    *,
+    seed: Mapping[str, object],
+    seed_file: Path,
+    forecast_db: Path | str,
+) -> bool:
+    """Skip recovery work whose materialization inputs still match a known block.
+
+    The queue already persists an input fingerprint after a live posterior is
+    blocked.  Recovery discovery must consult the same fingerprint before it
+    spends its bounded write budget; otherwise the first alphabetical blocked
+    families are recreated forever and later seedable families never run.
+    Unknown state fails open so changed or unreadable inputs are retried.
+    """
+
+    try:
+        from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+            _blocked_attempt_state,
+        )
+        from src.data.replacement_forecast_materialization_request_builder import (  # noqa: PLC0415
+            build_replacement_forecast_materialization_request,
+        )
+
+        result = build_replacement_forecast_materialization_request(
+            seed,
+            base_dir=seed_file.parent,
+        )
+        if not result.ok or result.request is None:
+            return False
+        _marker, _fingerprint, unchanged = _blocked_attempt_state(
+            marker_dir=seed_file.parent.parent / "blocked_attempts",
+            input_json=seed_file,
+            payload=result.request,
+            forecast_db=forecast_db,
+        )
+        return bool(unchanged)
+    except Exception:  # noqa: BLE001 - unknown fingerprint state must retry
+        return False
+
+
 def discover_replacement_forecast_materialization_seeds(
     *,
     forecast_db: Path | str,
@@ -825,6 +865,15 @@ def discover_replacement_forecast_materialization_seeds(
                 reasons.extend(seed_result.reason_codes)
                 continue
             seed_file = seed_path / _seed_name(target, computed_at=computed)
+            if _unchanged_blocked_seed_attempt(
+                seed=seed_result.seed,
+                seed_file=seed_file,
+                forecast_db=forecast_db,
+            ):
+                reasons.append(
+                    "REPLACEMENT_SEED_DISCOVERY_UNCHANGED_BLOCKED_INPUT_SKIPPED"
+                )
+                continue
             write_seed(seed_file, seed_result.seed)
             written.append(str(seed_file))
     finally:

@@ -797,7 +797,7 @@ def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path:
     assert seed["target_date"] == "2026-06-08"
 
 
-def test_seed_discovery_prioritizes_held_position_family_before_alphabetical_targets(
+def test_seed_discovery_prioritizes_held_family_and_skips_unchanged_blocked_budget(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -814,6 +814,11 @@ def test_seed_discovery_prioritizes_held_position_family_before_alphabetical_tar
             ("Amsterdam", "amsterdam-baseline-run", "Europe/Amsterdam"),
             ("Tokyo", "tokyo-baseline-run", "Asia/Tokyo"),
         ):
+            conn.execute(
+                "INSERT INTO source_run VALUES (?, 'ecmwf_open_data', 'mx2t3_high', "
+                "'2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')",
+                (run_id,),
+            )
             for label, low, high in (("69°F or below", None, 69.0), ("70-71°F", 70.0, 71.0)):
                 conn.execute(
                     """
@@ -888,6 +893,27 @@ def test_seed_discovery_prioritizes_held_position_family_before_alphabetical_tar
     )
 
     assert report.status == "DISCOVERED"
+    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
+    assert seed["city"] == "Tokyo"
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._unchanged_blocked_seed_attempt",
+        lambda **kwargs: kwargs["seed"]["city"] == "Amsterdam",
+    )
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-06T04:01:00+00:00",
+        limit=1,
+    )
+
+    assert report.status == "DISCOVERED"
+    assert "REPLACEMENT_SEED_DISCOVERY_UNCHANGED_BLOCKED_INPUT_SKIPPED" in report.reason_codes
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
     assert seed["city"] == "Tokyo"
 
@@ -972,6 +998,11 @@ def test_seed_discovery_does_not_skip_current_source_run_because_stale_replaceme
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
+            "INSERT INTO source_run VALUES ("
+            "'baseline-current-run', 'ecmwf_open_data', 'mx2t3_high', "
+            "'2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')"
+        )
+        conn.execute(
             """
             UPDATE source_run_coverage
             SET source_run_id = 'baseline-current-run',
@@ -1017,7 +1048,7 @@ def test_seed_discovery_does_not_skip_current_source_run_because_stale_replaceme
         computed_at="2026-06-07T09:00:00+00:00",
     )
 
-    assert report.status == "DISCOVERED"
+    assert report.status == "DISCOVERED", report.reason_codes
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
     assert seed["baseline_source_run_id"] == "baseline-current-run"
 

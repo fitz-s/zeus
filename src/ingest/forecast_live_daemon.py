@@ -1160,8 +1160,6 @@ def _replacement_forecast_discovery_revision(
 def _replacement_forecast_materialize_poll_job() -> None:
     """Drain only source-committed work; global discovery has its own lane."""
 
-    global _replacement_forecast_last_discovery_revision
-
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
@@ -1170,10 +1168,6 @@ def _replacement_forecast_materialize_poll_job() -> None:
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     batch_limit = int(cfg["poll_batch_limit"])
-    if requests_pending or seeds_pending:
-        revision = _replacement_forecast_discovery_revision(cfg)
-        if revision is not None:
-            _replacement_forecast_last_discovery_revision = revision
     if requests_pending:
         _replacement_forecast_materialize_job(
             discover=False,
@@ -1211,8 +1205,6 @@ def _replacement_forecast_discovery_job() -> None:
         _replacement_forecast_queue_pending(cfg, key)
         for key in ("request_dir", "seed_dir")
     ):
-        if revision is not None:
-            _replacement_forecast_last_discovery_revision = revision
         return
     report = discover_replacement_forecast_materialization_seeds(
         forecast_db=cfg["forecast_db"],

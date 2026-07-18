@@ -3722,9 +3722,11 @@ def test_venue_point_order_truth_alignment_blocks_unknown_point_status(
     assert result.evidence["risky"][0]["risk"] == "venue_point_order_status_unknown"
 
 
+@pytest.mark.parametrize("point_read_mode", ("unknown", "shape_error_absent"))
 def test_venue_point_order_truth_alignment_boot_recovers_unknown_status_with_positive_trade(
     monkeypatch,
     tmp_path,
+    point_read_mode,
 ):
     trade_db = tmp_path / "zeus_trades.db"
     _init_entry_venue_audit_db(
@@ -3778,7 +3780,13 @@ def test_venue_point_order_truth_alignment_boot_recovers_unknown_status_with_pos
     conn.close()
     monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
     fake_adapter = _FakeVenuePointAdapter({})
-    fake_adapter.get_order = lambda order_id: {"id": order_id, "status": "UNKNOWN"}
+    if point_read_mode == "unknown":
+        fake_adapter.get_order = lambda order_id: {"id": order_id, "status": "UNKNOWN"}
+    else:
+        def _shape_error(_order_id):
+            raise RuntimeError("point-order response requires original_size and size_matched")
+
+        fake_adapter.get_order = _shape_error
     monkeypatch.setattr(
         preflight,
         "_preflight_venue_adapter",
@@ -4532,7 +4540,19 @@ def test_preflight_allows_bpf_capture_transport_degraded_skip(monkeypatch, tmp_p
     assert sidecar["evidence"]["risky"] == []
 
 
-def test_preflight_entry_blocks_forecast_live_heartbeat_missing_replacement_jobs(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("heartbeat_jobs", "expected_ok"),
+    (
+        (["forecast_live_heartbeat"], False),
+        (["forecast_live_heartbeat", "replacement_forecast_live_materialize"], True),
+    ),
+)
+def test_preflight_forecast_heartbeat_requires_only_jobs_owned_by_forecast_live(
+    monkeypatch,
+    tmp_path,
+    heartbeat_jobs,
+    expected_ok,
+):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     fresh = datetime.now(timezone.utc)
     trade = _init_trade_db(trade_db)
@@ -4552,20 +4572,19 @@ def test_preflight_entry_blocks_forecast_live_heartbeat_missing_replacement_jobs
     forecasts.commit()
     forecasts.close()
     heartbeat = json.loads(preflight.FORECAST_LIVE_HEARTBEAT_PATH.read_text())
-    heartbeat["jobs"] = ["forecast_live_heartbeat"]
+    heartbeat["jobs"] = heartbeat_jobs
     preflight.FORECAST_LIVE_HEARTBEAT_PATH.write_text(json.dumps(heartbeat))
 
     result = preflight.evaluate()
 
     assert result["ok"] is True
     sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
-    assert sidecar["ok"] is False
+    assert sidecar["ok"] is expected_ok
     assert sidecar["restart_blocking"] is False
-    assert [row["name"] for row in result["entry_blockers"]] == [
-        "forecast_sidecar_health"
-    ]
+    expected_entry_blockers = [] if expected_ok else ["forecast_sidecar_health"]
+    assert [row["name"] for row in result["entry_blockers"]] == expected_entry_blockers
     risks = {item["risk"] for item in sidecar["evidence"]["risky"]}
-    assert "forecast_live_heartbeat_missing_replacement_jobs" in risks
+    assert ("forecast_live_heartbeat_missing_replacement_jobs" in risks) is not expected_ok
 
 
 def test_preflight_accepts_fresh_running_replacement_forecast_sidecar_job(monkeypatch, tmp_path):

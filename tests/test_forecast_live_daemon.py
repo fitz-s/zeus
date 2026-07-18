@@ -335,7 +335,7 @@ def test_replacement_discovery_runs_outside_materialization_queue(monkeypatch, t
     assert len(calls) == 1
 
 
-def test_replacement_discovery_yields_to_committed_seed(monkeypatch, tmp_path) -> None:
+def test_replacement_discovery_yields_without_consuming_revision(monkeypatch, tmp_path) -> None:
     import src.data.replacement_forecast_production as production
     import src.data.replacement_forecast_seed_discovery as discovery
     import src.ingest.forecast_live_daemon as daemon
@@ -364,12 +364,21 @@ def test_replacement_discovery_yields_to_committed_seed(monkeypatch, tmp_path) -
     monkeypatch.setattr(
         discovery,
         "discover_replacement_forecast_materialization_seeds",
-        lambda **kwargs: calls.append(kwargs),
+        lambda **kwargs: (
+            calls.append(kwargs)
+            or SimpleNamespace(status="NO_ELIGIBLE_TARGETS", reason_codes=())
+        ),
     )
 
     daemon._replacement_forecast_discovery_job.__wrapped__()
 
     assert calls == []
+    assert daemon._replacement_forecast_last_discovery_revision is None
+
+    (seed_dir / "committed.json").unlink()
+    daemon._replacement_forecast_discovery_job.__wrapped__()
+
+    assert len(calls) == 1
     assert daemon._replacement_forecast_last_discovery_revision == ("revision-2",)
 
 

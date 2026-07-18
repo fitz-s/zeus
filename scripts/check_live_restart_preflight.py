@@ -211,7 +211,6 @@ REPLACEMENT_SCHEDULER_HEALTH_JOBS = (
     "replacement_forecast_live_materialize",
 )
 REPLACEMENT_HEARTBEAT_JOBS = (
-    "replacement_forecast_download",
     "replacement_forecast_live_materialize",
 )
 REPLACEMENT_POSTERIOR_SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
@@ -2165,6 +2164,20 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
         for command in venue_read_commands:
             venue_order_id = str(command.get("venue_order_id") or "").strip()
             command_id = str(command.get("command_id") or "").strip()
+            base_item = {
+                "command_id": command_id,
+                "position_id": command.get("position_id"),
+                "command_state": command.get("state"),
+                "venue_order_id": venue_order_id,
+                "position_phase": command.get("position_phase"),
+                "position_shares": command.get("position_shares"),
+                "position_cost_basis_usd": command.get("position_cost_basis_usd"),
+                "position_chain_shares": command.get("position_chain_shares"),
+                "positive_trade_fact_state": command.get("positive_trade_fact_state"),
+                "positive_trade_filled_size": command.get("positive_trade_filled_size"),
+                "positive_trade_fill_price": command.get("positive_trade_fill_price"),
+                "positive_trade_observed_at": command.get("positive_trade_observed_at"),
+            }
             try:
                 payload = _venue_payload(adapter.get_order(venue_order_id))
             except Exception as exc:  # noqa: BLE001
@@ -2182,6 +2195,29 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                     )
                     continue
                 if payload is None:
+                    risk_item = {
+                        **base_item,
+                        "venue_status": "UNKNOWN",
+                        "venue_matched_size": None,
+                        "local_fact_state": str(
+                            command.get("latest_fact_state") or ""
+                        ).strip().upper(),
+                        "local_fact_matched_size": (
+                            _decimal_float(command.get("latest_fact_matched_size")) or 0.0
+                        ),
+                        "local_fact_remaining_size": command.get(
+                            "latest_fact_remaining_size"
+                        ),
+                        "local_fact_observed_at": command.get("latest_fact_observed_at"),
+                        "venue_order": None,
+                        "risk": "venue_point_order_status_unknown",
+                        "point_error": repr(exc),
+                        "open_orders_fallback_match": False,
+                    }
+                    recoverable = _venue_point_order_boot_recoverable(risk_item)
+                    if recoverable is not None:
+                        boot_recoverable.append(recoverable)
+                        continue
                     risky.append(
                         {
                             "command_id": command_id,
@@ -2213,18 +2249,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             local_matched = _decimal_float(command.get("latest_fact_matched_size")) or 0.0
             local_state = str(command.get("latest_fact_state") or "").strip().upper()
             item = {
-                "command_id": command_id,
-                "position_id": command.get("position_id"),
-                "command_state": command.get("state"),
-                "venue_order_id": venue_order_id,
-                "position_phase": command.get("position_phase"),
-                "position_shares": command.get("position_shares"),
-                "position_cost_basis_usd": command.get("position_cost_basis_usd"),
-                "position_chain_shares": command.get("position_chain_shares"),
-                "positive_trade_fact_state": command.get("positive_trade_fact_state"),
-                "positive_trade_filled_size": command.get("positive_trade_filled_size"),
-                "positive_trade_fill_price": command.get("positive_trade_fill_price"),
-                "positive_trade_observed_at": command.get("positive_trade_observed_at"),
+                **base_item,
                 "venue_status": status,
                 "venue_matched_size": venue_matched,
                 "local_fact_state": local_state,
