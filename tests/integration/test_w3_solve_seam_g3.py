@@ -3460,12 +3460,9 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
 
     assert metadata_calls == [
         {metadata_key: metadata for metadata_key in metadata_keys},
-        {metadata_key: metadata for metadata_key in metadata_keys},
     ]
-    assert bind_calls == [True, True]
-    assert refresh_hwm_calls[0] == {}
-    assert set(refresh_hwm_calls[1]) == {"family"}
-    assert refresh_hwm_calls[1]["family"].tzinfo is not None
+    assert bind_calls == [True]
+    assert refresh_hwm_calls == [{}]
 
     urgent_revision["value"] = (7, 8, 9)
     urgent_reason["value"] = "market_price_advanced"
@@ -3958,11 +3955,17 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
 @pytest.mark.parametrize(
     ("condition_a_executable", "expected_book_calls"),
     (
-        (True, [("yes-token-a", "no-token-a")]),
-        (False, []),
+        (
+            True,
+            [("yes-token-a", "no-token-a", "yes-token-b", "no-token-b")],
+        ),
+        (
+            False,
+            [("yes-token-a", "no-token-a", "yes-token-b", "no-token-b")],
+        ),
     ),
 )
-def test_live_adapter_day0_binds_tradeability_before_fetching_executable_books(
+def test_live_adapter_day0_prunes_speculative_books_after_current_tradeability(
     monkeypatch,
     condition_a_executable,
     expected_book_calls,
@@ -4066,7 +4069,6 @@ def test_live_adapter_day0_binds_tradeability_before_fetching_executable_books(
             return False
 
         def get_orderbook_snapshots(self, tokens, **_):
-            assert bind_complete
             book_calls.append(tuple(tokens))
             return {
                 token: {"asset_id": token, "hash": f"hash-{token}"}
@@ -4074,6 +4076,7 @@ def test_live_adapter_day0_binds_tradeability_before_fetching_executable_books(
             }
 
     def fake_capture(_trade_conn, **kwargs):
+        assert bind_complete
         assert set(kwargs["prefetched_books"]) == (
             {"yes-token-a", "no-token-a"}
             if condition_a_executable
@@ -9212,6 +9215,52 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert {
         row["market_end_at"] for row in batch_metadata.values()
     } == {"2026-07-14T12:00:00Z"}
+
+    broken_family = "broken|2026-07-14|high"
+    broken_condition = "broken-condition"
+    isolated_calls = []
+    isolated_errors = {}
+    isolated_barrier = threading.Barrier(2)
+
+    def isolated_markets(condition_ids):
+        requested = tuple(condition_ids)
+        isolated_calls.append(requested)
+        isolated_barrier.wait(timeout=1.0)
+        if requested == (broken_condition,):
+            raise TimeoutError("broken family timed out")
+        return batch_markets
+
+    isolated = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={
+            original.family_key: original,
+            broken_family: SimpleNamespace(
+                family_key=broken_family,
+                bindings=(
+                    SimpleNamespace(
+                        condition_id=broken_condition,
+                        yes_token_id="broken-yes",
+                        no_token_id="broken-no",
+                    ),
+                ),
+            ),
+        },
+        get_gamma_event=lambda _slug: pytest.fail(
+            "complete family batches must not use event fallback"
+        ),
+        get_gamma_markets=isolated_markets,
+        metadata_sink={},
+        family_errors=isolated_errors,
+    )
+    assert set(isolated) == {original.family_key}
+    assert isolated_errors == {
+        broken_family: "TimeoutError:broken family timed out"
+    }
+    assert set(isolated_calls) == {
+        tuple(binding.condition_id for binding in original.bindings),
+        (broken_condition,),
+    }
+
     partial_batch_calls = []
     partial_batch_metadata = {}
     partial_batch = bind_current_global_probability_tokens(
@@ -12793,6 +12842,111 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     assert result.winner_event_id == event.event_id
     assert result.venue_submit_count == 1
     assert result.receipts[event.event_id].submitted is True
+
+
+def test_global_batch_book_failure_excludes_only_its_family(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b), captured_at_utc=decision_at
+    )
+    family_a, family_b = scope.family_keys
+    witnesses = {
+        family_key: SimpleNamespace(
+            family_key=family_key,
+            captured_at_utc=decision_at,
+            posterior_identity_hash=run_id,
+            witness_identity=f"q-{run_id}",
+        )
+        for family_key, run_id in zip(scope.family_keys, ("run-a", "run-b"))
+    }
+    prepared = {
+        event.event_id: SimpleNamespace(
+            probability_witness=witnesses[family_key]
+        )
+        for event, family_key in zip((event_a, event_b), scope.family_keys)
+    }
+    candidate_b = SimpleNamespace(family_key=family_b)
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=candidate_b, no_trade_reason=None),
+        winner_event_id=event_b.event_id,
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-b",
+            wealth_witness_identity="wealth-1",
+        ),
+    )
+    calls = {"selected_events": [], "venue": 0}
+
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-1",
+            economic_identity="wealth-economics-1",
+        ),
+    )
+
+    def select(prepared_by_event, **kwargs):
+        calls["selected_events"].append(tuple(prepared_by_event))
+        assert kwargs["current_scope"].family_keys == (family_b,)
+        return selected
+
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", select
+    )
+
+    def actuate(event, actuation, _at):
+        assert event.event_id == event_b.event_id
+        assert actuation is selected.actuation
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event.event_id,
+            event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared[current.event_id],
+        ),
+        actuate_winner=actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            {family_b: probabilities[family_b]},
+            _global_test_book("book-b", price="0.40"),
+        ),
+    )
+
+    assert calls == {"selected_events": [(event_b.event_id,)], "venue": 1}
+    assert result.winner_event_id == event_b.event_id
+    assert result.receipts[event_b.event_id].submitted is True
+    assert result.receipts[event_a.event_id].reason == (
+        "GLOBAL_FAMILY_INELIGIBLE:GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE"
+    )
 
 
 @pytest.mark.parametrize(

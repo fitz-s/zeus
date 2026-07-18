@@ -1261,8 +1261,9 @@ def bind_current_global_probability_tokens(
     checked_at_utc: datetime | None = None,
     max_workers: int = 8,
     metadata_sink: dict[tuple[str, str], Mapping[str, object]] | None = None,
+    family_errors: dict[str, str] | None = None,
 ) -> Mapping[str, FamilyPayoffWitness]:
-    """Bind tokens and, when requested, current Gamma tradeability metadata."""
+    """Bind current tokens/metadata, optionally isolating failed families."""
 
     missing_by_family = {
         family_key: witness
@@ -1403,18 +1404,6 @@ def bind_current_global_probability_tokens(
                 )
             return out
 
-        market_by_condition = _market_map(
-            get_gamma_markets(condition_ids),
-            requested_conditions,
-            require_complete=False,
-        )
-        batch_missing = requested_conditions.difference(market_by_condition)
-        if batch_missing and get_gamma_event is None:
-            raise ValueError(
-                "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
-                + ",".join(sorted(batch_missing))
-            )
-
         def _family_event_map(
             family_key: str,
             family_markets: Sequence[Mapping[str, object]],
@@ -1443,7 +1432,11 @@ def bind_current_global_probability_tokens(
                 event_by_id[event_id] = nested_event
             return event_by_id, metadata_ambiguous
 
-        for family_key, witness in remote_work_by_family.items():
+        def _current_family_event(
+            family_key: str,
+            witness: FamilyPayoffWitness,
+            market_by_condition: Mapping[str, Mapping[str, object]],
+        ) -> Mapping[str, object]:
             family_condition_ids = tuple(
                 binding.condition_id for binding in witness.bindings
             )
@@ -1456,8 +1449,7 @@ def bind_current_global_probability_tokens(
                     raise ValueError(
                         f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}"
                     )
-                events[family_key] = event
-                continue
+                return event
             family_markets = tuple(
                 market_by_condition[binding.condition_id]
                 for binding in witness.bindings
@@ -1492,10 +1484,71 @@ def bind_current_global_probability_tokens(
                     f"GLOBAL_CURRENT_GAMMA_EVENT_IDENTITY_AMBIGUOUS:{family_key}"
                 )
             event = next(iter(event_by_id.values()))
-            events[family_key] = {
+            return {
                 **event,
                 "markets": family_markets,
             }
+
+        if family_errors is None:
+            market_by_condition = _market_map(
+                get_gamma_markets(condition_ids),
+                requested_conditions,
+                require_complete=False,
+            )
+            batch_missing = requested_conditions.difference(market_by_condition)
+            if batch_missing and get_gamma_event is None:
+                raise ValueError(
+                    "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
+                    + ",".join(sorted(batch_missing))
+                )
+            for family_key, witness in remote_work_by_family.items():
+                events[family_key] = _current_family_event(
+                    family_key,
+                    witness,
+                    market_by_condition,
+                )
+        else:
+            from concurrent.futures import as_completed
+
+            workers = max(
+                1,
+                min(int(max_workers), 16, len(remote_work_by_family)),
+            )
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="global-family-metadata",
+            ) as pool:
+                def _load_family(
+                    family_key: str,
+                    witness: FamilyPayoffWitness,
+                ) -> Mapping[str, object]:
+                    family_condition_ids = tuple(
+                        binding.condition_id for binding in witness.bindings
+                    )
+                    expected = frozenset(family_condition_ids)
+                    family_markets = _market_map(
+                        get_gamma_markets(family_condition_ids),
+                        expected,
+                        require_complete=False,
+                    )
+                    return _current_family_event(
+                        family_key,
+                        witness,
+                        family_markets,
+                    )
+
+                futures = {
+                    pool.submit(_load_family, family_key, witness): family_key
+                    for family_key, witness in remote_work_by_family.items()
+                }
+                for future in as_completed(futures):
+                    family_key = futures[future]
+                    try:
+                        events[family_key] = future.result()
+                    except Exception as exc:  # noqa: BLE001 - typed family exclusion
+                        family_errors[family_key] = (
+                            f"{type(exc).__name__}:{exc}"
+                        )
     else:
         slug_by_family: dict[str, str] = {}
         for family_key, witness in remote_work_by_family.items():
@@ -1524,29 +1577,42 @@ def bind_current_global_probability_tokens(
 
     rebound: dict[str, FamilyPayoffWitness] = {}
     for family_key, witness in probability_witnesses.items():
+        if family_errors is not None and family_key in family_errors:
+            continue
         if family_key not in work_by_family:
             rebound[family_key] = witness
             continue
-        event = events.get(family_key)
-        if (
-            refresh_metadata
-            and event is None
-            and family_key not in local_metadata_family_keys
-        ):
-            raise ValueError(f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}")
-        condition_ids = {binding.condition_id for binding in witness.bindings}
-        token_map = {
-            condition_id: pair
-            for condition_id, pair in local_tokens.items()
-            if condition_id in condition_ids
-        }
-        if event is not None:
-            metadata_conditions: set[str] = set()
-            for outcome in _extract_outcomes(dict(event)):
-                condition_id = str(outcome.get("condition_id") or "").strip()
-                yes = str(outcome.get("token_id") or "").strip()
-                no = str(outcome.get("no_token_id") or "").strip()
-                if condition_id in condition_ids and yes and no:
+        try:
+            event = events.get(family_key)
+            if (
+                refresh_metadata
+                and event is None
+                and family_key not in local_metadata_family_keys
+            ):
+                raise ValueError(
+                    f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}"
+                )
+            condition_ids = {
+                binding.condition_id for binding in witness.bindings
+            }
+            token_map = {
+                condition_id: pair
+                for condition_id, pair in local_tokens.items()
+                if condition_id in condition_ids
+            }
+            family_metadata = (
+                {}
+                if family_errors is not None and metadata_sink is not None
+                else metadata_sink
+            )
+            if event is not None:
+                metadata_conditions: set[str] = set()
+                for outcome in _extract_outcomes(dict(event)):
+                    condition_id = str(outcome.get("condition_id") or "").strip()
+                    yes = str(outcome.get("token_id") or "").strip()
+                    no = str(outcome.get("no_token_id") or "").strip()
+                    if condition_id not in condition_ids or not yes or not no:
+                        continue
                     pair = (yes, no)
                     previous = token_map.get(condition_id)
                     if previous is not None and previous != pair:
@@ -1554,7 +1620,7 @@ def bind_current_global_probability_tokens(
                             f"GLOBAL_TOKEN_IDENTITY_CONFLICT:{condition_id}"
                         )
                     token_map[condition_id] = pair
-                    if metadata_sink is not None:
+                    if family_metadata is not None:
                         raw = outcome.get("gamma_market_raw")
                         if not isinstance(raw, Mapping):
                             raise ValueError(
@@ -1631,23 +1697,38 @@ def bind_current_global_probability_tokens(
                             "_global_current_gamma": True,
                         }
                         metadata_conditions.add(condition_id)
-                        metadata_sink[(condition_id, yes)] = {
+                        family_metadata[(condition_id, yes)] = {
                             **base,
                             "selected_outcome_token_id": yes,
                         }
-                        metadata_sink[(condition_id, no)] = {
+                        family_metadata[(condition_id, no)] = {
                             **base,
                             "selected_outcome_token_id": no,
                         }
-            if metadata_sink is not None and metadata_conditions != condition_ids:
-                missing = ",".join(sorted(condition_ids - metadata_conditions))
-                raise ValueError(
-                    f"GLOBAL_CURRENT_GAMMA_METADATA_INCOMPLETE:{family_key}:{missing}"
-                )
-        rebound[family_key] = _rebind_probability_witness_tokens(
-            witness,
-            token_map_by_condition=token_map,
-        )
+                if (
+                    family_metadata is not None
+                    and metadata_conditions != condition_ids
+                ):
+                    missing = ",".join(sorted(condition_ids - metadata_conditions))
+                    raise ValueError(
+                        "GLOBAL_CURRENT_GAMMA_METADATA_INCOMPLETE:"
+                        f"{family_key}:{missing}"
+                    )
+            bound = _rebind_probability_witness_tokens(
+                witness,
+                token_map_by_condition=token_map,
+            )
+            if (
+                family_errors is not None
+                and metadata_sink is not None
+                and family_metadata is not None
+            ):
+                metadata_sink.update(family_metadata)
+            rebound[family_key] = bound
+        except Exception as exc:  # noqa: BLE001 - typed family exclusion
+            if family_errors is None:
+                raise
+            family_errors[family_key] = f"{type(exc).__name__}:{exc}"
     return rebound
 
 

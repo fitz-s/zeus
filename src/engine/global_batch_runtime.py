@@ -2095,10 +2095,50 @@ def process_current_global_batch(
         if current_book_epoch_provider is not None:
             if cancelled("book_epoch_start"):
                 return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
-            probabilities, book_epoch = current_book_epoch_provider(
+            current_probabilities, book_epoch = current_book_epoch_provider(
                 probabilities,
                 current_time(),
             )
+            current_probabilities = dict(current_probabilities)
+            unexpected_families = frozenset(current_probabilities).difference(
+                probabilities
+            )
+            if unexpected_families:
+                return reject(
+                    "GLOBAL_CURRENT_BOOK_FAMILY_UNEXPECTED:"
+                    + ",".join(sorted(unexpected_families))
+                )
+            unavailable_families = frozenset(probabilities).difference(
+                current_probabilities
+            )
+            for family_key in unavailable_families:
+                reason = "GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE"
+                ineligible_by_family[family_key] = reason
+                owner = claimed_by_family.get(family_key)
+                if owner is not None:
+                    ineligible_by_event[owner.event_id] = reason
+            probabilities = current_probabilities
+            prepared_by_event = {
+                event_id: prepared
+                for event_id, prepared in prepared_by_event.items()
+                if prepared.probability_witness.family_key in probabilities
+            }
+            if not prepared_by_event:
+                return reject("GLOBAL_AUCTION_NO_CURRENT_BOOK_FAMILY")
+            if unavailable_families:
+                scope = current_global_auction_scope_from_events(
+                    tuple(
+                        full_scope_event_by_family[family_key]
+                        for family_key in sorted(probabilities)
+                    ),
+                    captured_at_utc=scope_at,
+                )
+                selection_epoch_identity = _selection_epoch_identity(
+                    full_scope=decision_scope,
+                    eligible_scope=scope,
+                    probability_witnesses=probabilities,
+                    ineligible_by_family=ineligible_by_family,
+                )
             prepared_by_event = {
                 event_id: replace(
                     prepared,

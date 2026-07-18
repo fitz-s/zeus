@@ -7413,6 +7413,7 @@ def event_bound_live_adapter_from_trade_conn(
                 1.0,
                 float(os.environ.get("ZEUS_GLOBAL_AUCTION_GAMMA_TIMEOUT_SECONDS", "6.0")),
             )
+            unavailable_by_family: dict[str, str] = {}
 
             def _urgent_book_preemption(stage: str) -> bool:
                 if not _day0_selection_cancelled():
@@ -7435,6 +7436,13 @@ def event_bound_live_adapter_from_trade_conn(
                 metadata_sink=None,
                 force_current_gamma=False,
             ):
+                probability_slice = {
+                    family_key: witness
+                    for family_key, witness in probability_slice.items()
+                    if family_key not in unavailable_by_family
+                }
+                if not probability_slice:
+                    return {}
                 gamma_batch_requests = 0
                 gamma_event_requests = 0
                 refresh_started_at = datetime.now(UTC)
@@ -7508,6 +7516,16 @@ def event_bound_live_adapter_from_trade_conn(
                         checked_at_utc=_at,
                         max_workers=16,
                         metadata_sink=metadata_sink,
+                        family_errors=unavailable_by_family,
+                    )
+                failed = sorted(
+                    set(probability_slice).intersection(unavailable_by_family)
+                )
+                for family_key in failed:
+                    logging.getLogger(__name__).warning(
+                        "global book family excluded: family=%s reason=%s",
+                        family_key,
+                        unavailable_by_family[family_key],
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
@@ -7586,7 +7604,11 @@ def event_bound_live_adapter_from_trade_conn(
                     metadata_sink=current_metadata,
                     force_current_gamma=True,
                 )
-                refreshed = dict(probability_slice)
+                refreshed = {
+                    family_key: witness
+                    for family_key, witness in probability_slice.items()
+                    if family_key not in unavailable_by_family
+                }
                 refreshed.update(rebound)
                 return refreshed
 
@@ -7814,12 +7836,16 @@ def event_bound_live_adapter_from_trade_conn(
                         token_override=exact_tokens,
                     )
                 _, prefetched_books, prefetched_at = prefetched
+                books = {
+                    token: prefetched_books[token]
+                    for token in exact_tokens
+                    if token in prefetched_books
+                }
                 missing_tokens = tuple(
                     token
                     for token in exact_tokens
-                    if token not in prefetched_books
+                    if token not in books
                 )
-                books = dict(prefetched_books)
                 epoch_at = prefetched_at
                 if missing_tokens:
                     supplement = _prefetch_books(
@@ -8234,27 +8260,6 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if _urgent_book_preemption("after_current_metadata"):
                     return probabilities, None
-            elif day0_urgent_batch and speculative_prefetch_tokens is None:
-                rebound_probabilities.update(
-                    _bind(
-                        bind_slice,
-                        mode="current_metadata",
-                        metadata_sink=full_metadata,
-                    )
-                )
-                if _urgent_book_preemption("after_day0_current_metadata"):
-                    return probabilities, None
-                exact_tokens = _global_current_executable_prefetch_tokens(
-                    rebound_probabilities,
-                    book_metadata_by_key,
-                    checked_at=datetime.now(UTC),
-                )
-                if exact_tokens is not None:
-                    prefetched = _prefetch_books(
-                        rebound_probabilities,
-                        mode="day0_executable_books",
-                        token_override=exact_tokens,
-                    )
             else:
                 from concurrent.futures import (
                     ThreadPoolExecutor,
@@ -8319,6 +8324,15 @@ def event_bound_live_adapter_from_trade_conn(
                 return probabilities, None
             bound_probabilities = dict(retained_bound_probabilities)
             bound_probabilities.update(rebound_probabilities)
+            for family_key in unavailable_by_family:
+                bound_probabilities.pop(family_key, None)
+            if not bound_probabilities:
+                logging.getLogger(__name__).warning(
+                    "global book epoch has no eligible family after current "
+                    "metadata isolation: failures=%d",
+                    len(unavailable_by_family),
+                )
+                return {}, None
             cache_checked_at = datetime.now(UTC)
             cached, cache_after_reason = _probe_global_book_epoch_cache(
                 trade_conn,
@@ -8439,6 +8453,13 @@ def event_bound_live_adapter_from_trade_conn(
             bound_probabilities = _refresh_capture_metadata(
                 bound_probabilities
             )
+            if not bound_probabilities:
+                logging.getLogger(__name__).warning(
+                    "global book epoch has no eligible family after capture "
+                    "metadata isolation: failures=%d",
+                    len(unavailable_by_family),
+                )
+                return {}, None
             if _urgent_book_preemption("after_full_metadata"):
                 return probabilities, None
             prefetched = _complete_current_prefetch(
