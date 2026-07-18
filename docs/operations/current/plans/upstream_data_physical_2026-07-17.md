@@ -207,3 +207,21 @@ DISPATCHED (worktrees, disjoint file ownership):
       book-reprice hop-by-hop latency measurement; ranked slowest-hop verdict.
 Landing protocol: each reports SHA; orchestrator cherry-picks onto live tip one at a
 time, runs the union of their suites + materializer baseline between picks.
+
+## LATENCY VERDICT + NEXT LEVER (2026-07-18 23:2x)
+Measured (b66ad88c6, independently re-verified): the obs->probability bottleneck is
+the ~40-min Day0 posterior recompute cadence (p50 40.2 min, n=10,498 gaps), NOT
+fetch (<1 min fast METAR) or the event queue (57 s median). Zeus is roughly TIED
+with the book (~10.6 min p50 reprice, upper bound); to be structurally faster the
+Day0 recompute must be EVENT-DRIVEN on DAY0_EXTREME_UPDATED, not tick-scheduled.
+COORDINATION BOUNDARY: coworker landed 2b5ae40a3 today (held-family day0 hourly
+refresh priority, src/events/reactor.py) and the queue already carries
+day0_observed_extreme_observation_time seed-coverage (monitor_refresh writes such
+seeds). The event-driven recompute lever = extend THAT seed path so a fresh
+DAY0_EXTREME_UPDATED enqueues an immediate priority materialization for the
+family (all traded families, not only held) instead of waiting for the tick.
+DO NOT build blind: reactor.py/live_materialization_queue.py are under active
+coworker edit — next session must diff their tip first, then implement the
+enqueue-on-event bridge as a small slice on top.
+API-ERROR RECOVERY: all four wave implementers were killed by a transient 400 at
+~23:0x; all four resumed from transcript (worktrees intact) — awaiting completion.
