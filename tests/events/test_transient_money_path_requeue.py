@@ -415,6 +415,29 @@ def test_entries_paused_requeue_sets_runtime_authority_retry_floor(monkeypatch):
     ).isoformat()
 
 
+def test_risk_allocator_health_requeue_sets_runtime_authority_retry_floor(monkeypatch):
+    monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "120")
+    conn, store = _store()
+    event = _event("snap-heartbeat-floor")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        "GLOBAL_AUCTION_NO_TRADE:"
+        "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:"
+        "reason=heartbeat_lost:reduce_only=True:"
+        "kill_switch_reason=heartbeat_lost",
+    )
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert _claimed_at(conn, event.event_id) == (
+        _DT + timedelta(seconds=120)
+    ).isoformat()
+
+
 def test_current_wealth_ambiguity_requeue_waits_for_recovery_cadence(monkeypatch):
     monkeypatch.delenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", raising=False)
     conn, store = _store()

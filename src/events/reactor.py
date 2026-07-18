@@ -4269,6 +4269,7 @@ def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
         in {
             "entries_paused",
             "live_health_entry_authority",
+            "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE",
             "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",
         }
         for seg in segments

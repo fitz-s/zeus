@@ -1050,6 +1050,36 @@ def test_global_entry_health_pause_requeues_instead_of_burning_event():
     assert _is_transient_money_path_reason(reason) is True
 
 
+def test_global_entry_health_pause_preserves_reason_without_reduce_only_family():
+    from src.engine import event_reactor_adapter as adapter
+    from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
+
+    result = GlobalBatchSubmitResult(
+        receipts={
+            "event-1": EventSubmissionReceipt(
+                submitted=False,
+                event_id="event-1",
+                causal_snapshot_id="snapshot-1",
+                reason="GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY",
+                proof_accepted=False,
+            )
+        },
+        winner_event_id=None,
+        venue_submit_count=0,
+    )
+    suppression = (
+        "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:"
+        "reason=heartbeat_lost:reduce_only=True:"
+        "kill_switch_reason=heartbeat_lost"
+    )
+
+    retained = adapter._retain_transient_entry_suppressed_batch(result, suppression)
+
+    assert retained.receipts["event-1"].reason == (
+        f"GLOBAL_AUCTION_NO_TRADE:{suppression}"
+    )
+
+
 def test_main_starts_durable_reactor_wake_listener_before_scheduler():
     import src.main as main
 
