@@ -10332,6 +10332,8 @@ def _global_probability_tightening_from_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
+    if reason.startswith("QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"):
+        return "CANDIDATE_BLOCKED"
     if (
         reason.startswith(
             "GLOBAL_ACTUATION_PREPARE_FAILED:"

@@ -5826,6 +5826,10 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
         (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:unit_price_out_of_bounds",
+            "CANDIDATE_BLOCKED",
+        ),
+        (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED",
             "BATCH_BLOCKED",
