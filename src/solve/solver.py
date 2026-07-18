@@ -662,6 +662,19 @@ class DeterministicBinPayoffWitness:
 FamilyPayoffWitness = JointOutcomeProbabilityWitness | DeterministicBinPayoffWitness
 
 
+def actionable_family_payoff_bindings(
+    witness: FamilyPayoffWitness,
+) -> tuple[OutcomeTokenBinding, ...]:
+    """Return bindings whose payoff authority can produce a candidate."""
+
+    if not isinstance(witness, DeterministicBinPayoffWitness):
+        return witness.bindings
+    exact_bins = frozenset(bin_id for bin_id, _ in witness.exact_yes_payoffs)
+    return tuple(
+        binding for binding in witness.bindings if binding.bin_id in exact_bins
+    )
+
+
 def family_payoff_q_samples(
     witness: FamilyPayoffWitness,
     *,

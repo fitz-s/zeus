@@ -326,6 +326,7 @@ UTC = timezone.utc
 class _GlobalBookEpochCacheEntry:
     namespace: str
     topology: tuple[tuple[str, str, str, str, str], ...]
+    actionable_topology: tuple[tuple[str, str, str, str, str], ...]
     bound_probabilities: tuple[tuple[str, object], ...]
     epoch: object
     metadata_by_key: tuple[
@@ -804,9 +805,9 @@ def _global_book_topology_signature(
 def _global_book_prefetch_tokens(
     probabilities: Mapping[str, object],
 ) -> tuple[str, ...] | None:
-    """Return the complete bound token universe for speculative current-book I/O."""
+    """Return only tokens that can become candidates in this probability cut."""
 
-    topology = _global_book_topology_signature(probabilities)
+    topology = _global_book_actionable_topology(probabilities)
     if topology is None:
         return None
     return tuple(
@@ -814,6 +815,32 @@ def _global_book_prefetch_tokens(
         for row in topology
         for token_id in (row[3], row[4])
     )
+
+
+def _global_book_actionable_topology(
+    probabilities: Mapping[str, object],
+    *,
+    topology: tuple[tuple[str, str, str, str, str], ...] | None = None,
+) -> tuple[tuple[str, str, str, str, str], ...] | None:
+    """Prune deterministic unknown bins without changing witness topology."""
+
+    topology = topology or _global_book_topology_signature(probabilities)
+    if topology is None:
+        return None
+    from src.solve.solver import actionable_family_payoff_bindings
+
+    actionable = frozenset(
+        (str(family_key), str(binding.bin_id))
+        for family_key, witness in probabilities.items()
+        for binding in actionable_family_payoff_bindings(witness)
+    )
+    if not actionable:
+        return None
+    return tuple(
+        row
+        for row in topology
+        if (row[0], row[1]) in actionable
+    ) or None
 
 
 def _global_current_executable_prefetch_tokens(
@@ -826,7 +853,7 @@ def _global_current_executable_prefetch_tokens(
 
     if checked_at.tzinfo is None:
         return None
-    topology = _global_book_topology_signature(probabilities)
+    topology = _global_book_actionable_topology(probabilities)
     if topology is None:
         return None
     from src.engine.global_auction_universe import (
@@ -853,7 +880,7 @@ def _global_speculative_executable_prefetch_tokens(
 ) -> tuple[str, ...] | None:
     """Use prior tradeability only to prune speculative book I/O."""
 
-    topology = _global_book_topology_signature(probabilities)
+    topology = _global_book_actionable_topology(probabilities)
     if topology is None:
         return None
     from src.engine.global_auction_universe import (
@@ -2024,21 +2051,39 @@ def _probe_global_book_cache_entry(
         if topology_hint is not None
         else _global_book_topology_signature(probabilities)
     )
+    actionable_topology = _global_book_actionable_topology(
+        probabilities,
+        topology=topology,
+    )
     if namespace is None:
         return None, "namespace_unavailable"
     if topology is None:
         return None, "topology_unavailable"
+    if actionable_topology is None:
+        return None, "actionable_topology_unavailable"
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         entry = _GLOBAL_BOOK_EPOCH_CACHE
     if entry is None:
         return None, "cache_empty"
     if entry.namespace != namespace:
         return None, "namespace_changed"
+    mutable = frozenset(mutable_family_keys or ())
+
+    def actionable_covered() -> bool:
+        current = {
+            row for row in actionable_topology if row[0] not in mutable
+        }
+        cached = {
+            row for row in entry.actionable_topology if row[0] not in mutable
+        }
+        return current.issubset(cached)
+
     hit_reason = "hit"
     if entry.topology != topology:
         if set(topology) < set(entry.topology):
-            return entry, "hit_subset"
-        mutable = frozenset(mutable_family_keys or ())
+            if actionable_covered():
+                return entry, "hit_subset"
+            return None, "actionable_topology_expanded"
         cached_stable = tuple(
             row for row in entry.topology if row[0] not in mutable
         )
@@ -2059,6 +2104,8 @@ def _probe_global_book_cache_entry(
                 f"current={len(topology)}:{current}",
             )
         hit_reason = "hit_mutable_topology"
+    if not actionable_covered():
+        return None, "actionable_topology_expanded"
     return entry, hit_reason
 
 
@@ -2159,11 +2206,14 @@ def _store_global_book_epoch(
         return "checked_at_naive"
     namespace = _global_book_epoch_cache_namespace(trade_conn)
     topology = _global_book_topology_signature(bound_probabilities)
+    actionable_topology = _global_book_actionable_topology(bound_probabilities)
     current_identity = getattr(epoch, "current_identity", None)
     if namespace is None:
         return "namespace_unavailable"
     if topology is None:
         return "topology_unavailable"
+    if actionable_topology is None:
+        return "actionable_topology_unavailable"
     if not callable(current_identity):
         return "current_identity_missing"
     try:
@@ -2175,6 +2225,7 @@ def _store_global_book_epoch(
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
             topology=topology,
+            actionable_topology=actionable_topology,
             bound_probabilities=tuple(sorted(bound_probabilities.items())),
             epoch=epoch,
             metadata_by_key=tuple(

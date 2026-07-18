@@ -33,6 +33,7 @@ from src.events.triggers.forecast_snapshot_ready import (
     executable_forecast_live_eligible_reader,
 )
 from src.solve.solver import (
+    actionable_family_payoff_bindings,
     CurrentExecutionAuthority,
     ExecutableSellCurve,
     FamilyPayoffWitness,
@@ -171,7 +172,7 @@ def current_global_book_epoch_identity(
 
 @dataclass(frozen=True)
 class CurrentGlobalBookEpoch:
-    """Every bound YES/NO book observed in one bounded public-CLOB sweep."""
+    """Every candidate-capable YES/NO book in one bounded public-CLOB sweep."""
 
     assets: tuple[CurrentGlobalBookAsset, ...]
     asset_states: tuple[tuple[str, ...], ...]
@@ -768,7 +769,7 @@ def capture_current_global_book_epoch(
     prefetched_books: Mapping[str, Mapping[str, object]] | None = None,
     prefetched_at_utc: datetime | None = None,
 ) -> CurrentGlobalBookEpoch:
-    """Fetch every bound native book; no missing token may shrink the feasible set."""
+    """Fetch every candidate-capable native book without shrinking its set."""
 
     if (
         max_age <= timedelta(0)
@@ -780,7 +781,7 @@ def capture_current_global_book_epoch(
     for family_key, witness in sorted(probability_witnesses.items()):
         if family_key != witness.family_key:
             raise ValueError("GLOBAL_BOOK_PROBABILITY_FAMILY_MISMATCH")
-        for binding in witness.bindings:
+        for binding in actionable_family_payoff_bindings(witness):
             for side, raw_token in (
                 ("YES", binding.yes_token_id),
                 ("NO", binding.no_token_id),

@@ -4615,6 +4615,126 @@ def test_live_adapter_urgent_day0_preempts_parallel_book_prefetch(monkeypatch):
     world.close()
 
 
+def test_global_book_prefetch_prunes_unknown_deterministic_bins_before_io():
+    from src.solve.solver import deterministic_bin_payoff_witness_identity
+
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="bin-exact",
+            condition_id="condition-exact",
+            yes_token_id="yes-exact",
+            no_token_id="no-exact",
+        ),
+        OutcomeTokenBinding(
+            bin_id="bin-unknown",
+            condition_id="condition-unknown",
+            yes_token_id="yes-unknown",
+            no_token_id="no-unknown",
+        ),
+    )
+    captured_at = _dt.datetime(
+        2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc
+    )
+    witness_fields = {
+        "family_key": "family-deterministic",
+        "bindings": bindings,
+        "exact_yes_payoffs": (("bin-exact", 0),),
+        "q_version": "q-exact",
+        "resolution_identity": "resolution-exact",
+        "topology_identity": "topology-exact",
+        "posterior_identity_hash": "posterior-exact",
+        "source_truth_identity": "source-exact",
+        "authority_certificate_hash": "authority-exact",
+        "band_alpha": 0.05,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": captured_at,
+    }
+    deterministic = DeterministicBinPayoffWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=deterministic_bin_payoff_witness_identity(
+            **witness_fields
+        ),
+    )
+    probabilistic = SimpleNamespace(
+        family_key="family-probabilistic",
+        bindings=(
+            OutcomeTokenBinding(
+                bin_id="bin-probabilistic",
+                condition_id="condition-probabilistic",
+                yes_token_id="yes-probabilistic",
+                no_token_id="no-probabilistic",
+            ),
+        ),
+    )
+    probabilities = {
+        deterministic.family_key: deterministic,
+        probabilistic.family_key: probabilistic,
+    }
+    expected = (
+        "yes-exact",
+        "no-exact",
+        "yes-probabilistic",
+        "no-probabilistic",
+    )
+    metadata = {
+        (condition_id, token_id): {
+            "_global_current_gamma": True,
+            "enable_orderbook": True,
+            "active": True,
+            "closed": False,
+            "accepting_orders": True,
+            "tradeability_status_json": "{}",
+        }
+        for condition_id, token_id in (
+            ("condition-exact", "yes-exact"),
+            ("condition-exact", "no-exact"),
+            ("condition-unknown", "yes-unknown"),
+            ("condition-unknown", "no-unknown"),
+            ("condition-probabilistic", "yes-probabilistic"),
+            ("condition-probabilistic", "no-probabilistic"),
+        )
+    }
+
+    assert era._global_book_prefetch_tokens(probabilities) == expected
+    assert era._global_current_executable_prefetch_tokens(
+        probabilities,
+        metadata,
+        checked_at=_dt.datetime.now(_dt.timezone.utc),
+    ) == expected
+    assert era._global_speculative_executable_prefetch_tokens(
+        probabilities,
+        metadata,
+    ) == expected
+
+    requested = []
+    times = iter((captured_at, captured_at + _dt.timedelta(seconds=1)))
+    epoch = capture_current_global_book_epoch(
+        _global_book_metadata_conn(deterministic),
+        probability_witnesses={deterministic.family_key: deterministic},
+        get_books=lambda tokens: (
+            requested.extend(tokens)
+            or {
+                token: {
+                    "asset_id": token,
+                    "hash": f"book-{token}",
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "bids": [{"price": "0.20", "size": "100"}],
+                    "asks": [{"price": "0.30", "size": "100"}],
+                }
+                for token in tokens
+            }
+        ),
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+    )
+
+    assert requested == ["yes-exact", "no-exact"]
+    assert len(epoch.asset_states) == 2
+    assert {row[1] for row in epoch.asset_states} == {"bin-exact"}
+
+
 def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
     trade = sqlite3.connect(":memory:")
     trade.executescript(
