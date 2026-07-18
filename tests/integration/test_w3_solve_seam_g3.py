@@ -1253,6 +1253,50 @@ def test_speculative_book_prefetch_prunes_only_complete_prior_tradeability():
     )
 
 
+def test_speculative_book_metadata_reads_latest_projection_without_history():
+    trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT PRIMARY KEY,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            tradeability_status_json TEXT NOT NULL
+        );
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('condition-open', 'yes-open', 'no-open', 1, 0, 1,
+             '{"executable_allowed": true}'),
+            ('condition-closed', 'yes-closed', 'no-closed', 0, 1, 0,
+             '{"executable_allowed": false}');
+        """
+    )
+    topology = (
+        ('family-open', 'bin-open', 'condition-open', 'yes-open', 'no-open'),
+        (
+            'family-closed',
+            'bin-closed',
+            'condition-closed',
+            'yes-closed',
+            'no-closed',
+        ),
+    )
+
+    metadata = era._global_book_speculative_snapshot_metadata(trade, topology)
+
+    assert set(metadata) == {
+        ('condition-open', 'yes-open'),
+        ('condition-open', 'no-open'),
+        ('condition-closed', 'yes-closed'),
+        ('condition-closed', 'no-closed'),
+    }
+    assert metadata[('condition-open', 'yes-open')]["enable_orderbook"] is True
+    assert metadata[('condition-closed', 'yes-closed')]["closed"] == 1
+    trade.close()
+
+
 _SPINE_DECISION_AT = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
 
 

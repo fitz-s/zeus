@@ -969,18 +969,33 @@ def _global_book_speculative_snapshot_metadata(
     trade_conn: sqlite3.Connection,
     topology: tuple[tuple[str, str, str, str, str], ...] | None,
 ) -> dict[tuple[str, str], Mapping[str, object]]:
-    """Read last-seen tradeability only to prune concurrent speculative book I/O."""
+    """Read latest projected tradeability only to prune speculative book I/O."""
 
     if topology is None:
         return {}
     token_pair_by_condition = {row[2]: (row[3], row[4]) for row in topology}
+    rows: list[Mapping[str, object]] = []
     try:
-        from src.engine.global_auction_universe import _global_book_snapshot_rows
-
-        rows = _global_book_snapshot_rows(
-            trade_conn,
-            condition_ids=tuple(token_pair_by_condition),
-        )
+        condition_ids = tuple(token_pair_by_condition)
+        for offset in range(0, len(condition_ids), 400):
+            chunk = condition_ids[offset : offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = trade_conn.execute(
+                f"""
+                SELECT condition_id,
+                       yes_token_id,
+                       no_token_id,
+                       active,
+                       closed,
+                       accepting_orders,
+                       tradeability_status_json
+                  FROM executable_market_snapshot_latest
+                 WHERE condition_id IN ({placeholders})
+                """,
+                chunk,
+            )
+            columns = tuple(item[0] for item in cur.description or ())
+            rows.extend(dict(zip(columns, row, strict=True)) for row in cur.fetchall())
     except (sqlite3.Error, TypeError, ValueError):
         return {}
     metadata: dict[tuple[str, str], Mapping[str, object]] = {}
@@ -992,8 +1007,13 @@ def _global_book_speculative_snapshot_metadata(
             str(row.get("no_token_id") or "").strip(),
         ):
             continue
+        # This projection only decides which books to fetch concurrently. A
+        # permissive unknown enable_orderbook may fetch one extra book; current
+        # Gamma metadata still owns tradeability and submit authority.
+        item = dict(row)
+        item["enable_orderbook"] = True
         for token_id in expected:
-            metadata[(condition_id, token_id)] = row
+            metadata[(condition_id, token_id)] = item
     return metadata
 
 

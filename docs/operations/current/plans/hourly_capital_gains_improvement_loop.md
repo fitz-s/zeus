@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-07-18 17:31Z tick — speculative book 读取退出千万行历史表
+- **运行态证据:** 11-family global batch 的 `prepare_families=13.126s`、`book_epoch_fence=34.785s`，整个 `process_pending=53.084s`；同一时段 urgent exit monitor 等 reactor 30 秒后超时。book epoch 内 Gamma/CLOB 阶段仅约 2–4 秒，剩余时间发生在 trade-DB topology/cache 读取与 I/O contention。
+- **第一性冗余:** speculative prefetch 只决定提前抓哪些 books，却通过 `executable_market_snapshot_latest` 回表读取 10,203,966 行的历史 `executable_market_snapshots`；历史 evidence 不应参与稳态 I/O hint。改为只读 27,620 行 latest projection，当前 Gamma/CLOB 继续独占 tradeability、book 和 submit authority。
+- **同库对照:** 同一 121 condition，latest-only `0.000778s`，旧 latest→history join `0.044176s`，约 `56.81x`；11 个 speculative topology/prefetch tests 通过。未复制/修改 live DB，未重启 daemon；loaded SHA 仍旧，等待自然 reload 后才能确认 53 秒 tail 是否下降。
+- **下一突破口:** `prepare_families` 在同一轮被放大到 13 秒；继续把 per-family forecast/readiness reads 批次化，并在 Gamma/CLOB/DB 阶段边界加入 urgent-fact cancellation，不绕过 actuation lock。
+
 ### 2026-07-18 13:58Z tick — 目标升级为 edge-reversal + fault containment；wake 状态读从历史扫描改为批次主键查
 - **新地图:** 唯一计时从新 causal fact 的 ingest commit 开始，到其受影响 BUY/SELL/HOLD submit 为止。forecast reversal 使用百秒窗口；deterministic observation reversal 优先 held SELL 和 exact complementary BUY。平均 cycle 速度不是验收。
 - **隔离约束:** source/city/family/event/candidate/request/query/command 任一处失败或阻塞，只能影响依赖它的动作；pre-submit deadline/retry 必须局部化，外部 side effect 开始后转入 must-complete settlement/reconciliation，不占全局 discovery reactor。
