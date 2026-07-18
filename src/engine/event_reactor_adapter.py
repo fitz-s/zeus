@@ -6915,11 +6915,17 @@ def event_bound_live_adapter_from_trade_conn(
             in ({"FORECAST_SNAPSHOT_READY"} | _DAY0_LANE_EVENT_TYPES)
             for event in events
         )
-        delta_scope_family_keys = (
-            probability_refresh_family_keys
-            if probability_delta_batch and probability_refresh_family_keys
-            else None
+        price_delta_batch = bool(events) and all(
+            str(getattr(event, "event_type", "") or "")
+            == _EDLI_REDECISION_EVENT_TYPE
+            for event in events
         )
+        if probability_delta_batch and probability_refresh_family_keys:
+            delta_scope_family_keys = probability_refresh_family_keys
+        elif price_delta_batch and book_refresh_family_keys:
+            delta_scope_family_keys = book_refresh_family_keys
+        else:
+            delta_scope_family_keys = None
         if entry_submit_suppression_reason is not None:
             logging.getLogger(__name__).info(
                 "global batch suppressing BUY candidates before selection: reason=%s",

@@ -4977,6 +4977,58 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     world.close()
 
 
+def test_live_adapter_restricts_price_delta_to_changed_families(monkeypatch):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    events = tuple(
+        replace(
+            _global_scope_event(city=city, source_run_id=f"run-{city.lower()}"),
+            event_type="EDLI_REDECISION_PENDING",
+        )
+        for city in ("Dallas", "Miami")
+    )
+
+    adapter.process_global_batch(
+        events,
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+
+    assert captured["restrict_to_family_keys"] == frozenset(
+        {
+            era.weather_family_id(
+                city=city,
+                target_date="2026-07-11",
+                metric="high",
+            )
+            for city in ("Dallas", "Miami")
+        }
+    )
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
 def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
     from src.events.candidate_binding import weather_family_id
 
