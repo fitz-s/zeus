@@ -293,7 +293,7 @@ This never freezes unrelated entries; the function always returns `0`
 
 1. Compute exit limit: `current_price - 0.01` (1 cent below current)
 2. If `best_bid < base_price` and slippage ≤ 3% → use best_bid instead
-3. Reject outside absolute `[0.05, 0.95]`, then bind to the current executable
+3. Reject outside absolute `[0.05, 1)`, then bind to the current executable
    snapshot and align to its tick without clamping across the absolute boundary
 4. SELL quantization: `math.floor(shares * 100 + 1e-9) / 100.0` (round DOWN)
 5. Reject if shares round to zero or no token_id
@@ -539,11 +539,13 @@ These are separate truth surfaces that should not be conflated.
 - `currency: Literal["usd", "probability_units"]`
 
 Live venue submission adds two cumulative order-price contracts: every
-BUY/SELL, entry/exit, single/batch order must have unit price in the inclusive
-absolute range `[0.05, 0.95]`, and it must also be tick-aligned for the current
+BUY/SELL, entry/exit, single/batch order must have unit price in the absolute
+domain `[0.05, 1)`, and it must also be tick-aligned for the current
 executable snapshot. `VenueSubmissionEnvelope.assert_live_submit_bound()`
-enforces the absolute range immediately before the adapter SDK boundary. Venue
-tick legality never widens the absolute range (INV-43).
+enforces the absolute domain immediately before the adapter SDK boundary. Venue
+tick legality never widens the absolute domain (INV-43). The 0.05 lower bound
+prevents cheap-tail quantity explosions; sub-unit high-price entries remain subject to
+the separate robust probability, EV, delta-log-wealth, Kelly, and JIT-book proofs.
 
 ### 7.2 Kelly safety gate
 

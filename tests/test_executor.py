@@ -1607,16 +1607,21 @@ class TestExecutor:
 
     @pytest.mark.parametrize(
         "price,tick,expected",
-        [(0.05, "0.01", 0.05), (0.50, "0.01", 0.50), (0.95, "0.01", 0.95)],
+        [
+            (0.05, "0.01", 0.05),
+            (0.50, "0.01", 0.50),
+            (0.95, "0.01", 0.95),
+            (0.999, "0.001", 0.999),
+        ],
     )
-    def test_reduce_only_exit_alignment_preserves_absolute_band_price(
+    def test_reduce_only_exit_alignment_preserves_absolute_domain_price(
         self, price, tick, expected
     ):
         from src.execution.executor import _align_sell_limit_price_to_tick
 
         assert _align_sell_limit_price_to_tick(price, Decimal(tick)) == pytest.approx(expected)
 
-    @pytest.mark.parametrize("price", [0.049, 0.951])
+    @pytest.mark.parametrize("price", [0.049, 1.0])
     def test_execute_exit_order_rejects_out_of_band_price_before_persistence(
         self, price
     ):

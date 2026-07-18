@@ -112,7 +112,7 @@ authority surface.
 
 ## Deliverables
 - Enforce INV-43 at the real venue envelope boundary: every live BUY/SELL,
-  entry/exit, single/batch unit price must be inside inclusive `[0.05, 0.95]`.
+  entry/exit, single/batch unit price must be inside `[0.05, 1)`.
   No q-kernel, current-state, strategy-tail, risk, or order-role exception may
   waive it; rejection occurs before command persistence where possible and
   always before SDK contact.
@@ -194,6 +194,18 @@ authority surface.
 - Recovery owns the envelope contract, executor/aggregate/qkernel seams,
   strategy registry, invariant/authority/reference surfaces, and direct
   single/batch/entry/exit antibodies. Canonical DB content is read-only.
+
+The 2026-07-18 forward auction falsified the symmetric 0.95 ceiling: a selected
+exact-payoff NO at a sub-unit venue price had positive current robust EV and
+delta log wealth but was rejected solely by the envelope ceiling. INV-43 now
+keeps the 0.05 cheap-tail floor that prevents Paris-shaped quantity explosions
+and uses the binary payout boundary 1 as an exclusive upper domain. High-price
+entry admission remains conditional on the existing current-probability, EV,
+delta-log-wealth, Fractional Kelly, JIT-book, and submit-certificate proofs.
+Focused entry/exit/single/batch antibodies passed 37/37 and the complete W3
+auction seam passed 202/202. Independent K0 verification found no submit bypass:
+prices below 0.05, at or above 1, and non-finite values still fail before SDK
+contact; 0.999 is admitted only inside the existing positive global certificate.
 
 ## Verification
 - INV-43 focused venue/entry/exit/current-state antibodies: `22 passed`;

@@ -962,18 +962,13 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     ("direction", "side"),
     ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
 )
-@pytest.mark.parametrize(
-    ("price", "q_lcb", "edge", "shares"),
-    ((0.001, 0.80, 0.799, 1000.0), (0.999, 1.0, 0.001, 10.0)),
-)
 def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
-    direction,
-    side,
-    price,
-    q_lcb,
-    edge,
-    shares,
+    direction, side
 ):
+    price = 0.001
+    q_lcb = 0.80
+    edge = 0.799
+    shares = 1000.0
     economics = _current_state_econ(
         side=side,
         payoff_q_point=max(0.92, q_lcb),
@@ -1017,6 +1012,61 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
 
     assert verdict["allowed"] is False
     assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+
+
+@pytest.mark.parametrize(
+    ("direction", "side"),
+    ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
+)
+def test_entry_economics_current_state_accepts_positive_subunit_high_price(
+    direction, side
+):
+    price = 0.999
+    q_lcb = 1.0
+    edge = 0.001
+    shares = 10.0
+    economics = _current_state_econ(
+        side=side,
+        payoff_q_point=q_lcb,
+        payoff_q_lcb=q_lcb,
+        cost=price,
+        edge_lcb=edge,
+        selection_guard_q_safe=q_lcb,
+        global_limit_price=str(price),
+        global_expected_fill_price_before_fee=str(price),
+        global_expected_cost_usd=str(price * shares),
+        global_max_spend_usd=str(price * shares),
+        global_target_shares=str(shares),
+        global_robust_delta_log_wealth=0.10,
+        global_robust_ev_usd=edge * shares,
+        global_cut_time_win_probability_lcb=q_lcb,
+        global_cut_time_loss_probability_ucb=0.0,
+        global_terminal_win_probability_lcb=q_lcb,
+        global_terminal_loss_probability_ucb=0.0,
+        global_terminal_loss_payoff_usd=str(-(price * shares)),
+        global_terminal_win_payoff_usd=str((1.0 - price) * shares),
+        global_terminal_median_payoff_usd=str((1.0 - price) * shares),
+        global_terminal_wealth_after_loss_usd=str(100.0 - price * shares),
+        global_terminal_wealth_after_win_usd=str(100.0 + (1.0 - price) * shares),
+        global_cut_time_expected_value_diagnostic_usd=edge * shares,
+        global_expected_value_diagnostic_usd=edge * shares,
+    )
+    verdict = _entry_economics_component(
+        _intent(
+            direction=direction,
+            limit_price=price,
+            q_live=q_lcb,
+            q_lcb_5pct=q_lcb,
+            expected_edge=edge,
+            min_entry_price=0.10,
+            executable_snapshot_min_tick_size="0.001",
+            qkernel_execution_economics=economics,
+        ),
+        shares=shares,
+        actionable_payload={"qkernel_execution_economics": economics},
+    )
+
+    assert verdict["allowed"] is True
 
 
 @pytest.mark.parametrize("direction", (Direction("buy_yes"), Direction("buy_no")))

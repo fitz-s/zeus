@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from src.contracts import Direction, ExecutionIntent
+from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.contracts.slippage_bps import SlippageBps
 
 
@@ -1736,9 +1737,11 @@ def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
-@pytest.mark.parametrize("price", [0.05, 0.95])
+@pytest.mark.parametrize("price", [0.05, 0.95, 0.999])
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
-def test_live_submit_unit_price_band_is_inclusive(tmp_path, price, side):
+def test_live_submit_unit_price_domain_accepts_floor_and_subunit_prices(
+    tmp_path, price, side
+):
     fake = FakeOneStepClient(response={"orderID": "ord-boundary", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
@@ -1751,7 +1754,11 @@ def test_live_submit_unit_price_band_is_inclusive(tmp_path, price, side):
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
-@pytest.mark.parametrize("price", [0.0499, 0.9501])
+def test_live_submit_domain_accepts_fee_adjusted_subunit_cost():
+    assert assert_live_order_unit_price("0.99904995") == Decimal("0.99904995")
+
+
+@pytest.mark.parametrize("price", [0.0499, 1.0, 1.0001])
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
 def test_live_submit_rejects_out_of_band_price_before_sdk_contact(
     tmp_path, price, side
@@ -1765,12 +1772,14 @@ def test_live_submit_rejects_out_of_band_price_before_sdk_contact(
     result = adapter.submit(envelope)
 
     assert result.status == "rejected"
-    assert "outside absolute [0.05, 0.95]" in str(result.error_message)
+    assert "outside absolute [0.05, 1)" in str(result.error_message)
     assert not fake.calls
 
 
-@pytest.mark.parametrize("price", [0.001, 0.04, 0.96, 0.999])
-def test_live_sell_submit_cannot_use_venue_tick_to_waive_absolute_band(tmp_path, price):
+@pytest.mark.parametrize("price", [0.001, 0.04, 1.0, 1.001])
+def test_live_sell_submit_cannot_use_venue_tick_to_waive_absolute_domain(
+    tmp_path, price
+):
     fake = FakeOneStepClient(response={"orderID": "must-not-submit", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
@@ -1780,7 +1789,7 @@ def test_live_sell_submit_cannot_use_venue_tick_to_waive_absolute_band(tmp_path,
     result = adapter.submit(envelope)
 
     assert result.status == "rejected"
-    assert "outside absolute [0.05, 0.95]" in str(result.error_message)
+    assert "outside absolute [0.05, 1)" in str(result.error_message)
     assert not fake.calls
 
 
@@ -2639,13 +2648,13 @@ class TestSubmitBatch:
         fake = FakeBatchTwoStepClient()
         adapter, _ = _adapter(tmp_path, fake)
         envelopes = _batch_envelopes(adapter, 3)
-        envelopes[1] = envelopes[1].with_updates(price=Decimal("0.951"))
+        envelopes[1] = envelopes[1].with_updates(price=Decimal("1"))
 
         results = adapter.submit_batch(envelopes)
 
         assert [result.status for result in results] == ["rejected"] * 3
         assert all(
-            "outside absolute [0.05, 0.95]" in str(result.error_message)
+            "outside absolute [0.05, 1)" in str(result.error_message)
             for result in results
         )
         assert not fake.calls

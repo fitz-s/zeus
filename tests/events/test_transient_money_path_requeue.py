@@ -252,7 +252,7 @@ def test_global_preflight_wrapper_preserves_inner_terminal_disposition():
         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
         "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
         "unit_price_out_of_bounds:live order unit price outside absolute "
-        "[0.05, 0.95] submit band: price=0.9990999"
+        "[0.05, 1) submit domain: price=1.0001"
     )
 
 
