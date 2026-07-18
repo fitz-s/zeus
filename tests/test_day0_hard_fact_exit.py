@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-17
+# Last reused or audited: 2026-07-18
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -833,6 +833,42 @@ class TestRestingOrderCancel:
         ])
         n = cancel_day0_dead_bin_resting_entries(
             clob=clob, conn=_orders_conn(),
+            cities_by_name={"Tokyo": _tokyo()}, now=self.NOW_TOKYO_DAY,
+        )
+        assert n == 1
+        assert clob.cancelled == ["o1"]
+
+    def test_cancel_sweep_consults_durable_observation_instants_when_memos_cold(self, monkeypatch):
+        """H-1 (Day0 first-principles audit 2026-07-18): after a restart the WU-API
+        memo and the METAR memo are both cold, but VERIFIED durable rows already
+        prove the bin dead. The cancel sweep must consult the SAME durable truth the
+        held-position exit lane consults (world_conn threaded), else a resting BUY
+        on a structurally dead bin survives to fill."""
+        _set_metar_memo(monkeypatch, None)
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
+            lambda city, target_date, now: (None, None),
+        )
+        conn = _orders_conn()
+        conn.execute(
+            """CREATE TABLE observation_instants (
+                city TEXT, target_date TEXT, source TEXT, timezone_name TEXT,
+                local_timestamp TEXT, utc_timestamp TEXT, running_max REAL,
+                running_min REAL, authority TEXT, causality_status TEXT,
+                temperature_metric TEXT)"""
+        )
+        conn.execute(
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("Tokyo", "2026-06-10", "wu_icao_history", "Asia/Tokyo",
+             "2026-06-10T13:00:00+09:00", "2026-06-10T04:00:00+00:00",
+             26.0, 20.0, "VERIFIED", "OK", None),
+        )
+        clob = _FakeClob([
+            {"orderID": "o1", "asset_id": "tok-dead-yes", "side": "BUY"},
+            {"orderID": "o2", "asset_id": "tok-alive-yes", "side": "BUY"},
+        ])
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob, conn=conn,
             cities_by_name={"Tokyo": _tokyo()}, now=self.NOW_TOKYO_DAY,
         )
         assert n == 1

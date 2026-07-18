@@ -1065,8 +1065,14 @@ def cancel_day0_dead_bin_resting_entries(
             paused = is_day0_family_paused(city_name, target_date, now=moment)
             verdict = None
             if not paused:
+                # H-1 (Day0 first-principles audit 2026-07-18): thread the caller's
+                # composite connection as world_conn — same durable truth the
+                # held-position exit lane consults (cycle_runtime world_conn=conn).
+                # Without it the durable observation_instants source is silently
+                # excluded and a cold-memo restart leaves dead-bin BUYs resting.
                 effective, source = settlement_grade_effective_extreme(
-                    city=city, target_date=target_date, metric=metric, now=moment
+                    city=city, target_date=target_date, metric=metric, now=moment,
+                    world_conn=conn,
                 )
                 if effective is not None:
                     verdict = hard_fact_bin_verdict(
