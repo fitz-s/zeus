@@ -275,3 +275,28 @@ def test_runner_idempotent_upsert():
     run_exit_timing_attribution(conn, only_new=False)  # re-run must not duplicate
     n = conn.execute("SELECT COUNT(*) FROM exit_timing_attribution WHERE position_id='p-rev'").fetchone()[0]
     assert n == 1
+
+
+def test_runner_only_new_filters_existing_before_grading(monkeypatch):
+    import src.analysis.exit_timing_attribution as attribution
+
+    conn = _exit_runner_conn()
+    _seed_settlement_attribution(conn, position_id="p-rev", won=0)
+    conn.execute(
+        "INSERT INTO trades.position_current VALUES "
+        "('p-rev','economically_closed',0.85,'CI_SEPARATED_REVERSAL',10.0)"
+    )
+    first = attribution.run_exit_timing_attribution(conn, only_new=True)
+    assert first["graded"] == 1
+
+    monkeypatch.setattr(
+        attribution,
+        "grade_exit_timing",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("existing exit grades must be filtered in SQL")
+        ),
+    )
+    second = attribution.run_exit_timing_attribution(conn, only_new=True)
+    assert second["graded"] == 0
+    assert second["skipped_existing"] == 1
+    assert second["exited_positions"] == 1

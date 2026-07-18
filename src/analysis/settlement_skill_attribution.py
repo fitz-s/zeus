@@ -1013,7 +1013,11 @@ def _load_position_entry_times(world_conn: sqlite3.Connection) -> dict[str, str]
     return out
 
 
-def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
+def load_settled_positions(
+    world_conn: sqlite3.Connection,
+    *,
+    only_new: bool = False,
+) -> list[SkillGrade]:
     """Grade every settled position in the real ledger into a skill category.
 
     W3 (2026-06-20): grades the real position ledger ``trades.position_current``
@@ -1035,11 +1039,6 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
     from src.types.temperature import UnitMismatchError
 
     _ensure_trades_attached(world_conn)
-    market_meta = _load_market_meta(world_conn)
-    settlements, settled_at = _load_settlements(world_conn)
-    entry_times = _load_position_entry_times(world_conn)
-
-    out: list[SkillGrade] = []
     # Grade ONLY genuinely-held TERMINAL positions: phase IN
     # (settled, economically_closed, admin_closed). position_current.phase is
     # constrained to lifecycle values; without this filter the query also returned
@@ -1047,18 +1046,37 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
     # (``pending_exit`` / ``day0_window`` — not settled from our side) whose MARKET
     # merely happened to carry a VERIFIED settlement_outcome, mis-grading them and
     # writing incorrect settlement_attribution. (PR #416 review fix 2026-06-21.)
-    for (
-        position_id, condition_id, direction, entry_price, shares,
-    ) in world_conn.execute(
+    new_only_clause = (
         """
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM settlement_attribution AS existing
+                 WHERE existing.position_id = position_current.position_id
+          )
+        """
+        if only_new
+        else ""
+    )
+    position_rows = world_conn.execute(
+        f"""
         SELECT position_id, condition_id, direction, entry_price, shares
-        FROM trades.position_current
+        FROM trades.position_current AS position_current
         WHERE entry_price IS NOT NULL
           AND direction IS NOT NULL
           AND condition_id IS NOT NULL
           AND phase IN ('settled', 'economically_closed', 'admin_closed')
+          {new_only_clause}
         """
-    ).fetchall():
+    ).fetchall()
+    if not position_rows:
+        return []
+
+    market_meta = _load_market_meta(world_conn)
+    settlements, settled_at = _load_settlements(world_conn)
+    entry_times = _load_position_entry_times(world_conn)
+
+    out: list[SkillGrade] = []
+    for position_id, condition_id, direction, entry_price, shares in position_rows:
         # position_current's per-share avg fill is ``entry_price``; ``shares`` is the
         # filled size. (There is no avg_fill_price column on this ledger.)
         audit_id = position_id
@@ -1461,10 +1479,24 @@ def _run_with_conn(
     now_utc: datetime,
     only_new: bool,
 ) -> dict:
-    grades = load_settled_positions(world_conn)
+    grades = load_settled_positions(world_conn, only_new=only_new)
 
     graded = 0
     skipped = 0
+    if only_new:
+        skipped = int(
+            world_conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM settlement_attribution AS existing
+                  JOIN trades.position_current AS position_current
+                    ON position_current.position_id = existing.position_id
+                 WHERE position_current.phase IN (
+                       'settled', 'economically_closed', 'admin_closed'
+                 )
+                """
+            ).fetchone()[0]
+        )
     by_category: dict[str, int] = {}
 
     world_conn.execute("SAVEPOINT skill_attr_batch")
@@ -1478,13 +1510,17 @@ def _run_with_conn(
             by_category[g.category] = by_category.get(g.category, 0) + 1
         # Exit-timing attribution (2026-06-22, lifecycle consult): the orthogonal
         # exit-decision grade. Runs in the SAME batch so the entry-skill row and its
-        # exit-timing row commit atomically. Reads this batch's freshly-written
-        # settlement_attribution.won; always re-grades (only_new=False) so exit alpha
-        # refreshes in place. Never raises out of the batch (audit must not block the
-        # settlement grader); on error the batch still releases with entry grades intact.
+        # exit-timing row commit atomically. Incremental scheduler runs grade only
+        # missing exit rows; explicit full re-grades still refresh existing rows.
+        # Never raises out of the batch (audit must not block the settlement grader);
+        # on error the batch still releases with entry grades intact.
         try:
             from src.analysis.exit_timing_attribution import run_exit_timing_attribution
-            exit_stats = run_exit_timing_attribution(world_conn, now_utc=now_utc, only_new=False)
+            exit_stats = run_exit_timing_attribution(
+                world_conn,
+                now_utc=now_utc,
+                only_new=only_new,
+            )
             logger.info(
                 "exit_timing_attribution: graded=%s exited=%s total_exit_alpha_usd=%s by_category=%s",
                 exit_stats["graded"], exit_stats["exited_positions"],
@@ -1509,7 +1545,7 @@ def _run_with_conn(
     return {
         "graded": graded,
         "skipped_existing": skipped,
-        "total_settled_positions": len(grades),
+        "total_settled_positions": len(grades) + skipped,
         "by_category": by_category,
         "skill_win_rate": rate.skill_win_rate,
         "naive_win_rate": rate.naive_win_rate,

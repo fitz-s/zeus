@@ -402,7 +402,7 @@ def _attach_forecasts(world_conn: sqlite3.Connection) -> sqlite3.Connection:
     return world_conn
 
 
-def test_F3_end_to_end_db_grade(tmp_path) -> None:
+def test_F3_end_to_end_db_grade(tmp_path, monkeypatch) -> None:
     """W3: grades trades.position_current (the real ledger).
 
     Phase 3 (2026-06-20): the grader reads ``trades.position_current`` instead of
@@ -515,7 +515,17 @@ def test_F3_end_to_end_db_grade(tmp_path) -> None:
     assert audit[0] is None
     assert audit[1] is None
 
-    # Idempotent: re-run grades nothing new.
+    # Idempotent: re-run filters existing positions before loading broad
+    # market, settlement, entry-event, or posterior inputs.
+    import src.analysis.settlement_skill_attribution as attribution_module
+
+    monkeypatch.setattr(
+        attribution_module,
+        "_load_market_meta",
+        lambda _conn: (_ for _ in ()).throw(
+            AssertionError("existing grades must be filtered before broad DB reads")
+        ),
+    )
     stats2 = run_settlement_skill_attribution(world_conn=wconn, only_new=True)
     assert stats2["graded"] == 0
     assert stats2["skipped_existing"] == 1

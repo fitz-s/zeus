@@ -238,16 +238,6 @@ def grade_exit_timing(
 # decision-q certificate (a strengthening increment) will refine skill attribution.
 
 
-def _exit_row_exists(world_conn: sqlite3.Connection, position_id: str) -> bool:
-    return (
-        world_conn.execute(
-            "SELECT 1 FROM exit_timing_attribution WHERE position_id = ? LIMIT 1",
-            (position_id,),
-        ).fetchone()
-        is not None
-    )
-
-
 def persist_exit_timing_grade(
     world_conn: sqlite3.Connection,
     *,
@@ -327,8 +317,19 @@ def run_exit_timing_attribution(
     if now_utc is None:
         now_utc = datetime.now(tz=timezone.utc)
 
-    rows = world_conn.execute(
+    new_only_clause = (
         """
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM exit_timing_attribution AS existing
+                 WHERE existing.position_id = sa.position_id
+          )
+        """
+        if only_new
+        else ""
+    )
+    rows = world_conn.execute(
+        f"""
         SELECT sa.position_id, sa.condition_id, sa.city, sa.target_date,
                sa.temperature_metric, sa.direction, sa.won,
                pc.exit_price, pc.exit_reason, pc.shares
@@ -336,20 +337,31 @@ def run_exit_timing_attribution(
         JOIN trades.position_current AS pc ON pc.position_id = sa.position_id
         WHERE pc.phase IN ('economically_closed', 'admin_closed')
           AND pc.exit_price IS NOT NULL
+          {new_only_clause}
         """
     ).fetchall()
 
     graded = 0
     skipped = 0
+    if only_new:
+        skipped = int(
+            world_conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM exit_timing_attribution AS existing
+                  JOIN trades.position_current AS pc
+                    ON pc.position_id = existing.position_id
+                 WHERE pc.phase IN ('economically_closed', 'admin_closed')
+                   AND pc.exit_price IS NOT NULL
+                """
+            ).fetchone()[0]
+        )
     by_category: dict[str, int] = {}
     total_exit_alpha = 0.0
     for (
         position_id, condition_id, city, target_date, temperature_metric,
         direction, won, exit_price, exit_reason, shares,
     ) in rows:
-        if only_new and _exit_row_exists(world_conn, str(position_id)):
-            skipped += 1
-            continue
         reason = (exit_reason or "").strip()
         grade = grade_exit_timing(
             closed_shares=float(shares or 0.0),
@@ -378,7 +390,7 @@ def run_exit_timing_attribution(
     return {
         "graded": graded,
         "skipped_existing": skipped,
-        "exited_positions": len(rows),
+        "exited_positions": len(rows) + skipped,
         "by_category": by_category,
         "total_exit_alpha_usd": round(total_exit_alpha, 4),
     }
