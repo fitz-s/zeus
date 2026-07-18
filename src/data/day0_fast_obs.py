@@ -136,9 +136,14 @@ METAR_INCREMENTAL_FETCH_HOURS = 0.5
 METAR_BACKFILL_FETCH_HOURS = 2.0
 METAR_BACKFILL_INTERVAL_S = 15.0 * 60.0
 METAR_RECOVERY_OVERLAP_HOURS = 0.25
-METAR_HTTP_LIMITS = httpx.Limits(
+METAR_GLOBAL_HTTP_LIMITS = httpx.Limits(
     max_keepalive_connections=1,
     max_connections=2,
+    keepalive_expiry=90.0,
+)
+METAR_PRIORITY_HTTP_LIMITS = httpx.Limits(
+    max_keepalive_connections=4,
+    max_connections=4,
     keepalive_expiry=90.0,
 )
 
@@ -1251,6 +1256,11 @@ class Day0FastObsEmitter:
         init=False,
     )
     _http_client: httpx.Client | None = field(default=None, init=False, repr=False)
+    _priority_http_client: httpx.Client | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
     # SPLIT MEMOS (PR#404 round-2 P0-1): the KILL memo (hard-fact exit source,
     # advanced by any memo-safe value incl. stale-withheld ones) and the LIVE
     # memo (emit moved-check, advanced ONLY by an INSERTED live event) were one
@@ -1758,8 +1768,13 @@ class Day0FastObsEmitter:
         if self.fetcher is fetch_metar_reports:
             with self._lock:
                 if self._http_client is None:
-                    self._http_client = httpx.Client(limits=METAR_HTTP_LIMITS)
+                    self._http_client = httpx.Client(limits=METAR_GLOBAL_HTTP_LIMITS)
+                if self._priority_http_client is None:
+                    self._priority_http_client = httpx.Client(
+                        limits=METAR_PRIORITY_HTTP_LIMITS
+                    )
                 client = self._http_client
+                priority_client = self._priority_http_client
                 awc_due = (
                     self._last_awc_attempt_monotonic == 0.0
                     or now - self._last_awc_attempt_monotonic
@@ -1768,12 +1783,13 @@ class Day0FastObsEmitter:
                 history_missing = not self._full_window_loaded
             cycle_reports: list[MetarReport] = []
             priority_reports, priority_ok = self._station_cursor.poll(
-                client=client,
+                client=priority_client,
                 stations=priority_stations,
                 budget_s=self.priority_station_poll_budget_s,
             )
             reports.extend(priority_reports)
             source_ok = source_ok or priority_ok
+            cycle_ok = priority_ok
             if priority_reports:
                 cycle_reports = priority_reports
             try:
@@ -1791,7 +1807,7 @@ class Day0FastObsEmitter:
                     type(exc).__name__,
                     exc,
                 )
-            if awc_due and (history_missing or not cycle_reports):
+            if awc_due and (history_missing or not cycle_ok):
                 with self._lock:
                     self._last_awc_attempt_monotonic = now
                 try:

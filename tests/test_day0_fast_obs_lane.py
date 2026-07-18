@@ -333,6 +333,11 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
 
         assert reports == [report]
         assert status == fast_obs.FETCH_FRESH
+        assert emitter._priority_http_client is not emitter._http_client
+        assert (
+            fast_obs.METAR_PRIORITY_HTTP_LIMITS.max_connections
+            >= fast_obs.NoaaMetarStationCursor().max_workers
+        )
 
     def test_awc_history_fetch_is_not_repeated_each_source_clock_poll(
         self,
@@ -361,9 +366,12 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
 
         first = emitter._reports_with_status(["KORD"])
         second = emitter._reports_with_status(["KORD"])
+        emitter._last_awc_attempt_monotonic = 0.0
+        third = emitter._reports_with_status(["KORD"])
 
         assert first[1] == fast_obs.FETCH_FRESH
         assert second[1] == fast_obs.FETCH_CACHE_HIT
+        assert third[1] == fast_obs.FETCH_CACHE_HIT
         assert len(awc_calls) == 1
 
     def test_cycle_fact_survives_awc_recovery_failure(self, monkeypatch):
@@ -1512,7 +1520,7 @@ class TestMetarConnectionReuse:
         assert len(client.calls) == 1
         assert client.calls[0][1]["params"]["hours"] == 2.0
 
-    def test_emitter_reuses_one_client_across_polls(self, monkeypatch):
+    def test_emitter_reuses_isolated_clients_across_polls(self, monkeypatch):
         import src.data.day0_fast_obs as fast_obs
 
         t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
@@ -1553,10 +1561,15 @@ class TestMetarConnectionReuse:
         emitter._reports_with_status(["RJTT"])
         emitter._reports_with_status(["RJTT"])
 
-        assert len(clients) == 1
+        assert len(clients) == 2
+        assert emitter._http_client in clients
+        assert emitter._priority_http_client in clients
+        assert emitter._http_client is not emitter._priority_http_client
         # Cold start reads the cycle plus AWC history; the next source-clock
-        # poll reads only the cycle cursor. Both use the same pooled client.
-        assert clients[0].calls == 3
+        # poll reads only the cycle cursor. Priority station I/O has its own
+        # pool and cannot consume global cycle/recovery connections.
+        assert emitter._http_client.calls == 3
+        assert emitter._priority_http_client.calls == 0
 
 
 class TestMutexNoHttpSplit:
