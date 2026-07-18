@@ -55,6 +55,45 @@ def _scope_key(*parts: object) -> str:
     return "|".join("" if part is None else str(part) for part in parts)
 
 
+def _compose_scope_key(
+    *,
+    scope_type: str | None,
+    city_id: str | None,
+    city_timezone: str | None,
+    target_local_date_iso: str | None,
+    temperature_metric: str | None,
+    physical_quantity: str | None,
+    observation_field: str | None,
+    data_version: str | None,
+    strategy_key: str | None,
+    market_family: str | None,
+    source_id: str | None,
+    track: str | None,
+    condition_id: str | None,
+) -> str:
+    """Single source of truth for the readiness_state upsert-conflict key.
+
+    Both ``write_readiness_state`` (the upsert) and ``get_readiness_state_for_scope`` (the read
+    the cert-monotone guard uses) MUST derive scope_key here so the write target and the read
+    target can never disagree on which row a scope maps to.
+    """
+    return _scope_key(
+        scope_type,
+        city_id,
+        city_timezone,
+        target_local_date_iso,
+        temperature_metric,
+        physical_quantity,
+        observation_field,
+        data_version,
+        strategy_key,
+        market_family,
+        source_id,
+        track,
+        condition_id,
+    )
+
+
 @contextlib.contextmanager
 def _savepoint(conn: WorldConnection, name: str) -> Iterator[None]:
     conn.execute(f"SAVEPOINT {name}")
@@ -123,20 +162,20 @@ def write_readiness_state(
     if status == "LIVE_ELIGIBLE" and expires_at is None:
         raise ValueError("LIVE_ELIGIBLE readiness requires expires_at")
     target_local_date_iso = _to_iso(target_local_date)
-    scope_key = _scope_key(
-        scope_type,
-        city_id,
-        city_timezone,
-        target_local_date_iso,
-        temperature_metric,
-        physical_quantity,
-        observation_field,
-        data_version,
-        strategy_key,
-        market_family,
-        source_id,
-        track,
-        condition_id,
+    scope_key = _compose_scope_key(
+        scope_type=scope_type,
+        city_id=city_id,
+        city_timezone=city_timezone,
+        target_local_date_iso=target_local_date_iso,
+        temperature_metric=temperature_metric,
+        physical_quantity=physical_quantity,
+        observation_field=observation_field,
+        data_version=data_version,
+        strategy_key=strategy_key,
+        market_family=market_family,
+        source_id=source_id,
+        track=track,
+        condition_id=condition_id,
     )
     with _savepoint(conn, "readiness_state_write"):
         conn.execute(
@@ -203,6 +242,51 @@ def write_readiness_state(
 
 def get_readiness_state(conn: WorldConnection, readiness_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM readiness_state WHERE readiness_id = ?", (readiness_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_readiness_state_for_scope(
+    conn: WorldConnection,
+    *,
+    scope_type: str,
+    city_id: str | None = None,
+    city_timezone: str | None = None,
+    target_local_date: date | str | None = None,
+    temperature_metric: str | None = None,
+    physical_quantity: str | None = None,
+    observation_field: str | None = None,
+    data_version: str | None = None,
+    strategy_key: str | None = None,
+    market_family: str | None = None,
+    source_id: str | None = None,
+    track: str | None = None,
+    condition_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the currently-certified readiness_state row for a scope (the row a
+    ``write_readiness_state`` with the same scope fields would REPLACE), or None.
+
+    Reuses ``_compose_scope_key`` so this read and the upsert can never disagree on the
+    conflict key. The cert-monotone guard uses this to inspect the incumbent certificate
+    before deciding whether the incoming write is a lawful forward advance.
+    """
+    scope_key = _compose_scope_key(
+        scope_type=scope_type,
+        city_id=city_id,
+        city_timezone=city_timezone,
+        target_local_date_iso=_to_iso(target_local_date),
+        temperature_metric=temperature_metric,
+        physical_quantity=physical_quantity,
+        observation_field=observation_field,
+        data_version=data_version,
+        strategy_key=strategy_key,
+        market_family=market_family,
+        source_id=source_id,
+        track=track,
+        condition_id=condition_id,
+    )
+    row = conn.execute(
+        "SELECT * FROM readiness_state WHERE scope_key = ?", (scope_key,)
+    ).fetchone()
     return dict(row) if row else None
 
 

@@ -64,7 +64,7 @@ from src.data.replacement_forecast_runtime_policy import (
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.contracts.availability_time import proof_of_possession_available_at
-from src.state.readiness_repo import write_readiness_state
+from src.state.readiness_repo import get_readiness_state_for_scope, write_readiness_state
 from src.state.source_run_repo import get_source_run
 
 UTC = timezone.utc
@@ -4773,6 +4773,131 @@ def _build_readiness(
     )
 
 
+def _bound_posterior_id(source_run_id: object) -> int | None:
+    """Parse the ``posterior:<id>`` binding a readiness cert records in ``source_run_id``."""
+    if not isinstance(source_run_id, str) or not source_run_id.startswith("posterior:"):
+        return None
+    try:
+        return int(source_run_id.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _posterior_serving_key(
+    conn: sqlite3.Connection, posterior_id: int
+) -> tuple[datetime, datetime] | None:
+    """Return a posterior's ``(source_cycle_time, computed_at)`` serving-order key, or None.
+
+    This is the exact key serving orders by (event_reactor/staleness_cancel:
+    ``source_cycle_time DESC, computed_at DESC``). None on any read/parse gap so the guard
+    fails open.
+    """
+    try:
+        row = conn.execute(
+            "SELECT source_cycle_time, computed_at FROM forecast_posteriors WHERE posterior_id = ?",
+            (posterior_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    cycle_raw = row[0] if not hasattr(row, "keys") else row["source_cycle_time"]
+    computed_raw = row[1] if not hasattr(row, "keys") else row["computed_at"]
+    if cycle_raw is None or computed_raw is None:
+        return None
+    try:
+        return (
+            _to_utc(str(cycle_raw), field_name="source_cycle_time"),
+            _to_utc(str(computed_raw), field_name="computed_at"),
+        )
+    except Exception:
+        return None
+
+
+def _serving_key_strictly_newer(
+    existing: tuple[datetime, datetime], incoming: tuple[datetime, datetime]
+) -> bool:
+    """True iff ``existing`` sorts STRICTLY ahead of ``incoming`` on the serving key
+    ``(source_cycle_time DESC, computed_at DESC)``. EQUAL is NOT strictly newer (fail-open)."""
+    existing_cycle, existing_computed = existing
+    incoming_cycle, incoming_computed = incoming
+    if existing_cycle > incoming_cycle:
+        return True
+    if existing_cycle == incoming_cycle and existing_computed > incoming_computed:
+        return True
+    return False
+
+
+def _readiness_cert_cycle_regression_reasons(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    incoming_posterior_id: int,
+) -> tuple[str, ...]:
+    """CERTIFICATE-BOUNDARY monotone guard — belt-and-suspenders to _cycle_monotone_block_reasons.
+
+    The readiness certificate is upserted last-writer-wins on ``scope_key`` (readiness_repo
+    ``ON CONFLICT(scope_key) DO UPDATE``) with NO timestamp comparison. The upstream cycle
+    guards refuse a STRICTLY-OLDER model *cycle* but not an EQUAL cycle committed OUT of
+    computed_at order — the crash-only race where a SIGKILL'd orphan materialize child commits
+    an older-COMPUTED posterior concurrently with a lock-stealing new daemon. Serving binds to
+    the cert's posterior_id and orders families by (source_cycle_time DESC, computed_at DESC);
+    this refuses to REGRESS the cert onto a posterior the incumbent certified one is STRICTLY
+    newer than on that same key.
+
+    FAIL-OPEN on every gap (no incumbent cert, unparseable binding, missing/unreadable posterior
+    timestamps, or EQUAL keys): the guard ONLY blocks a strict regression and is NEVER the sole
+    gate that can darken a scope. A forward-or-equal advance proceeds byte-identically to today.
+    """
+    try:
+        expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
+        incumbent = get_readiness_state_for_scope(
+            conn,
+            scope_type="strategy",
+            city_id=request.city_id,
+            city_timezone=request.city_timezone,
+            target_local_date=request.target_date,
+            temperature_metric=metric,
+            physical_quantity=expected.physical_quantity,
+            observation_field=expected.observation_field,
+            data_version=_data_version(metric),
+            strategy_key=STRATEGY_KEY,
+            source_id=SOURCE_ID,
+            track="soft_anchor_posterior",
+        )
+    except Exception:
+        return ()
+    if incumbent is None:
+        return ()
+    incumbent_posterior_id = _bound_posterior_id(incumbent.get("source_run_id"))
+    if incumbent_posterior_id is None or incumbent_posterior_id == incoming_posterior_id:
+        return ()
+    incumbent_key = _posterior_serving_key(conn, incumbent_posterior_id)
+    incoming_key = _posterior_serving_key(conn, incoming_posterior_id)
+    if incumbent_key is None or incoming_key is None:
+        return ()
+    if _serving_key_strictly_newer(incumbent_key, incoming_key):
+        import logging  # noqa: PLC0415
+
+        logging.getLogger("zeus.replacement_readiness_cert_monotone").warning(
+            "REFUSED readiness-cert regression for %s %s %s: incumbent posterior %s "
+            "(cycle=%s computed=%s) is STRICTLY newer than incoming posterior %s "
+            "(cycle=%s computed=%s). Cert keeps the fresher binding (crash-steal race guard).",
+            request.city,
+            _date_text(request.target_date),
+            metric,
+            incumbent_posterior_id,
+            incumbent_key[0].isoformat(),
+            incumbent_key[1].isoformat(),
+            incoming_posterior_id,
+            incoming_key[0].isoformat(),
+            incoming_key[1].isoformat(),
+        )
+        return ("READINESS_CERT_CYCLE_REGRESSION",)
+    return ()
+
+
 def materialize_replacement_forecast_live(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -4848,6 +4973,23 @@ def materialize_replacement_forecast_live(
         conn, request, metric=metric, anchor_id=anchor_id, result=posterior_result
     )
     readiness = _build_readiness(request, metric=metric, posterior_id=posterior_id, anchor_id=anchor_id)
+    # CERTIFICATE-BOUNDARY monotone guard (belt-and-suspenders to _cycle_monotone_block_reasons
+    # at the value-build step): the cert upsert is last-writer-wins on scope_key, so a same-cycle
+    # posterior committed OUT of computed_at order (crash-steal race) could otherwise REGRESS the
+    # serving cert. Refuse only a STRICT regression on (source_cycle_time, computed_at); fail-open
+    # otherwise so a lawful forward advance is byte-identical to today. The posterior row already
+    # written stays (it sorts BELOW the certified one and serving binds to the cert, not newest).
+    cert_regression_reasons = _readiness_cert_cycle_regression_reasons(
+        conn, request, metric=metric, incoming_posterior_id=posterior_id
+    )
+    if cert_regression_reasons:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=cert_regression_reasons,
+            posterior_id=posterior_id,
+            anchor_id=anchor_id,
+            readiness_id=None,
+        )
     expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
     write_readiness_state(
         conn,
