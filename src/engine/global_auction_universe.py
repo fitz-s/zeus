@@ -670,39 +670,43 @@ def _current_global_book_asset_state(
     status = "VENUE_NOT_EXECUTABLE" if metadata_current else "VENUE_METADATA_STALE"
     if executable_metadata:
         if raw_book is None:
-            raise ValueError(f"GLOBAL_BOOK_RESPONSE_INCOMPLETE:{token_id}")
-        raw_asset_id = str(
-            raw_book.get("asset_id")
-            or raw_book.get("assetId")
-            or raw_book.get("token_id")
-            or ""
-        ).strip()
-        if raw_asset_id != token_id:
-            raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
-        book_hash = _canonical_raw_book_hash(raw_book)
-        curve = _global_book_curve(
-            family_key=family_key,
-            bin_id=bin_id,
-            condition_id=condition_id,
-            side=side,
-            token_id=token_id,
-            raw_book=raw_book,
-            metadata=metadata,
-            captured_at_utc=captured_at_utc,
-            max_age=max_age,
-        )
-        sell_curve = _global_sell_curve(
-            family_key=family_key,
-            bin_id=bin_id,
-            condition_id=condition_id,
-            side=side,
-            token_id=token_id,
-            raw_book=raw_book,
-            metadata=metadata,
-            captured_at_utc=captured_at_utc,
-            max_age=max_age,
-        )
-        status = "EXECUTABLE" if curve is not None else "NO_ASK"
+            status = "BOOK_UNAVAILABLE"
+            book_hash = "unavailable:" + hashlib.sha256(
+                f"{condition_id}|{side}|{token_id}".encode("utf-8")
+            ).hexdigest()
+        else:
+            raw_asset_id = str(
+                raw_book.get("asset_id")
+                or raw_book.get("assetId")
+                or raw_book.get("token_id")
+                or ""
+            ).strip()
+            if raw_asset_id != token_id:
+                raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
+            book_hash = _canonical_raw_book_hash(raw_book)
+            curve = _global_book_curve(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                side=side,
+                token_id=token_id,
+                raw_book=raw_book,
+                metadata=metadata,
+                captured_at_utc=captured_at_utc,
+                max_age=max_age,
+            )
+            sell_curve = _global_sell_curve(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                side=side,
+                token_id=token_id,
+                raw_book=raw_book,
+                metadata=metadata,
+                captured_at_utc=captured_at_utc,
+                max_age=max_age,
+            )
+            status = "EXECUTABLE" if curve is not None else "NO_ASK"
     else:
         book_hash = "metadata:" + hashlib.sha256(
             json.dumps(
@@ -769,7 +773,7 @@ def capture_current_global_book_epoch(
     prefetched_books: Mapping[str, Mapping[str, object]] | None = None,
     prefetched_at_utc: datetime | None = None,
 ) -> CurrentGlobalBookEpoch:
-    """Fetch every candidate-capable native book without shrinking its set."""
+    """Capture every candidate-capable side, isolating missing public books."""
 
     if (
         max_age <= timedelta(0)
@@ -861,10 +865,6 @@ def capture_current_global_book_epoch(
     finished_at = finished_at.astimezone(timezone.utc)
     if finished_at < started_at or finished_at - started_at > max_age:
         raise ValueError("GLOBAL_BOOK_CAPTURE_WINDOW_EXPIRED")
-    missing_books = [token for token in tokens if token not in books]
-    if missing_books:
-        raise ValueError(f"GLOBAL_BOOK_RESPONSE_INCOMPLETE:{len(missing_books)}")
-
     assets: list[CurrentGlobalBookAsset] = []
     sell_assets: list[CurrentGlobalSellAsset] = []
     states: list[tuple[str, ...]] = []

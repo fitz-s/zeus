@@ -332,12 +332,14 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["book_native_side_candidate_coverage_status"] == "COMPLETE"
     assert summary["book_native_side_status_counts"] == {
         "NO": {
+            "BOOK_UNAVAILABLE": 0,
             "EXECUTABLE": 0,
             "NO_ASK": 2,
             "VENUE_METADATA_STALE": 0,
             "VENUE_NOT_EXECUTABLE": 0,
         },
         "YES": {
+            "BOOK_UNAVAILABLE": 0,
             "EXECUTABLE": 1,
             "NO_ASK": 0,
             "VENUE_METADATA_STALE": 0,
@@ -8948,11 +8950,25 @@ def test_current_global_book_epoch_rejects_older_projected_token_change():
         )
 
 
-def test_current_global_book_epoch_rejects_one_missing_native_side():
+def test_current_global_book_epoch_isolates_missing_books_to_their_family():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)
     at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
+    family_a = SimpleNamespace(
+        family_key="family-a",
+        bindings=tuple(probability.bindings[:1]),
+    )
+    family_b = SimpleNamespace(
+        family_key="family-b",
+        bindings=tuple(probability.bindings[1:]),
+    )
+    assert family_b.bindings
+    unavailable = {
+        token
+        for binding in family_a.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    }
 
     def incomplete_books(tokens):
         return {
@@ -8964,18 +8980,57 @@ def test_current_global_book_epoch_rejects_one_missing_native_side():
                 "bids": [],
                 "asks": [{"price": "0.30", "size": "100"}],
             }
-            for token in tokens[:-1]
+            for token in tokens
+            if token not in unavailable
         }
 
-    with pytest.raises(ValueError, match="GLOBAL_BOOK_RESPONSE_INCOMPLETE:1"):
-        capture_current_global_book_epoch(
-            conn,
-            probability_witnesses={probability.family_key: probability},
-            get_books=incomplete_books,
-            clock=lambda: next(times),
-            max_age=_dt.timedelta(seconds=30),
-            batch_size=500,
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={
+            family_a.family_key: family_a,
+            family_b.family_key: family_b,
+        },
+        get_books=incomplete_books,
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        batch_size=500,
+    )
+
+    states_by_family = {
+        family_key: tuple(
+            state for state in epoch.asset_states if state[0] == family_key
         )
+        for family_key in (family_a.family_key, family_b.family_key)
+    }
+    assert {state[5] for state in states_by_family[family_a.family_key]} == {
+        "BOOK_UNAVAILABLE"
+    }
+    assert {state[5] for state in states_by_family[family_b.family_key]} == {
+        "EXECUTABLE"
+    }
+    assert not any(asset.family_key == family_a.family_key for asset in epoch.assets)
+    assert {asset.family_key for asset in epoch.assets} == {family_b.family_key}
+    receipt = global_batch_runtime._book_native_side_receipt(
+        asset_states=epoch.asset_states,
+        probability_keys=(family_a.family_key, family_b.family_key),
+        buy_candidate_index=tuple(
+            (
+                f"candidate-{asset.token_id}",
+                asset.family_key,
+                asset.bin_id,
+                asset.condition_id,
+                asset.side,
+                asset.token_id,
+            )
+            for asset in epoch.assets
+        ),
+        excluded_by_family={},
+    )
+    assert receipt["book_native_side_candidate_coverage_complete"] is True
+    assert sum(
+        side_counts["BOOK_UNAVAILABLE"]
+        for side_counts in receipt["book_native_side_status_counts"].values()
+    ) == len(unavailable)
 
 
 def test_current_global_book_epoch_overlaps_chunks_and_preserves_window():
