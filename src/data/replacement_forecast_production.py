@@ -589,6 +589,50 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 ),
             )
 
+        planned_target_count = sum(len(rows) for rows in target_keys_by_source.values())
+        covered_target_count = 0
+        coverage_probe_status = "SOURCE_CLOCK_TARGET_COVERAGE_READ_FAILED"
+        try:
+            from src.state.db import _connect_read_only  # noqa: PLC0415
+
+            coverage_conn = _connect_read_only(Path(str(forecast_db)))
+            filtered_target_keys: dict[str, list[object]] = {}
+            scoped_covered_target_count = 0
+            try:
+                for source, rows in target_keys_by_source.items():
+                    cycle_iso = source_cycles[source].isoformat()
+                    covered = {
+                        (str(city), str(target_date), str(metric))
+                        for city, target_date, metric in coverage_conn.execute(
+                            """
+                            SELECT city, target_date, metric
+                              FROM raw_model_forecasts
+                             WHERE model = ?
+                               AND source_cycle_time = ?
+                               AND endpoint = 'single_runs'
+                            """,
+                            (source, cycle_iso),
+                        )
+                    }
+                    missing = [
+                        row
+                        for row in rows
+                        if (row.city, row.target_date, row.temperature_metric)
+                        not in covered
+                    ]
+                    scoped_covered_target_count += len(rows) - len(missing)
+                    filtered_target_keys[source] = missing
+            finally:
+                coverage_conn.close()
+            target_keys_by_source = filtered_target_keys
+            covered_target_count = scoped_covered_target_count
+            coverage_probe_status = "SOURCE_CLOCK_TARGET_COVERAGE_SCOPED"
+        except Exception:
+            # Coverage is an optimization only. The downloader's own natural-key
+            # dedup remains the correctness backstop when this read is unavailable.
+            pass
+        missing_target_count = sum(len(rows) for rows in target_keys_by_source.values())
+
         targets_by_source: dict[str, list[BayesPrecisionFusionDownloadTarget]] = {}
         for source, target_keys in target_keys_by_source.items():
             cycle = source_cycles[source]
@@ -626,6 +670,10 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 },
                 "updated_sources": updated_sources,
                 "affected_cities": affected_cities,
+                "planned_target_count": planned_target_count,
+                "covered_target_count": covered_target_count,
+                "missing_target_count": missing_target_count,
+                "coverage_probe_status": coverage_probe_status,
             }
 
         max_workers = min(
@@ -954,6 +1002,10 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             "target_count": sum(
                 int(item.get("target_count") or 0) for item in reports
             ),
+            "planned_target_count": planned_target_count,
+            "covered_target_count": covered_target_count,
+            "missing_target_count": missing_target_count,
+            "coverage_probe_status": coverage_probe_status,
             "candidate_row_count": sum(
                 int(item.get("candidate_row_count") or 0) for item in reports
             ),
