@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-07-17
-# Lifecycle: created=2026-05-14; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Last reused/audited: 2026-07-18
+# Lifecycle: created=2026-05-14; last_reviewed=2026-07-17; last_reused=2026-07-18
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction); a0d51d480b507f324 root-cause (ECMWF 00z ingest schedule fix — add 12z triggers, update FORECAST_LIVE_JOB_IDS).
 # Purpose: Relationship tests for the forecast-live daemon boundary — job registry, lock semantics, journaling, and source-health probe.
 # Reuse: Run when forecast_live_daemon.py job specs, run_opendata_track, or job journaling logic changes.
@@ -2407,6 +2407,159 @@ def test_slow_forecast_monitor_does_not_block_unrelated_wake(monkeypatch) -> Non
     assert main._edli_reactor_wake_poll_once() is True
     assert acknowledgements == [market_wake.wake_id, forecast_wake.wake_id]
     assert reactor_calls == ["market_price_advanced", "forecast_posterior_advanced"]
+
+
+def test_completed_forecast_wake_is_acked_before_overlapping_new_wake(
+    monkeypatch,
+) -> None:
+    import threading
+
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Tel Aviv", "2026-07-18", "high")
+    first = reactor_wake.ReactorWake(
+        "wake-forecast-first",
+        "2026-07-18T19:22:05+00:00",
+        "replacement_forecast_materializer",
+        "forecast_posterior_advanced",
+        (),
+        (family,),
+    )
+    second = reactor_wake.ReactorWake(
+        "wake-forecast-second",
+        "2026-07-18T19:22:06+00:00",
+        "replacement_forecast_materializer",
+        "forecast_posterior_advanced",
+        (),
+        (family,),
+    )
+    acknowledged: list[str] = []
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: second)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda _selected: tuple(
+            wake for wake in (first, second) if wake.wake_id not in acknowledged
+        ),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda wake: acknowledged.append(wake.wake_id) or True,
+    )
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+    monkeypatch.setattr(
+        main,
+        "_forecast_wake_held_families",
+        lambda _families: frozenset({family}),
+    )
+
+    def dispatch(wake_ids, _families):
+        for wake_id in wake_ids:
+            main._forecast_exit_monitor_attempts[wake_id] = True
+        return True
+
+    monkeypatch.setattr(main, "_dispatch_forecast_exit_monitor", dispatch)
+    monkeypatch.setattr(main, "_edli_event_reactor_cycle", lambda **_kwargs: True)
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+    main._forecast_exit_monitor_attempts.clear()
+    main._forecast_exit_monitor_attempts[first.wake_id] = True
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert acknowledged == [first.wake_id]
+    assert main._edli_reactor_wake_poll_once() is True
+    assert acknowledged == [first.wake_id, second.wake_id]
+
+
+def test_exit_monitor_claim_is_atomic_across_forecast_and_periodic(
+    monkeypatch,
+) -> None:
+    import threading
+
+    import src.main as main
+    from src.execution import exit_lifecycle
+
+    started = threading.Event()
+    release = threading.Event()
+    results: list[bool] = []
+
+    def run_exit_monitor_cycle(**_kwargs):
+        started.set()
+        assert release.wait(2.0)
+        return True
+
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", run_exit_monitor_cycle)
+    monkeypatch.setattr(main, "_held_position_monitor_active", threading.Event())
+    monkeypatch.setattr(main, "_held_position_monitor_claim", threading.Lock())
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+    main._day0_urgent_wake_pending.clear()
+
+    worker = threading.Thread(
+        target=lambda: results.append(
+            main._exit_monitor_cycle(urgent_forecast=True)
+        )
+    )
+    worker.start()
+    assert started.wait(1.0)
+    assert main._exit_monitor_cycle() is False
+    release.set()
+    worker.join(2.0)
+    assert worker.is_alive() is False
+    assert results == [True]
+
+
+def test_forecast_monitor_preempts_for_any_current_day0_wake(monkeypatch) -> None:
+    import threading
+
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+
+    observed: list[bool] = []
+
+    def run_exit_monitor_cycle(**kwargs):
+        observed.append(kwargs["should_preempt_for_urgent_day0"]())
+        return True
+
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", run_exit_monitor_cycle)
+    monkeypatch.setattr(
+        reactor_wake,
+        "read_reactor_wake",
+        lambda: SimpleNamespace(reason="day0_extreme_event_committed"),
+    )
+    monkeypatch.setattr(main, "_held_position_monitor_active", threading.Event())
+    monkeypatch.setattr(main, "_held_position_monitor_claim", threading.Lock())
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+    main._day0_urgent_wake_pending.clear()
+
+    assert main._exit_monitor_cycle(urgent_forecast=True) is True
+    assert observed == [True]
+
+
+def test_forecast_monitor_ignores_acked_day0_urgent_marker(monkeypatch) -> None:
+    import threading
+
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+
+    observed: list[bool] = []
+
+    def run_exit_monitor_cycle(**kwargs):
+        observed.append(kwargs["should_preempt_for_urgent_day0"]())
+        return True
+
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", run_exit_monitor_cycle)
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: None)
+    monkeypatch.setattr(main, "_held_position_monitor_active", threading.Event())
+    monkeypatch.setattr(main, "_held_position_monitor_claim", threading.Lock())
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+    main._day0_urgent_wake_pending.clear()
+
+    assert main._exit_monitor_cycle(urgent_forecast=True) is True
+    assert observed == [False]
 
 
 @pytest.mark.parametrize(

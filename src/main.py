@@ -86,6 +86,7 @@ logger = logging.getLogger("zeus")
 # Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
 _cycle_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
+_held_position_monitor_claim = threading.Lock()
 _held_position_monitor_bootstrap_complete = threading.Event()
 _day0_urgent_wake_pending = threading.Event()
 _day0_exit_monitor_attempts_lock = threading.Lock()
@@ -4241,7 +4242,25 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
-    wakes = coalescible_reactor_wakes(wake)
+    wakes = tuple(
+        queued
+        for queued in coalescible_reactor_wakes(wake)
+        if queued.wake_id not in excluded_wake_ids
+    )
+    if not wakes:
+        return False
+    with _forecast_exit_monitor_attempts_lock:
+        completed_forecast_ids = {
+            wake_id
+            for wake_id, result in _forecast_exit_monitor_attempts.items()
+            if result is True
+        }
+    completed_forecast_wakes = tuple(
+        queued for queued in wakes if queued.wake_id in completed_forecast_ids
+    )
+    if completed_forecast_wakes:
+        wakes = completed_forecast_wakes
+        wake = wakes[0]
     wake_event_ids = tuple(
         dict.fromkeys(event_id for queued in wakes for event_id in queued.event_ids)
     )
@@ -6225,64 +6244,74 @@ def _exit_monitor_cycle(
         logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
         return False
     pending_before_claim = not urgent_fact and _day0_urgent_wake_pending.is_set()
-    if _held_position_monitor_active.is_set():
+    if not _held_position_monitor_claim.acquire(blocking=False):
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
 
     # Claim exit priority before waiting. New reactor ticks defer on this Event;
     # the current reactor finishes without a competing SQLite traversal.
     _held_position_monitor_active.set()
-    handoff_timeout = (
-        _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-        if urgent_fact
-        else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-    )
-    reactor_idle = _edli_reactor_active_lock.acquire(
-        timeout=handoff_timeout
-    )
-    if not reactor_idle:
-        logger.warning(
-            "exit_monitor deferred: active EDLI reactor did not finish within %.1fs",
-            handoff_timeout,
+    try:
+        handoff_timeout = (
+            _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+            if urgent_fact
+            else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
         )
-        _held_position_monitor_active.clear()
-        return False
-    _edli_reactor_active_lock.release()
-    if (
-        not urgent_day0
-        and not pending_before_claim
-        and _day0_urgent_wake_pending.is_set()
-    ):
-        logger.info(
-            "periodic exit_monitor yielded after reactor handoff to pending Day0 urgent wake"
-        )
-        _held_position_monitor_active.clear()
-        return True
-    if pending_before_claim:
-        logger.info(
-            "periodic exit_monitor servicing full portfolio after bounded Day0 priority"
-        )
-    should_preempt_for_urgent_day0 = None
-    if urgent_fact:
-        from src.runtime.reactor_wake import (
-            reactor_urgent_wake_reason,
-            reactor_urgent_wake_revision,
-        )
+        reactor_idle = _edli_reactor_active_lock.acquire(timeout=handoff_timeout)
+        if not reactor_idle:
+            logger.warning(
+                "exit_monitor deferred: active EDLI reactor did not finish within %.1fs",
+                handoff_timeout,
+            )
+            return False
+        _edli_reactor_active_lock.release()
+        if (
+            not urgent_day0
+            and not pending_before_claim
+            and _day0_urgent_wake_pending.is_set()
+        ):
+            logger.info(
+                "exit_monitor yielded after reactor handoff to pending Day0 urgent wake"
+            )
+            return False if urgent_forecast else True
+        if pending_before_claim:
+            logger.info(
+                "periodic exit_monitor servicing full portfolio after bounded Day0 priority"
+            )
+        should_preempt_for_urgent_day0 = None
+        if urgent_forecast:
+            from src.runtime.reactor_wake import read_reactor_wake
 
-        urgent_revision = reactor_urgent_wake_revision()
+            def _day0_wake_pending() -> bool:
+                if _day0_urgent_wake_pending.is_set():
+                    return True
+                queued = read_reactor_wake()
+                return (
+                    queued is not None
+                    and queued.reason == "day0_extreme_event_committed"
+                )
 
-        def _newer_day0_wake_pending() -> bool:
-            current = reactor_urgent_wake_revision()
-            return (
-                current is not None
-                and current != urgent_revision
-                and reactor_urgent_wake_reason() == "day0_extreme_event_committed"
+            should_preempt_for_urgent_day0 = _day0_wake_pending
+        elif urgent_day0:
+            from src.runtime.reactor_wake import (
+                reactor_urgent_wake_reason,
+                reactor_urgent_wake_revision,
             )
 
-        should_preempt_for_urgent_day0 = _newer_day0_wake_pending
-    elif not pending_before_claim:
-        should_preempt_for_urgent_day0 = _day0_urgent_wake_pending.is_set
-    try:
+            urgent_revision = reactor_urgent_wake_revision()
+
+            def _newer_day0_wake_pending() -> bool:
+                current = reactor_urgent_wake_revision()
+                return (
+                    current is not None
+                    and current != urgent_revision
+                    and reactor_urgent_wake_reason()
+                    == "day0_extreme_event_committed"
+                )
+
+            should_preempt_for_urgent_day0 = _newer_day0_wake_pending
+        elif not pending_before_claim:
+            should_preempt_for_urgent_day0 = _day0_urgent_wake_pending.is_set
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             mark_held_position_monitor_complete=_held_position_monitor_active.clear,
@@ -6297,6 +6326,7 @@ def _exit_monitor_cycle(
         return True
     finally:
         _held_position_monitor_active.clear()
+        _held_position_monitor_claim.release()
 
 
 def main():
