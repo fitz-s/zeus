@@ -47,6 +47,8 @@ _MANIFEST_CACHE: dict[
     Path,
     dict[Path, tuple[tuple[int, int, int], RawForecastArtifactManifest]],
 ] = {}
+_MANIFEST_LOADS: dict[Path, threading.Condition] = {}
+_MANIFEST_CACHE_VERSIONS: dict[Path, int] = {}
 
 
 def _read_manifest_with_path(path: Path) -> RawForecastArtifactManifest:
@@ -227,13 +229,28 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
     if not raw_manifest_dir.exists():
         return ()
     root = raw_manifest_dir.resolve()
-    paths = tuple(sorted(root.rglob("*.manifest.json")))
+    with _MANIFEST_CACHE_LOCK:
+        observed_version = _MANIFEST_CACHE_VERSIONS.get(root, 0)
+        while (active := _MANIFEST_LOADS.get(root)) is not None:
+            while root in _MANIFEST_LOADS:
+                active.wait()
+            if _MANIFEST_CACHE_VERSIONS.get(root, 0) > observed_version:
+                current = _MANIFEST_CACHE.get(root, {})
+                return tuple(
+                    manifest
+                    for _, manifest in current.values()
+                    if manifest.source_available_at <= computed_at
+                )
+        active = threading.Condition(_MANIFEST_CACHE_LOCK)
+        _MANIFEST_LOADS[root] = active
+        cached = dict(_MANIFEST_CACHE.get(root, {}))
     current: dict[
         Path,
         tuple[tuple[int, int, int], RawForecastArtifactManifest],
     ] = {}
-    with _MANIFEST_CACHE_LOCK:
-        cached = _MANIFEST_CACHE.get(root, {})
+    succeeded = False
+    try:
+        paths = tuple(sorted(root.rglob("*.manifest.json")))
         for path in paths:
             stat = path.stat()
             signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
@@ -243,7 +260,16 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
             else:
                 manifest = _read_manifest_with_path(path)
             current[path] = (signature, manifest)
-        _MANIFEST_CACHE[root] = current
+        succeeded = True
+    finally:
+        with _MANIFEST_CACHE_LOCK:
+            if succeeded:
+                _MANIFEST_CACHE[root] = current
+                _MANIFEST_CACHE_VERSIONS[root] = (
+                    _MANIFEST_CACHE_VERSIONS.get(root, 0) + 1
+                )
+            _MANIFEST_LOADS.pop(root, None)
+            active.notify_all()
     return tuple(
         manifest
         for _, manifest in current.values()

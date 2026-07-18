@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,6 +147,63 @@ def test_load_manifests_reuses_unchanged_files_but_rechecks_availability(
     assert before == ()
     assert len(after) == len(changed) == 1
     assert reads == [manifest_path.resolve(), manifest_path.resolve()]
+
+
+def test_load_manifests_singleflights_concurrent_inventory_scans(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_seed_discovery as discovery
+
+    raw_dir = tmp_path / "raw"
+    _write_manifest(
+        raw_dir,
+        name="selected",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={},
+    )
+    root = raw_dir.resolve()
+    discovery._MANIFEST_CACHE.pop(root, None)
+    discovery._MANIFEST_LOADS.pop(root, None)
+    discovery._MANIFEST_CACHE_VERSIONS.pop(root, None)
+    first_scan_started = threading.Event()
+    release_first_scan = threading.Event()
+    real_rglob = Path.rglob
+    scans = 0
+
+    def blocked_rglob(path: Path, pattern: str):
+        nonlocal scans
+        scans += 1
+        first_scan_started.set()
+        assert release_first_scan.wait(1.0)
+        return real_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", blocked_rglob)
+    results: list[tuple[RawForecastArtifactManifest, ...]] = []
+
+    def load() -> None:
+        results.append(
+            _load_manifests(
+                raw_dir,
+                computed_at=datetime.fromisoformat("2026-06-06T04:00:00+00:00"),
+            )
+        )
+
+    first = threading.Thread(target=load)
+    second = threading.Thread(target=load)
+    first.start()
+    assert first_scan_started.wait(0.5)
+    second.start()
+    release_first_scan.set()
+    first.join(1.0)
+    second.join(1.0)
+
+    assert first.is_alive() is False
+    assert second.is_alive() is False
+    assert scans == 1
+    assert [len(result) for result in results] == [1, 1]
 
 
 def test_load_manifest_files_reads_only_producer_committed_paths(tmp_path: Path) -> None:

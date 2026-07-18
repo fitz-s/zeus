@@ -21,6 +21,7 @@ import logging
 import sqlite3
 import copy
 import json
+import threading
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -112,6 +113,8 @@ _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
     "Day0 observation is stale for executable probability generation:"
 )
 _nowcast_consecutive_write_failures = 0
+_BELIEF_RESEED_LOCK = threading.Lock()
+_BELIEF_RESEED_GENERATIONS: dict[tuple[str, str, str], int] = {}
 
 
 @dataclass(frozen=True)
@@ -706,7 +709,7 @@ def _is_position_after_target_local_day(
     return target_date_value < local_today
 
 
-def _enqueue_single_family_belief_reseed_failsoft(
+def _perform_single_family_belief_reseed_failsoft(
     *, city: str, target_date: str, metric: str
 ) -> dict[str, object] | None:
     """Fail-soft single-family replacement-posterior re-materialization trigger.
@@ -774,6 +777,98 @@ def _enqueue_single_family_belief_reseed_failsoft(
             city, target_date, metric, exc,
         )
         return None
+
+
+def _run_single_family_belief_reseed_worker(
+    *,
+    key: tuple[str, str, str],
+    city: str,
+    target_date: str,
+    metric: str,
+) -> None:
+    """Run one family repair lane and coalesce arrivals while it is active."""
+
+    while True:
+        with _BELIEF_RESEED_LOCK:
+            generation = _BELIEF_RESEED_GENERATIONS.get(key)
+        if generation is None:
+            return
+        try:
+            _perform_single_family_belief_reseed_failsoft(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+        except Exception:  # noqa: BLE001 - worker isolation must survive test/adapter faults
+            logger.exception(
+                "monitor belief reseed worker failed city=%s target_date=%s metric=%s",
+                city,
+                target_date,
+                metric,
+            )
+        with _BELIEF_RESEED_LOCK:
+            if _BELIEF_RESEED_GENERATIONS.get(key) == generation:
+                _BELIEF_RESEED_GENERATIONS.pop(key, None)
+                return
+
+
+def _enqueue_single_family_belief_reseed_failsoft(
+    *, city: str, target_date: str, metric: str
+) -> dict[str, object] | None:
+    """Dispatch belief repair without retaining the held-position SELL lane.
+
+    A reseed cannot change the current monitor decision: its result is consumed
+    only by a later re-decision. Keep one worker per family, coalesce arrivals
+    during that run, and let unrelated families progress independently.
+    """
+
+    city = str(city).strip()
+    target_date = str(target_date).strip()[:10]
+    metric = str(metric).strip().lower()
+    key = (city.casefold(), target_date, metric)
+    with _BELIEF_RESEED_LOCK:
+        generation = _BELIEF_RESEED_GENERATIONS.get(key, 0) + 1
+        dispatch = key not in _BELIEF_RESEED_GENERATIONS
+        _BELIEF_RESEED_GENERATIONS[key] = generation
+    if not dispatch:
+        return {
+            "status": "CYCLE_ADVANCE_RESEED_COALESCED",
+            "city": city,
+            "target_date": target_date,
+            "metric": metric,
+            "dispatched": False,
+        }
+    try:
+        threading.Thread(
+            target=_run_single_family_belief_reseed_worker,
+            kwargs={
+                "key": key,
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+            },
+            name=f"belief-reseed-{city}-{target_date}-{metric}",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # noqa: BLE001 - monitor remains fail-closed, never blocked
+        with _BELIEF_RESEED_LOCK:
+            if _BELIEF_RESEED_GENERATIONS.get(key) == generation:
+                _BELIEF_RESEED_GENERATIONS.pop(key, None)
+        logger.warning(
+            "monitor belief reseed dispatch FAILED city=%s target_date=%s metric=%s exc=%s",
+            city,
+            target_date,
+            metric,
+            exc,
+        )
+        return None
+    return {
+        "status": "CYCLE_ADVANCE_RESEED_DISPATCHED",
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+        "dispatched": True,
+    }
 
 
 def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):

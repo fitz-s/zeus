@@ -18,6 +18,8 @@ Gate conditions tested:
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -29,6 +31,62 @@ from src.engine.monitor_refresh import _maybe_write_day0_nowcast
 from src.engine.position_belief import ReplacementBelief
 from src.observability.counters import read as read_counter, reset_all as reset_counters
 from src.state.portfolio import Position
+
+
+def test_belief_reseed_dispatch_is_family_isolated_and_coalesced(monkeypatch) -> None:
+    paris_started = threading.Event()
+    paris_release = threading.Event()
+    moscow_started = threading.Event()
+    paris_calls = 0
+    calls_lock = threading.Lock()
+
+    def perform(*, city: str, target_date: str, metric: str):
+        nonlocal paris_calls
+        if city == "Paris":
+            with calls_lock:
+                paris_calls += 1
+            paris_started.set()
+            assert paris_release.wait(1.0)
+        elif city == "Moscow":
+            moscow_started.set()
+        return {"status": "done"}
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_perform_single_family_belief_reseed_failsoft",
+        perform,
+    )
+    with monitor_refresh_module._BELIEF_RESEED_LOCK:
+        monitor_refresh_module._BELIEF_RESEED_GENERATIONS.clear()
+
+    started = time.monotonic()
+    first = monitor_refresh_module._enqueue_single_family_belief_reseed_failsoft(
+        city="Paris", target_date="2026-07-18", metric="high"
+    )
+    assert time.monotonic() - started < 0.1
+    assert first["status"] == "CYCLE_ADVANCE_RESEED_DISPATCHED"
+    assert paris_started.wait(0.5)
+
+    duplicate = monitor_refresh_module._enqueue_single_family_belief_reseed_failsoft(
+        city="paris", target_date="2026-07-18", metric="HIGH"
+    )
+    unrelated = monitor_refresh_module._enqueue_single_family_belief_reseed_failsoft(
+        city="Moscow", target_date="2026-07-18", metric="high"
+    )
+    assert duplicate["status"] == "CYCLE_ADVANCE_RESEED_COALESCED"
+    assert unrelated["status"] == "CYCLE_ADVANCE_RESEED_DISPATCHED"
+    assert moscow_started.wait(0.5)
+
+    paris_release.set()
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        with monitor_refresh_module._BELIEF_RESEED_LOCK:
+            if not monitor_refresh_module._BELIEF_RESEED_GENERATIONS:
+                break
+        time.sleep(0.01)
+    with monitor_refresh_module._BELIEF_RESEED_LOCK:
+        assert monitor_refresh_module._BELIEF_RESEED_GENERATIONS == {}
+    assert paris_calls == 2
 
 
 def _replacement_belief(*, fresh: bool = True) -> ReplacementBelief:
