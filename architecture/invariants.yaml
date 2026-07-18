@@ -946,20 +946,20 @@ invariants:
     zones: [K0_frozen_kernel, K2_runtime, live_venue_submit]
     statement: >
       Every live BUY or SELL venue submission, including entry, reduce-only
-      exit, single-order, and batch paths, must have a unit price in [0.05, 1).
-      Any price below 0.05 or at or above 1 is rejected before
+      exit, single-order, and batch paths, must have an inclusive unit price
+      in [0.05, 0.95]. Any price below 0.05 or above 0.95 is rejected before
       SDK contact. No strategy, q-kernel, tail, risk, lifecycle, current-state,
       or order-role exception may waive the venue submission contract.
     why: >
-      The lower bound is the venue-envelope protection against cheap-tail
-      quantity explosions such as the Paris 35C incident. A fixed 0.95 upper
-      bound instead rejects a sub-unit exact-payoff order even when its current
-      robust probability, positive EV, positive delta log wealth, Kelly size,
-      and JIT book all agree. Those economic proofs govern high-price entries;
-      the envelope only rejects a non-binary unit price at or above 1.
+      Upstream price floors previously conflicted: ordinary entry used 0.10,
+      strategy profiles used 0.05, q-kernel center-buy YES admitted 0.02,
+      current-state solving waived legacy floors, and exits admitted venue-tick
+      prices near 0.001/0.999. The Paris and Seoul incidents prove that an
+      upper-layer economics proof is not a live safety boundary; the envelope
+      must reject every current and future submit route without exception.
     enforced_by:
       tests:
-        - tests/test_v2_adapter.py::test_live_submit_unit_price_domain_accepts_floor_and_subunit_prices
+        - tests/test_v2_adapter.py::test_live_submit_unit_price_band_is_inclusive
         - tests/test_v2_adapter.py::test_live_submit_rejects_out_of_band_price_before_sdk_contact
         - tests/test_v2_adapter.py::TestSubmitBatch::test_out_of_band_price_rejects_entire_batch_before_sdk_contact
         - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_out_of_band_price_before_persistence
@@ -970,5 +970,5 @@ invariants:
       - tests/test_v2_adapter.py
       - tests/test_executor.py
       - tests/engine/test_q_exec_lcb_event_seam.py
-    basis: operator cheap-tail directive 2026-07-13; Paris 35C incident 2026-07-15; first-principles high-price correction 2026-07-18
+    basis: operator absolute unit-price directive 2026-07-13 and 2026-07-18; Paris 35C incident 2026-07-15; Seoul 25C 0.999 incident 2026-07-18
     added: 2026-07-15

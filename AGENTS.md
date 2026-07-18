@@ -188,6 +188,12 @@ Chain reconciliation order: `Chain (Polymarket CLOB) > Chronicler (event log) > 
 Durable trading rules:
 
 - Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks.
+- Every live venue BUY or SELL, including entry, reduce-only exit, single-order,
+  and batch paths, must have an inclusive unit price in `[0.05, 0.95]`. The
+  venue envelope rejects anything below `0.05` or above `0.95` before SDK
+  contact. Strategy, q-kernel, economic proof, current state, risk, lifecycle,
+  venue tick, and order role have no exception. Only a direct operator
+  instruction may change this durable boundary.
 - Live may act; backtest may evaluate — and only against verified settlement joins, never mixed regimes. Shadow modes are extirpated (operator directive 2026-06-12); do not reintroduce one as a staging tier.
 - Settlement values flow through `SettlementSemantics`.
 - DB commits precede derived JSON/report exports.

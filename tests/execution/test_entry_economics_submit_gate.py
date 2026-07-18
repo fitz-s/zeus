@@ -1018,7 +1018,7 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
     ("direction", "side"),
     ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
 )
-def test_entry_economics_current_state_accepts_positive_subunit_high_price(
+def test_entry_economics_current_state_cannot_waive_absolute_price_ceiling(
     direction, side
 ):
     price = 0.999
@@ -1066,7 +1066,8 @@ def test_entry_economics_current_state_accepts_positive_subunit_high_price(
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is True
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
 @pytest.mark.parametrize("direction", (Direction("buy_yes"), Direction("buy_no")))

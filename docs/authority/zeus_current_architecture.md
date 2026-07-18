@@ -305,18 +305,14 @@ or broken truth input must not silently downgrade risk.
 ### 10.2 Absolute Live Order Price Domain
 
 Every proposed or submitted BUY or SELL price must be finite and inside the
-absolute domain `[0.05, 1)`. This applies to every entry,
+inclusive absolute range `[0.05, 0.95]`. This applies to every entry,
 reduce-only exit, single-order, and batch order before SDK contact. The current
 executable snapshot still supplies tick alignment and venue legality, but a
-venue-legal price outside the absolute domain remains forbidden. No strategy,
+venue-legal price outside the absolute range remains forbidden. No strategy,
 q-kernel, lifecycle state, current-state proof, or order role may waive this
 contract (INV-43).
 
-The lower bound prevents cheap-tail quantity explosions; there is no symmetric
-fixed upper quality band. A high-price entry below one may proceed only when current
-robust probability, positive EV, positive delta log wealth, Fractional Kelly,
-and the JIT executable book all authorize the exact order. Price is not a
-probability-quality proxy. A domain-legal price does not by
+Price is not a probability-quality proxy. A band-legal price does not by
 itself authorize an entry: the global auction separately requires a strict
 current-evidence robust win majority, positive robust EV and delta log wealth,
 and only the remaining shares below the cumulative Fractional Kelly final-
