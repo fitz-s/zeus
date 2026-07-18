@@ -2,18 +2,18 @@
 # Last reused or audited: 2026-07-16
 # Authority basis: day0 first-principles review 2026-06-10 §6.2 (live obs hook)
 #   + operator green-light 2026-06-10 (free METAR fast lane; no paid sources);
-#   NOAA/NWS cycle files provide the publication-first METAR transport;
-#   aviationweather.gov provides bounded history/recovery.
+#   NOAA/NWS station files provide current-exposure priority transport, cycle
+#   files provide the global delta, and aviationweather.gov provides recovery.
 """Day0 fast observation lane: free METAR feed for the running-extreme tracker.
 
 First principles
 ----------------
 The day0 absorbing boundary is driven by the settlement station's running
 extreme. WU (the Polymarket settlement reference) publishes the same ASOS/METAR
-stream after the observation. NOAA/NWS cycle files expose newly published
-global METAR batches as an append-only file; aviationweather.gov supplies
-bounded history and recovery. This module emits DAY0_EXTREME_UPDATED events
-when the running extreme moves.
+stream after the observation. NOAA/NWS station files expose exact held-family
+updates, cycle files expose global METAR deltas, and aviationweather.gov
+supplies bounded history and recovery. This module emits DAY0_EXTREME_UPDATED
+events when the running extreme moves.
 
 Provenance law (source + authority on every datum):
 - source_id "aviationweather_metar"; station identity validated against the
@@ -44,6 +44,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -59,6 +60,9 @@ UTC = timezone.utc
 AVIATIONWEATHER_METAR_ENDPOINT = "https://aviationweather.gov/api/data/metar"
 NOAA_METAR_CYCLE_ENDPOINT = (
     "https://tgftp.nws.noaa.gov/data/observations/metar/cycles/{hour}Z.TXT"
+)
+NOAA_METAR_STATION_ENDPOINT = (
+    "https://tgftp.nws.noaa.gov/data/observations/metar/stations/{station}.TXT"
 )
 
 #: Canonical source id carried in event payload provenance.
@@ -432,6 +436,178 @@ class NoaaMetarCycleCursor:
             cutoff = now - timedelta(minutes=10)
             reports = [report for report in reports if report.obs_time >= cutoff]
         return reports, True
+
+
+_StationFetchResult = tuple[str, list[MetarReport], bool, str | None]
+
+
+@dataclass
+class NoaaMetarStationCursor:
+    """Bounded conditional polling for current-exposure station files."""
+
+    endpoint: str = NOAA_METAR_STATION_ENDPOINT
+    max_workers: int = 4
+    _modified: dict[str, str] = field(default_factory=dict, init=False)
+    _in_flight: dict[str, Future[_StationFetchResult]] = field(
+        default_factory=dict,
+        init=False,
+    )
+    _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def _fetch(
+        self,
+        *,
+        client: httpx.Client,
+        station: str,
+        modified: str | None,
+        timeout: float,
+    ) -> _StationFetchResult:
+        headers = {"If-Modified-Since": modified} if modified else {}
+        try:
+            response = client.get(
+                self.endpoint.format(station=station),
+                headers=headers,
+                timeout=timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "NOAA_METAR_STATION_FETCH_FAILED station=%s exc=%s: %s",
+                station,
+                type(exc).__name__,
+                exc,
+            )
+            return station, [], False, modified
+        if response.status_code == 304:
+            return station, [], True, modified
+        if response.status_code != 200:
+            logger.warning(
+                "NOAA_METAR_STATION_HTTP_%s station=%s",
+                response.status_code,
+                station,
+            )
+            return station, [], False, modified
+        modified = response.headers.get("last-modified")
+        try:
+            published = parsedate_to_datetime(str(modified))
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=UTC)
+            published = published.astimezone(UTC)
+        except (TypeError, ValueError, OverflowError):
+            logger.warning(
+                "NOAA_METAR_STATION_MISSING_PUBLICATION_CLOCK station=%s",
+                station,
+            )
+            return station, [], False, None
+        return (
+            station,
+            parse_noaa_metar_cycle_payload(
+                response.content,
+                stations=(station,),
+                published_at=published,
+            ),
+            True,
+            modified,
+        )
+
+    def _consume(
+        self,
+        station: str,
+        future: Future[_StationFetchResult],
+    ) -> tuple[list[MetarReport], bool]:
+        try:
+            result_station, reports, source_ok, modified = future.result()
+        except Exception as exc:  # noqa: BLE001 - isolate one station worker
+            logger.warning(
+                "NOAA_METAR_STATION_WORKER_FAILED station=%s exc=%s: %s",
+                station,
+                type(exc).__name__,
+                exc,
+            )
+            return [], False
+        with self._lock:
+            if modified:
+                self._modified[result_station] = modified
+        return reports, source_ok
+
+    def poll(
+        self,
+        *,
+        client: httpx.Client,
+        stations: Iterable[str],
+        timeout: float = DEFAULT_METAR_FETCH_TIMEOUT_S,
+        budget_s: float = 0.75,
+    ) -> tuple[list[MetarReport], bool]:
+        selected = tuple(
+            dict.fromkeys(
+                station
+                for raw in stations
+                if (station := str(raw).strip().upper())
+            )
+        )
+        with self._lock:
+            ready = {
+                station: future
+                for station, future in self._in_flight.items()
+                if future.done()
+            }
+            for station in ready:
+                self._in_flight.pop(station, None)
+            if selected and self._executor is None:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=max(1, int(self.max_workers)),
+                    thread_name_prefix="day0-station",
+                )
+            for station in selected:
+                if station in ready or station in self._in_flight:
+                    continue
+                assert self._executor is not None
+                self._in_flight[station] = self._executor.submit(
+                    self._fetch,
+                    client=client,
+                    station=station,
+                    modified=self._modified.get(station),
+                    timeout=timeout,
+                )
+            pending = {
+                future: station for station, future in self._in_flight.items()
+            }
+
+        reports: list[MetarReport] = []
+        source_ok = False
+        for station, future in ready.items():
+            station_reports, station_ok = self._consume(station, future)
+            reports.extend(station_reports)
+            source_ok = source_ok or station_ok
+
+        deadline = time.monotonic() + max(0.0, float(budget_s))
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, _ = wait(
+                pending,
+                timeout=remaining,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for future in done:
+                station = pending.pop(future)
+                with self._lock:
+                    if self._in_flight.get(station) is future:
+                        self._in_flight.pop(station, None)
+                station_reports, station_ok = self._consume(station, future)
+                reports.extend(station_reports)
+                source_ok = source_ok or station_ok
+        return reports, source_ok
+
+    def close(self) -> None:
+        with self._lock:
+            executor = self._executor
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
 def fetch_metar_reports(
@@ -1059,6 +1235,7 @@ class Day0FastObsEmitter:
 
     fetcher: Callable[..., list[MetarReport]] = fetch_metar_reports
     min_fetch_interval_s: float = DEFAULT_MIN_FETCH_INTERVAL_S
+    priority_station_poll_budget_s: float = 0.75
     _last_attempt_monotonic: float = field(default=0.0, init=False)
     _last_awc_attempt_monotonic: float = field(default=0.0, init=False)
     _cache_fetched_monotonic: float = field(default=0.0, init=False)
@@ -1067,6 +1244,10 @@ class Day0FastObsEmitter:
     _full_window_loaded: bool = field(default=False, init=False)
     _cycle_cursor: NoaaMetarCycleCursor = field(
         default_factory=NoaaMetarCycleCursor,
+        init=False,
+    )
+    _station_cursor: NoaaMetarStationCursor = field(
+        default_factory=NoaaMetarStationCursor,
         init=False,
     )
     _http_client: httpx.Client | None = field(default=None, init=False, repr=False)
@@ -1540,7 +1721,12 @@ class Day0FastObsEmitter:
                     self._event_evaluated_report_keys.discard(key)
         return len(reports)
 
-    def _reports_with_status(self, stations: list[str]) -> tuple[list[MetarReport], str, Optional[float]]:
+    def _reports_with_status(
+        self,
+        stations: list[str],
+        *,
+        priority_stations: Iterable[str] = (),
+    ) -> tuple[list[MetarReport], str, Optional[float]]:
         """Return reports and freshness with a start-to-start fetch throttle."""
         now = time.monotonic()
         with self._lock:
@@ -1581,13 +1767,24 @@ class Day0FastObsEmitter:
                 )
                 history_missing = not self._full_window_loaded
             cycle_reports: list[MetarReport] = []
+            priority_reports, priority_ok = self._station_cursor.poll(
+                client=client,
+                stations=priority_stations,
+                budget_s=self.priority_station_poll_budget_s,
+            )
+            reports.extend(priority_reports)
+            source_ok = source_ok or priority_ok
+            if priority_reports:
+                cycle_reports = priority_reports
             try:
-                cycle_reports, source_ok = self._cycle_cursor.poll(
-                    client=client,
-                    stations=stations,
-                    as_of=datetime.now(UTC),
-                )
-                reports.extend(cycle_reports)
+                if not priority_reports:
+                    cycle_reports, cycle_ok = self._cycle_cursor.poll(
+                        client=client,
+                        stations=stations,
+                        as_of=datetime.now(UTC),
+                    )
+                    reports.extend(cycle_reports)
+                    source_ok = source_ok or cycle_ok
             except Exception as exc:  # noqa: BLE001 - isolate transports
                 logger.warning(
                     "NOAA_METAR_CYCLE_POLL_RAISED exc=%s: %s",
@@ -1918,6 +2115,7 @@ class Day0FastObsEmitter:
         *,
         cities: list[Any],
         decision_time: datetime,
+        priority_scopes: Iterable[tuple[str, str]] = (),
         anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], Any]] = None,
         anomaly_check_budget_s: Optional[float] = None,
         anomaly_check_max_cities: Optional[int] = None,
@@ -1941,8 +2139,17 @@ class Day0FastObsEmitter:
         if not eligible:
             return FastObsPrefetch((), (), FETCH_NO_DATA, None, decision_time)
 
+        priority_scope_set = frozenset(
+            (str(city), str(target_date)) for city, target_date in priority_scopes
+        )
         reports, status, cache_age = self._reports_with_status(
-            [source.station_id for _, source, _ in eligible]
+            [source.station_id for _, source, _ in eligible],
+            priority_stations=(
+                source.station_id
+                for city, source, target_date in eligible
+                if (str(getattr(city, "name", "")), target_date)
+                in priority_scope_set
+            ),
         )
         with self._lock:
             ledger_reports = tuple(self._pending_ledger_reports.values())

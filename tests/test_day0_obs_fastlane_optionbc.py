@@ -718,6 +718,7 @@ class TestDay0MetarSourceClockTick:
         monkeypatch.setattr(im, "_DAY0_METAR_PENDING_COMMITS", [])
         monkeypatch.setattr(im, "_DAY0_METAR_COMMIT_LOCK", threading.Lock())
         monkeypatch.setattr(im, "_day0_source_family_admission", lambda _eligible: None)
+        monkeypatch.setattr(im, "_day0_priority_scopes", lambda: frozenset())
         monkeypatch.setattr(
             "src.config.settings",
             {

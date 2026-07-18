@@ -28,6 +28,8 @@ Contracts:
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -253,6 +255,84 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         assert client.calls[1][1]["Accept-Encoding"] == "identity"
         assert client.calls[1][1]["Range"] == f"bytes={len(initial)}-"
         assert client.calls[2][1]["Range"] == f"bytes={len(initial)}-"
+
+    def test_priority_station_cursor_isolates_a_stalled_station(self):
+        from src.data.day0_fast_obs import NoaaMetarStationCursor
+
+        blocked = threading.Event()
+
+        class _Response:
+            status_code = 200
+
+            def __init__(self, station):
+                self.content = (
+                    f"2026/07/18 04:15\n{station} 180415Z 24006KT 10SM CLR "
+                    "28/22 A2993 RMK AO2 T02830222\n"
+                ).encode()
+                self.headers = {
+                    "last-modified": "Sat, 18 Jul 2026 04:16:00 GMT",
+                }
+
+        class _Client:
+            def get(self, url, *, headers, timeout):
+                station = url.rsplit("/", 1)[-1].removesuffix(".TXT")
+                if station == "KORD":
+                    blocked.wait(1.0)
+                return _Response(station)
+
+        cursor = NoaaMetarStationCursor(max_workers=2)
+        started = time.monotonic()
+        reports, source_ok = cursor.poll(
+            client=_Client(),
+            stations=("KORD", "KAUS"),
+            budget_s=0.2,
+        )
+        elapsed = time.monotonic() - started
+
+        assert source_ok is True
+        assert [report.station_id for report in reports] == ["KAUS"]
+        assert elapsed < 0.5
+        assert "KORD" in cursor._in_flight
+
+        blocked.set()
+        recovered, recovered_ok = cursor.poll(
+            client=_Client(),
+            stations=(),
+            budget_s=0.5,
+        )
+        cursor.close()
+        assert recovered_ok is True
+        assert [report.station_id for report in recovered] == ["KORD"]
+
+    def test_priority_station_fact_bypasses_global_cycle_wait(self):
+        import src.data.day0_fast_obs as fast_obs
+
+        report = _report(
+            "KORD",
+            datetime(2026, 7, 18, 4, 15, tzinfo=UTC),
+            28.3,
+        )
+
+        class _StationCursor:
+            def poll(self, **_kwargs):
+                return [report], True
+
+        class _CycleCursor:
+            def poll(self, **_kwargs):
+                raise AssertionError("priority fact must not wait for global cycle I/O")
+
+        emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+        emitter._station_cursor = _StationCursor()
+        emitter._cycle_cursor = _CycleCursor()
+        emitter._full_window_loaded = True
+
+        reports, status, _age = emitter._reports_with_status(
+            ["KORD"],
+            priority_stations=("KORD",),
+        )
+
+        assert reports == [report]
+        assert status == fast_obs.FETCH_FRESH
 
     def test_awc_history_fetch_is_not_repeated_each_source_clock_poll(
         self,

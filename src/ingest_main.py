@@ -124,6 +124,29 @@ def _day0_metar_emitter():
     return _DAY0_METAR_EMITTER
 
 
+def _day0_priority_scopes() -> frozenset[tuple[str, str]]:
+    """Current exposure scopes whose station files deserve the fastest lane."""
+
+    try:
+        from src.data.replacement_forecast_seed_discovery import (
+            held_position_family_priorities,
+        )
+
+        priorities = held_position_family_priorities()
+    except Exception as exc:  # noqa: BLE001 - global METAR feed remains available
+        logger.warning(
+            "DAY0_PRIORITY_SCOPE_READ_FAILED exc=%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return frozenset()
+    return frozenset(
+        (city, target_date)
+        for (city, target_date, _metric), priority in priorities.items()
+        if priority == 0
+    )
+
+
 def _day0_source_family_admission(eligible: Any):
     """Bind source-clock event emission to a market or current exposure.
 
@@ -1183,7 +1206,7 @@ def _k2_obs_fast_tick():
 
 @_scheduler_job("ingest_day0_metar_source_clock")
 def _day0_metar_source_clock_tick():
-    """Capture newly published AWC METAR reports and emit moved Day0 extremes.
+    """Capture newly published METAR reports and emit moved Day0 extremes.
 
     The HTTP batch runs before any DB lock. Cold start loads the full observation
     window; steady-state polls request and merge only the recent publication
@@ -1232,6 +1255,7 @@ def _day0_metar_source_clock_tick():
     prefetch = emitter.prefetch(
         cities=cities,
         decision_time=decision_time,
+        priority_scopes=_day0_priority_scopes(),
         anomaly_check=None,
     )
     pending_reports = tuple(prefetch.ledger_reports or ())
