@@ -67,10 +67,14 @@ independent second-lines-of-defense on the execution/ingest edges.
 ### TIER0 — mispriced live q now
 
 #### T0-1 · Day0 served q integrates the whole-day distribution, never the remaining-hours distribution; sigma never narrows
-> **⚠️ REFUTED / DOWNGRADED by settlement-graded verification — see §6.** HIGH shows no
-> over-dispersion (n=786; post-peak served 0.045 vs realized 0.070); LOW only a
-> small-sample mid-day signal (n=36). Not a tier0. Do not implement the sigma-narrowing
-> rewrite. Retained below verbatim as the original code-reasoning hypothesis.
+> **⚠️⚠️ §6's refutation was itself WRONG — see §7 (erratum). T0-1 stands CONFIRMED
+> at tier0.** §6's verification scripts silently dropped every C-unit interior bin
+> (a bin-label regex gap; ~half the fleet zeroed), which manufactured the apparent
+> post-peak thinness. Corrected measurement: HIGH post-peak served P(new higher
+> high) = 0.314 vs realized 0.070 (**4.50×** over-dispersed; bug-free F-only
+> subset independently shows 2.34×, n=22); LOW evening served P(new lower low) =
+> 0.409 vs realized 0.000 (n=71). The original failure scenario below is
+> empirically accurate in mechanism AND magnitude.
 
 `src/forecast/sigma_authority.py:405` · `src/probability/joint_q.py:346` · `src/data/replacement_forecast_materializer.py:3136,3403`
 
@@ -515,7 +519,56 @@ that will claim calibration the instant a real fit ships while nothing applies i
 
 ---
 
-## 6. Empirical verification addendum (team-lead, settlement-graded) — 2026-07-18
+## 7. ERRATUM to §6 (2026-07-18, same day): the refutation was wrong; T0-1 stands
+
+§6 below concluded T0-1 was refuted. **That conclusion was an artifact of a bug in
+§6's own measurement scripts, found by the per-city diurnal-timing follow-up**
+(`day0_percity_diurnal_timing.md`): the bin-label parser had no case for the plain
+single-value C-unit interior bin ("be 29°C on July 1?"), so every interior bin of
+every C-unit market (~half the fleet) was silently dropped from the served
+beyond-obs mass. F-unit markets phrase interior bins as "between A-B°F" and were
+unaffected — the pooled mix of correct F rows and zeroed C rows manufactured the
+low "served P(>obs)" that §6 read as post-peak thinness.
+
+Corrected measurement (team-lead re-run, independent of the reporting agent;
+same dedup/integer-pivot/solar-window method as §6, PLAIN-bin regex added,
+0/8,745 HIGH keys and 0/1,232 LOW keys unparsed):
+
+| stratum | n | served P(beyond obs) | realized | ratio |
+|---|---|---|---|---|
+| HIGH pre (<12) | 57 | 0.707 | 0.842 | 0.84 |
+| HIGH peak (12–16) | 164 | 0.395 | 0.256 | 1.54 |
+| HIGH post (>16) | 574 | **0.314** | **0.070** | **4.50** |
+| LOW day (8–18) | 38 | 0.762 | 0.211 | 3.62 |
+| LOW eve (>18) | 71 | **0.409** | **0.000** | **∞** |
+| LOW overnight (<5) | 3 | 0.667 | 0.667 | 1.00 |
+
+Decisive cross-check — the F-unit-only subset, which the regex bug NEVER touched,
+shows the same shape (HIGH: pre 0.80, peak 1.36, **post 2.34**, n=22 post), so the
+corrected result is not itself a parsing artifact.
+
+Wuhan 2026-06-20 (obs 24°C at 09:53 UTC, settled 32°C) illustrates both sides:
+the served posterior correctly put ~1.00 on above-obs bins (the model DOES predict
+further rise pre-peak — §6's buggy parser read this as 0.00), while post-peak rows
+serve ~0.31 mass on new-higher-high outcomes that realize only 7% of the time.
+
+Standing verdict: **T0-1 is CONFIRMED at tier0, for both metrics.** The audit's
+original mechanism (whole-day sigma never narrows; the observed/straddle bin is
+under-weighted post-peak and the beyond-obs tail over-weighted) is empirically
+accurate, and its magnitude (~0.31 misplaced mass post-peak) matches the original
+failure scenario's ~0.42 estimate better than §6's 0.045. §6's secondary findings
+that DID survive: the per-city timing work confirms HIGH's peak window (49/50
+cities median peak 12–16 local) but corrects LOW's trough to 3–5am for 27/50
+cities, and the finite-evidence floor fix (c363aacfb) remains correct — it
+addresses UCB under-coverage on possible zero-hit bins, which coexists with
+point-q over-dispersion beyond the obs (different moments of the same served
+distribution). Fix direction: as the audit originally specified — route a
+remaining-hours distribution (Day0Router members / day0_metric_fact
+q_remaining_extreme, both already computed) into the pricing lane; do NOT clamp
+sigma heuristically. Full corrected tables and the per-city window table:
+`day0_percity_diurnal_timing.md`.
+
+## 6. [SUPERSEDED BY §7] Empirical verification addendum (team-lead, settlement-graded) — 2026-07-18
 
 The audit above is code-reasoning + adversarial verification. Its headline **T0-1
 (tier0: whole-day sigma → symmetric HIGH+LOW over-dispersion)** was tested against
