@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-01
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07; last_reused=2026-07-01
+# Last reused/audited: 2026-07-18
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07; last_reused=2026-07-18
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -12,6 +12,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest
@@ -22,8 +23,32 @@ from src.data.replacement_forecast_seed_discovery import (
     _load_manifests,
     _manifest_allows_target_date,
     _latest_manifest,
+    _seed_target_sort_key,
     discover_replacement_forecast_materialization_seeds,
 )
+
+
+def test_seed_target_sort_keeps_day0_retries_from_starving_pre_settlement_q() -> None:
+    day0_held = SimpleNamespace(
+        city="Manila",
+        target_date="2026-07-18",
+        temperature_metric="high",
+        day0_observed_extreme_required=True,
+    )
+    future = SimpleNamespace(
+        city="Paris",
+        target_date="2026-07-19",
+        temperature_metric="high",
+        day0_observed_extreme_required=False,
+    )
+    held = {("Manila", "2026-07-18", "high"): 0}
+
+    ordered = sorted(
+        (day0_held, future),
+        key=lambda row: _seed_target_sort_key(row, held),
+    )
+
+    assert ordered == [future, day0_held]
 
 
 def _write_file(path: Path, payload: object) -> Path:

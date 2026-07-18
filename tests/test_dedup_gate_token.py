@@ -1,5 +1,8 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-18
+# Lifecycle: created=2026-05-17; last_reviewed=2026-07-17; last_reused=2026-07-18
+# Purpose: Protect same-token entry deduplication and certified global increments.
+# Reuse: Run when entry dedup, fill materialization, or increment admission changes.
 # Authority basis: first-principles global marginal-increment execution repair
 #
 # Relationship test: when Module A (position_current DB state) shows a non-terminal
@@ -680,6 +683,30 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
     assert allowed["allowed"] is True
     assert allowed["reason"] == "allowed_reconciled_position_increment"
     assert allowed["increment_position_id"] == "active-position"
+
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-filled-unmaterialized', 'active-position', ?, 'ENTRY', 'BUY',
+                   'order-filled-unmaterialized', 'FILLED',
+                   '2026-07-14T05:01:10+00:00', '2026-07-14T05:01:11+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.commit()
+    unmaterialized = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+    assert unmaterialized["allowed"] is False
+    assert unmaterialized["reason"] == "filled_entry_command_not_materialized"
+    assert unmaterialized["existing_command_id"] == "cmd-filled-unmaterialized"
+    mem_db.execute(
+        "DELETE FROM venue_commands WHERE command_id='cmd-filled-unmaterialized'"
+    )
+    mem_db.commit()
 
     mem_db.execute(
         "UPDATE position_current SET shares=25.0 WHERE position_id='active-position'"

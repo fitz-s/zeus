@@ -2375,10 +2375,39 @@ def _entry_duplicate_same_token_component(
                 and state.upper() == "FILLED"
                 and position_id == increment_position_id
             ):
-                # The current wealth witness cannot be constructed while an
-                # in-flight BUY is ambiguous.  A terminal FILLED command whose
-                # token is already represented by the one incrementable
-                # position is historical endowment, not a competing order.
+                materialized = False
+                if _table_exists(conn, "execution_fact"):
+                    materialized = (
+                        conn.execute(
+                            """
+                            SELECT 1
+                              FROM execution_fact
+                             WHERE command_id = ?
+                               AND position_id = ?
+                               AND lower(COALESCE(order_role, '')) = 'entry'
+                               AND lower(COALESCE(terminal_exec_status, '')) = 'filled'
+                               AND filled_at IS NOT NULL
+                               AND fill_price > 0
+                               AND shares > 0
+                             LIMIT 1
+                            """,
+                            (command_id, increment_position_id),
+                        ).fetchone()
+                        is not None
+                    )
+                if not materialized:
+                    return {
+                        "component": "entry_duplicate_same_token",
+                        "allowed": False,
+                        "reason": "filled_entry_command_not_materialized",
+                        "existing_command_id": command_id,
+                        "existing_position_id": position_id,
+                        "existing_command_state": state,
+                        "existing_phase": "" if phase is None else str(phase),
+                    }
+                # The command is historical endowment only after its exact fill
+                # has reached canonical execution facts. The projection/fact
+                # aggregate equality above proves that fill is in current wealth.
                 continue
             return {
                 "component": "entry_duplicate_same_token",

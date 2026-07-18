@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-18
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -2704,6 +2704,26 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         deterministic.probability_witness.witness_identity
     )
 
+    held_unknown_payload: dict[str, object] = {}
+    held_unknown = era._prepare_current_global_probability_family(
+        deterministic_event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=2),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=held_unknown_payload,
+        required_condition_id="c1",
+    )
+    assert remaining_day_calls == 2
+    assert isinstance(
+        held_unknown.probability_witness,
+        JointOutcomeProbabilityWitness,
+    )
+    assert held_unknown.probability_witness.yes_q_samples[0].tolist() == pytest.approx(
+        [0.0, 0.2, 0.8]
+    )
+
     observed_extreme["value"] = 72.0
     exact_payload: dict[str, object] = {}
     exact = era._prepare_current_global_probability_family(
@@ -2716,7 +2736,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         day0_payload_out=exact_payload,
     )
 
-    assert remaining_day_calls == 1
+    assert remaining_day_calls == 2
     assert exact.probability_witness.band_basis == (
         "day0_absorbing_observation_exact_settlement_simplex_v1"
     )

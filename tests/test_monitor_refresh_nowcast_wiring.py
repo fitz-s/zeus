@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-07-18
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-07-11
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-07-18
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -261,6 +261,7 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
         assert kwargs["forecast_conn"] is forecasts
         assert kwargs["topology_conn"] is forecasts
         assert kwargs["observation_conn"] is world
+        assert kwargs["required_condition_id"] == condition_id
         kwargs["day0_payload_out"].update(
             {
                 "_edli_global_day0_binding": {
@@ -487,6 +488,84 @@ def test_current_global_monitor_edge_band_uses_solver_cvar() -> None:
 
     assert lower == pytest.approx(0.1)
     assert upper == pytest.approx(0.7)
+
+
+def test_canonical_monitor_sync_restores_exit_confirmation_from_latest_event() -> None:
+    import json
+    import sqlite3
+
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            shares REAL,
+            chain_shares REAL,
+            updated_at TEXT,
+            target_date TEXT,
+            chain_state TEXT,
+            direction TEXT,
+            order_status TEXT,
+            exit_retry_count INTEGER,
+            next_exit_retry_at TEXT,
+            exit_reason TEXT,
+            last_monitor_market_price_is_fresh INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            position_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current
+        VALUES ('held-1', 'day0_window', 12.0, 12.0,
+                '2026-07-18T09:00:00+00:00', '2026-07-18', 'synced',
+                'buy_no', 'filled', 0, NULL, NULL, 1)
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_events VALUES (?, 'MONITOR_REFRESHED', 7, ?)",
+        (
+            "held-1",
+            json.dumps(
+                {
+                    "exit_decision_neg_edge_count": 1,
+                    "exit_decision_applied_validations": [
+                        "day0_robust_sell_value_awaits_confirmation"
+                    ],
+                }
+            ),
+        ),
+    )
+
+    rows = cycle_runtime._canonical_monitor_position_rows(conn)
+    assert rows is not None and len(rows) == 1
+    pos = SimpleNamespace(
+        state="active",
+        exit_state="",
+        applied_validations=[],
+        neg_edge_count=0,
+    )
+    cycle_runtime._sync_position_from_canonical_monitor_row(pos, rows[0])
+
+    assert pos.state == "day0_window"
+    assert pos.neg_edge_count == 1
+    assert pos.applied_validations == [
+        "day0_robust_sell_value_awaits_confirmation"
+    ]
+    conn.close()
 
 
 def test_identified_day0_monitor_fails_closed_without_global_probability(

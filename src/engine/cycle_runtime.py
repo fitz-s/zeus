@@ -4136,6 +4136,25 @@ def _canonical_monitor_position_rows(conn, *, now_utc: datetime | None = None) -
     required = {"position_id", "phase"}
     if not required.issubset(columns):
         return None
+    monitor_event_payload = "NULL AS last_monitor_event_payload_json"
+    if _table_exists_in_schema(conn, "main", "position_events"):
+        event_columns = _table_columns_in_schema(conn, "main", "position_events")
+        if {
+            "position_id",
+            "event_type",
+            "sequence_no",
+            "payload_json",
+        }.issubset(event_columns):
+            monitor_event_payload = """
+                (
+                    SELECT pe.payload_json
+                      FROM position_events AS pe
+                     WHERE pe.position_id = position_current.position_id
+                       AND pe.event_type = 'MONITOR_REFRESHED'
+                     ORDER BY pe.sequence_no DESC
+                     LIMIT 1
+                ) AS last_monitor_event_payload_json
+            """
     select_sql = ", ".join(
         [
             "position_id",
@@ -4156,6 +4175,7 @@ def _canonical_monitor_position_rows(conn, *, now_utc: datetime | None = None) -
                 "last_monitor_market_price_is_fresh",
                 "0",
             ),
+            monitor_event_payload,
         ]
     )
     try:
@@ -4236,6 +4256,24 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
     exit_reason = str(_row_get(row, "exit_reason", "") or "").strip()
     if exit_reason:
         pos.exit_reason = exit_reason
+    pos.neg_edge_count = 0
+    monitor_payload = _row_get(row, "last_monitor_event_payload_json")
+    if monitor_payload:
+        try:
+            monitor_event = json.loads(str(monitor_payload))
+            neg_edge_count = int(
+                monitor_event.get("exit_decision_neg_edge_count") or 0
+            )
+            validations = monitor_event.get("exit_decision_applied_validations")
+            if not isinstance(validations, list):
+                validations = monitor_event.get("applied_validations")
+            if isinstance(validations, list):
+                pos.applied_validations = [
+                    str(value) for value in validations if str(value).strip()
+                ]
+            pos.neg_edge_count = max(0, neg_edge_count)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pos.neg_edge_count = 0
     for attr in ("shares", "chain_shares"):
         value = _finite_positive_or_none(_row_get(row, attr))
         if value is not None:

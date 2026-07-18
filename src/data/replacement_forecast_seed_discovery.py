@@ -597,6 +597,24 @@ def held_position_family_priorities() -> dict[tuple[str, str, str], int]:
     return priorities
 
 
+def _seed_target_sort_key(
+    row: object,
+    held_family_priority: Mapping[tuple[str, str, str], int],
+) -> tuple[bool, int, str, str, str]:
+    family = (
+        str(getattr(row, "city")),
+        str(getattr(row, "target_date")),
+        str(getattr(row, "temperature_metric")),
+    )
+    return (
+        bool(getattr(row, "day0_observed_extreme_required")),
+        held_family_priority.get(family, 2),
+        family[1],
+        family[0],
+        family[2],
+    )
+
+
 def discover_replacement_forecast_materialization_seeds(
     *,
     forecast_db: Path | str,
@@ -685,15 +703,11 @@ def discover_replacement_forecast_materialization_seeds(
                         and row.openmeteo_manifest_count > 0
                     )
                 ),
-                key=lambda row: (
-                    held_family_priority.get(
-                        (str(row.city), str(row.target_date), str(row.temperature_metric)),
-                        2,
-                    ),
-                    str(row.target_date),
-                    str(row.city),
-                    str(row.temperature_metric),
-                ),
+                # Same-day scopes with an observed extreme have their own
+                # current-evidence Day0 probability lane. Do not let their
+                # repeated materialization attempts consume every bounded
+                # recovery slot while pre-settlement families have no q.
+                key=lambda row: _seed_target_sort_key(row, held_family_priority),
             )
         )
         if not targets:

@@ -27161,6 +27161,7 @@ def _prepare_current_global_probability_family(
     max_age: timedelta,
     day0_payload_out: dict[str, object] | None = None,
     cache_metadata_out: dict[str, str] | None = None,
+    required_condition_id: str | None = None,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency."""
 
@@ -27399,6 +27400,15 @@ def _prepare_current_global_probability_family(
         )
         for outcome in omega.bins
     )
+    required_bin_id = None
+    if required_condition_id is not None:
+        required = str(required_condition_id).strip()
+        required_bindings = tuple(
+            binding for binding in bindings if binding.condition_id == required
+        )
+        if len(required_bindings) != 1:
+            raise ValueError("GLOBAL_REQUIRED_CONDITION_BINDING_INVALID")
+        required_bin_id = required_bindings[0].bin_id
     resolution_identity = _event_resolution_identity(omega.resolution)
     probability_authority = "replacement_current_global_probability_v1"
     components = None
@@ -27436,7 +27446,9 @@ def _prepare_current_global_probability_family(
                 family=family,
                 payload=payload,
             )
-            if exact_yes_payoffs:
+            if exact_yes_payoffs and (
+                required_bin_id is None or required_bin_id in exact_yes_payoffs
+            ):
                 probability_authority = "day0_deterministic_bin_payoff_v1"
                 source_truth_identity = stable_hash(
                     {

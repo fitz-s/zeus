@@ -3990,7 +3990,23 @@ def _current_global_held_samples(
     if complementary_token and complementary_token != expected_complement:
         raise ValueError("monitor complementary token conflicts with current global witness")
 
-    samples = np.asarray(witness.yes_q_samples[:, indexes[0]], dtype=float)
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        family_payoff_q_samples,
+    )
+
+    if isinstance(witness, DeterministicBinPayoffWitness):
+        samples = family_payoff_q_samples(
+            witness,
+            bin_id=str(binding.bin_id),
+            side="NO" if direction == "buy_no" else "YES",
+        )
+        if samples is None:
+            raise ValueError("monitor held bin is unknown in deterministic witness")
+    else:
+        samples = np.asarray(witness.yes_q_samples[:, indexes[0]], dtype=float)
+        if direction == "buy_no":
+            samples = 1.0 - samples
     if (
         samples.ndim != 1
         or samples.size < 2
@@ -3999,7 +4015,7 @@ def _current_global_held_samples(
         or (samples > 1.0).any()
     ):
         raise ValueError("monitor current-global held samples are invalid")
-    return 1.0 - samples if direction == "buy_no" else samples
+    return np.ascontiguousarray(samples)
 
 
 def _refresh_current_global_day0_probability(
@@ -4072,6 +4088,7 @@ def _refresh_current_global_day0_probability(
             decision_time=now,
             max_age=FRESHNESS_WINDOW_DEFAULT,
             day0_payload_out=day0_payload,
+            required_condition_id=condition_id,
         )
     finally:
         if forecasts is not None:
