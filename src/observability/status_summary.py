@@ -165,8 +165,28 @@ def _atomic_write_status_payload(payload: dict) -> None:
         raise
 
 
+def write_cycle_result(cycle_summary: dict) -> None:
+    """Publish completed cycle facts without refreshing the derived DB read model.
+
+    Money-path callers use this after canonical commits.  The periodic heartbeat
+    owns the heavier DB-derived refresh, so a status projection cannot delay the
+    next forecast, observation, or executable-price wake.
+    """
+
+    _write_cycle_status(cycle_summary, refresh_runtime=False)
+
+
 def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
     """Update live progress plus the minimal DB-derived runtime read model."""
+
+    _write_cycle_status(cycle_summary, refresh_runtime=True)
+
+
+def _write_cycle_status(
+    cycle_summary: dict | None,
+    *,
+    refresh_runtime: bool,
+) -> None:
 
     generated_at = datetime.now(timezone.utc).isoformat()
     prior: dict = {}
@@ -213,6 +233,12 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
     status["process"]["last_pulse_kind"] = (
         "business_cycle" if not status["process"]["pulse_only"] else "auxiliary_pulse"
     )
+    if not refresh_runtime:
+        # Preserve the last verified top-level freshness instant.  This write
+        # publishes only the completed cycle; it must not make retained DB-derived
+        # portfolio/execution/control fields appear newly refreshed.
+        _atomic_write_status_payload(status)
+        return
     minimal_refresh_ok = _refresh_minimal_runtime_read_model_for_status(status)
     try:
         status["execution_capability"] = _get_execution_capability_status()

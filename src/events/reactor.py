@@ -6159,9 +6159,9 @@ def run_edli_event_reactor_cycle(
         _live_ack_count_ref = getattr(submit_adapter, "_live_ack_count", [0])
         _live_venue_acks = int(_live_ack_count_ref[0])
         try:
-            from src.observability.status_summary import write_cycle_pulse
+            from src.observability.status_summary import write_cycle_result
 
-            write_cycle_pulse(
+            write_cycle_result(
                 _build_edli_status_pulse(
                     started_at=process_pending_decision_time.isoformat(),
                     completed_at=datetime.now(timezone.utc).isoformat(),

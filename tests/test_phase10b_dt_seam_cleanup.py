@@ -1317,7 +1317,7 @@ class TestRCPV2RowCountSensor:
         after_process = source.split("_rr = reactor.process_pending", 1)[1]
 
         assert after_process.index("conn.commit()") < after_process.index(
-            "write_cycle_pulse("
+            "write_cycle_result("
         )
 
     def test_terminal_entry_command_with_nonterminal_venue_fact_is_conflict(self):

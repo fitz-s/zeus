@@ -27,7 +27,7 @@ import pytest
 # Gate-side freshness reader (the consumer half of the relationship).
 from scripts.check_live_release_gate import _fresh  # type: ignore
 from src.observability import status_summary
-from src.observability.status_summary import write_cycle_pulse
+from src.observability.status_summary import write_cycle_pulse, write_cycle_result
 
 
 _GATE_FRESHNESS_KEYS = ("generated_at", "updated_at", "observed_at", "captured_at")
@@ -83,6 +83,61 @@ def test_generated_at_tracks_timestamp_in_lockstep(tmp_path, monkeypatch):
             "generated_at must equal timestamp on a fresh pulse; divergence would "
             "let the gate read a different freshness instant than legacy consumers"
         )
+
+
+def test_cycle_result_skips_db_refresh_and_preserves_verified_freshness(
+    tmp_path, monkeypatch
+):
+    """A completed money-path cycle must not wait on the derived DB read model."""
+
+    target = _redirect_status_path(tmp_path, monkeypatch)
+    verified_at = "2026-07-18T00:00:00+00:00"
+    target.write_text(
+        json.dumps(
+            {
+                "generated_at": verified_at,
+                "timestamp": verified_at,
+                "portfolio": {"open_positions": 3},
+                "execution_capability": {"live_action_authorized": True},
+            }
+        )
+    )
+
+    def _unexpected_refresh(*_args, **_kwargs):
+        raise AssertionError("cycle-result write entered DB-derived refresh")
+
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_minimal_runtime_read_model_for_status",
+        _unexpected_refresh,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_get_execution_capability_status",
+        _unexpected_refresh,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_current_open_entry_orders_for_status",
+        _unexpected_refresh,
+    )
+
+    write_cycle_result(
+        {
+            "mode": "edli_event_reactor",
+            "completed_at": "2026-07-18T00:00:01+00:00",
+            "candidates": 12,
+            "submit_attempts": 1,
+        }
+    )
+
+    payload = json.loads(target.read_text())
+    assert payload["cycle"]["candidates"] == 12
+    assert payload["cycle"]["submit_attempts"] == 1
+    assert payload["portfolio"] == {"open_positions": 3}
+    assert payload["execution_capability"] == {"live_action_authorized": True}
+    assert payload["generated_at"] == verified_at
+    assert payload["timestamp"] == verified_at
 
 
 def test_cycle_pulse_refreshes_control_pause_truth(tmp_path, monkeypatch):
