@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 
@@ -52,6 +52,8 @@ _LIVE_TRADING_REQUIRED_SIDECAR_HEARTBEATS = (
 _LIVE_TRADING_WATCHDOG_LAST_CHECK_MONOTONIC = 0.0
 _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC = 0.0
 _HEARTBEAT_REQUEST_CAUSE_PRESERVED = False
+_HEARTBEAT_TRANSPORT_RESET_COUNT = 0
+_HEARTBEAT_LAST_TRANSPORT_RESET_REASON: str | None = None
 
 
 class HeartbeatHealth(str, Enum):
@@ -177,7 +179,7 @@ def heartbeat_http_timeout_seconds_from_env(cadence_seconds: int) -> float:
     return value
 
 
-def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> None:
+def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> bool:
     """Keep heartbeat HTTP blocking time below the lease cadence.
 
     The CLOB heartbeat rotates a server-owned lease token. A read timeout can
@@ -196,12 +198,13 @@ def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> None:
         from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
     except Exception as exc:  # pragma: no cover - dependency absence is runtime-specific
         logger.warning("heartbeat HTTP timeout install skipped: %s", exc)
-        return
+        return False
 
     old_client = getattr(heartbeat_http_helpers, "_http_client", None)
     heartbeat_http_helpers._http_client = httpx.Client(
-        http2=True,
+        http2=False,
         timeout=httpx.Timeout(timeout_seconds),
+        limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
     )
     close = getattr(old_client, "close", None)
     if callable(close):
@@ -212,10 +215,11 @@ def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> None:
 
     if getattr(heartbeat_http_helpers, "_zeus_request_cause_preserved", False):
         _HEARTBEAT_REQUEST_CAUSE_PRESERVED = True
-        return
+        return True
 
     def _request_with_cause(endpoint: str, method: str, headers=None, data=None, params=None):
         overloaded_headers = heartbeat_http_helpers._overload_headers(method, headers)
+        overloaded_headers["Connection"] = "close"
         try:
             if isinstance(data, str):
                 resp = heartbeat_http_helpers._http_client.request(
@@ -258,11 +262,52 @@ def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> None:
     heartbeat_http_helpers.request = _request_with_cause
     heartbeat_http_helpers._zeus_request_cause_preserved = True
     _HEARTBEAT_REQUEST_CAUSE_PRESERVED = True
+    return True
+
+
+def _is_heartbeat_transport_error(exc: BaseException) -> bool:
+    try:
+        import httpx
+    except Exception:  # pragma: no cover - dependency absence is runtime-specific
+        return False
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.RequestError):
+            return True
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        current = cause if isinstance(cause, BaseException) else context
+        if not isinstance(current, BaseException):
+            current = None
+    return False
+
+
+def _reset_dedicated_heartbeat_http_transport(
+    *,
+    cadence_seconds: int,
+    cause: BaseException,
+) -> None:
+    global _HEARTBEAT_TRANSPORT_RESET_COUNT
+    global _HEARTBEAT_LAST_TRANSPORT_RESET_REASON
+
+    if not install_dedicated_heartbeat_http_timeout(cadence_seconds=cadence_seconds):
+        raise RuntimeError("heartbeat HTTP transport reset unavailable")
+    _HEARTBEAT_TRANSPORT_RESET_COUNT += 1
+    _HEARTBEAT_LAST_TRANSPORT_RESET_REASON = _describe_heartbeat_exception(cause)
+    logger.warning(
+        "Venue heartbeat transport reset after %s",
+        _HEARTBEAT_LAST_TRANSPORT_RESET_REASON,
+    )
 
 
 def heartbeat_transport_diagnostics() -> dict[str, Any]:
     return {
         "request_cause_preserved": bool(_HEARTBEAT_REQUEST_CAUSE_PRESERVED),
+        "transport_reset_count": int(_HEARTBEAT_TRANSPORT_RESET_COUNT),
+        "last_transport_reset_reason": _HEARTBEAT_LAST_TRANSPORT_RESET_REASON,
     }
 
 
@@ -1005,6 +1050,7 @@ class HeartbeatSupervisor:
         cadence_seconds: int = DEFAULT_HEARTBEAT_CADENCE_SECONDS,
         *,
         initial_heartbeat_id: str = "",
+        transport_reset: Callable[[BaseException], None] | None = None,
     ) -> None:
         if cadence_seconds <= 0:
             raise ValueError("cadence_seconds must be positive")
@@ -1030,6 +1076,7 @@ class HeartbeatSupervisor:
         self._last_invalid_id_at: Optional[datetime] = None
         self._lease_continuous_since: Optional[datetime] = None
         self._lease_gap_suspected_until: Optional[datetime] = None
+        self._transport_reset = transport_reset
         self._running = False
         self._run_once_lock = threading.Lock()
 
@@ -1077,6 +1124,7 @@ class HeartbeatSupervisor:
                         self.record_success()
                         return self.status()
                     except Exception as retry_exc:
+                        self._reset_transport_after_failure(retry_exc)
                         exc = RuntimeError(
                             f"Invalid Heartbeat ID; empty-chain recovery failed: {retry_exc}"
                         )
@@ -1084,18 +1132,28 @@ class HeartbeatSupervisor:
                     self.record_failure(exc)
                 else:
                     self.record_failure(exc)
+                    self._reset_transport_after_failure(exc)
                     if self._health is HeartbeatHealth.LOST:
                         try:
                             self._heartbeat_id = await self._post_heartbeat_once("")
                             self.record_success()
                             return self.status()
                         except Exception as retry_exc:
+                            self._reset_transport_after_failure(retry_exc)
                             self._last_error = (
                                 f"{self._last_error}; empty-chain recovery failed: {retry_exc}"
                             )
         finally:
             self._run_once_lock.release()
         return self.status()
+
+    def _reset_transport_after_failure(self, exc: BaseException) -> None:
+        if self._transport_reset is None or not _is_heartbeat_transport_error(exc):
+            return
+        try:
+            self._transport_reset(exc)
+        except Exception as reset_exc:  # fail closed; next tick may retry the reset.
+            logger.warning("Venue heartbeat transport reset failed: %s", reset_exc)
 
     async def _post_heartbeat_once(self, heartbeat_id: str) -> str:
         if self._adapter is None:
@@ -1321,7 +1379,8 @@ def run_heartbeat_keeper(
     """
 
     cadence = heartbeat_cadence_seconds_from_env() if cadence_seconds is None else int(cadence_seconds)
-    if adapter is None:
+    owns_transport = adapter is None
+    if owns_transport:
         install_dedicated_heartbeat_http_timeout(cadence_seconds=cadence)
         from src.data.proxy_health import bypass_dead_proxy_env_vars
 
@@ -1334,6 +1393,14 @@ def run_heartbeat_keeper(
         adapter,
         cadence_seconds=cadence,
         initial_heartbeat_id=initial_heartbeat_id,
+        transport_reset=(
+            lambda exc: _reset_dedicated_heartbeat_http_transport(
+                cadence_seconds=cadence,
+                cause=exc,
+            )
+        )
+        if owns_transport
+        else None,
     )
     ticks = 0
     while True:

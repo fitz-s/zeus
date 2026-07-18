@@ -508,6 +508,9 @@ def test_install_dedicated_heartbeat_timeout_replaces_sdk_http_client(monkeypatc
         assert installed is not old_client
         assert installed.timeout.read == pytest.approx(1.0)
         assert installed.timeout.connect == pytest.approx(1.0)
+        assert installed._transport._pool._http2 is False
+        assert installed._transport._pool._max_connections == 1
+        assert installed._transport._pool._max_keepalive_connections == 0
     finally:
         installed = heartbeat_http_helpers._http_client
         if installed is not old_client:
@@ -527,6 +530,8 @@ def test_install_dedicated_heartbeat_timeout_preserves_request_error_cause(monke
     old_request = heartbeat_http_helpers.request
     old_installed = getattr(heartbeat_http_helpers, "_zeus_request_cause_preserved", None)
     old_diagnostic = heartbeat_supervisor_module._HEARTBEAT_REQUEST_CAUSE_PRESERVED
+    old_reset_count = heartbeat_supervisor_module._HEARTBEAT_TRANSPORT_RESET_COUNT
+    old_reset_reason = heartbeat_supervisor_module._HEARTBEAT_LAST_TRANSPORT_RESET_REASON
 
     class RaisingClient:
         def request(self, **kwargs):
@@ -542,7 +547,9 @@ def test_install_dedicated_heartbeat_timeout_preserves_request_error_cause(monke
         heartbeat_supervisor_module._HEARTBEAT_REQUEST_CAUSE_PRESERVED = False
         install_dedicated_heartbeat_http_timeout(cadence_seconds=2)
         assert heartbeat_supervisor_module.heartbeat_transport_diagnostics() == {
-            "request_cause_preserved": True
+            "request_cause_preserved": True,
+            "transport_reset_count": old_reset_count,
+            "last_transport_reset_reason": old_reset_reason,
         }
         installed = heartbeat_http_helpers._http_client
         installed.close()
@@ -564,6 +571,48 @@ def test_install_dedicated_heartbeat_timeout_preserves_request_error_cause(monke
         else:
             heartbeat_http_helpers._zeus_request_cause_preserved = old_installed
         heartbeat_supervisor_module._HEARTBEAT_REQUEST_CAUSE_PRESERVED = old_diagnostic
+        heartbeat_supervisor_module._HEARTBEAT_TRANSPORT_RESET_COUNT = old_reset_count
+        heartbeat_supervisor_module._HEARTBEAT_LAST_TRANSPORT_RESET_REASON = old_reset_reason
+
+
+def test_transport_failure_resets_dedicated_pool_without_abandoning_chain():
+    import httpx
+    from py_clob_client_v2.exceptions import PolyApiException
+
+    def pool_timeout() -> PolyApiException:
+        request = httpx.Request("POST", "https://clob.polymarket.com/v1/heartbeats")
+        try:
+            raise httpx.PoolTimeout("pool exhausted", request=request)
+        except httpx.PoolTimeout as exc:
+            try:
+                raise PolyApiException(error_msg="Request exception: PoolTimeout") from exc
+            except PolyApiException as wrapped:
+                return wrapped
+
+    adapter = FakeHeartbeatAdapter([
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"}),
+        pool_timeout(),
+        pool_timeout(),
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-recovered"}),
+    ])
+    reset_causes: list[BaseException] = []
+    supervisor = HeartbeatSupervisor(
+        adapter,
+        cadence_seconds=5,
+        transport_reset=reset_causes.append,
+    )
+
+    assert _run(supervisor.run_once()).health is HeartbeatHealth.HEALTHY
+    assert _run(supervisor.run_once()).health is HeartbeatHealth.DEGRADED
+    recovered = _run(supervisor.run_once())
+
+    assert recovered.health is HeartbeatHealth.HEALTHY
+    assert recovered.heartbeat_id == "id-recovered"
+    assert adapter.heartbeat_ids == ["", "id-1", "id-1", ""]
+    assert [type(cause.__cause__).__name__ for cause in reset_causes] == [
+        "PoolTimeout",
+        "PoolTimeout",
+    ]
 
 
 def test_invalid_heartbeat_id_restarts_chain_in_same_tick():
@@ -1029,6 +1078,7 @@ def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
         payload["transport_diagnostics"]["request_cause_preserved"],
         bool,
     )
+    assert isinstance(payload["transport_diagnostics"]["transport_reset_count"], int)
     assert payload["health"] == "HEALTHY"
     assert payload["heartbeat_id"] == "keeper-A"
     assert payload["last_error"] is None
