@@ -2892,6 +2892,45 @@ def test_new_market_message_does_not_default_unmapped_token_to_yes():
     assert event is None
 
 
+def test_quote_only_ingestor_writes_trade_evidence_and_rejects_world_events():
+    conn, _writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        None,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        feasibility_conn=conn,
+    )
+
+    results = ingestor.seed_from_rest(
+        lambda _token_id: pytest.fail("pre-captured quote must not fetch"),
+        received_at="2026-07-18T20:00:00+00:00",
+        pre_cached={
+            "token-1": {
+                "asset_id": "token-1",
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": "quote-only-hash",
+            }
+        },
+    )
+    assert len(results) == 1
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 2
+
+    world_event = ingestor.event_from_message(
+        {
+            "event_type": "new_market",
+            "condition_id": "0xnew",
+            "clob_token_ids": ["token-1"],
+            "timestamp": "1784404800000",
+        },
+        received_at="2026-07-18T20:00:00+00:00",
+    )
+    assert world_event is not None
+    with pytest.raises(MarketChannelAuthorityError, match="quote-only"):
+        ingestor._commit_market_event(world_event)
+
+
 def test_feasibility_evidence_from_quote_is_evidence_only():
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())

@@ -1,11 +1,10 @@
 # Created: 2026-06-20
 # Last audited: 2026-07-17
 # Last reused/audited: 2026-07-17
-# Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). The held- and
-#   candidate-priority refresh still uses one attached connection when it can emit both
-#   WORLD and TRADE facts. The forever market-channel loop is different: quote projection
-#   writes TRADE only, while NEW_MARKET_DISCOVERED writes WORLD only, so those lanes must
-#   not share the WORLD writer lock.
+# Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
+#   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
+#   through independently coordinated lanes. TRADE quote refresh must never acquire
+#   the WORLD writer lock.
 """B5 antibodies for price-channel DB ownership and writer-lane isolation."""
 from __future__ import annotations
 
@@ -113,58 +112,54 @@ def test_forever_runner_opens_independent_world_and_trade_lanes():
 
 
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
-def test_refresh_uses_non_flocked_world_connection_with_trades(func_name):
-    """Bounded REST refresh functions must use one ATTACHed connection without
-    holding cross-process writer flocks across orderbook fetches."""
+def test_refresh_uses_trade_only_write_connection(func_name):
+    """Quote refresh owns TRADE evidence and must not open an attached WORLD writer."""
     node = _func_node(func_name)
     called = {
         sub.func.id
         for sub in ast.walk(node)
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
     }
-    assert "get_world_connection_with_trades_required" in called, (
-        f"{func_name} must use get_world_connection_with_trades_required: one "
-        f"world-main connection with zeus_trades.db ATTACHed."
-    )
+    assert "get_trade_connection" in called
+    assert "get_world_connection_with_trades_required" not in called
     assert "world_connection_with_trades_flocked" not in called, (
-        f"{func_name} must not use world_connection_with_trades_flocked: "
-        f"seed_rest_books_in_chunks performs REST fetches before each DB write "
-        f"chunk, and holding writer flocks across that network window starves "
-        f"live redecision snapshot refresh."
+        f"{func_name} must not couple TRADE quote evidence to WORLD ownership."
     )
     assert "_bound_price_channel_sqlite_wait" in called, (
-        f"{func_name} must cap SQLite busy wait before entering the composed "
-        "world+trade writer gate."
+        f"{func_name} must cap SQLite busy wait before entering the TRADE writer gate."
     )
 
 
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
-def test_refresh_feasibility_write_is_schema_qualified_trades(func_name):
-    """The feasibility write must be schema-qualified to the attached 'trades' schema
-    (so it never lands in the world shadow table)."""
+def test_refresh_feasibility_write_targets_trade_main_without_world_writer(func_name):
     node = _func_node(func_name)
-    qualifies_trades = any(
+    trade_main = any(
         kw.arg == "feasibility_schema"
         and isinstance(kw.value, ast.Constant)
-        and kw.value.value == "trades"
+        and kw.value.value == ""
         for sub in ast.walk(node)
         if isinstance(sub, ast.Call)
         for kw in sub.keywords
     )
-    assert qualifies_trades, (
-        f"{func_name} must pass feasibility_schema='trades' so the feasibility insert "
-        f"targets trades.execution_feasibility_evidence (not the world shadow table)."
+    quote_only = any(
+        isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Name)
+        and sub.func.id == "MarketChannelIngestor"
+        and sub.args
+        and isinstance(sub.args[0], ast.Constant)
+        and sub.args[0].value is None
+        for sub in ast.walk(node)
     )
+    assert trade_main
+    assert quote_only
 
 
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
-def test_refresh_seed_chunks_use_unified_world_trade_gate(func_name):
-    """The DB write chunk must use the composed world+trade gate, not the bare
-    world mutex by itself."""
+def test_refresh_seed_chunks_use_trade_only_gate(func_name):
     node = _func_node(func_name)
     write_gate_calls = _write_gate_keyword_call_names(node, "seed_rest_books_in_chunks")
-    assert write_gate_calls == ["_edli_price_channel_world_trade_write_gate"], (
-        f"{func_name} must pass _edli_price_channel_world_trade_write_gate(...) as "
+    assert write_gate_calls == ["_edli_price_channel_trade_write_gate"], (
+        f"{func_name} must pass _edli_price_channel_trade_write_gate(...) as "
         f"seed_rest_books_in_chunks(write_gate=...), got {write_gate_calls!r}"
     )
 
@@ -244,7 +239,7 @@ def test_world_gate_releases_mutex_when_coordinator_times_out(monkeypatch):
         @contextlib.contextmanager
         def lease(self, *_args, **_kwargs):
             events.append("enter:coordinator")
-            raise TimeoutError("trade writer busy")
+            raise TimeoutError("world writer busy")
             yield
 
     monkeypatch.setattr(
@@ -258,8 +253,8 @@ def test_world_gate_releases_mutex_when_coordinator_times_out(monkeypatch):
         lambda: _Coordinator(),
     )
 
-    with pytest.raises(TimeoutError, match="trade writer busy"):
-        with _PriceChannelWriteGate(owner="bounded-world-trade", scope="world_trade"):
+    with pytest.raises(TimeoutError, match="world writer busy"):
+        with _PriceChannelWriteGate(owner="bounded-world", scope="world"):
             pytest.fail("timed-out gate must not enter its body")
 
     assert events == [

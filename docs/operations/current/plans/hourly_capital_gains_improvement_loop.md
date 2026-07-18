@@ -5,11 +5,17 @@
 
 ## 现状(forward)
 
+### 2026-07-18 19:42Z tick — quote refresh 不再占用 WORLD writer
+- **新地图对应关系:** held/candidate REST quote refresh 只生成 TRADE-owned executable evidence；derived `EDLI_REDECISION_PENDING` 已在 quote commit 后通过 independently coordinated WORLD sink 写入。把两者继续绑在同一 attached connection / `world_trade` gate 没有 settlement 或 atomicity 需求，只会让一个慢 quote chunk 阻塞无关 market event、reactor claim 和 ingest commit。
+- **运行态归因:** `price_channel_market_event deferred: WORLD writer busy for 25ms` 发生在进程内 WORLD mutex acquisition，证明同进程某条 WORLD gate 正占用 mutex。held/candidate refresh 仍周期性获取该 mutex，尽管它们的 quote rows 从不写 `opportunity_events`；这是可直接删除的全局耦合。live daemon loaded SHA 仍为 `8f7d7d962`，所以此归因来自当前旧路径，修复尚未 live。
+- **隔离修复:** 两条 refresh 改用 canonical TRADE connection、TRADE-only coordinator gate 和 unqualified TRADE schema；`MarketChannelIngestor(None, feasibility_conn=...)` 明确表达 quote-only capability，遇到非 quote WORLD event 立即拒绝。删除已无调用者的 `world_trade` gate/scope。WORLD redecision 保留原独立 bounded writer，失败只积压对应 derived events，不回滚已提交 quote evidence。
+- **验证:** quote-only authority/fault-containment 定向 `9 passed`；held/candidate/open-rest 真实 DB fixture `4 passed`；完整 INV-37 lane `25 passed`、market-channel `86 passed`、price-channel lift `78 passed`。下一步在自然 reload 后复采 WORLD mutex backpressure 与 reactor claim bounce；若仍有长占用，只剩 `price_channel_market_event`/`price_channel_redecision_emit` 等真实 WORLD owners，不再被 quote refresh 污染。
+
 ### 2026-07-18 19:26Z tick — reconcile 慢读退出 WORLD writer 临界区
-- **运行态锁证据:** `edli_user_channel_reconcile` 在 20:08/20:10/20:15 本地周期分别占用约 69/55/97 秒；同窗 reactor `BEGIN IMMEDIATE` 连续报 `database is locked`，一次 event 被反复 lock-bounce。该 job 在无 user/reconcile JSONL 配置时仍有 0.1 秒到 253 秒的巨大抖动，主要剩余工作是 authenticated WS/REST fill bridge 的历史查询。
+- **运行态锁证据:** `edli_user_channel_reconcile` 在 20:08/20:10/20:15 本地周期分别占用约 69/55/97 秒；同窗 reactor `BEGIN IMMEDIATE` 连续报 `database is locked`，一次 event 被反复 lock-bounce。后续只读计数证明 live-order events 仅约 15k、commands/trade facts 约 1.1k，authenticated WS/REST bridge 查询不是这些几十秒的计算来源；长 duration 主要是等待另一个 writer。此前“10M+ historical bridge query”假设被证伪。
 - **第一性错误:** cycle 处理 inbox 后已打开 WORLD 写事务，却继续读取 external reconcile evidence，并在同一事务内串联两个重历史 bridge scan。外部/历史 I/O 既不需要 writer ownership，也让一个 reconcile lane 的慢读阻塞全部无关 opportunity claim。
 - **隔离修复:** inbox、venue fact apply、WS-confirmed bridge、REST-orphan bridge 现在分成四个独立 commit phase；仅有 pending aggregate 时才加载 reconcile evidence。external reader/单 aggregate failure 只跳过依赖项；网络/文件结果返回后重新验证 `pending_reconcile`，仍由原 aggregate state machine + SAVEPOINT 应用。未改变 fill authority、event hash、projection CAS 或 cross-DB bridge。
-- **验证与边界:** 事务抗体先制造 inbox write，再证明 external reconcile、confirmed scan、rest scan 三个边界均见 `in_transaction=False`，且最终 projection 正确进入 `RECONCILED`。现有 cycle fixtures 同时改为准确 patch WORLD 主连接与独立 trade bridge 连接。当前 daemon loaded SHA 仍为 `8f7d7d962`，本修复尚未 live；下一步把两个 10M+ historical event bridge query 改为 pending/changed aggregate 增量读取，并继续定位 user-cycle 结束后仍存在的第二个 WORLD writer。
+- **验证与边界:** 事务抗体先制造 inbox write，再证明 external reconcile、confirmed scan、rest scan 三个边界均见 `in_transaction=False`，且最终 projection 正确进入 `RECONCILED`。现有 cycle fixtures 同时改为准确 patch WORLD 主连接与独立 trade bridge 连接。当前 daemon loaded SHA 仍为 `8f7d7d962`，本修复尚未 live；phase split 仍缩短实际 writer ownership，但不再进行无价值的 bridge incremental rewrite，下一步转向真实 mutex owner。
 
 ### 2026-07-18 19:07Z tick — urgent Day0 fact 可抢占并行 book discovery，不再等待慢 CLOB teardown
 - **第一性阻塞:** global batch 外层只在 book provider 返回后检查 urgent cancellation；provider 内部并行 Gamma/CLOB 使用等待式 `ThreadPoolExecutor` context。新的 deterministic extreme 即使已提交，也可能继续等待无关 CLOB request 与 executor teardown，期间 targeted held SELL 无法取得 reactor handoff。

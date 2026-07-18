@@ -266,9 +266,7 @@ class _PriceChannelWriteGate:
 
         stack = contextlib.ExitStack()
         try:
-            if self._scope == "world_trade":
-                dbs = (DBIdentity.WORLD, DBIdentity.TRADE)
-            elif self._scope == "world":
+            if self._scope == "world":
                 dbs = (DBIdentity.WORLD,)
             elif self._scope == "trade":
                 dbs = (DBIdentity.TRADE,)
@@ -317,10 +315,6 @@ class _PriceChannelWriteGate:
             return self._stack.__exit__(exc_type, exc, tb)
         finally:
             self._stack = None
-
-
-def _edli_price_channel_world_trade_write_gate(*, owner: str) -> _PriceChannelWriteGate:
-    return _PriceChannelWriteGate(owner=owner, scope="world_trade")
 
 
 def _edli_price_channel_world_write_gate(*, owner: str) -> _PriceChannelWriteGate:
@@ -2485,7 +2479,6 @@ def _edli_refresh_held_position_quote_evidence(
 
     from src.data.polymarket_client import PolymarketClient
     from src.events.event_coalescer import EventCoalescer
-    from src.events.event_writer import EventWriter
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
         MarketChannelOnlineService,
@@ -2600,14 +2593,6 @@ def _edli_refresh_held_position_quote_evidence(
             "skipped": "no_held_token_metadata",
         }
 
-    # Quote/book refresh writes trade-owned execution_feasibility_evidence and may
-    # synchronously emit derived EDLI_REDECISION_PENDING world events. Raw
-    # BOOK_SNAPSHOT/BEST_BID_ASK_CHANGED cache facts are intentionally not persisted
-    # to opportunity_events; keeping them there was write amplification, not
-    # decision truth. The attached connection still keeps the trade witness and any
-    # derived world event on one commit boundary.
-    from src.state.db import get_world_connection_with_trades_required
-
     ordered_metadata_tokens = [
         token_id for token_id in selected_held_token_ids if token_id in token_metadata
     ]
@@ -2631,16 +2616,14 @@ def _edli_refresh_held_position_quote_evidence(
             },
         )
 
-    # Do not use the flocked context here: REST book fetches happen inside
-    # seed_rest_books_in_chunks before each DB chunk write, and holding
-    # cross-process trade/world writer flocks across those network calls starves
-    # live redecision's executable snapshot refresh.
     conn = None
     try:
-        conn = get_world_connection_with_trades_required(write_class="live")
+        # Quote evidence is TRADE truth. Derived WORLD redecision events use the
+        # independently coordinated sink after this transaction commits.
+        conn = get_trade_connection(write_class="live")
         _bound_price_channel_sqlite_wait(conn)
 
-        def _commit_atomic_cross_db() -> None:
+        def _commit_quote_evidence() -> None:
             conn.commit()
 
         # The redecision-routing decision (WHICH families to re-solve) is a decision-layer
@@ -2654,13 +2637,13 @@ def _edli_refresh_held_position_quote_evidence(
             )
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
-                    EventWriter(conn),
+                    None,
                     active_token_ids=set(token_metadata),
                     token_metadata=token_metadata,
                     feasibility_conn=conn,
-                    feasibility_schema="trades",
+                    feasibility_schema="",
                     coalescer=EventCoalescer(max_market_keys=1000),
-                    market_event_sink=_edli_price_channel_redecision_sink(conn),
+                    market_event_sink=_edli_price_channel_redecision_sink(),
                     market_event_sink_independently_coordinated=True,
                 ),
                 fetch_orderbook=fetch_orderbook,
@@ -2669,10 +2652,10 @@ def _edli_refresh_held_position_quote_evidence(
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                write_gate=_edli_price_channel_world_trade_write_gate(
+                write_gate=_edli_price_channel_trade_write_gate(
                     owner="price_channel_held_quote_refresh"
                 ),
-                commit=_commit_atomic_cross_db,
+                commit=_commit_quote_evidence,
                 logger=logger,
                 chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
                 deadline_monotonic=deadline,
@@ -2723,7 +2706,6 @@ def _edli_refresh_candidate_priority_quote_evidence(
 
     from src.data.polymarket_client import PolymarketClient
     from src.events.event_coalescer import EventCoalescer
-    from src.events.event_writer import EventWriter
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
         MarketChannelOnlineService,
@@ -2826,14 +2808,6 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "skipped": "no_candidate_token_metadata",
         }
 
-    # Same attached-connection shape as held refresh: quote evidence lands in
-    # trades.execution_feasibility_evidence, while only derived redecision events
-    # touch world.opportunity_events.
-    from src.state.db import get_world_connection_with_trades_required
-
-    # Same lock discipline as held-position refresh: one world-main connection
-    # with trades attached, but no cross-process writer flock held across REST
-    # fetches. Each seed chunk still commits on this single attached connection.
     ordered_metadata_tokens = [
         token_id for token_id in selected_candidate_token_ids if token_id in token_metadata
     ]
@@ -2862,10 +2836,12 @@ def _edli_refresh_candidate_priority_quote_evidence(
 
     conn = None
     try:
-        conn = get_world_connection_with_trades_required(write_class="live")
+        # Candidate quote projection has the same TRADE-only ownership as held
+        # quotes; WORLD event emission is a separate, bounded failure domain.
+        conn = get_trade_connection(write_class="live")
         _bound_price_channel_sqlite_wait(conn)
 
-        def _commit_atomic_cross_db() -> None:
+        def _commit_quote_evidence() -> None:
             conn.commit()
 
         # The redecision-routing decision (WHICH families to re-solve) is a decision-layer
@@ -2879,13 +2855,13 @@ def _edli_refresh_candidate_priority_quote_evidence(
             )
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
-                    EventWriter(conn),
+                    None,
                     active_token_ids=set(token_metadata),
                     token_metadata=token_metadata,
                     feasibility_conn=conn,
-                    feasibility_schema="trades",
+                    feasibility_schema="",
                     coalescer=EventCoalescer(max_market_keys=1000),
-                    market_event_sink=_edli_price_channel_redecision_sink(conn),
+                    market_event_sink=_edli_price_channel_redecision_sink(),
                     market_event_sink_independently_coordinated=True,
                 ),
                 fetch_orderbook=fetch_orderbook,
@@ -2894,10 +2870,10 @@ def _edli_refresh_candidate_priority_quote_evidence(
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                write_gate=_edli_price_channel_world_trade_write_gate(
+                write_gate=_edli_price_channel_trade_write_gate(
                     owner="price_channel_candidate_quote_refresh"
                 ),
-                commit=_commit_atomic_cross_db,
+                commit=_commit_quote_evidence,
                 logger=logger,
                 chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
                 deadline_monotonic=deadline,

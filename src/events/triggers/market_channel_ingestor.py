@@ -132,7 +132,7 @@ class MarketChannelIngestor:
 
     def __init__(
         self,
-        writer: EventWriter,
+        writer: EventWriter | None,
         *,
         active_token_ids: set[str],
         token_metadata: dict[str, MarketTokenMetadata] | None = None,
@@ -144,7 +144,11 @@ class MarketChannelIngestor:
         market_event_sink_independently_coordinated: bool = False,
     ) -> None:
         self._writer = writer
-        self._feasibility_conn = feasibility_conn or writer.conn
+        if feasibility_conn is None:
+            if writer is None:
+                raise ValueError("quote-only market ingestor requires feasibility_conn")
+            feasibility_conn = writer.conn
+        self._feasibility_conn = feasibility_conn
         # INV-37 (PR415 B5): when feasibility writes share the EventWriter's
         # connection (single-connection attached cross-DB path, feasibility_conn=None or
         # the same conn), that connection is world-MAIN with zeus_trades.db ATTACHed as
@@ -630,6 +634,10 @@ class MarketChannelIngestor:
                 inserted=True,
                 duplicate=False,
                 evidence_written=True,
+            )
+        if self._writer is None:
+            raise MarketChannelAuthorityError(
+                "quote-only market ingestor cannot persist WORLD events"
             )
         result = self._writer.write(event)
         if result.inserted:
