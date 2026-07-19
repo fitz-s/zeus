@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import subprocess
 import sys
@@ -958,7 +959,7 @@ def render_text(data: dict) -> str:
             )
     L.append("")
 
-    # PRICE HOLES (price-cache freshness for cities with open markets today/tomorrow)
+    # PRICE TRUTH (execution-feasibility BBA/depth for market-event scope)
     ph = data.get("price_holes", {})
     if ph.get("error"):
         L.append(f"PRICE    ERR {ph['error']}")
@@ -966,19 +967,34 @@ def render_text(data: dict) -> str:
         holes = ph.get("holes", [])
         cities_total = ph.get("cities_total", "?")
         fresh = ph.get("fresh_count", 0)
+        bba = ph.get("bba_token_coverage", {})
+        depth = ph.get("full_depth_token_coverage", {})
+        topology = ph.get("topology_metadata_staleness", {})
         if holes:
             names = ", ".join(
-                f"{h['city']}({h['age']})" for h in holes[:10]
+                f"{h['city']}/{h.get('token_id') or '?'}({h['age']})" for h in holes[:10]
             )
             more = f" +{len(holes) - 10} more" if len(holes) > 10 else ""
             L.append(
-                f"PRICE    HOLES={len(holes)}/{cities_total} "
-                f"(> {ph.get('stale_hours')}h): {names}{more}"
+                f"PRICE    BBA-MISSING={len(holes)} "
+                f"(token evidence > {ph.get('stale_hours')}h): {names}{more}"
             )
         else:
             L.append(
-                f"PRICE    holes=0/{cities_total} "
-                f"(all {fresh} open-market cities fresh within {ph.get('stale_hours')}h)"
+                f"PRICE    BBA green-cities={fresh}/{cities_total} "
+                f"(all scoped tokens fresh within {ph.get('stale_hours')}h)"
+            )
+        L.append(
+            f"         BBA tokens={bba.get('fresh_tokens', 0)}/{bba.get('tokens_total', 0)} "
+            f"depth tokens={depth.get('fresh_tokens', 0)}/{depth.get('tokens_total', 0)}"
+        )
+        if topology.get("error"):
+            L.append(f"         topology metadata ERR {topology['error']}")
+        else:
+            stale = len(topology.get("stale_or_missing_conditions", []))
+            L.append(
+                f"         topology metadata stale={stale}/{topology.get('conditions_total', 0)} "
+                f"(not price evidence)"
             )
     L.append("")
 
@@ -1092,33 +1108,39 @@ def section_obs_holes() -> dict:
     return out
 
 
-# Section: PRICE HOLES (zeus_trades.db executable_market_snapshots freshness per city)
+# Section: PRICE TRUTH COVERAGE (execution feasibility BBA/depth per token)
 # --------------------------------------------------------------------------
 PRICE_HOLE_STALE_HOURS = 2.0
 
 
 def section_price_holes() -> dict:
-    """Per-city price-cache freshness census for cities with an OPEN market today/tomorrow.
+    """Census current executable price evidence for today's/tomorrow's market events.
 
-    Queries market_events (zeus-forecasts.db) for (city, condition_id) pairs
-    with target_date today or tomorrow, then probes executable_market_snapshots
-    (zeus_trades.db) for the freshest captured_at per city across those
-    condition_ids.  The two DBs are queried separately and joined in Python —
-    market_events only exists in zeus-forecasts.db, not in zeus_trades.db.
-    A city whose freshest snapshot is older than PRICE_HOLE_STALE_HOURS (or has
-    no snapshot at all) is flagged as a PRICE HOLE.
+    ``execution_feasibility_latest`` is the price-truth surface: a fresh token
+    needs a valid bid/ask pair, and a full-depth token additionally needs a
+    non-empty bids and asks ladder.  The snapshot-latest table is retained as
+    a separate topology-metadata freshness signal only; its ``captured_at`` is
+    not price truth and must never make a token look executable.
+
+    The legacy ``holes``/``fresh_count`` keys remain for callers, but now mean
+    BBA token-coverage failures / BBA-complete cities respectively.
     """
-    out: dict = {"stale_hours": PRICE_HOLE_STALE_HOURS}
+    out: dict = {
+        "stale_hours": PRICE_HOLE_STALE_HOURS,
+        "scope": "market_events target_date today_or_tomorrow",
+        "holes_semantics": "BBA token coverage failures, not snapshot topology",
+    }
     today = _now().strftime("%Y-%m-%d")
-    from datetime import timedelta
     tomorrow = (_now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # 1. Fetch (city, condition_id) pairs for open markets (forecasts DB only).
+    # 1. Fetch the complete city×condition×token decision scope.  ``direction``
+    # rows in feasibility are intentionally deduplicated below by token; market
+    # events are the contract topology and may contain repeated directions.
     try:
         fc = ro(FORECASTS_DB)
         try:
-            city_cond_rows = fc.execute(
-                "SELECT DISTINCT city, condition_id FROM market_events "
+            scope_rows = fc.execute(
+                "SELECT DISTINCT city, condition_id, token_id FROM market_events "
                 "WHERE target_date IN (?, ?)",
                 (today, tomorrow),
             ).fetchall()
@@ -1128,81 +1150,220 @@ def section_price_holes() -> dict:
         out["error"] = f"forecasts_db: {type(exc).__name__}: {exc}"
         return out
 
-    # Build: city -> set of condition_ids
-    city_to_conds: dict[str, list[str]] = {}
-    for r in city_cond_rows:
-        city_to_conds.setdefault(r["city"], []).append(r["condition_id"])
+    targets = [
+        {
+            "city": r["city"],
+            "condition_id": r["condition_id"],
+            "token_id": r["token_id"],
+        }
+        for r in scope_rows
+    ]
+    cities = {target["city"] for target in targets}
+    out["cities_with_market_events"] = len(cities)
 
-    open_cities = set(city_to_conds.keys())
-    out["cities_with_open_markets"] = len(open_cities)
-
-    if not open_cities:
+    if not targets:
         out["holes"] = []
         out["cities_total"] = 0
+        out["fresh_count"] = 0
+        out["bba_token_coverage"] = {
+            "tokens_total": 0,
+            "fresh_tokens": 0,
+            "cities": [],
+        }
+        out["full_depth_token_coverage"] = {
+            "tokens_total": 0,
+            "fresh_tokens": 0,
+            "cities": [],
+        }
+        out["topology_metadata_staleness"] = {
+            "conditions_total": 0,
+            "fresh_conditions": 0,
+            "stale_or_missing_conditions": [],
+        }
         return out
 
-    # 2. Freshest captured_at per condition_id from the current latest table
-    #    (no cross-DB JOIN). Do not scan the historical snapshot ledger here.
-    #    Use a single query with IN over all condition_ids across all open cities.
-    all_conds = [c for conds in city_to_conds.values() for c in conds]
+    def _timestamp(value: object) -> datetime | None:
+        if value is None:
+            return None
+        try:
+            text = str(value).strip().replace(" ", "T")
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    def _fresh(value: object) -> bool:
+        parsed = _timestamp(value)
+        return parsed is not None and (_now() - parsed).total_seconds() <= PRICE_HOLE_STALE_HOURS * 3600
+
+    def _valid_bba(row: sqlite3.Row) -> bool:
+        try:
+            bid = float(row["best_bid_before"])
+            ask = float(row["best_ask_before"])
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(bid) and math.isfinite(ask) and 0.0 <= bid <= ask <= 1.0
+
+    def _has_full_depth(row: sqlite3.Row) -> bool:
+        try:
+            depth = json.loads(row["depth_before_json"] or "")
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(depth, dict)
+            and isinstance(depth.get("bids"), list)
+            and bool(depth["bids"])
+            and isinstance(depth.get("asks"), list)
+            and bool(depth["asks"])
+        )
+
+    def _latest(existing: object | None, candidate: object) -> object:
+        prior = _timestamp(existing)
+        current = _timestamp(candidate)
+        if current is None:
+            return existing
+        if prior is None or current > prior:
+            return candidate
+        return existing
+
+    # 2. Read price truth once per token.  A token can have up to four latest
+    # direction rows; aggregate evidence by token instead of allowing one
+    # direction or one city-wide maximum to hide a stale sibling.
+    tokens = sorted({str(t["token_id"]) for t in targets if t["token_id"]})
+    feasibility_rows: list[sqlite3.Row] = []
     try:
         tr = ro(TRADES_DB)
         try:
-            placeholders = ",".join("?" * len(all_conds))
-            cond_snap_rows = tr.execute(
-                f"SELECT condition_id, max(captured_at) AS freshest "
-                f"FROM executable_market_snapshot_latest "
-                f"WHERE condition_id IN ({placeholders}) "
-                f"GROUP BY condition_id",
-                all_conds,
-            ).fetchall()
+            if tokens:
+                placeholders = ",".join("?" * len(tokens))
+                feasibility_rows = tr.execute(
+                    f"SELECT token_id, quote_seen_at, best_bid_before, best_ask_before, depth_before_json "
+                    f"FROM execution_feasibility_latest WHERE token_id IN ({placeholders})",
+                    tokens,
+                ).fetchall()
         finally:
             tr.close()
     except sqlite3.Error as exc:
         out["error"] = f"trades_db: {type(exc).__name__}: {exc}"
         return out
 
-    # Build map condition_id -> freshest captured_at
-    cond_freshest: dict[str, str] = {r["condition_id"]: r["freshest"] for r in cond_snap_rows}
+    bba_seen_at: dict[str, object] = {}
+    depth_seen_at: dict[str, object] = {}
+    for row in feasibility_rows:
+        token = row["token_id"]
+        if _valid_bba(row):
+            bba_seen_at[token] = _latest(bba_seen_at.get(token), row["quote_seen_at"])
+        if _valid_bba(row) and _has_full_depth(row):
+            depth_seen_at[token] = _latest(depth_seen_at.get(token), row["quote_seen_at"])
 
-    # Aggregate to city level: freshest across all that city's condition_ids.
-    city_freshest: dict[str, str | None] = {}
-    for city, conds in city_to_conds.items():
-        freshest: str | None = None
-        for cond in conds:
-            ts = cond_freshest.get(cond)
-            if ts is not None and (freshest is None or ts > freshest):
-                freshest = ts
-        city_freshest[city] = freshest
+    def _coverage(seen_at: dict[str, object], *, is_depth: bool) -> dict:
+        missing: list[dict] = []
+        by_city: dict[str, dict[str, int]] = {
+            city: {"tokens_total": 0, "fresh_tokens": 0, "bba_fresh_tokens": 0}
+            for city in cities
+        }
+        fresh_tokens = 0
+        for target in targets:
+            city = target["city"]
+            token = target["token_id"]
+            by_city[city]["tokens_total"] += 1
+            if _fresh(bba_seen_at.get(token)):
+                by_city[city]["bba_fresh_tokens"] += 1
+            seen = seen_at.get(token) if token else None
+            if _fresh(seen):
+                fresh_tokens += 1
+                by_city[city]["fresh_tokens"] += 1
+                continue
+            missing.append(
+                {
+                    "city": city,
+                    "condition_id": target["condition_id"],
+                    "token_id": token,
+                    "age": age_str(str(seen)) if seen is not None else "NONE",
+                    "reason": "market_event_token_missing" if not token else "stale_or_missing_evidence",
+                }
+            )
 
-    holes = []
-    fresh_count = 0
-    for city in sorted(open_cities):
-        freshest_ts = city_freshest.get(city)
-        if freshest_ts is None:
-            # No snapshot at all = definitely a hole.
-            holes.append({"city": city, "age": "NONE", "freshest": None})
-            continue
-        age = age_str(freshest_ts)
-        # Compute hours since freshest snapshot.
+        city_rows = []
+        for city in sorted(by_city):
+            stats = by_city[city]
+            if stats["fresh_tokens"] == stats["tokens_total"]:
+                status = "green"
+            elif is_depth and stats["bba_fresh_tokens"]:
+                # BBA proves a current top-of-book, but not a two-sided ladder.
+                status = "partial"
+            elif stats["fresh_tokens"]:
+                status = "partial"
+            else:
+                status = "missing"
+            city_rows.append({"city": city, **stats, "status": status})
+        return {
+            "tokens_total": len(targets),
+            "fresh_tokens": fresh_tokens,
+            "missing_or_stale_tokens": missing,
+            "cities": city_rows,
+        }
+
+    bba_coverage = _coverage(bba_seen_at, is_depth=False)
+    depth_coverage = _coverage(depth_seen_at, is_depth=True)
+
+    # 3. Snapshot freshness remains visible, but solely as topology metadata.
+    # It cannot satisfy any BBA/depth coverage requirement above.
+    topology: dict = {
+        "conditions_total": 0,
+        "fresh_conditions": 0,
+        "stale_or_missing_conditions": [],
+    }
+    conditions = sorted({str(t["condition_id"]) for t in targets if t["condition_id"]})
+    try:
+        tr = ro(TRADES_DB)
         try:
-            ts = str(freshest_ts).replace(" ", "T")
-            if ts.endswith("Z"):
-                ts = ts[:-1] + "+00:00"
-            dt = datetime.fromisoformat(ts)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            hours = (_now() - dt).total_seconds() / 3600.0
-        except (ValueError, TypeError):
-            hours = float("inf")
-        if hours > PRICE_HOLE_STALE_HOURS:
-            holes.append({"city": city, "age": age, "freshest": freshest_ts})
-        else:
-            fresh_count += 1
+            if conditions:
+                placeholders = ",".join("?" * len(conditions))
+                cond_snap_rows = tr.execute(
+                    f"SELECT condition_id, max(captured_at) AS freshest "
+                    f"FROM executable_market_snapshot_latest "
+                    f"WHERE condition_id IN ({placeholders}) "
+                    f"GROUP BY condition_id",
+                    conditions,
+                ).fetchall()
+            else:
+                cond_snap_rows = []
+        finally:
+            tr.close()
+    except sqlite3.Error as exc:
+        topology["error"] = f"trades_db: {type(exc).__name__}: {exc}"
+    else:
+        condition_freshest = {r["condition_id"]: r["freshest"] for r in cond_snap_rows}
+        condition_city = {
+            condition: next(t["city"] for t in targets if t["condition_id"] == condition)
+            for condition in conditions
+        }
+        topology["conditions_total"] = len(conditions)
+        for condition in conditions:
+            freshest = condition_freshest.get(condition)
+            if _fresh(freshest):
+                topology["fresh_conditions"] += 1
+            else:
+                topology["stale_or_missing_conditions"].append(
+                    {
+                        "city": condition_city[condition],
+                        "condition_id": condition,
+                        "age": age_str(freshest),
+                        "freshest": freshest,
+                    }
+                )
 
-    out["cities_total"] = len(open_cities)
-    out["holes"] = holes
-    out["fresh_count"] = fresh_count
+    out["cities_total"] = len(cities)
+    out["bba_token_coverage"] = bba_coverage
+    out["full_depth_token_coverage"] = depth_coverage
+    out["topology_metadata_staleness"] = topology
+    out["holes"] = bba_coverage["missing_or_stale_tokens"]
+    out["fresh_count"] = sum(city["status"] == "green" for city in bba_coverage["cities"])
     return out
 
 

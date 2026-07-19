@@ -311,141 +311,135 @@ def test_zeus_status_age_str():
     assert out.endswith(("s", "m", "h", "d"))
 
 
-def test_zeus_status_price_holes_fresh_city(tmp_path):
-    """City with a fresh snapshot (<2h) must not appear in holes."""
-    from datetime import datetime, timezone, timedelta
+def _price_truth_dbs(tmp_path, *, markets, feasibility=(), snapshots=()):
+    """Build only the two read-only status surfaces used by price coverage."""
+    fdb = tmp_path / "forecasts.db"
+    tdb = tmp_path / "trades.db"
+    fc = sqlite3.connect(str(fdb))
+    fc.execute(
+        "CREATE TABLE market_events "
+        "(city TEXT, target_date TEXT, condition_id TEXT, token_id TEXT, "
+        "temperature_metric TEXT, range_label TEXT)"
+    )
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    fc.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, 'high', '30-31')",
+        [(city, today, condition, token) for city, condition, token in markets],
+    )
+    fc.commit()
+    fc.close()
+
+    tr = sqlite3.connect(str(tdb))
+    tr.execute(
+        "CREATE TABLE execution_feasibility_latest "
+        "(token_id TEXT, direction TEXT, quote_seen_at TEXT, "
+        "best_bid_before REAL, best_ask_before REAL, depth_before_json TEXT)"
+    )
+    tr.executemany(
+        "INSERT INTO execution_feasibility_latest VALUES (?, ?, ?, ?, ?, ?)",
+        feasibility,
+    )
+    tr.execute(
+        "CREATE TABLE executable_market_snapshot_latest "
+        "(condition_id TEXT, outcome_label TEXT, "
+        "orderbook_top_ask REAL, captured_at TEXT)"
+    )
+    tr.executemany(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?, 'YES', 0.55, ?)",
+        snapshots,
+    )
+    tr.commit()
+    tr.close()
+    return fdb, tdb
+
+
+def test_zeus_status_price_truth_uses_fresh_feasibility_not_stale_snapshot(tmp_path):
+    """Snapshot staleness is topology-only; fresh feasibility BBA is green."""
     zs = _load("zeus_status_smoke_price1", "zeus_status.py")
-
-    fdb = tmp_path / "forecasts.db"
-    tdb = tmp_path / "trades.db"
-
-    fc = sqlite3.connect(str(fdb))
-    fc.execute(
-        "CREATE TABLE market_events "
-        "(city TEXT, target_date TEXT, condition_id TEXT, "
-        "temperature_metric TEXT, range_label TEXT)"
+    now = datetime.now(timezone.utc)
+    fdb, tdb = _price_truth_dbs(
+        tmp_path,
+        markets=[("Tokyo", "cond-tok", "tok-yes")],
+        feasibility=[
+            ("tok-yes", "buy_yes", now.isoformat(), 0.45, 0.55, '{"bids":[[0.45,1]],"asks":[[0.55,1]]}'),
+            # Same token, different direction: deduplicate token coverage.
+            ("tok-yes", "sell_yes", now.isoformat(), 0.45, 0.55, '{"bids":[[0.45,1]],"asks":[[0.55,1]]}'),
+        ],
+        snapshots=[("cond-tok", (now - timedelta(hours=4)).isoformat())],
     )
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    fc.execute(
-        "INSERT INTO market_events VALUES ('Tokyo', ?, 'cond-tok', 'high', '30-31')",
-        (today,),
-    )
-    fc.commit()
-    fc.close()
-
-    tr = sqlite3.connect(str(tdb))
-    tr.execute(
-        "CREATE TABLE executable_market_snapshot_latest "
-        "(condition_id TEXT, outcome_label TEXT, "
-        "orderbook_top_ask REAL, captured_at TEXT)"
-    )
-    # Fresh snapshot (just now).
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-    tr.execute(
-        "INSERT INTO executable_market_snapshot_latest VALUES ('cond-tok', 'YES', 0.55, ?)",
-        (now_iso,),
-    )
-    tr.commit()
-    tr.close()
-
-    zs.FORECASTS_DB = str(fdb)
-    zs.TRADES_DB = str(tdb)
+    zs.FORECASTS_DB, zs.TRADES_DB = str(fdb), str(tdb)
 
     result = zs.section_price_holes()
+
     assert result.get("error") is None, result.get("error")
-    assert result["cities_total"] == 1
-    assert result["holes"] == [], f"Expected no holes, got {result['holes']}"
-    assert result["fresh_count"] == 1
+    assert result["bba_token_coverage"]["fresh_tokens"] == 1
+    assert result["bba_token_coverage"]["cities"] == [
+        {"city": "Tokyo", "tokens_total": 1, "fresh_tokens": 1, "bba_fresh_tokens": 1, "status": "green"}
+    ]
+    assert result["topology_metadata_staleness"]["stale_or_missing_conditions"][0]["condition_id"] == "cond-tok"
+    assert result["holes"] == []
 
 
-def test_zeus_status_price_holes_stale_city(tmp_path):
-    """City with a snapshot older than 2h must appear in holes."""
-    from datetime import datetime, timezone, timedelta
+def test_zeus_status_price_truth_requires_every_city_token_fresh(tmp_path):
+    """A fresh sibling cannot mask a stale token in the same city."""
     zs = _load("zeus_status_smoke_price2", "zeus_status.py")
-
-    fdb = tmp_path / "forecasts.db"
-    tdb = tmp_path / "trades.db"
-
-    fc = sqlite3.connect(str(fdb))
-    fc.execute(
-        "CREATE TABLE market_events "
-        "(city TEXT, target_date TEXT, condition_id TEXT, "
-        "temperature_metric TEXT, range_label TEXT)"
+    now = datetime.now(timezone.utc)
+    fdb, tdb = _price_truth_dbs(
+        tmp_path,
+        markets=[("Seoul", "cond-one", "tok-one"), ("Seoul", "cond-two", "tok-two")],
+        feasibility=[
+            ("tok-one", "buy_yes", now.isoformat(), 0.45, 0.55, '{"bids":[[0.45,1]],"asks":[[0.55,1]]}'),
+            ("tok-two", "buy_yes", (now - timedelta(hours=4)).isoformat(), 0.45, 0.55, '{"bids":[[0.45,1]],"asks":[[0.55,1]]}'),
+        ],
     )
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    fc.execute(
-        "INSERT INTO market_events VALUES ('Seoul', ?, 'cond-seo', 'high', '28-29')",
-        (today,),
-    )
-    fc.commit()
-    fc.close()
-
-    tr = sqlite3.connect(str(tdb))
-    tr.execute(
-        "CREATE TABLE executable_market_snapshot_latest "
-        "(condition_id TEXT, outcome_label TEXT, "
-        "orderbook_top_ask REAL, captured_at TEXT)"
-    )
-    # Stale snapshot (4h ago).
-    stale_iso = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%S")
-    tr.execute(
-        "INSERT INTO executable_market_snapshot_latest VALUES ('cond-seo', 'YES', 0.55, ?)",
-        (stale_iso,),
-    )
-    tr.commit()
-    tr.close()
-
-    zs.FORECASTS_DB = str(fdb)
-    zs.TRADES_DB = str(tdb)
+    zs.FORECASTS_DB, zs.TRADES_DB = str(fdb), str(tdb)
 
     result = zs.section_price_holes()
-    assert result.get("error") is None, result.get("error")
-    assert result["cities_total"] == 1
+
+    assert result["bba_token_coverage"]["fresh_tokens"] == 1
+    assert result["bba_token_coverage"]["cities"][0]["status"] == "partial"
     assert len(result["holes"]) == 1
-    assert result["holes"][0]["city"] == "Seoul"
+    hole = result["holes"][0]
+    assert (hole["city"], hole["condition_id"], hole["token_id"]) == ("Seoul", "cond-two", "tok-two")
+    assert hole["age"].endswith("h")
+    assert hole["reason"] == "stale_or_missing_evidence"
 
 
-def test_zeus_status_price_holes_no_snapshot(tmp_path):
-    """City with open market but no snapshot at all must appear as NONE hole."""
-    from datetime import datetime, timezone
+def test_zeus_status_price_truth_distinguishes_bba_from_full_depth(tmp_path):
+    """A fresh BBA-only row is green for BBA but partial for full depth."""
     zs = _load("zeus_status_smoke_price3", "zeus_status.py")
-
-    fdb = tmp_path / "forecasts.db"
-    tdb = tmp_path / "trades.db"
-
-    fc = sqlite3.connect(str(fdb))
-    fc.execute(
-        "CREATE TABLE market_events "
-        "(city TEXT, target_date TEXT, condition_id TEXT, "
-        "temperature_metric TEXT, range_label TEXT)"
+    now = datetime.now(timezone.utc)
+    fdb, tdb = _price_truth_dbs(
+        tmp_path,
+        markets=[("Manila", "cond-man", "tok-man")],
+        feasibility=[
+            ("tok-man", "buy_yes", now.isoformat(), 0.45, 0.55, '{"bids":[],"asks":[[0.55,1]]}'),
+        ],
     )
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    fc.execute(
-        "INSERT INTO market_events VALUES ('Mumbai', ?, 'cond-mum', 'high', '32-33')",
-        (today,),
-    )
-    fc.commit()
-    fc.close()
-
-    tr = sqlite3.connect(str(tdb))
-    tr.execute(
-        "CREATE TABLE executable_market_snapshot_latest "
-        "(condition_id TEXT, outcome_label TEXT, "
-        "orderbook_top_ask REAL, captured_at TEXT)"
-    )
-    # Intentionally leave table empty — no snapshot for Mumbai.
-    tr.commit()
-    tr.close()
-
-    zs.FORECASTS_DB = str(fdb)
-    zs.TRADES_DB = str(tdb)
+    zs.FORECASTS_DB, zs.TRADES_DB = str(fdb), str(tdb)
 
     result = zs.section_price_holes()
-    assert result.get("error") is None, result.get("error")
-    assert result["cities_total"] == 1
-    assert len(result["holes"]) == 1
-    assert result["holes"][0]["city"] == "Mumbai"
+
+    assert result["bba_token_coverage"]["cities"][0]["status"] == "green"
+    assert result["full_depth_token_coverage"]["fresh_tokens"] == 0
+    assert result["full_depth_token_coverage"]["cities"][0]["status"] == "partial"
+
+
+def test_zeus_status_price_truth_no_evidence_is_missing(tmp_path):
+    """No feasibility row is missing BBA/depth evidence even with no snapshot."""
+    zs = _load("zeus_status_smoke_price4", "zeus_status.py")
+    fdb, tdb = _price_truth_dbs(
+        tmp_path,
+        markets=[("Mumbai", "cond-mum", "tok-mum")],
+    )
+    zs.FORECASTS_DB, zs.TRADES_DB = str(fdb), str(tdb)
+
+    result = zs.section_price_holes()
+
+    assert result["bba_token_coverage"]["cities"][0]["status"] == "missing"
+    assert result["full_depth_token_coverage"]["cities"][0]["status"] == "missing"
     assert result["holes"][0]["age"] == "NONE"
+    assert result["holes"][0]["reason"] == "stale_or_missing_evidence"
 
 
 # --------------------------------------------------------------------------
