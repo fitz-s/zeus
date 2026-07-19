@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-06-18; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-07-19
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -3195,15 +3195,22 @@ def _positive_float(value: object) -> float | None:
 def _terminal_partial_entry_has_no_resting_remainder(item: dict[str, Any]) -> bool:
     """Accept a short fill only when local venue and trade quantities close exactly."""
 
-    if (
-        str(item.get("intent_kind") or "").upper() != "ENTRY"
-        or str(item.get("command_state") or item.get("state") or "").upper()
-        != "PARTIAL"
-    ):
+    if str(item.get("intent_kind") or "").upper() != "ENTRY":
         return False
+    command_state = str(
+        item.get("command_state") or item.get("state") or ""
+    ).upper()
     fact_state = str(
         item.get("latest_fact_state") or item.get("local_fact_state") or ""
     ).upper()
+    if command_state == "REVIEW_REQUIRED":
+        if (
+            str(item.get("position_phase") or "") not in HARD_TERMINAL_POSITION_PHASES
+            or fact_state not in TERMINAL_VENUE_FACT_STATES
+        ):
+            return False
+    elif command_state != "PARTIAL":
+        return False
     if fact_state not in TERMINAL_VENUE_FACT_STATES | {
         "PARTIAL",
         "PARTIALLY_MATCHED",
@@ -3222,7 +3229,8 @@ def _terminal_partial_entry_has_no_resting_remainder(item: dict[str, Any]) -> bo
     filled = _decimal_float(item.get("positive_trade_filled_size"))
     requested = _decimal_float(item.get("size"))
     return (
-        str(item.get("positive_trade_fact_state") or "").upper()
+        bool(str(item.get("venue_order_id") or "").strip())
+        and str(item.get("positive_trade_fact_state") or "").upper()
         in {"MATCHED", "MINED", "CONFIRMED"}
         and matched is not None
         and matched > 0.0
