@@ -132,7 +132,9 @@ class _CurrentGlobalDay0FamilyCache:
     snapshots: dict[
         tuple[str, str, str], list[_CurrentGlobalDay0FamilySnapshot]
     ] = field(default_factory=dict)
-    failures: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    failures: dict[
+        tuple[str, str, str], tuple[type[Exception], str]
+    ] = field(default_factory=dict)
 
 
 class _CachedCurrentGlobalDay0FamilyError(RuntimeError):
@@ -4293,6 +4295,22 @@ def _day0_family_snapshot_covers_condition(
     return str(matched[0].bin_id) in exact_bin_ids
 
 
+def _target_day_has_canonical_observation(conn, position: Position) -> bool:
+    return (
+        conn.execute(
+            """
+            SELECT 1
+              FROM observation_instants
+             WHERE city = ?
+               AND target_date = ?
+             LIMIT 1
+            """,
+            (str(position.city), str(position.target_date)),
+        ).fetchone()
+        is not None
+    )
+
+
 def _materialize_current_global_day0_probability(
     position: Position,
     snapshot: _CurrentGlobalDay0FamilySnapshot,
@@ -4439,17 +4457,7 @@ def _build_current_global_day0_family_snapshot(
             (str(position.city), str(position.target_date), metric),
         ).fetchone()
         if row is None:
-            observed = world.execute(
-                """
-                SELECT 1
-                  FROM observation_instants
-                 WHERE city = ?
-                   AND target_date = ?
-                 LIMIT 1
-                """,
-                (str(position.city), str(position.target_date)),
-            ).fetchone()
-            if observed is None:
+            if not _target_day_has_canonical_observation(world, position):
                 raise _Day0UnobservedPrefixUnavailable(
                     "current global Day0 family event unavailable: "
                     "zero target-date canonical observations"
@@ -4465,17 +4473,28 @@ def _build_current_global_day0_family_snapshot(
 
         day0_payload: dict[str, object] = {}
         cache_metadata: dict[str, str] = {}
-        prepared = _prepare_current_global_probability_family(
-            event,
-            forecast_conn=forecasts,
-            topology_conn=forecasts,
-            observation_conn=world,
-            decision_time=now,
-            max_age=FRESHNESS_WINDOW_DEFAULT,
-            day0_payload_out=day0_payload,
-            cache_metadata_out=cache_metadata,
-            required_condition_id=condition_id,
-        )
+        try:
+            prepared = _prepare_current_global_probability_family(
+                event,
+                forecast_conn=forecasts,
+                topology_conn=forecasts,
+                observation_conn=world,
+                decision_time=now,
+                max_age=FRESHNESS_WINDOW_DEFAULT,
+                day0_payload_out=day0_payload,
+                cache_metadata_out=cache_metadata,
+                required_condition_id=condition_id,
+            )
+        except ValueError as exc:
+            if (
+                str(exc) == "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"
+                and not _target_day_has_canonical_observation(world, position)
+            ):
+                raise _Day0UnobservedPrefixUnavailable(
+                    "current global Day0 probability unavailable: "
+                    "zero target-date canonical observations"
+                ) from exc
+            raise
     finally:
         if forecasts is not None:
             forecasts.close()
@@ -4582,7 +4601,10 @@ def _refresh_current_global_day0_probability(
         cached_failure = family_cache.failures.get(family_key)
         if cached_failure is not None:
             _cnt_inc("monitor_day0_family_failure_cache_hit_total")
-            raise _CachedCurrentGlobalDay0FamilyError(cached_failure)
+            failure_type, reason = cached_failure
+            if failure_type is _Day0UnobservedPrefixUnavailable:
+                raise _Day0UnobservedPrefixUnavailable(reason)
+            raise _CachedCurrentGlobalDay0FamilyError(reason)
 
     try:
         snapshot = _build_current_global_day0_family_snapshot(
@@ -4596,7 +4618,7 @@ def _refresh_current_global_day0_probability(
             family_cache is not None
             and str(exc) != "GLOBAL_REQUIRED_CONDITION_BINDING_INVALID"
         ):
-            family_cache.failures[family_key] = str(exc)
+            family_cache.failures[family_key] = (type(exc), str(exc))
             _cnt_inc("monitor_day0_family_builder_failure_total")
         raise
     if family_cache is not None:

@@ -133,16 +133,21 @@ def test_belief_reseed_start_failure_clears_coalesced_generation(monkeypatch) ->
         assert monitor_refresh_module._BELIEF_RESEED_GENERATIONS == {}
 
 
-def _replacement_belief(*, fresh: bool = True) -> ReplacementBelief:
+def _replacement_belief(
+    *,
+    fresh: bool = True,
+    direction: str = "buy_no",
+) -> ReplacementBelief:
+    q_yes = 0.27
     return ReplacementBelief(
-        held_side_prob=0.73,
-        q_yes_bin=0.27,
+        held_side_prob=q_yes if direction == "buy_yes" else 1.0 - q_yes,
+        q_yes_bin=q_yes,
         posterior_id="posterior-pre-first-observation",
         computed_at="2026-07-11T23:05:00+00:00",
         age_hours=0.1,
         fresh=fresh,
         bin_key="test-bin",
-        direction="buy_no",
+        direction=direction,
     )
 
 
@@ -237,11 +242,20 @@ def test_day0_start_grace_is_bounded_to_target_local_day() -> None:
     )
 
 
-def test_pre_first_day0_observation_uses_fresh_replacement_belief(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("direction", "expected_probability"),
+    [("buy_yes", 0.27), ("buy_no", 0.73)],
+)
+def test_pre_first_day0_observation_uses_fresh_replacement_belief(
+    monkeypatch,
+    direction: str,
+    expected_probability: float,
+) -> None:
     from src.contracts.exceptions import ObservationUnavailableError
     from src.engine import position_belief
 
     pos = _make_position()
+    pos.direction = direction
     pos.entry_method = "day0_observation"
     pos.p_posterior = 0.41
     monkeypatch.setattr(
@@ -259,7 +273,7 @@ def test_pre_first_day0_observation_uses_fresh_replacement_belief(monkeypatch) -
     monkeypatch.setattr(
         position_belief,
         "load_replacement_belief",
-        lambda **kwargs: _replacement_belief(),
+        lambda **kwargs: _replacement_belief(direction=kwargs["direction"]),
     )
 
     prob, refresh_pos, fresh = monitor_refresh_module._refresh_day0_monitor_probability(
@@ -270,7 +284,7 @@ def test_pre_first_day0_observation_uses_fresh_replacement_belief(monkeypatch) -
     )
 
     assert fresh is True
-    assert prob == pytest.approx(0.73)
+    assert prob == pytest.approx(expected_probability)
     assert refresh_pos.selected_method == "replacement_posterior"
     assert (
         "day0_unobserved_prefix_within_start_grace:replacement_posterior_authority"
@@ -1009,13 +1023,20 @@ def test_identified_day0_monitor_fails_closed_without_global_probability(
     ]
 
 
+@pytest.mark.parametrize(
+    ("direction", "expected_probability"),
+    [("buy_yes", 0.27), ("buy_no", 0.73)],
+)
 def test_identified_day0_monitor_uses_fresh_belief_before_first_observation(
     monkeypatch,
+    direction: str,
+    expected_probability: float,
 ) -> None:
     """Canonical holdings keep one current q across the local-midnight boundary."""
     from src.engine import position_belief
 
     pos = _make_position()
+    pos.direction = direction
     pos.city = "London"
     pos.target_date = "2026-07-20"
     pos.entry_method = "day0_observation"
@@ -1044,7 +1065,7 @@ def test_identified_day0_monitor_uses_fresh_belief_before_first_observation(
     monkeypatch.setattr(
         position_belief,
         "load_replacement_belief",
-        lambda **kwargs: _replacement_belief(),
+        lambda **kwargs: _replacement_belief(direction=kwargs["direction"]),
     )
 
     probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
@@ -1054,13 +1075,137 @@ def test_identified_day0_monitor_uses_fresh_belief_before_first_observation(
         target_d=date(2026, 7, 20),
     )
 
-    assert probability == pytest.approx(0.73)
+    assert probability == pytest.approx(expected_probability)
     assert fresh is True
     assert refreshed.selected_method == "replacement_posterior"
     assert (
         "day0_unobserved_prefix_within_start_grace:replacement_posterior_authority"
         in refreshed.applied_validations
     )
+
+
+def test_identified_day0_monitor_does_not_use_grace_for_generic_observation_failure(
+    monkeypatch,
+) -> None:
+    """Provider/event faults are not proof that the target-day prefix is empty."""
+    from src.contracts.exceptions import ObservationUnavailableError
+    from src.engine import position_belief
+
+    pos = _make_position()
+    pos.city = "London"
+    pos.target_date = "2026-07-20"
+    pos.entry_method = "day0_observation"
+    pos.p_posterior = 0.41
+    pos.condition_id = "0x" + "4f" * 32
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_refresh_current_global_day0_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ObservationUnavailableError(
+                "current global Day0 family event unavailable despite "
+                "target-date canonical observation"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_within_day0_observation_start_grace",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: _replacement_belief(direction=kwargs["direction"]),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kwargs: None,
+    )
+
+    probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
+        pos,
+        conn=object(),
+        city=SimpleNamespace(name="London", timezone="Europe/London"),
+        target_d=date(2026, 7, 20),
+    )
+
+    assert probability == pytest.approx(pos.p_posterior)
+    assert fresh is False
+    assert getattr(
+        refreshed,
+        monitor_refresh_module._MONITOR_PROBABILITY_FRESH_ATTR,
+    ) is False
+    assert all(
+        "day0_unobserved_prefix" not in validation
+        for validation in refreshed.applied_validations
+    )
+
+
+def test_unobserved_prefix_authority_is_shared_across_family_cache(
+    monkeypatch,
+) -> None:
+    """Sibling holdings cannot get different authority from iteration order."""
+    from src.engine import position_belief
+
+    builds = []
+
+    def missing_prefix(position, **kwargs):
+        builds.append(position.condition_id)
+        raise monitor_refresh_module._Day0UnobservedPrefixUnavailable(
+            "zero target-date canonical observations"
+        )
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_build_current_global_day0_family_snapshot",
+        missing_prefix,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_within_day0_observation_start_grace",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: _replacement_belief(direction=kwargs["direction"]),
+    )
+
+    cache = monitor_refresh_module._CurrentGlobalDay0FamilyCache()
+    results = []
+    for suffix, direction in (("51", "buy_yes"), ("52", "buy_no")):
+        pos = _make_position()
+        pos.city = "London"
+        pos.target_date = "2026-07-20"
+        pos.entry_method = "day0_observation"
+        pos.condition_id = "0x" + suffix * 32
+        pos.direction = direction
+        results.append(
+            monitor_refresh_module.monitor_probability_refresh(
+                pos,
+                conn=object(),
+                city=SimpleNamespace(name="London", timezone="Europe/London"),
+                target_d=date(2026, 7, 20),
+                day0_family_cache=cache,
+            )
+        )
+
+    assert [probability for probability, _, _ in results] == pytest.approx(
+        [0.27, 0.73]
+    )
+    assert [fresh for _, _, fresh in results] == [True, True]
+    assert len(builds) == 1
 
 
 def test_post_local_day_waits_for_final_observation_without_reseed(
