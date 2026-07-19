@@ -334,7 +334,18 @@ def project_accumulator_to_v2(
         _append_log(log_path, log_entry)
         return {"candidates": 1, "written": 0, "build_errors": 0, "retired": 0}
 
-    conn.execute("BEGIN")
+    # ``project_accumulator_to_v2`` is also called by ingest_main on the
+    # connection used for the HKO tick.  That caller can already own a
+    # transaction (for example after writing the observation-print ledger), so
+    # an unconditional BEGIN raises "cannot start a transaction within a
+    # transaction".  Use a savepoint in that case: it keeps this projection
+    # atomic without committing or rolling back the caller's work.
+    caller_owns_transaction = conn.in_transaction
+    savepoint = f"sp_hko_project_{id(conn)}"
+    if caller_owns_transaction:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    else:
+        conn.execute("BEGIN")
     try:
         retired = conn.execute(
             """
@@ -355,10 +366,17 @@ def project_accumulator_to_v2(
             if _same_extrema_already_materialized(conn, snapshot)
             else insert_rows(conn, [row])
         )
-        conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        if caller_owns_transaction:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        else:
+            conn.execute("ROLLBACK")
         raise
+    if caller_owns_transaction:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    else:
+        conn.execute("COMMIT")
     log_entry["written"] = written
     log_entry["retired"] = int(retired)
     _append_log(log_path, log_entry)

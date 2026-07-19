@@ -1,8 +1,8 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-21; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Keep backfill scripts aligned with live config and obs_v2 provenance identity contracts.
 # Reuse: Inspect config/cities.json, tier_resolver, script manifest, and current source-validity posture first.
-# Last reused/audited: 2026-04-25
+# Last reused/audited: 2026-07-19
 # Authority basis: plan v3 antibody A7; P1 obs_v2 provenance identity packet.
 """Antibody A7: backfill scripts must match the live config.
 
@@ -530,6 +530,156 @@ def test_hko_ingest_repeated_provider_snapshot_is_idempotent(hko_ingest_tick_mod
         ),
     )
     conn.close()
+
+
+def _hko_projection_transaction_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE hko_hourly_accumulator (
+            target_date TEXT NOT NULL,
+            hour_utc TEXT NOT NULL,
+            temperature REAL NOT NULL,
+            fetched_at TEXT NOT NULL
+        );
+        CREATE TABLE observation_instants (
+            id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            utc_timestamp TEXT NOT NULL,
+            running_max REAL,
+            running_min REAL,
+            causality_status TEXT,
+            provenance_json TEXT
+        );
+        CREATE TABLE projection_probe (value TEXT NOT NULL);
+        CREATE TABLE outer_probe (value TEXT NOT NULL);
+        INSERT INTO hko_hourly_accumulator VALUES
+            ('2026-07-19', '2026-07-19T01:00Z', 31.0, '2026-07-19T01:01:00+00:00');
+        INSERT INTO observation_instants VALUES
+            (1, 'Hong Kong', '2026-07-19', 'hko_hourly_accumulator',
+             '2026-07-19T00:00:00+00:00', 30.0, 25.0, 'OK', '{}');
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def _hko_projection_snapshot(hko_ingest_tick_module):
+    return hko_ingest_tick_module.HkoExtremaSnapshot(
+        target_date="2026-07-19",
+        observed_at_utc="2026-07-19T01:00:00+00:00",
+        high_c=31.0,
+        low_c=25.0,
+        fetched_at_utc="2026-07-19T01:01:00+00:00",
+    )
+
+
+def test_hko_projection_standalone_owns_atomic_transaction(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    conn = _hko_projection_transaction_conn()
+    observed_in_transaction = []
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_fetch_hko_extrema",
+        lambda: _hko_projection_snapshot(hko_ingest_tick_module),
+    )
+
+    def fake_insert_rows(insert_conn, _rows):
+        observed_in_transaction.append(insert_conn.in_transaction)
+        insert_conn.execute("INSERT INTO projection_probe VALUES ('written')")
+        return 1
+
+    monkeypatch.setattr(hko_ingest_tick_module, "insert_rows", fake_insert_rows)
+    try:
+        result = hko_ingest_tick_module.project_accumulator_to_v2(
+            conn, "v1.wu-native", tmp_path / "hko.jsonl"
+        )
+        assert result == {
+            "candidates": 1,
+            "written": 1,
+            "build_errors": 0,
+            "retired": 1,
+        }
+        assert observed_in_transaction == [True]
+        assert not conn.in_transaction
+        assert conn.execute("SELECT value FROM projection_probe").fetchall() == [("written",)]
+        assert conn.execute(
+            "SELECT causality_status FROM observation_instants WHERE id = 1"
+        ).fetchone() == ("REQUIRES_SOURCE_REAUDIT",)
+    finally:
+        conn.close()
+
+
+def test_hko_projection_standalone_rolls_back_on_write_failure(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    conn = _hko_projection_transaction_conn()
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_fetch_hko_extrema",
+        lambda: _hko_projection_snapshot(hko_ingest_tick_module),
+    )
+
+    def fail_insert_rows(_insert_conn, _rows):
+        raise sqlite3.OperationalError("injected write failure")
+
+    monkeypatch.setattr(hko_ingest_tick_module, "insert_rows", fail_insert_rows)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected write failure"):
+            hko_ingest_tick_module.project_accumulator_to_v2(
+                conn, "v1.wu-native", tmp_path / "hko.jsonl"
+            )
+        assert not conn.in_transaction
+        assert conn.execute(
+            "SELECT causality_status FROM observation_instants WHERE id = 1"
+        ).fetchone() == ("OK",)
+    finally:
+        conn.close()
+
+
+def test_hko_projection_savepoint_preserves_caller_transaction(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    conn = _hko_projection_transaction_conn()
+    observed_in_transaction = []
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_fetch_hko_extrema",
+        lambda: _hko_projection_snapshot(hko_ingest_tick_module),
+    )
+
+    def fake_insert_rows(insert_conn, _rows):
+        observed_in_transaction.append(insert_conn.in_transaction)
+        insert_conn.execute("INSERT INTO projection_probe VALUES ('written')")
+        return 1
+
+    monkeypatch.setattr(hko_ingest_tick_module, "insert_rows", fake_insert_rows)
+    try:
+        conn.execute("BEGIN")
+        conn.execute("INSERT INTO outer_probe VALUES ('caller-work')")
+        result = hko_ingest_tick_module.project_accumulator_to_v2(
+            conn, "v1.wu-native", tmp_path / "hko.jsonl"
+        )
+        assert result["written"] == 1
+        assert observed_in_transaction == [True]
+        assert conn.in_transaction
+        conn.rollback()
+        assert conn.execute("SELECT value FROM outer_probe").fetchall() == []
+        assert conn.execute("SELECT value FROM projection_probe").fetchall() == []
+        assert conn.execute(
+            "SELECT causality_status FROM observation_instants WHERE id = 1"
+        ).fetchone() == ("OK",)
+    finally:
+        conn.close()
 
 
 def test_dst_gap_fill_row_stamps_provenance_identity(
