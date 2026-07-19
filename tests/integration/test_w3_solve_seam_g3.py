@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-19
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -3892,9 +3892,28 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
             for token in (binding.yes_token_id, binding.no_token_id)
         ]
         kwargs["get_books"](tokens)
+        states = tuple(
+            (
+                "family",
+                binding.bin_id,
+                binding.condition_id,
+                side,
+                token,
+                "EXECUTABLE",
+                f"hash-{token}",
+                "event-family",
+                "market-family",
+            )
+            for binding in kwargs["probability_witnesses"]["family"].bindings
+            for side, token in (
+                ("YES", binding.yes_token_id),
+                ("NO", binding.no_token_id),
+            )
+        )
         return SimpleNamespace(
             witness_identity="book-current",
             assets=(),
+            asset_states=states,
             current_identity=lambda _checked_at: "book-current",
         )
 
@@ -5855,6 +5874,46 @@ def test_global_book_epoch_cache_serves_exact_scoped_subset(monkeypatch):
     )
     assert cached is None
     assert reason.startswith("topology_changed:")
+
+
+def test_global_book_epoch_scope_projects_broad_cached_cut():
+    at = _dt.datetime.now(_dt.timezone.utc)
+    states = tuple(
+        (
+            family,
+            f"bin-{family}",
+            f"condition-{family}",
+            side,
+            f"{side.lower()}-{family}",
+            "EXECUTABLE",
+            f"hash-{side.lower()}-{family}",
+            f"event-{family}",
+            f"market-{family}",
+        )
+        for family in ("family-a", "family-b")
+        for side in ("YES", "NO")
+    )
+    epoch = CurrentGlobalBookEpoch(
+        assets=(),
+        asset_states=states,
+        captured_at_utc=at,
+        max_age=_dt.timedelta(seconds=180),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=at,
+        ),
+    )
+
+    scoped = era._scope_global_book_epoch(epoch, ("family-a",))
+
+    assert {row[0] for row in scoped.asset_states} == {"family-a"}
+    assert len(scoped.asset_states) == 2
+    assert scoped.current_identity(at) == scoped.witness_identity
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_BOOK_SCOPED_EPOCH_FAMILY_MISSING:family-c",
+    ):
+        era._scope_global_book_epoch(epoch, ("family-c",))
 
 
 def test_global_book_epoch_cache_metadata_expires_with_epoch(monkeypatch):

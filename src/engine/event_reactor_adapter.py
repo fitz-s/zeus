@@ -1582,6 +1582,34 @@ def _merge_global_book_epoch_delta(
     )
 
 
+def _scope_global_book_epoch(
+    epoch: object,
+    family_keys: Iterable[str],
+) -> object:
+    """Project a reusable broad book cut onto the exact probability scope."""
+
+    required = frozenset(str(key or "").strip() for key in family_keys)
+    states = tuple(getattr(epoch, "asset_states", ()) or ())
+    represented = frozenset(str(row[0] or "").strip() for row in states)
+    if not required or any(not key for key in required):
+        raise ValueError("GLOBAL_BOOK_SCOPED_EPOCH_FAMILY_EMPTY")
+    missing = required.difference(represented)
+    if missing:
+        raise ValueError(
+            "GLOBAL_BOOK_SCOPED_EPOCH_FAMILY_MISSING:"
+            + ",".join(sorted(missing))
+        )
+    extra = represented.difference(required)
+    if not extra:
+        return epoch
+    return _merge_global_book_epoch_delta(
+        epoch,
+        None,
+        extra,
+        allow_topology_change=True,
+    )
+
+
 def _get_cached_global_book_epoch(
     trade_conn: sqlite3.Connection,
     probabilities: Mapping[str, object],
@@ -8092,7 +8120,10 @@ def event_bound_live_adapter_from_trade_conn(
                             len(rebound_probabilities),
                             len(getattr(epoch, "assets", ())),
                         )
-                        return rebound_probabilities, epoch
+                        return rebound_probabilities, _scope_global_book_epoch(
+                            epoch,
+                            rebound_probabilities,
+                        )
             if cached_before_bind is not None and eligible_refresh_family_keys:
                 cached_probabilities = _cached_global_book_probabilities(
                     cached_before_bind
@@ -8164,9 +8195,11 @@ def event_bound_live_adapter_from_trade_conn(
                             exc,
                         )
                     else:
+                        cache_probabilities = dict(cached_probabilities)
+                        cache_probabilities.update(rebound_probabilities)
                         _store_global_book_epoch(
                             trade_conn,
-                            rebound_probabilities,
+                            cache_probabilities,
                             refreshed_epoch,
                             checked_at=cache_checked_at,
                             metadata_by_key=book_metadata_by_key,
@@ -8180,7 +8213,10 @@ def event_bound_live_adapter_from_trade_conn(
                             len(exact_refresh_tokens),
                             changed_tokens,
                         )
-                        return rebound_probabilities, refreshed_epoch
+                        return rebound_probabilities, _scope_global_book_epoch(
+                            refreshed_epoch,
+                            rebound_probabilities,
+                        )
             prefetch_slice = None
             prefetch_mode = ""
             prefetch_token_hint = None
@@ -8458,7 +8494,10 @@ def event_bound_live_adapter_from_trade_conn(
                     len(bound_probabilities),
                     len(getattr(cached, "assets", ())),
                 )
-                return bound_probabilities, cached
+                return bound_probabilities, _scope_global_book_epoch(
+                    cached,
+                    bound_probabilities,
+                )
 
             if (
                 cached is not None
