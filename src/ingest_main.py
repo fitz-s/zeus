@@ -468,6 +468,39 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
         _DAY0_METAR_COMMIT_LOCK.release()
 
     if emitted:
+        # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): a freshly-committed
+        # DAY0_EXTREME_UPDATED family must not wait on the ~40-min scheduled
+        # posterior recompute cadence — the measured latency bottleneck (see
+        # docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md).
+        # Runs AFTER the world-write mutex is released and conn closed (no
+        # network/DB I/O in the just-closed txn), mirroring the LOCK LAW every
+        # other substrate-refresh drain in this codebase already follows.
+        try:
+            from src.data.replacement_cycle_advance_trigger import (
+                enqueue_day0_extreme_updated_materialization_seed,
+            )
+
+            for family_city, family_target_date, family_metric in dict.fromkeys(
+                inserted_families
+            ):
+                bridge_report = enqueue_day0_extreme_updated_materialization_seed(
+                    city=family_city,
+                    target_date=family_target_date,
+                    metric=family_metric,
+                )
+                logger.info(
+                    "DAY0_METAR_MATERIALIZATION_BRIDGE city=%s target_date=%s metric=%s "
+                    "status=%s",
+                    family_city, family_target_date, family_metric,
+                    bridge_report.get("status"),
+                )
+        except Exception:
+            logger.warning(
+                "DAY0_METAR_MATERIALIZATION_BRIDGE_FAILED families=%d; scheduled recompute "
+                "cadence remains the fallback",
+                len(inserted_families),
+                exc_info=True,
+            )
         try:
             publish_reactor_wake(
                 source="day0_metar_source_clock",

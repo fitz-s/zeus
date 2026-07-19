@@ -5926,6 +5926,14 @@ def run_edli_event_reactor_cycle(
             )
             _log_stage("committed_event_fast_path")
         if catchup_day0_event_ids:
+            # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): the catch-up scan lane
+            # (non-METAR / WU / HKO sources, and reboot catch-up) commits DAY0_EXTREME_UPDATED
+            # events here just like the fast METAR source clock does in ingest_main.py's
+            # _commit_pending_day0_metar. Bridge those families to an immediate
+            # re-materialization seed too, so this lane does not stay on the ~40-min
+            # scheduled cadence while the fast lane already races the book. Runs AFTER
+            # conn.commit() and the world-write mutex release above — no txn is open.
+            _edli_bridge_day0_extreme_materialization_seeds(catchup_day0_event_ids)
             try:
                 from src.runtime.reactor_wake import publish_reactor_wake
 
@@ -7222,6 +7230,78 @@ def _reactor_day0_hourly_fetch_timeout_seconds() -> float:
         return max(0.25, float(raw))
     except (TypeError, ValueError):
         return 1.5
+
+def _edli_bridge_day0_extreme_materialization_seeds(event_ids: tuple[str, ...]) -> None:
+    """Bridge freshly-committed DAY0_EXTREME_UPDATED events to immediate re-materialization.
+
+    Operator directive 2026-07-19: Day0 is a zero-sum race against the market book, and the
+    measured bottleneck is the ~40-min SCHEDULED posterior recompute cadence, not fetch or event
+    delivery (docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md). This
+    is the catch-up scan lane's mirror of the fast METAR source clock's bridge in
+    ingest_main.py's ``_commit_pending_day0_metar`` — same seed transport
+    (``enqueue_day0_extreme_updated_materialization_seed``), same idempotent
+    ``cycle_advance_enqueues`` marker, so a family bridged from either lane never double-seeds.
+
+    Reads the already-committed event rows via a fresh read-only world connection (the emit
+    txn's mutex was already released by the caller) to recover the (city, target_date, metric)
+    family for each event id — ``EventWriteResult`` itself carries no family info. Fail-soft
+    throughout: any error is logged and swallowed; this must never break the reactor cycle or
+    block the wake publish that follows it.
+    """
+    if not event_ids:
+        return
+    import logging as _logging
+
+    _log = _logging.getLogger("zeus.events.reactor")
+    try:
+        from src.data.replacement_cycle_advance_trigger import (
+            enqueue_day0_extreme_updated_materialization_seed,
+        )
+
+        world_ro = get_world_connection_read_only()
+        try:
+            placeholders = ",".join("?" for _ in event_ids)
+            rows = world_ro.execute(
+                f"""
+                SELECT DISTINCT
+                    json_extract(payload_json, '$.city') AS city,
+                    json_extract(payload_json, '$.target_date') AS target_date,
+                    json_extract(payload_json, '$.metric') AS metric
+                FROM opportunity_events
+                WHERE event_type = 'DAY0_EXTREME_UPDATED'
+                  AND event_id IN ({placeholders})
+                """,
+                tuple(event_ids),
+            ).fetchall()
+        finally:
+            world_ro.close()
+    except Exception as exc:  # noqa: BLE001 — fail-soft: never break the reactor cycle
+        _log.warning(
+            "day0-extreme-updated materialization bridge FAMILY LOOKUP FAILED (fail-soft): %s",
+            exc,
+        )
+        return
+    families = {
+        (str(row[0]), str(row[1]), str(row[2]))
+        for row in rows
+        if row[0] and row[1] and row[2]
+    }
+    for city, target_date, metric in sorted(families):
+        try:
+            report = enqueue_day0_extreme_updated_materialization_seed(
+                city=city, target_date=target_date, metric=metric,
+            )
+            _log.info(
+                "day0-extreme-updated materialization bridge (catch-up) city=%s "
+                "target_date=%s metric=%s status=%s",
+                city, target_date, metric, report.get("status"),
+            )
+        except Exception as exc:  # noqa: BLE001 — one family must not break the rest
+            _log.warning(
+                "day0-extreme-updated materialization bridge (catch-up) FAILED (fail-soft) "
+                "city=%s target_date=%s metric=%s exc=%s",
+                city, target_date, metric, exc,
+            )
 
 def _edli_emit_day0_extreme_events(
     world_conn,

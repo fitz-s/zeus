@@ -1178,6 +1178,107 @@ def enqueue_single_family_cycle_advance_reseed(
     return report
 
 
+def enqueue_day0_extreme_updated_materialization_seed(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    computed_at: datetime | None = None,
+    held_position: bool | None = None,
+) -> dict[str, object]:
+    """Bridge a committed DAY0_EXTREME_UPDATED event to an immediate re-materialization seed.
+
+    Operator directive 2026-07-19 (Day0 is a zero-sum race against the market book): the measured
+    bottleneck is the ~40-minute SCHEDULED posterior recompute cadence (HOP 2b,
+    docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md), not fetch or
+    event delivery — those are already fast (<1 min / ~1 min p50). A fresh observed extreme must
+    reprice q immediately instead of waiting on the next scheduled tick.
+
+    Reuses the EXISTING single-family cycle-advance seed transport verbatim — same seed builder,
+    same seed_dir, same ``cycle_advance_enqueues`` idempotency marker with its
+    ``day0_observed_extreme_observation_time`` monotone guard (``_already_enqueued`` /
+    ``_record_enqueue`` above) — no new subsystem, no second transport. The observed extreme is
+    re-read FRESH from the canonical settlement-grade surface via
+    ``replacement_forecast_seed_discovery._day0_observed_extreme_seed_payload`` (the SAME reader
+    the poll-lane batch trigger uses), never trusted from the caller, so a stale/racing caller
+    cannot inject a wrong extreme.
+
+    ``held_position`` defaults to an auto-detected held-family check reusing
+    ``_edli_current_held_position_family_keys`` (2b5ae40a3) so held/traded families are tagged for
+    priority drain ordering, but held_position only affects queue PRIORITY — every admitted Day0
+    family, held or not, still gets a seed (operator: "entry opportunities repriced too, not only
+    held positions").
+
+    Fail-soft throughout: any error (config missing, no observed extreme, DB fault, held-lookup
+    failure) is logged and a status dict returned; this must NEVER raise into the event-emission
+    path that calls it.
+    """
+    city = str(city)
+    target_date = str(target_date)
+    metric = str(metric)
+    report: dict[str, object] = {
+        "status": "DAY0_EXTREME_BRIDGE_SKIPPED",
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+    }
+    try:
+        from src.data.replacement_forecast_production import (  # noqa: PLC0415
+            _replacement_forecast_live_materialization_queue_config,
+        )
+        from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+            _day0_observed_extreme_seed_payload,
+        )
+
+        cfg = _replacement_forecast_live_materialization_queue_config()
+        forecast_db = cfg.get("forecast_db")
+        seed_dir = cfg.get("seed_dir")
+        raw_manifest_dir = cfg.get("raw_manifest_dir")
+        if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
+            report["status"] = "DAY0_EXTREME_BRIDGE_NOT_CONFIGURED"
+            return report
+        now = (computed_at or datetime.now(tz=UTC)).astimezone(UTC)
+        day0_payload = _day0_observed_extreme_seed_payload(
+            city=city, target_date=target_date, metric=metric, computed_at=now,
+        )
+        if day0_payload is None:
+            report["status"] = "DAY0_EXTREME_BRIDGE_NO_OBSERVED_EXTREME"
+            return report
+        if held_position is None:
+            try:
+                from src.events.reactor import (  # noqa: PLC0415
+                    _edli_current_held_position_family_keys,
+                )
+
+                held_position = (
+                    (city, target_date, metric) in _edli_current_held_position_family_keys()
+                )
+            except Exception:  # noqa: BLE001 — priority tagging is best-effort, never fatal
+                held_position = False
+        inner = enqueue_single_family_cycle_advance_reseed(
+            forecast_db=Path(str(forecast_db)),
+            seed_dir=Path(str(seed_dir)),
+            raw_manifest_dir=Path(str(raw_manifest_dir)),
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            computed_at=now,
+            held_position=bool(held_position),
+            **day0_payload,
+        )
+        report.update(inner)
+        return report
+    except Exception as exc:  # noqa: BLE001 — fail-soft: never raise into event emission
+        _LOG.warning(
+            "day0-extreme-updated materialization bridge FAILED (fail-soft) "
+            "city=%s target_date=%s metric=%s exc=%s",
+            city, target_date, metric, exc,
+        )
+        report["status"] = "DAY0_EXTREME_BRIDGE_FAILSOFT_SKIPPED"
+        report["error"] = str(exc)
+        return report
+
+
 def _build_and_write_advance_seed(
     conn: sqlite3.Connection,
     *,
