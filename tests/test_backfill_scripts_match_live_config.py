@@ -678,6 +678,215 @@ def test_hko_projection_savepoint_preserves_caller_transaction(
         assert conn.execute(
             "SELECT causality_status FROM observation_instants WHERE id = 1"
         ).fetchone() == ("OK",)
+        assert not (tmp_path / "hko.jsonl").exists()
+    finally:
+        conn.close()
+
+
+def test_hko_projection_commit_failure_rolls_back_every_write(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    conn = _hko_projection_transaction_conn()
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(
+        """
+        CREATE TABLE projection_parent (id INTEGER PRIMARY KEY);
+        CREATE TABLE projection_child (
+            parent_id INTEGER,
+            FOREIGN KEY(parent_id) REFERENCES projection_parent(id)
+                DEFERRABLE INITIALLY DEFERRED
+        );
+        """
+    )
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_fetch_hko_extrema",
+        lambda: _hko_projection_snapshot(hko_ingest_tick_module),
+    )
+
+    def insert_invalid_child(insert_conn, _rows):
+        insert_conn.execute("INSERT INTO projection_probe VALUES ('written')")
+        insert_conn.execute("INSERT INTO projection_child VALUES (99)")
+        return 1
+
+    monkeypatch.setattr(hko_ingest_tick_module, "insert_rows", insert_invalid_child)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            hko_ingest_tick_module.project_accumulator_to_v2(
+                conn, "v1.wu-native", tmp_path / "hko.jsonl"
+            )
+        assert not conn.in_transaction
+        assert conn.execute("SELECT value FROM projection_probe").fetchall() == []
+        assert conn.execute(
+            "SELECT causality_status FROM observation_instants WHERE id = 1"
+        ).fetchone() == ("OK",)
+        assert not (tmp_path / "hko.jsonl").exists()
+    finally:
+        conn.close()
+
+
+def test_hko_tick_commits_caller_visible_ledger_before_logging(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "hko.db"
+    log_path = tmp_path / "hko.jsonl"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE ledger_probe (value TEXT NOT NULL)")
+    conn.commit()
+
+    def append_uncommitted_ledger(tick_conn):
+        tick_conn.execute("INSERT INTO ledger_probe VALUES ('durable')")
+        return True
+
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_accumulate_hko_reading",
+        append_uncommitted_ledger,
+    )
+    result = hko_ingest_tick_module.tick_accumulator(conn, log_path)
+    assert result == {"tick_ok": True}
+    assert not conn.in_transaction
+    conn.close()
+
+    reopened = sqlite3.connect(db_path)
+    try:
+        assert reopened.execute("SELECT value FROM ledger_probe").fetchall() == [
+            ("durable",)
+        ]
+    finally:
+        reopened.close()
+    assert json.loads(log_path.read_text().strip())["tick_ok"] is True
+
+
+def test_hko_tick_rejects_caller_owned_transaction(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    conn = _hko_projection_transaction_conn()
+    called = False
+
+    def should_not_run(_conn):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_accumulate_hko_reading",
+        should_not_run,
+    )
+    try:
+        conn.execute("BEGIN")
+        conn.execute("INSERT INTO outer_probe VALUES ('caller-work')")
+        with pytest.raises(RuntimeError, match="transaction-free"):
+            hko_ingest_tick_module.tick_accumulator(conn, tmp_path / "hko.jsonl")
+        assert called is False
+        assert conn.in_transaction
+        assert conn.execute("SELECT value FROM outer_probe").fetchall() == [
+            ("caller-work",)
+        ]
+        assert not (tmp_path / "hko.jsonl").exists()
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_hko_projection_rollback_failure_requires_outer_rollback(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    raw_conn = _hko_projection_transaction_conn()
+    released = False
+
+    class RollbackFailureProxy:
+        @property
+        def in_transaction(self):
+            return raw_conn.in_transaction
+
+        def execute(self, sql, parameters=()):
+            nonlocal released
+            if str(sql).startswith("ROLLBACK TO SAVEPOINT"):
+                raise sqlite3.OperationalError("injected rollback cleanup failure")
+            if str(sql).startswith("RELEASE SAVEPOINT"):
+                released = True
+            return raw_conn.execute(sql, parameters)
+
+        def rollback(self):
+            return raw_conn.rollback()
+
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_fetch_hko_extrema",
+        lambda: _hko_projection_snapshot(hko_ingest_tick_module),
+    )
+
+    def fail_after_write(insert_conn, _rows):
+        insert_conn.execute("INSERT INTO projection_probe VALUES ('failed-write')")
+        raise RuntimeError("injected body failure")
+
+    monkeypatch.setattr(hko_ingest_tick_module, "insert_rows", fail_after_write)
+    raw_conn.execute("BEGIN")
+    raw_conn.execute("INSERT INTO outer_probe VALUES ('caller-work')")
+    try:
+        with pytest.raises(RuntimeError, match="caller must roll back") as exc_info:
+            hko_ingest_tick_module.project_accumulator_to_v2(
+                RollbackFailureProxy(),
+                "v1.wu-native",
+                tmp_path / "hko.jsonl",
+            )
+        assert "injected body failure" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, sqlite3.OperationalError)
+        assert released is False
+        assert raw_conn.in_transaction
+        raw_conn.rollback()
+        assert raw_conn.execute("SELECT value FROM outer_probe").fetchall() == []
+        assert raw_conn.execute("SELECT value FROM projection_probe").fetchall() == []
+        assert raw_conn.execute(
+            "SELECT causality_status FROM observation_instants WHERE id = 1"
+        ).fetchone() == ("OK",)
+    finally:
+        if raw_conn.in_transaction:
+            raw_conn.rollback()
+        raw_conn.close()
+
+
+def test_hko_committed_projection_survives_log_failure(
+    hko_ingest_tick_module,
+    monkeypatch,
+    tmp_path,
+):
+    conn = _hko_projection_transaction_conn()
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_fetch_hko_extrema",
+        lambda: _hko_projection_snapshot(hko_ingest_tick_module),
+    )
+
+    def insert_projection(insert_conn, _rows):
+        insert_conn.execute("INSERT INTO projection_probe VALUES ('written')")
+        return 1
+
+    monkeypatch.setattr(hko_ingest_tick_module, "insert_rows", insert_projection)
+    monkeypatch.setattr(
+        hko_ingest_tick_module,
+        "_append_log",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    try:
+        result = hko_ingest_tick_module.project_accumulator_to_v2(
+            conn, "v1.wu-native", tmp_path / "hko.jsonl"
+        )
+        assert result["written"] == 1
+        assert not conn.in_transaction
+        assert conn.execute("SELECT value FROM projection_probe").fetchall() == [
+            ("written",)
+        ]
     finally:
         conn.close()
 

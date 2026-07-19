@@ -105,6 +105,19 @@ def _append_log(log_path: Path, entry: dict) -> None:
         fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
+def _append_committed_log(log_path: Path, entry: dict) -> None:
+    """Report a committed outcome without changing its canonical result."""
+    try:
+        _append_log(log_path, entry)
+    except OSError as exc:
+        logger.error(
+            "HKO committed outcome log failed path=%s exc=%s: %s",
+            log_path,
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _parse_hko_extrema_csv(
     payload: str,
     *,
@@ -366,20 +379,38 @@ def project_accumulator_to_v2(
             if _same_extrema_already_materialized(conn, snapshot)
             else insert_rows(conn, [row])
         )
-    except Exception:
         if caller_owns_transaction:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
             conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         else:
-            conn.execute("ROLLBACK")
+            conn.execute("COMMIT")
+    except Exception as body_exc:
+        if caller_owns_transaction:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            except sqlite3.Error as cleanup_exc:
+                raise RuntimeError(
+                    "HKO projection failed and savepoint rollback failed; "
+                    "caller must roll back the outer transaction "
+                    f"(body={type(body_exc).__name__}: {body_exc})"
+                ) from cleanup_exc
+            try:
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except sqlite3.Error as cleanup_exc:
+                raise RuntimeError(
+                    "HKO projection failed and savepoint release failed; "
+                    "caller must roll back the outer transaction "
+                    f"(body={type(body_exc).__name__}: {body_exc})"
+                ) from cleanup_exc
+        else:
+            if conn.in_transaction:
+                conn.rollback()
         raise
-    if caller_owns_transaction:
-        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-    else:
-        conn.execute("COMMIT")
     log_entry["written"] = written
     log_entry["retired"] = int(retired)
-    _append_log(log_path, log_entry)
+    # A savepoint release is not a durable commit.  A caller-owned transaction
+    # must report success only after its owner commits.
+    if not caller_owns_transaction:
+        _append_committed_log(log_path, log_entry)
     return {
         "candidates": 1,
         "written": written,
@@ -403,8 +434,20 @@ def tick_accumulator(
     if dry_run:
         _append_log(log_path, {"ts": ts_now, "phase": "tick", "dry_run": True})
         return {"tick_ok": True, "dry_run": True}
+    if conn.in_transaction:
+        raise RuntimeError("HKO tick requires a transaction-free connection")
     ok = _accumulate_hko_reading(conn)
-    _append_log(log_path, {
+    # The accumulator commits its primary reading before appending the optional
+    # observation-print ledger.  Finish that residual transaction here so both
+    # runtime callers receive a durable tick and a clean transaction boundary.
+    try:
+        if conn.in_transaction:
+            conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    _append_committed_log(log_path, {
         "ts": ts_now, "phase": "tick", "tick_ok": bool(ok), "dry_run": False,
     })
     return {"tick_ok": bool(ok)}
