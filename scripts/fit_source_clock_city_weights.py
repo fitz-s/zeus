@@ -84,6 +84,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.data.bayes_precision_fusion_download import _model_in_domain  # noqa: E402
 from src.forecast.center import MIN_SETTLED_N, raw_second_moment_weights  # noqa: E402
 from src.forecast.model_selection import (  # noqa: E402
     ANCHOR_MODEL,
@@ -217,6 +218,15 @@ def residual_stats_by_model(
     return {m: (sq_sums[m] / counts[m], counts[m]) for m in sorted(counts)}
 
 
+def _filter_models(
+    obs_by_key: Mapping[object, Mapping[str, float]], eligible: frozenset[str]
+) -> dict[object, dict[str, float]]:
+    return {
+        key: {model: value for model, value in values.items() if model in eligible}
+        for key, values in obs_by_key.items()
+    }
+
+
 def _basket_errors(
     models: Sequence[str],
     raw_m2_and_n: Mapping[str, tuple[float | None, int]],
@@ -311,13 +321,18 @@ def city_metric_entry(
     obs_by_date: Mapping[str, Mapping[str, float]],
     settle_by_date: Mapping[str, float],
     region_key: str,
-    region_basket_cache: dict[str, tuple[tuple[str, ...] | None, dict[str, tuple[float, int]]]],
+    region_basket_cache: dict[
+        tuple[str, tuple[str, ...]],
+        tuple[tuple[str, ...] | None, dict[str, tuple[float, int]]],
+    ],
     region_obs: Mapping[object, Mapping[str, float]],
     region_settle: Mapping[object, float],
     global_raw_m2_and_n: Mapping[str, tuple[float, int]],
     frozen_csv_path: Path,
+    eligible_models: frozenset[str],
 ) -> dict[str, object]:
     n_paired = len(settle_by_date)
+    obs_by_date = _filter_models(obs_by_date, eligible_models)
     raw_m2_and_n_city = residual_stats_by_model(obs_by_date, settle_by_date)
 
     if n_paired >= TIER1_MIN_N:
@@ -326,19 +341,31 @@ def city_metric_entry(
         basis = raw_m2_and_n_city
     elif n_paired >= TIER2_MIN_N:
         tier = "REGION_POOLED"
-        if region_key not in region_basket_cache:
-            r_raw_m2 = residual_stats_by_model(region_obs, region_settle)
-            r_basket = greedy_basket(list(r_raw_m2), r_raw_m2, region_obs, region_settle)
-            region_basket_cache[region_key] = (r_basket, r_raw_m2)
-        basket, basis = region_basket_cache[region_key]
+        cache_key = (region_key, tuple(sorted(eligible_models)))
+        if cache_key not in region_basket_cache:
+            eligible_region_obs = _filter_models(region_obs, eligible_models)
+            r_raw_m2 = residual_stats_by_model(eligible_region_obs, region_settle)
+            r_basket = greedy_basket(
+                list(r_raw_m2), r_raw_m2, eligible_region_obs, region_settle
+            )
+            region_basket_cache[cache_key] = (r_basket, r_raw_m2)
+        basket, basis = region_basket_cache[cache_key]
     else:
         tier = "GLOBAL_CORE"
-        basket = GLOBAL_CORE_BASKET
-        basis = global_raw_m2_and_n
+        basket = tuple(model for model in GLOBAL_CORE_BASKET if model in eligible_models)
+        basis = {
+            model: stat
+            for model, stat in global_raw_m2_and_n.items()
+            if model in eligible_models
+        }
 
     if basket is None:
-        basket = GLOBAL_CORE_BASKET
-        basis = global_raw_m2_and_n
+        basket = tuple(model for model in GLOBAL_CORE_BASKET if model in eligible_models)
+        basis = {
+            model: stat
+            for model, stat in global_raw_m2_and_n.items()
+            if model in eligible_models
+        }
         tier = "GLOBAL_CORE"
 
     weights = raw_second_moment_weights({m: basis.get(m, (None, 0)) for m in basket}, unit="C")
@@ -418,12 +445,33 @@ def build_artifact(
         metric: residual_stats_by_model(global_obs[metric], global_settle[metric])
         for metric in METRICS
     }
-    region_basket_cache: dict[str, tuple[tuple[str, ...] | None, dict[str, tuple[float, int]]]] = {}
+    region_basket_cache: dict[
+        tuple[str, tuple[str, ...]],
+        tuple[tuple[str, ...] | None, dict[str, tuple[float, int]]],
+    ] = {}
+
+    candidate_models = (
+        servable
+        if servable is not None
+        else frozenset(GLOBAL_CORE_BASKET).union(
+            model
+            for by_date in obs_all.values()
+            for values in by_date.values()
+            for model in values
+        )
+    )
 
     cities_out: dict[str, dict[str, object]] = {}
     for city_cfg in cities_cfg:
         city = str(city_cfg["name"])
         region = region_by_city[city]
+        lat = float(city_cfg["lat"])
+        lon = float(city_cfg["lon"])
+        eligible_models = frozenset(
+            model
+            for model in candidate_models
+            if _model_in_domain(model, lat=lat, lon=lon, lead_days=0)
+        )
         per_metric: dict[str, object] = {}
         for metric in METRICS:
             obs_by_date = obs_all.get((city, metric), {})
@@ -440,6 +488,7 @@ def build_artifact(
                 region_settle=region_settle.get(region_key, {}),
                 global_raw_m2_and_n=global_raw_m2_and_n[metric],
                 frozen_csv_path=frozen_csv_path,
+                eligible_models=eligible_models,
             )
         cities_out[city] = per_metric
 

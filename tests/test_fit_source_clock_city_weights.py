@@ -232,3 +232,62 @@ def test_default_servable_filter_excludes_retired_archive_models(tmp_path: Path)
     assert "jma_seamless" not in fscw.LIVE_SERVABLE_MODELS
     assert "icon_seamless" not in fscw.LIVE_SERVABLE_MODELS
     assert "ecmwf_ifs" in fscw.LIVE_SERVABLE_MODELS
+
+
+def test_artifact_excludes_models_outside_each_city_domain(tmp_path: Path) -> None:
+    """Archived rows cannot license a model the current downloader will never request.
+
+    Cover both city-specific and region-pooled selection: the latter also proves the
+    pooled-basket cache is scoped by the target city's physically eligible model set.
+    """
+    rows = _rows_for_city(
+        "Amsterdam",
+        "high",
+        70,
+        models={
+            "meteofrance_arome_france_hd": 0.05,
+            "ukmo_global_deterministic_10km": 0.8,
+        },
+    )
+    rows += _rows_for_city(
+        "Lagos",
+        "high",
+        45,
+        models={"ncep_nbm_conus": 0.05, "ecmwf_ifs": 0.8},
+    )
+    conn = _make_db(rows)
+    cities_path = _cities_json(
+        tmp_path,
+        [
+            {
+                "name": "Amsterdam",
+                "timezone": "Europe/Amsterdam",
+                "country_code": "NL",
+                "lat": 52.3105,
+                "lon": 4.7683,
+            },
+            {
+                "name": "Lagos",
+                "timezone": "Africa/Lagos",
+                "country_code": "NG",
+                "lat": 6.5774,
+                "lon": 3.3212,
+            },
+        ],
+    )
+    artifact = fscw.build_artifact(
+        conn,
+        as_of="2026-12-31",
+        generated_at="FIXED",
+        cities_path=cities_path,
+        frozen_csv_path=tmp_path / "missing.csv",
+        git_sha="FIXED",
+    )
+
+    amsterdam = artifact["cities"]["Amsterdam"]["high"]
+    assert amsterdam["basket_provenance"]["tier"] == "CITY_SPECIFIC"
+    assert amsterdam["models"] == {"ukmo_global_deterministic_10km": 1.0}
+
+    lagos = artifact["cities"]["Lagos"]["high"]
+    assert lagos["basket_provenance"]["tier"] == "REGION_POOLED"
+    assert lagos["models"] == {"ecmwf_ifs": 1.0}
