@@ -46,7 +46,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 from src.data.bayes_precision_fusion_capture import (
     OPENMETEO_MODEL_IDS,
@@ -1286,6 +1286,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     forecast_hours: int = 120,
     retention_days: int = RETENTION_DAYS,
     max_wall_clock_seconds: float | None = None,
+    frozen_source_runs: Mapping[str, tuple[datetime, datetime]] | None = None,
 ) -> dict[str, object]:
     """Capture (forward single_runs + fixed-lead previous_runs) the 8 extra OM models for each
     current target and persist into raw_model_forecasts on a SINGLE zeus-forecasts.db connection
@@ -1376,11 +1377,25 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     # R4a (2026-06-13): previous_runs fixed-lead values are IMMUTABLE once captured — the skip
     # key for previous_runs ignores source_cycle_time so a past target_date is never re-fetched
     # under a new cycle stamp. single_runs KEEPS the per-cycle key (current value changes per cycle).
-    source_clock_single_runs = (
-        {}
-        if _use_legacy_per_model
-        else _read_source_clock_single_runs_requests(decision_time=captured_at)
-    )
+    if frozen_source_runs is not None:
+        source_clock_single_runs: dict[str, _SourceClockSingleRunsRequest] = {}
+        for model, source_run in frozen_source_runs.items():
+            try:
+                run, available = source_run
+                if run.utcoffset() is None or available.utcoffset() is None:
+                    raise ValueError("frozen source run must be timezone-aware")
+                source_clock_single_runs[str(model)] = _SourceClockSingleRunsRequest(
+                    run=run.astimezone(UTC),
+                    source_available_at=available.astimezone(UTC).isoformat(),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid frozen source run for {model!r}") from exc
+    else:
+        source_clock_single_runs = (
+            {}
+            if _use_legacy_per_model
+            else _read_source_clock_single_runs_requests(decision_time=captured_at)
+        )
     target_cities = tuple(sorted({target.city for target in target_list}))
     target_dates = tuple(sorted({target.target_date for target in target_list}))
     request_cycles = tuple(
@@ -1993,4 +2008,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "single_runs_location_batch_count": location_batch_count,
         "single_runs_location_count": location_count,
         "single_runs_location_target_date_count": location_target_date_count,
+        "single_runs_request_cycles": {
+            model: _single_runs_request_for_model(model).run.isoformat()
+            for model in requested_models
+        },
     }

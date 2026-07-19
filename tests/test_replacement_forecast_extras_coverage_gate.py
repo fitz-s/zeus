@@ -28,7 +28,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1561,6 +1561,14 @@ def test_source_clock_scoped_capture_stops_queued_tasks_after_quota_abort(
             return {
                 "updated_sources": list(self.updated_sources),
                 "affected_cities": list(self.affected_cities),
+                "source_runs": {
+                    source: {
+                        "initialisation_time": _CYCLE.isoformat(),
+                        "availability_time": _CYCLE.isoformat(),
+                        "update_interval_seconds": 3600,
+                    }
+                    for source in self.updated_sources
+                },
             }
 
     keys = (
@@ -1611,6 +1619,7 @@ def test_source_clock_scoped_capture_stops_queued_tasks_after_quota_abort(
             "written_row_count": 0,
             "transport_errors": ("single_runs:Paris:429",),
             "transport_aborted_remaining_targets": True,
+            "single_runs_request_cycles": {source: _CYCLE.isoformat()},
         }
 
     monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
@@ -1629,6 +1638,130 @@ def test_source_clock_scoped_capture_stops_queued_tasks_after_quota_abort(
     assert report["priority_probe_transport_aborted"] is True
     assert report["source_results"]["icon_global"]["status"] == (
         "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
+    )
+    assert report["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    )
+
+
+def test_source_clock_scoped_capture_terminalizes_deterministic_client_error(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_updates as updates
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
+
+    class _Report:
+        updated_sources = ("ukmo_uk_deterministic_2km",)
+        affected_cities = ("London",)
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+                "source_runs": {
+                    "ukmo_uk_deterministic_2km": {
+                        "initialisation_time": _CYCLE.isoformat(),
+                        "availability_time": _CYCLE.isoformat(),
+                        "update_interval_seconds": 3600,
+                    }
+                },
+            }
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        updates,
+        "read_model_updates_jsonl",
+        lambda _path: (
+            updates.OpenMeteoModelUpdate(
+                model="ukmo_uk_deterministic_2km",
+                last_run_initialisation_time=_CYCLE + timedelta(hours=1),
+                last_run_availability_time=_CYCLE + timedelta(hours=1),
+                update_interval_seconds=3600,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: (
+            target_plan.ReplacementForecastTargetKey("London", "2026-07-17", "high"),
+        ),
+    )
+    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: ("London",),
+    )
+    monkeypatch.setattr(
+        dl,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **_kwargs: {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "target_count": 1,
+            "written_row_count": 0,
+            "transport_errors": (
+                "single_runs:London:Client error '400 Bad Request' for url 'https://example.invalid'",
+            ),
+            "global_models_unavailable": ["ukmo_uk_deterministic_2km"],
+            "single_runs_request_cycles": {
+                "ukmo_uk_deterministic_2km": _CYCLE.isoformat()
+            },
+        },
+    )
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 1,
+        },
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert report["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_PERMANENT_FAILURE"
+    )
+    result = report["source_results"]["ukmo_uk_deterministic_2km"]
+    assert result["status"] == "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
+    assert result["cycle"] == _CYCLE.isoformat()
+    assert result["permanent_errors"] == result["transport_errors"]
+
+
+def test_source_transport_error_terminalization_excludes_ambiguous_statuses() -> None:
+    assert not prod._source_transport_error_is_nonretryable("Client error '400 Bad Request'")
+    assert prod._source_transport_error_is_nonretryable(
+        "Client error '400 Bad Request'",
+        generic_400_is_terminal=True,
+    )
+    assert not prod._source_transport_error_is_nonretryable(
+        "Client error '400 Bad Request': The requested model run is not available",
+        generic_400_is_terminal=True,
+    )
+    assert prod._source_transport_error_is_nonretryable(
+        "Client error '400 Bad Request': invalid parameter models"
+    )
+    assert prod._source_transport_error_is_nonretryable("status_code=422 invalid request")
+    assert not prod._source_transport_error_is_nonretryable("Client error '404 Not Found'")
+    assert not prod._source_transport_error_is_nonretryable("HTTP 408")
+    assert not prod._source_transport_error_is_nonretryable("HTTP 429")
+    assert not prod._source_transport_error_is_nonretryable("HTTP 503")
+    assert not prod._source_transport_error_is_nonretryable("Server error '503 Unavailable'")
+    assert not prod._source_transport_error_is_nonretryable("HTTP/1.1 429")
+    assert not prod._source_transport_error_is_nonretryable("connection reset")
+    assert not prod._source_transport_error_is_nonretryable(
+        "Client error '400 Bad Request'; connection reset"
+    )
+    assert not prod._source_transport_error_is_nonretryable(
+        "batched Client error '400 Bad Request'; fallback HTTP 429"
     )
 
 

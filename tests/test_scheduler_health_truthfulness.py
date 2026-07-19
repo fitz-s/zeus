@@ -56,6 +56,53 @@ def test_paused_mars_credentials_is_failed():
     assert failed is True
 
 
+def test_terminal_source_run_failure_is_not_reported_healthy():
+    failed, reason = _classify_result(
+        {"status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_PERMANENT_FAILURE"}
+    )
+    assert failed is True
+    assert "permanent_failure" in reason
+
+
+def test_replacement_maintenance_partial_is_not_reported_healthy():
+    failed, reason = _classify_result({"status": "REPLACEMENT_MAINTENANCE_PARTIAL"})
+    assert failed is True
+    assert reason == "replacement_maintenance_partial"
+
+
+def test_mixed_terminal_and_retryable_source_runs_are_not_reported_healthy():
+    failed, reason = _classify_result(
+        {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "source_results": {
+                "ukmo_uk_deterministic_2km": {
+                    "status": "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
+                },
+                "icon_global": {
+                    "status": "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
+                },
+            },
+        }
+    )
+    assert failed is True
+    assert reason == "source_run_permanent_failure:ukmo_uk_deterministic_2km"
+
+
+def test_source_transport_degradation_is_not_reported_healthy():
+    for status in (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+        "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
+        "SOURCE_CLOCK_BPF_SCOPED_CYCLE_UNRESOLVED_SKIP",
+        "SOURCE_CLOCK_BPF_SCOPED_CYCLE_UNRESOLVED_PARTIAL",
+        "SOURCE_CLOCK_BPF_SCOPED_CAPTURE_FAILSOFT_SKIPPED",
+        "SOURCE_CLOCK_BPF_SCOPED_RUN_IDENTITY_MISMATCH",
+    ):
+        failed, reason = _classify_result({"status": status})
+        assert failed is True
+        assert reason == status.lower()
+
+
 def test_paused_by_control_plane_is_not_failed():
     """Operator-paused source is a legitimate noop — not a daemon health failure."""
     failed, _reason = _classify_result({"status": "paused_by_control_plane"})
@@ -89,6 +136,10 @@ def test_truthful_fail_statuses_set_locked_down():
     assert "extract_failed" in _TRUTHFUL_FAIL_STATUSES
     assert "paused_mars_credentials" in _TRUTHFUL_FAIL_STATUSES
     assert "bad_target_date" in _TRUTHFUL_FAIL_STATUSES
+    assert (
+        "source_clock_scoped_bayes_precision_fusion_extra_permanent_failure"
+        in _TRUTHFUL_FAIL_STATUSES
+    )
     # paused_by_control_plane explicitly NOT in the failed set.
     assert "paused_by_control_plane" not in _TRUTHFUL_FAIL_STATUSES
     assert "ok" not in _TRUTHFUL_FAIL_STATUSES

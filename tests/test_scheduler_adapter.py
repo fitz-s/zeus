@@ -482,7 +482,7 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
     monkeypatch.setattr(
         source_clock_probe,
         "source_clock_scoped_download_cursor_sources",
-        lambda _report: (),
+        lambda _report, **_kwargs: (),
     )
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
@@ -693,7 +693,7 @@ def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
     monkeypatch.setattr(
         source_clock_probe,
         "source_clock_scoped_download_cursor_sources",
-        lambda _report: (),
+        lambda _report, **_kwargs: (),
     )
     monkeypatch.setattr(
         prod,

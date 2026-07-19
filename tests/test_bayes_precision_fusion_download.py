@@ -979,6 +979,52 @@ def test_batched_single_runs_uses_source_clock_public_run(tmp_path, monkeypatch)
     assert row["source_available_at"] == available_at
 
 
+def test_batched_single_runs_uses_frozen_run_without_rereading_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    frozen_run = datetime(2026, 6, 25, 0, tzinfo=UTC)
+    frozen_available = datetime(2026, 6, 25, 4, tzinfo=UTC)
+    seen_runs: list[datetime] = []
+
+    monkeypatch.setattr(
+        dl,
+        "_read_source_clock_single_runs_requests",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("mutable metadata reread")),
+    )
+
+    def _single_batch(**kwargs):
+        seen_runs.append(kwargs["run"])
+        return {"ecmwf_ifs": (22.0, 10.0)}
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _single_batch)
+
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=frozen_run,
+        targets=_targets(),
+        models=("ecmwf_ifs",),
+        include_previous_runs=False,
+        frozen_source_runs={
+            "ecmwf_ifs": (frozen_run, frozen_available),
+        },
+    )
+
+    assert seen_runs == [frozen_run]
+    assert report["single_runs_request_cycles"] == {
+        "ecmwf_ifs": frozen_run.isoformat()
+    }
+    conn = sqlite3.connect(str(db))
+    row = conn.execute(
+        "SELECT source_cycle_time, source_available_at FROM raw_model_forecasts"
+        " WHERE endpoint='single_runs'"
+    ).fetchone()
+    conn.close()
+    assert row == (frozen_run.isoformat(), frozen_available.isoformat())
+
+
 def test_bpf_batched_fetch_uses_injected_quota_tracker(monkeypatch) -> None:
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as om

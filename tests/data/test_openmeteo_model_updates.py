@@ -1,6 +1,7 @@
 # Created: 2026-06-25
 # Last reused/audited: 2026-07-18
 
+import json
 from datetime import UTC, datetime
 
 from src.data.openmeteo_model_updates import (
@@ -159,6 +160,48 @@ def test_source_clock_probe_can_defer_cursor_until_download_success(tmp_path) ->
     ) == ("ecmwf_ifs",)
     assert source_clock_scoped_download_cursor_sources(
         {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "source_results": {
+                "ukmo_uk_deterministic_2km": {
+                    "status": "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
+                },
+                "icon_global": {
+                    "status": "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
+                },
+            },
+        }
+    ) == ("ukmo_uk_deterministic_2km",)
+    assert source_clock_scoped_download_allows_cursor_advance(
+        {"status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_PERMANENT_FAILURE"}
+    )
+    frozen = {
+        "source_runs": {
+            "ukmo_uk_deterministic_2km": {
+                "initialisation_time": "2000-01-01T07:00:00+00:00"
+            }
+        }
+    }
+    terminal = {
+        "source_results": {
+            "ukmo_uk_deterministic_2km": {
+                "status": "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE",
+                "cycle": "2000-01-01T08:00:00+00:00",
+            }
+        }
+    }
+    assert source_clock_scoped_download_cursor_sources(
+        terminal,
+        source_clock_report=frozen,
+    ) == ()
+    terminal["source_results"]["ukmo_uk_deterministic_2km"]["cycle"] = (
+        "2000-01-01T07:00:00+00:00"
+    )
+    assert source_clock_scoped_download_cursor_sources(
+        terminal,
+        source_clock_report=frozen,
+    ) == ("ukmo_uk_deterministic_2km",)
+    assert source_clock_scoped_download_cursor_sources(
+        {
             "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
             "updated_sources": ["icon_global", "ecmwf_ifs"],
         }
@@ -213,6 +256,171 @@ def test_source_clock_cursor_replays_current_run_when_city_route_changes(
     assert unchanged.updated_sources == ()
     assert expanded.updated_sources == ("ecmwf_ifs",)
     assert expanded.affected_cities == ("Paris", "Seoul")
+
+
+def test_source_clock_cursor_commits_exact_probe_token_not_newer_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.source_clock_update_probe as probe
+
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    monkeypatch.setattr(probe, "all_configured_source_ids", lambda: ("ecmwf_ifs",))
+    monkeypatch.setattr(
+        probe,
+        "affected_cities_for_source_updates",
+        lambda _sources: ("Paris",),
+    )
+    first = OpenMeteoModelUpdate(
+        model="ecmwf_ifs",
+        last_run_initialisation_time=datetime(2000, 1, 1, 0, 0, tzinfo=UTC),
+        last_run_availability_time=datetime(2000, 1, 1, 4, 0, tzinfo=UTC),
+    )
+    write_model_updates_jsonl(updates_path, [first])
+    report = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+
+    later = OpenMeteoModelUpdate(
+        model="ecmwf_ifs",
+        last_run_initialisation_time=datetime(2000, 1, 1, 6, 0, tzinfo=UTC),
+        last_run_availability_time=datetime(2000, 1, 1, 10, 0, tzinfo=UTC),
+    )
+    write_model_updates_jsonl(updates_path, [later])
+
+    assert advance_source_clock_cursor(report) == ("ecmwf_ifs",)
+    assert json.loads(cursor_path.read_text())["ecmwf_ifs"] == dict(report.cursor_values)[
+        "ecmwf_ifs"
+    ]
+    replay = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+    assert replay.updated_sources == ("ecmwf_ifs",)
+
+
+def test_source_clock_cursor_compare_and_set_rejects_changed_preimage(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.source_clock_update_probe as probe
+
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    monkeypatch.setattr(probe, "all_configured_source_ids", lambda: ("ecmwf_ifs",))
+    monkeypatch.setattr(
+        probe,
+        "affected_cities_for_source_updates",
+        lambda _sources: ("Paris",),
+    )
+    update = OpenMeteoModelUpdate(
+        model="ecmwf_ifs",
+        last_run_initialisation_time=datetime(2000, 1, 1, 0, 0, tzinfo=UTC),
+        last_run_availability_time=datetime(2000, 1, 1, 4, 0, tzinfo=UTC),
+    )
+    write_model_updates_jsonl(updates_path, [update])
+    report = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+    cursor_path.write_text(json.dumps({"ecmwf_ifs": "newer-token"}), encoding="utf-8")
+
+    assert advance_source_clock_cursor(report) == ()
+    assert json.loads(cursor_path.read_text()) == {"ecmwf_ifs": "newer-token"}
+
+
+def test_source_clock_cursor_allows_newer_terminal_run_after_concurrent_older_commit(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.source_clock_update_probe as probe
+
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    monkeypatch.setattr(probe, "all_configured_source_ids", lambda: ("ecmwf_ifs",))
+    monkeypatch.setattr(
+        probe,
+        "affected_cities_for_source_updates",
+        lambda _sources: ("Paris",),
+    )
+    older = OpenMeteoModelUpdate(
+        model="ecmwf_ifs",
+        last_run_initialisation_time=datetime(2000, 1, 1, 0, 0, tzinfo=UTC),
+        last_run_availability_time=datetime(2000, 1, 1, 4, 0, tzinfo=UTC),
+    )
+    newer = OpenMeteoModelUpdate(
+        model="ecmwf_ifs",
+        last_run_initialisation_time=datetime(2000, 1, 1, 6, 0, tzinfo=UTC),
+        last_run_availability_time=datetime(2000, 1, 1, 10, 0, tzinfo=UTC),
+    )
+    write_model_updates_jsonl(updates_path, [older])
+    older_report = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+    write_model_updates_jsonl(updates_path, [newer])
+    newer_report = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+
+    assert advance_source_clock_cursor(older_report) == ("ecmwf_ifs",)
+    assert advance_source_clock_cursor(newer_report) == ("ecmwf_ifs",)
+    assert json.loads(cursor_path.read_text())["ecmwf_ifs"] == dict(
+        newer_report.cursor_values
+    )["ecmwf_ifs"]
+    assert advance_source_clock_cursor(older_report) == ()
+
+
+def test_source_clock_cursor_identity_includes_initialisation_time(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.source_clock_update_probe as probe
+
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    monkeypatch.setattr(probe, "all_configured_source_ids", lambda: ("ecmwf_ifs",))
+    monkeypatch.setattr(
+        probe,
+        "affected_cities_for_source_updates",
+        lambda _sources: ("Paris",),
+    )
+    availability = datetime(2000, 1, 1, 10, 0, tzinfo=UTC)
+    first = OpenMeteoModelUpdate(
+        model="ecmwf_ifs",
+        last_run_initialisation_time=datetime(2000, 1, 1, 0, 0, tzinfo=UTC),
+        last_run_availability_time=availability,
+    )
+    write_model_updates_jsonl(updates_path, [first])
+    initial = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+    )
+    assert initial.updated_sources == ("ecmwf_ifs",)
+
+    corrected = OpenMeteoModelUpdate(
+        model="ecmwf_ifs",
+        last_run_initialisation_time=datetime(2000, 1, 1, 6, 0, tzinfo=UTC),
+        last_run_availability_time=availability,
+    )
+    write_model_updates_jsonl(updates_path, [corrected])
+    changed = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+    assert changed.updated_sources == ("ecmwf_ifs",)
 
 
 def test_source_clock_probe_filters_nbm_metadata_runs_not_served_by_single_runs(tmp_path) -> None:

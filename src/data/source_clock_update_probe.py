@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Mapping
+
+import fcntl
 
 from src.config import STATE_DIR
 from src.data.openmeteo_model_updates import (
@@ -30,9 +36,16 @@ from src.strategy.live_inference.source_clock_vnext import source_publicly_usabl
 
 DEFAULT_MODEL_UPDATES_JSONL = STATE_DIR / "source_updates" / "open_meteo_model_updates.jsonl"
 DEFAULT_CURSOR_JSON = STATE_DIR / "source_updates" / "open_meteo_model_updates_cursor.json"
+_CURSOR_V3_RE = re.compile(
+    r"^v3:"
+    r"(?P<initialisation>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})):"
+    r"(?P<availability>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})):"
+    r"(?P<route>[0-9a-f]{64})$"
+)
 _DOWNLOAD_CURSOR_COMMIT_STATUSES = frozenset(
     {
         "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_PERMANENT_FAILURE",
         "SOURCE_CLOCK_BPF_SCOPED_NO_AFFECTED_CITIES",
         "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS",
     }
@@ -40,6 +53,7 @@ _DOWNLOAD_CURSOR_COMMIT_STATUSES = frozenset(
 _SOURCE_CURSOR_COMMIT_STATUSES = frozenset(
     {
         "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED",
+        "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE",
         "SOURCE_CLOCK_SOURCE_NO_TARGETS",
     }
 )
@@ -55,6 +69,9 @@ class SourceClockUpdateProbeReport:
     cursor_path: str
     error: str | None = None
     emitted_event_ids: tuple[str, ...] = ()
+    cursor_values: tuple[tuple[str, str], ...] = ()
+    cursor_preimage: tuple[tuple[str, str | None], ...] = ()
+    source_runs: tuple[tuple[str, str, str, int], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -66,6 +83,16 @@ class SourceClockUpdateProbeReport:
             "cursor_path": self.cursor_path,
             "error": self.error,
             "emitted_event_ids": list(self.emitted_event_ids),
+            "cursor_values": dict(self.cursor_values),
+            "cursor_preimage": dict(self.cursor_preimage),
+            "source_runs": {
+                source: {
+                    "initialisation_time": initialisation,
+                    "availability_time": availability,
+                    "update_interval_seconds": interval,
+                }
+                for source, initialisation, availability, interval in self.source_runs
+            },
         }
 
 
@@ -81,7 +108,85 @@ def _read_cursor(path: Path) -> dict[str, str]:
 
 def _write_cursor(path: Path, cursor: Mapping[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(sorted(cursor.items())), indent=2) + "\n", encoding="utf-8")
+    payload = (json.dumps(dict(sorted(cursor.items())), indent=2) + "\n").encode("utf-8")
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
+@contextmanager
+def _cursor_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _commit_cursor_values(
+    path: Path,
+    *,
+    values: Mapping[str, str],
+    preimage: Mapping[str, str | None],
+) -> tuple[str, ...]:
+    committed: list[str] = []
+    with _cursor_lock(path):
+        current = _read_cursor(path)
+        for model, value in values.items():
+            expected = preimage.get(model)
+            current_value = current.get(model)
+            if (
+                current_value != expected
+                and not _cursor_value_is_strictly_newer(value, current_value)
+            ):
+                continue
+            current[model] = value
+            committed.append(model)
+        if committed:
+            _write_cursor(path, current)
+    return tuple(sorted(committed))
+
+
+def _cursor_value_is_strictly_newer(proposed: str, current: str | None) -> bool:
+    if current is None:
+        return False
+    proposed_match = _CURSOR_V3_RE.fullmatch(proposed)
+    current_match = _CURSOR_V3_RE.fullmatch(current)
+    if proposed_match is None or current_match is None:
+        return False
+    try:
+        proposed_order = (
+            datetime.fromisoformat(proposed_match["initialisation"].replace("Z", "+00:00")),
+            datetime.fromisoformat(proposed_match["availability"].replace("Z", "+00:00")),
+        )
+        current_order = (
+            datetime.fromisoformat(current_match["initialisation"].replace("Z", "+00:00")),
+            datetime.fromisoformat(current_match["availability"].replace("Z", "+00:00")),
+        )
+    except ValueError:
+        return False
+    return proposed_order > current_order
 
 
 def _source_route_identity(model: str) -> str:
@@ -93,7 +198,8 @@ def _source_route_identity(model: str) -> str:
 def _cursor_for_updates(updates: tuple[OpenMeteoModelUpdate, ...]) -> dict[str, str]:
     return {
         update.model: (
-            f"v2:{update.last_run_availability_time.isoformat()}:"
+            f"v3:{update.last_run_initialisation_time.isoformat()}:"
+            f"{update.last_run_availability_time.isoformat()}:"
             f"{_source_route_identity(update.model)}"
         )
         for update in updates
@@ -146,10 +252,11 @@ def probe_openmeteo_source_clock_updates(
                 continue
             usable_changed.append(model)
     if usable_changed and advance_cursor:
-        next_cursor = dict(old)
-        for model in usable_changed:
-            next_cursor[model] = new[model]
-        _write_cursor(cursor, next_cursor)
+        _commit_cursor_values(
+            cursor,
+            values={model: new[model] for model in usable_changed},
+            preimage={model: old.get(model) for model in usable_changed},
+        )
     emitted_event_ids: tuple[str, ...] = ()
     if usable_changed and event_writer is not None:
         emitted_event_ids = _emit_source_run_arrived_events(
@@ -171,6 +278,17 @@ def probe_openmeteo_source_clock_updates(
         cursor_path=str(cursor),
         error=None,
         emitted_event_ids=emitted_event_ids,
+        cursor_values=tuple((model, new[model]) for model in usable_changed),
+        cursor_preimage=tuple((model, old.get(model)) for model in usable_changed),
+        source_runs=tuple(
+            (
+                model,
+                update_by_model[model].last_run_initialisation_time.astimezone(UTC).isoformat(),
+                update_by_model[model].last_run_availability_time.astimezone(UTC).isoformat(),
+                int(update_by_model[model].update_interval_seconds or 0),
+            )
+            for model in usable_changed
+        ),
     )
 
 
@@ -223,12 +341,14 @@ def source_clock_scoped_download_allows_cursor_advance(report: Mapping[str, obje
 
 def source_clock_scoped_download_cursor_sources(
     report: Mapping[str, object] | None,
+    *,
+    source_clock_report: SourceClockUpdateProbeReport | Mapping[str, object] | None = None,
 ) -> tuple[str, ...]:
     if not isinstance(report, Mapping):
         return ()
     source_results = report.get("source_results")
     if isinstance(source_results, Mapping):
-        return tuple(
+        candidates = tuple(
             sorted(
                 str(source)
                 for source, result in source_results.items()
@@ -236,18 +356,37 @@ def source_clock_scoped_download_cursor_sources(
                 and str(result.get("status") or "") in _SOURCE_CURSOR_COMMIT_STATUSES
             )
         )
-    if not source_clock_scoped_download_allows_cursor_advance(report):
+    else:
+        if not source_clock_scoped_download_allows_cursor_advance(report):
+            return ()
+        candidates = tuple(
+            sorted(
+                str(source)
+                for source in (
+                    report.get("updated_sources")
+                    or report.get("source_clock_updated_sources")
+                    or ()
+                )
+                if str(source)
+            )
+        )
+    if source_clock_report is None or not isinstance(source_results, Mapping):
+        return candidates
+    probe_payload = (
+        source_clock_report.as_dict()
+        if isinstance(source_clock_report, SourceClockUpdateProbeReport)
+        else source_clock_report
+    )
+    frozen_runs = probe_payload.get("source_runs")
+    if not isinstance(frozen_runs, Mapping):
         return ()
     return tuple(
-        sorted(
-            str(source)
-            for source in (
-                report.get("updated_sources")
-                or report.get("source_clock_updated_sources")
-                or ()
-            )
-            if str(source)
-        )
+        source
+        for source in candidates
+        if isinstance(source_results.get(source), Mapping)
+        and isinstance(frozen_runs.get(source), Mapping)
+        and str(source_results[source].get("cycle") or "")
+        == str(frozen_runs[source].get("initialisation_time") or "")
     )
 
 
@@ -268,18 +407,34 @@ def advance_source_clock_cursor(
     )
     if not requested:
         return ()
-    updates_path = Path(str(payload.get("model_updates_path") or DEFAULT_MODEL_UPDATES_JSONL))
     cursor_path = Path(str(payload.get("cursor_path") or DEFAULT_CURSOR_JSON))
-    updates = read_model_updates_jsonl(updates_path)
-    next_by_model = _cursor_for_updates(updates)
-    old = _read_cursor(cursor_path)
-    committed: list[str] = []
+    cursor_values = payload.get("cursor_values")
+    cursor_preimage = payload.get("cursor_preimage")
+    source_runs = payload.get("source_runs")
+    if not isinstance(cursor_values, Mapping) or not isinstance(cursor_preimage, Mapping):
+        return ()
+    values: dict[str, str] = {}
+    preimage: dict[str, str | None] = {}
     for model in requested:
-        ts = next_by_model.get(model)
-        if ts is None:
+        if model not in cursor_values or model not in cursor_preimage:
             continue
-        old[model] = ts
-        committed.append(model)
-    if committed:
-        _write_cursor(cursor_path, old)
-    return tuple(sorted(committed))
+        ts = str(cursor_values[model])
+        expected_old = cursor_preimage[model]
+        expected_old = None if expected_old is None else str(expected_old)
+        if not ts:
+            continue
+        if isinstance(source_runs, Mapping):
+            source_run = source_runs.get(model)
+            match = _CURSOR_V3_RE.fullmatch(ts)
+            if (
+                not isinstance(source_run, Mapping)
+                or match is None
+                or match["initialisation"]
+                != str(source_run.get("initialisation_time") or "")
+                or match["availability"]
+                != str(source_run.get("availability_time") or "")
+            ):
+                continue
+        values[model] = ts
+        preimage[model] = expected_old
+    return _commit_cursor_values(cursor_path, values=values, preimage=preimage)

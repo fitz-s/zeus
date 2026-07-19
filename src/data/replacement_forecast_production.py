@@ -28,10 +28,11 @@ import functools
 import json
 import logging
 import math
+import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Lock
 from typing import Callable, Mapping, Sequence
@@ -49,6 +50,72 @@ _SOURCE_CLOCK_DOWNLOAD_INFLIGHT: dict[tuple[object, ...], object] = {}
 # appears or a quota window reopens, one round trip should advance many market
 # families instead of an arbitrary alphabetical city.
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
+_NONRETRYABLE_SOURCE_HTTP_STATUS_CODES = frozenset({400, 401, 403, 405, 410, 422})
+_SOURCE_HTTP_STATUS_PATTERNS = (
+    re.compile(r"status_code\s*[=:]\s*(\d{3})", re.IGNORECASE),
+    re.compile(r"(?:client|server) error\s+['\"](\d{3})\b", re.IGNORECASE),
+    re.compile(r"\bHTTP/\d(?:\.\d)?\s+(\d{3})\b", re.IGNORECASE),
+    re.compile(r"\bHTTP\s+(\d{3})\b", re.IGNORECASE),
+)
+_SOURCE_RETRYABLE_TRANSPORT_MARKERS = (
+    "connection",
+    "connect error",
+    "reset",
+    "timed out",
+    "timeout",
+    "dns",
+    "tls",
+    "ssl",
+    "certificate",
+    "eof",
+    "network",
+    "socket",
+    "proxy",
+    "rate limit",
+    "quota",
+    "too many requests",
+    "not available",
+    "not yet available",
+    "try again",
+)
+_SOURCE_PERMANENT_400_MARKERS = (
+    "invalid parameter",
+    "unsupported",
+    "must be",
+    "out of bounds",
+    "unknown model",
+    "no data is available for this location",
+)
+
+
+def _source_transport_error_is_nonretryable(
+    error: object,
+    *,
+    generic_400_is_terminal: bool = False,
+) -> bool:
+    """Whether one source-run delivery error is a deterministic client failure.
+
+    A terminal result advances only this source-run cursor; the next published run
+    remains independently eligible. Ambiguous/network failures, 404 propagation
+    gaps, timeout-style 408/425, rate-limit 429, and all 5xx remain retryable.
+    """
+
+    text = str(error or "")
+    lowered = text.lower()
+    if any(marker in lowered for marker in _SOURCE_RETRYABLE_TRANSPORT_MARKERS):
+        return False
+    codes = {
+        int(match.group(1))
+        for pattern in _SOURCE_HTTP_STATUS_PATTERNS
+        for match in pattern.finditer(text)
+    }
+    if not codes or not codes.issubset(_NONRETRYABLE_SOURCE_HTTP_STATUS_CODES):
+        return False
+    if codes == {400}:
+        return generic_400_is_terminal or any(
+            marker in lowered for marker in _SOURCE_PERMANENT_400_MARKERS
+        )
+    return True
 
 
 def _source_cycle_can_cover_full_local_day(
@@ -567,19 +634,65 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
 
         now = datetime.now(timezone.utc)
         source_cycles: dict[str, datetime] = {}
-        try:
-            updates_path = Path(str(payload.get("model_updates_path") or DEFAULT_MODEL_UPDATES_JSONL))
-            for update in read_model_updates_jsonl(updates_path):
-                source = str(update.model)
-                if source not in updated_sources:
+        source_availabilities: dict[str, datetime] = {}
+        source_generic_400_terminal: dict[str, bool] = {}
+        frozen_runs = payload.get("source_runs")
+        if isinstance(frozen_runs, Mapping):
+            for source in updated_sources:
+                frozen = frozen_runs.get(source)
+                if not isinstance(frozen, Mapping):
                     continue
-                run_clock = update.to_source_run_clock()
-                if now >= source_publicly_usable_at(run_clock):
-                    source_cycles[source] = (
-                        update.last_run_initialisation_time.astimezone(timezone.utc)
+                try:
+                    initialisation_raw = datetime.fromisoformat(
+                        str(frozen["initialisation_time"])
                     )
-        except Exception:
-            source_cycles = {}
+                    availability_raw = datetime.fromisoformat(
+                        str(frozen["availability_time"])
+                    )
+                    interval = int(frozen.get("update_interval_seconds") or 0)
+                    if (
+                        initialisation_raw.utcoffset() is None
+                        or availability_raw.utcoffset() is None
+                        or interval < 0
+                    ):
+                        raise ValueError("source-run identity must be aware and nonnegative")
+                    initialisation = initialisation_raw.astimezone(timezone.utc)
+                    availability = availability_raw.astimezone(timezone.utc)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                source_cycles[source] = initialisation
+                source_availabilities[source] = availability
+                source_generic_400_terminal[source] = (
+                    interval > 0
+                    and now >= availability + timedelta(seconds=interval)
+                )
+        else:
+            # Legacy diagnostic callers do not carry a cursor token and therefore
+            # cannot advance one from this mutable metadata fallback. Live probes
+            # always freeze source_runs alongside their exact cursor values.
+            try:
+                updates_path = Path(str(payload.get("model_updates_path") or DEFAULT_MODEL_UPDATES_JSONL))
+                for update in read_model_updates_jsonl(updates_path):
+                    source = str(update.model)
+                    if source not in updated_sources:
+                        continue
+                    run_clock = update.to_source_run_clock()
+                    if now >= source_publicly_usable_at(run_clock):
+                        source_cycles[source] = (
+                            update.last_run_initialisation_time.astimezone(timezone.utc)
+                        )
+                        source_availabilities[source] = (
+                            update.last_run_availability_time.astimezone(timezone.utc)
+                        )
+                        interval = int(update.update_interval_seconds or 0)
+                        source_generic_400_terminal[source] = (
+                            interval > 0
+                            and now
+                            >= update.last_run_availability_time.astimezone(timezone.utc)
+                            + timedelta(seconds=interval)
+                        )
+            except Exception:
+                source_cycles = {}
         unresolved_sources = tuple(
             source for source in updated_sources if source not in source_cycles
         )
@@ -876,6 +989,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     "transport_aborted_remaining_targets": True,
                     "global_models_expected": 1,
                     "global_models_unavailable": (source,),
+                    "single_runs_request_cycles": {
+                        source: cycle.isoformat(),
+                    },
                 }
             remaining = (
                 max(0.0, deadline - time.monotonic())
@@ -895,6 +1011,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                         cfg.get("download_release_lag_hours") or 14.0
                     ),
                     max_wall_clock_seconds=remaining,
+                    frozen_source_runs={
+                        source: (cycle, source_availabilities[source])
+                    },
                 )
             if bool(report.get("transport_aborted_remaining_targets")):
                 quota_abort.set()
@@ -1058,19 +1177,57 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             statuses = {
                 str(item.get("status") or "") for item in source_reports
             }
+            source_transport_errors = tuple(
+                str(value)
+                for item in source_reports
+                for value in (item.get("transport_errors") or ())
+            )
+            source_permanent_errors = tuple(
+                error
+                for error in source_transport_errors
+                if _source_transport_error_is_nonretryable(
+                    error,
+                    generic_400_is_terminal=source_generic_400_terminal.get(
+                        source,
+                        False,
+                    ),
+                )
+            )
             source_incomplete = any(
                 item.get("global_models_dropped_scoped")
                 or item.get("global_models_unavailable")
                 for item in source_reports
             )
+            expected_cycle = source_cycles[source].isoformat()
+            actual_cycles = {
+                str(cycle)
+                for item in source_reports
+                for cycle in (
+                    (item.get("single_runs_request_cycles") or {}).get(source),
+                )
+                if cycle
+            }
+            identity_mismatch = (
+                bool(targets_by_source[source])
+                and isinstance(frozen_runs, Mapping)
+                and actual_cycles != {expected_cycle}
+            )
             if not targets_by_source[source]:
                 status = "SOURCE_CLOCK_SOURCE_NO_TARGETS"
+            elif identity_mismatch:
+                status = "SOURCE_CLOCK_SOURCE_RUN_IDENTITY_MISMATCH"
             elif source in fanout_deadline_pending_sources:
                 status = "SOURCE_CLOCK_SOURCE_TIMEBOXED_INCOMPLETE"
             elif source_errors:
                 status = "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"
             elif "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE" in statuses:
                 status = "SOURCE_CLOCK_SOURCE_TIMEBOXED_INCOMPLETE"
+            elif (
+                "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses
+                and source_transport_errors
+                and len(source_permanent_errors) == len(source_transport_errors)
+            ):
+                status = "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
             elif (
                 "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses
                 or source_incomplete
@@ -1084,7 +1241,13 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 status = "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"
             source_results[source] = {
                 "status": status,
-                "cycle": source_cycles[source].isoformat(),
+                "cycle": (
+                    next(iter(actual_cycles))
+                    if len(actual_cycles) == 1
+                    else expected_cycle
+                ),
+                "expected_cycle": expected_cycle,
+                "actual_cycles": tuple(sorted(actual_cycles)),
                 "target_count": sum(
                     int(item.get("target_count") or 0)
                     for item in source_reports
@@ -1093,11 +1256,8 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     int(item.get("written_row_count") or 0)
                     for item in source_reports
                 ),
-                "transport_errors": tuple(
-                    value
-                    for item in source_reports
-                    for value in (item.get("transport_errors") or ())
-                ),
+                "transport_errors": source_transport_errors,
+                "permanent_errors": source_permanent_errors,
                 "fanout_errors": source_errors,
             }
 
@@ -1106,12 +1266,16 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         }
         if "SOURCE_CLOCK_SOURCE_CYCLE_UNRESOLVED" in source_statuses:
             status = "SOURCE_CLOCK_BPF_SCOPED_CYCLE_UNRESOLVED_PARTIAL"
+        elif "SOURCE_CLOCK_SOURCE_RUN_IDENTITY_MISMATCH" in source_statuses:
+            status = "SOURCE_CLOCK_BPF_SCOPED_RUN_IDENTITY_MISMATCH"
         elif "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED" in source_statuses:
             status = "SOURCE_CLOCK_BPF_SCOPED_CAPTURE_FAILSOFT_SKIPPED"
         elif "SOURCE_CLOCK_SOURCE_TIMEBOXED_INCOMPLETE" in source_statuses:
             status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
         elif "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE" in source_statuses:
             status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+        elif "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE" in source_statuses:
+            status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_PERMANENT_FAILURE"
         else:
             status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
 

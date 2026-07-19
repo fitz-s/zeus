@@ -747,7 +747,7 @@ def _shutdown_scheduler_if_running(scheduler: Any | None, *, wait: bool = True) 
 # ---------------------------------------------------------------------------
 
 _TRUTHFUL_FAIL_STATUSES = frozenset({
-    "REPLACEMENT_MAINTENANCE_PARTIAL",
+    "replacement_maintenance_partial",
     "download_failed",
     "empty_ingest",
     "extract_failed",
@@ -755,6 +755,14 @@ _TRUTHFUL_FAIL_STATUSES = frozenset({
     "market_scan_failed",
     "paused_mars_credentials",
     "bad_target_date",
+    "source_clock_scoped_bayes_precision_fusion_extra_permanent_failure",
+    "source_clock_scoped_bayes_precision_fusion_extra_transport_retryable",
+    "source_clock_scoped_bayes_precision_fusion_extra_timeboxed_incomplete",
+    "source_clock_bpf_scoped_quota_cooldown_skipped",
+    "source_clock_bpf_scoped_cycle_unresolved_skip",
+    "source_clock_bpf_scoped_cycle_unresolved_partial",
+    "source_clock_bpf_scoped_capture_failsoft_skipped",
+    "source_clock_bpf_scoped_run_identity_mismatch",
 })
 
 
@@ -805,6 +813,17 @@ def _classify_result(result) -> tuple[bool, str | None]:
     if not isinstance(result, dict):
         return False, None
     status = str(result.get("status", "")).lower()
+    source_results = result.get("source_results")
+    if isinstance(source_results, dict):
+        permanent_sources = sorted(
+            str(source)
+            for source, source_result in source_results.items()
+            if isinstance(source_result, dict)
+            and str(source_result.get("status") or "").lower()
+            == "source_clock_source_permanent_failure"
+        )
+        if permanent_sources:
+            return True, "source_run_permanent_failure:" + ",".join(permanent_sources)
     if status in _TRUTHFUL_FAIL_STATUSES:
         return True, status + (": " + str(result.get("error")) if result.get("error") else "")
     # Inserted=0 on a stage-failure dict (e.g., DR-33-A flag-off harvester)
@@ -2357,7 +2376,10 @@ def _replacement_availability_poll_tick():
             # No committed callback completed, or at least one callback failed.
             # Preserve the broad scan as the authoritative catch-up path.
             report = _attach_reseed_reports(report)
-    cursor_sources = source_clock_scoped_download_cursor_sources(report)
+    cursor_sources = source_clock_scoped_download_cursor_sources(
+        report,
+        source_clock_report=source_clock_report,
+    )
     advanced_sources = (
         advance_source_clock_cursor(source_clock_report, sources=cursor_sources)
         if cursor_sources

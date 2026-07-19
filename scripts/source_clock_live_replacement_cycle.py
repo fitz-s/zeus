@@ -39,7 +39,7 @@ from src.data.replacement_forecast_production import (  # noqa: E402
 from src.data.source_clock_update_probe import (  # noqa: E402
     advance_source_clock_cursor,
     probe_openmeteo_source_clock_updates,
-    source_clock_scoped_download_allows_cursor_advance,
+    source_clock_scoped_download_cursor_sources,
 )
 
 
@@ -73,10 +73,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         source_clock_report=source_clock_report,
     )
     report["source_clock_scoped_extra_model_download"] = _jsonable(scoped_source_clock_download)
-    if source_clock_scoped_download_allows_cursor_advance(scoped_source_clock_download):
-        report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(source_clock_report)
-    else:
-        report["source_clock_cursor_advanced_sources"] = ()
+    cursor_sources = source_clock_scoped_download_cursor_sources(
+        scoped_source_clock_download,
+        source_clock_report=source_clock_report,
+    )
+    report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(
+        source_clock_report,
+        sources=cursor_sources,
+    )
 
     extras_download = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
     report["extra_model_download"] = _jsonable(extras_download)
