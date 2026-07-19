@@ -32,7 +32,23 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HEARTBEAT_CADENCE_SECONDS = 2
 DEFAULT_HEARTBEAT_HTTP_TIMEOUT_SECONDS = 1.0
-DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 8
+# Measured 2026-07-19 (docs/evidence/capital_efficiency_2026_07_19/
+# heartbeat_killswitch_driver.md + this fix's episode-duration histogram over
+# logs/zeus-venue-heartbeat.err, 44-day window): the deployed writer
+# (com.zeus.venue-heartbeat.plist) runs cadence=5s, http_timeout=2s. Every tick
+# writes the status file regardless of outcome, so a healthy-but-slow writer's
+# worst-case gap between two consecutive writes is bounded by cadence + one
+# worst-case single-attempt duration; the timeout is the code-enforced ceiling on
+# that duration (heartbeat_http_timeout_seconds_from_env caps it at cadence/2).
+# At today's deployed values that bound is 5+2=7s -- only 1s under the prior
+# default of 8, a near-collision with no room for ordinary process/OS scheduling
+# jitter (GC, disk I/O, the per-tick watchdog subroutine) the pure HTTP-timing
+# model doesn't capture. 12s = cadence + timeout + one full extra cadence cycle
+# of headroom, so a healthy writer at deployed settings is never seen as stale
+# even if two consecutive ticks are maximally slow, while a genuinely dead writer
+# is still detected within 12s -- negligible next to the ~90-120s exit_monitor
+# decision cadence that actually consumes this gate on the money path.
+DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 12
 DEFAULT_HEARTBEAT_RESTART_SEED_MAX_AGE_SECONDS = 30
 DEFAULT_HEARTBEAT_LEASE_RECOVERY_SUCCESS_TICKS = 3
 HEARTBEAT_KEEPER_STATUS_FILENAME = "venue-heartbeat-keeper.json"

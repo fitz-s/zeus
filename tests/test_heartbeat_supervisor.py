@@ -26,6 +26,7 @@ import pytest
 from src.contracts import Direction, ExecutionIntent
 from src.contracts.slippage_bps import SlippageBps
 from src.control.heartbeat_supervisor import (
+    DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS,
     ExternalHeartbeatSupervisor,
     HeartbeatHealth,
     HeartbeatNotHealthy,
@@ -1258,6 +1259,102 @@ def test_external_heartbeat_supervisor_blocks_healthy_status_during_lease_gap(tm
     status_path.write_text(json.dumps(payload))
 
     assert supervisor.gate_for_order_type(OrderType.GTC) is True
+
+
+def _write_healthy_status_aged(status_path: Path, *, age_seconds: float) -> None:
+    write_heartbeat_keeper_status(
+        HeartbeatStatus(
+            health=HeartbeatHealth.HEALTHY,
+            last_success_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+            consecutive_failures=0,
+            heartbeat_id="keeper-id",
+            cadence_seconds=5,
+        ),
+        path=status_path,
+    )
+    payload = json.loads(status_path.read_text())
+    payload["written_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    ).isoformat()
+    status_path.write_text(json.dumps(payload))
+
+
+def test_freshness_window_survives_deployed_worst_case_writer_latency(tmp_path):
+    """R3 heartbeat freshness margin (2026-07-19 fix).
+
+    Measured (docs/evidence/capital_efficiency_2026_07_19/
+    heartbeat_killswitch_driver.md + this fix's episode-duration histogram over
+    logs/zeus-venue-heartbeat.err): the deployed writer
+    (com.zeus.venue-heartbeat.plist) runs cadence=5s, http_timeout=2s, and writes
+    the status file every tick regardless of outcome. The worst-case gap between
+    two consecutive writes for a still-alive writer is bounded by
+    cadence + one worst-case single-attempt duration (the HTTP timeout is a
+    code-enforced ceiling on that duration) = 5 + 2 = 7s. The prior default
+    (8s) left only 1s of margin over that bound -- no room for ordinary
+    process/OS scheduling jitter. This asserts a healthy writer is never
+    misclassified LOST at that 7s deployed-worst-case gap, nor even with an
+    extra ~1.4s of unmodeled jitter on top (8.4s, which would already have
+    tripped the prior 8s default), under the new default window.
+    """
+
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    deployed_worst_case_gap = 5 + 2  # cadence_seconds + http_timeout_seconds
+
+    _write_healthy_status_aged(status_path, age_seconds=float(deployed_worst_case_gap))
+    supervisor = ExternalHeartbeatSupervisor(
+        status_path=status_path,
+        max_age_seconds=DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS,
+        cadence_seconds=5,
+    )
+    assert supervisor.status().health is HeartbeatHealth.HEALTHY
+    assert supervisor.gate_for_order_type(OrderType.GTC) is True
+
+    # Additional unmodeled jitter on top of the pure HTTP-timing bound: this
+    # would already have exceeded the prior 8s default (7 + 1.4 = 8.4 > 8).
+    jittery_gap = deployed_worst_case_gap + 1.4
+    _write_healthy_status_aged(status_path, age_seconds=jittery_gap)
+    supervisor_new = ExternalHeartbeatSupervisor(
+        status_path=status_path,
+        max_age_seconds=DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS,
+        cadence_seconds=5,
+    )
+    assert supervisor_new.status().health is HeartbeatHealth.HEALTHY
+
+    supervisor_old = ExternalHeartbeatSupervisor(
+        status_path=status_path,
+        max_age_seconds=8,
+        cadence_seconds=5,
+    )
+    assert supervisor_old.status().health is HeartbeatHealth.LOST
+    assert supervisor_old.status().status_reason == "heartbeat_snapshot_expired"
+
+
+def test_freshness_window_still_detects_dead_writer_within_bound(tmp_path):
+    """A writer that has truly stopped ticking is still detected as LOST well
+
+    within the new window, and that detection bound remains negligible next to
+    the ~90-120s exit_monitor decision cadence (this fix's own DB measurement
+    of decision_log timestamps) that actually consumes this gate on the money
+    path.
+    """
+
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    _write_healthy_status_aged(
+        status_path,
+        age_seconds=float(DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS) + 0.5,
+    )
+    supervisor = ExternalHeartbeatSupervisor(
+        status_path=status_path,
+        max_age_seconds=DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS,
+        cadence_seconds=5,
+    )
+    status = supervisor.status()
+    assert status.health is HeartbeatHealth.LOST
+    assert status.status_reason == "heartbeat_snapshot_expired"
+    assert supervisor.gate_for_order_type(OrderType.GTC) is False
+
+    exit_monitor_min_observed_cadence_seconds = 90  # measured, see fix commit body
+    assert DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS < exit_monitor_min_observed_cadence_seconds
 
 
 def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
