@@ -326,7 +326,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             condition_id="condition-sell",
             side="NO",
             token_id="token-sell",
-            held_shares=Decimal("12.34"),
+            held_shares=Decimal("12.346602"),
         ),
         global_batch_runtime._CurrentHeldObligation(
             position_id="position-q-missing",
@@ -362,7 +362,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 condition_id="condition-sell",
                 side="NO",
                 token_id="token-sell",
-                held_shares=Decimal("12.34"),
+                held_shares=Decimal("12.346602"),
                 ledger_snapshot_id="ledger-current",
                 probability_witness_identity="q-sell",
                 wealth_economic_identity="wealth-economics-current",
@@ -16546,8 +16546,8 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         token_id="yes-token",
         no_token_id="no-token",
         condition_id="condition-1",
-        chain_shares=10.0,
-        effective_shares=10.0,
+        chain_shares=10.006602,
+        effective_shares=10.006602,
         exit_state="",
         last_exit_order_id="",
         state="holding",
@@ -16607,10 +16607,13 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
 
     def execute_exit(portfolio_arg, position_arg, context, **kwargs):
         exits.append((portfolio_arg, position_arg, context, kwargs))
-        assert kwargs["exit_intent"].exact_limit_price == pytest.approx(0.50)
-        assert kwargs["exit_intent"].shares == pytest.approx(6.0)
-        assert kwargs["exit_intent"].close_position is False
-        assert kwargs["exit_intent"].submit_order_type == "FAK"
+        intent = kwargs["exit_intent"]
+        assert intent.exact_limit_price == pytest.approx(0.50)
+        assert intent.shares == pytest.approx(6.0)
+        assert intent.close_position is False
+        assert intent.submit_order_type == "FAK"
+        assert intent.capital_certificate["held_shares"] == "10.006602"
+        assert intent.capital_certificate["sellable_shares"] == "10"
         evidence = kwargs["execution_evidence"]
         evidence.venue_call_started = True
         evidence.venue_ack_received = True

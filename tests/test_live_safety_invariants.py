@@ -20,7 +20,7 @@ import sqlite3
 import zlib
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -11910,20 +11910,26 @@ def test_live_execute_exit_blocks_stale_market_price_context():
 def _global_sell_exit_intent(position, *, certificate=None):
     from src.execution.exit_lifecycle import ExitIntent
 
+    exact = Decimal(str(position.effective_shares))
+    sellable = exact.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
     return ExitIntent(
         trade_id=position.trade_id,
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
         token_id=position.token_id,
-        shares=position.effective_shares,
+        shares=sellable,
         current_market_price=0.45,
         best_bid=0.45,
         exact_limit_price=0.45,
         submit_order_type="FAK",
+        close_position=sellable >= exact - Decimal("1e-9"),
         capital_certificate=certificate,
     )
 
 
 def _valid_global_sell_certificate(position):
+    sellable = Decimal(str(position.effective_shares)).quantize(
+        Decimal("0.01"), rounding=ROUND_FLOOR
+    )
     return {
         "action": "SELL",
         "candidate_id": "global-sell-candidate",
@@ -11933,7 +11939,8 @@ def _valid_global_sell_certificate(position):
         "robust_delta_log_wealth": "0.001",
         "robust_ev_usd": "0.10",
         "held_shares": str(position.effective_shares),
-        "selected_shares": str(position.effective_shares),
+        "sellable_shares": str(sellable),
+        "selected_shares": str(sellable),
         "exact_limit_price": "0.45",
     }
 
@@ -11995,6 +12002,7 @@ def test_local_exit_without_capital_certificate_cannot_reach_venue(monkeypatch):
         {"robust_delta_log_wealth": "-0.001"},
         {"robust_ev_usd": "0"},
         {"held_shares": "1"},
+        {"sellable_shares": "1"},
         {"selected_shares": "1"},
         {"exact_limit_price": "0.44"},
     ],
@@ -12031,7 +12039,7 @@ def test_complete_global_sell_capital_certificate_can_reach_venue(monkeypatch):
 
     from src.execution import exit_lifecycle
 
-    pos = _make_position(state="holding")
+    pos = _make_position(state="holding", shares=7.036602)
     portfolio = _make_portfolio(pos)
     submitted = []
     monkeypatch.setattr(
@@ -12074,7 +12082,7 @@ def test_complete_global_sell_capital_certificate_can_reach_venue(monkeypatch):
 
     assert outcome == "sell_pending: order=global-sell-order, status=OPEN"
     assert len(submitted) == 1
-    assert submitted[0]["shares"] == pos.effective_shares
+    assert submitted[0]["shares"] == Decimal("7.03")
     assert submitted[0]["exact_limit_price"] == 0.45
 
 

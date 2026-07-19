@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 import hashlib
 import json
 import logging
@@ -1090,7 +1090,9 @@ def _store_global_auction_receipt(
             row.condition_id,
             row.side,
             row.token_id,
-            Decimal(row.held_shares),
+            Decimal(row.held_shares).quantize(
+                Decimal("0.01"), rounding=ROUND_FLOOR
+            ),
         )
         for row in holding_coverage
         if row.status == "EVALUATED"

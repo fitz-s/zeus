@@ -25,7 +25,7 @@ import time as _time_module
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from inspect import Parameter, signature
 from types import SimpleNamespace
 from typing import Callable, Optional
@@ -2022,6 +2022,16 @@ def _global_sell_capital_certificate_error(
 
     if not matches_decimal("held_shares", position.effective_shares):
         return "capital_certificate_held_shares_mismatch"
+    try:
+        exact_held = Decimal(str(position.effective_shares))
+        selected = Decimal(str(exit_intent.shares))
+    except (InvalidOperation, TypeError, ValueError):
+        return "capital_certificate_sellable_shares_mismatch"
+    sellable = exact_held.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    if not matches_decimal("sellable_shares", sellable):
+        return "capital_certificate_sellable_shares_mismatch"
+    if not selected.is_finite() or selected <= 0 or selected > sellable:
+        return "capital_certificate_selected_shares_exceeds_sellable"
     if not matches_decimal("selected_shares", exit_intent.shares):
         return "capital_certificate_selected_shares_mismatch"
     if exit_intent.exact_limit_price is None:

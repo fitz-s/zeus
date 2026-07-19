@@ -160,7 +160,7 @@ import zlib
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable, TypeVar, get_args
 
@@ -10559,11 +10559,19 @@ def _current_global_sell_position(
         != str(getattr(candidate, "condition_id", "") or "")
     ):
         raise ValueError("GLOBAL_SELL_POSITION_TOKEN_SUPERSEDED")
-    held = Decimal(str(getattr(candidate, "held_shares", "0") or "0"))
+    sellable = Decimal(str(getattr(candidate, "held_shares", "0") or "0"))
     chain = Decimal(str(getattr(position, "chain_shares", 0) or 0))
     effective = Decimal(str(getattr(position, "effective_shares", 0) or 0))
     tolerance = Decimal("1e-9")
-    if abs(chain - held) > tolerance or abs(effective - held) > tolerance:
+    exact_sellable = effective.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    if (
+        not all(
+            value.is_finite() and value > 0
+            for value in (sellable, chain, effective)
+        )
+        or abs(chain - effective) > tolerance
+        or sellable != exact_sellable
+    ):
         raise ValueError("GLOBAL_SELL_POSITION_SHARES_SUPERSEDED")
     exit_state_raw = getattr(position, "exit_state", "")
     exit_state = str(getattr(exit_state_raw, "value", exit_state_raw) or "")
@@ -10933,7 +10941,8 @@ def _submit_current_global_sell(
                         getattr(decision, "robust_delta_log_wealth")
                     ),
                     "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
-                    "held_shares": str(getattr(candidate, "held_shares", "")),
+                    "held_shares": str(getattr(position, "effective_shares", "")),
+                    "sellable_shares": str(getattr(candidate, "held_shares", "")),
                     "selected_shares": str(getattr(decision, "shares", "")),
                     "selected_cash_proceeds_usd": str(
                         getattr(decision, "cash_proceeds_usd", "")
