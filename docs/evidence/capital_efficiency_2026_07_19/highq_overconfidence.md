@@ -276,12 +276,14 @@ incomplete data.** Concretely, in order of what changes:
      no-submit path already is — this is the source that actually has
      canonical strategy identity and is large enough (99+15=114 in-band) to
      let Levels 1–3 engage.
-   - Only then arm `settlement_coverage_hierarchy_enabled` (start in a
-     shadow/diagnostic run — the module already computes `q_exec` without
-     being consumed live if the flag stays off in the sizing path but a
-     script calls `hierarchical_coverage_check` directly for monitoring, as
-     done in §1b/§5 above — before flipping it into the live Kelly/admission
-     path).
+   - Only then arm `settlement_coverage_hierarchy_enabled` directly in the
+     live Kelly/admission sizing path. The gate is the correctness proof in
+     item 6 below (invariant tests green + walk-forward backtest lands
+     `q_exec` within a few points of the ~63% empirical frequency) — not a
+     time-boxed or diagnostic-only observation period. `hierarchical_
+     coverage_check` may still be called directly for one-shot measurement
+     while building that proof (as done in §1b/§5 above), but that is a
+     correctness check, not a staged rollout tier the flag must pass through.
 5. **What must NOT be done**: do not build a second, parallel recalibration
    layer (regime_unification U1/U3 forbids era-layering); do not touch
    `mu*`/`sigma_pred`/the Normal q construction to "fix" this — the PIT

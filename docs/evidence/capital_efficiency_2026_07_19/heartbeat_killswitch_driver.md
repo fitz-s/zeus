@@ -136,9 +136,12 @@ network jitter, not just outright outages, likely also contributes to the
 count. This margin was **not** touched by either fix commit and remains a
 live (now lower-stakes, entries-only) contributor to reduce_only frequency
 going forward. Distinguishing "genuine sustained venue outage" from "jitter
-inside the 3s margin" would require per-episode duration histograms this
-investigation did not build (time-boxed); flagging it rather than
-quantifying it further.
+inside the 3s margin" is a direct measurement task against the existing
+30-day `decision_log` and heartbeat-keeper logs already on disk — build
+per-episode duration histograms from that history now, no new data
+collection or waiting period required. This investigation did not build
+them (time-boxed); flagging as the next direct measurement, not quantifying
+further here.
 
 ---
 
@@ -179,9 +182,10 @@ exists in the working tree:
 3. **Open, unaddressed, separate item**: the 8s freshness window vs 5s
    writer cadence / 2s HTTP timeout margin (`heartbeat_supervisor.py:35`,
    `com.zeus.venue-heartbeat.plist`) is tight and was not touched by either
-   commit — worth a follow-up investigation into episode-duration histograms
-   to determine whether widening it (with corresponding risk analysis) is
-   warranted, since it will keep the now-safe reduce_only-only trip firing
-   fairly often on ordinary CLOB API latency.
+   commit. Next direct step: build the episode-duration histograms from the
+   existing 30-day `decision_log` + heartbeat-keeper logs (already on disk,
+   §3 above) to size genuine-outage vs jitter, then decide whether widening
+   the window is warranted — a measurement to run now against history, not
+   a forward observation window to sit through.
 
 Report: `/Users/leofitz/zeus/docs/evidence/capital_efficiency_2026_07_19/heartbeat_killswitch_driver.md`
