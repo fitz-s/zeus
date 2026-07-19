@@ -4647,6 +4647,129 @@ def test_entry_matched_status_preserves_partial_quantity_truth():
     ) == "0.01"
 
 
+def test_entry_matched_typed_wire_size_does_not_invent_unsubmitted_remainder():
+    """A typed V2 submit may quantize the request before signing the order."""
+    from src.execution.executor import (
+        _venue_submit_order_fact_state,
+        _venue_submit_remaining_size,
+    )
+
+    result = {
+        "status": "MATCHED",
+        "_venue_response_contract": "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS",
+        "_v2_taking_amount": "5.05",
+        "_v2_making_amount": "3.03",
+        "_v2_matched_size": "5.05",
+        "_venue_submission_envelope": {
+            "signed_order": (
+                'b\'{"makerAmount":"3030000","takerAmount":"5050000",'
+                '"side":0}\''
+            ),
+        },
+    }
+
+    assert _venue_submit_order_fact_state(
+        result,
+        matched_size="5.05",
+        submitted_size="5.06",
+        side="BUY",
+    ) == "MATCHED"
+    assert _venue_submit_remaining_size(
+        result,
+        "5.06",
+        matched_size="5.05",
+        side="BUY",
+    ) == "0"
+
+
+def test_exit_matched_typed_wire_size_uses_signed_maker_shares():
+    from src.execution.executor import (
+        _venue_submit_order_fact_state,
+        _venue_submit_remaining_size,
+    )
+
+    result = {
+        "status": "MATCHED",
+        "_venue_response_contract": "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS",
+        "_v2_matched_size": "4.99",
+        "_venue_submission_envelope": {
+            "signed_order": (
+                'b\'{"makerAmount":"4990000","takerAmount":"2495000",'
+                '"side":1}\''
+            ),
+        },
+    }
+
+    assert _venue_submit_order_fact_state(
+        result,
+        matched_size="4.99",
+        submitted_size="5",
+        side="SELL",
+    ) == "MATCHED"
+    assert _venue_submit_remaining_size(
+        result,
+        "5",
+        matched_size="4.99",
+        side="SELL",
+    ) == "0"
+
+
+def test_entry_matched_human_fill_does_not_guess_wire_size_without_preimage():
+    from src.execution.executor import (
+        _venue_submit_order_fact_state,
+        _venue_submit_remaining_size,
+    )
+
+    result = {
+        "status": "MATCHED",
+        "_venue_response_contract": "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS",
+        "_v2_taking_amount": "4.99",
+        "_v2_making_amount": "2.495",
+        "_v2_matched_size": "4.99",
+    }
+
+    assert _venue_submit_order_fact_state(
+        result,
+        matched_size="4.99",
+        submitted_size="5",
+        side="BUY",
+    ) == "PARTIALLY_MATCHED"
+    assert _venue_submit_remaining_size(
+        result,
+        "5",
+        matched_size="4.99",
+        side="BUY",
+    ) == "0.01"
+
+
+@pytest.mark.parametrize("signed_order", [b"\xff", "[]"])
+def test_entry_matched_human_malformed_signed_preimage_stays_partial(signed_order):
+    from src.execution.executor import (
+        _venue_submit_order_fact_state,
+        _venue_submit_remaining_size,
+    )
+
+    result = {
+        "status": "MATCHED",
+        "_venue_response_contract": "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS",
+        "_v2_matched_size": "4.99",
+        "_venue_submission_envelope": {"signed_order": signed_order},
+    }
+
+    assert _venue_submit_order_fact_state(
+        result,
+        matched_size="4.99",
+        submitted_size="5",
+        side="BUY",
+    ) == "PARTIALLY_MATCHED"
+    assert _venue_submit_remaining_size(
+        result,
+        "5",
+        matched_size="4.99",
+        side="BUY",
+    ) == "0.01"
+
+
 # ---------------------------------------------------------------------------
 # Idempotency collision retry (MEDIUM-1) — both paths
 # ---------------------------------------------------------------------------

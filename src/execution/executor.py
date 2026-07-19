@@ -2743,7 +2743,9 @@ def _venue_submit_order_fact_state(
             if matched_size is not None
             else _venue_submit_matched_size(result, side=side)
         )
-        submitted = _decimal_or_none(submitted_size)
+        submitted = _venue_submit_wire_size(result, side=side_value)
+        if submitted is None:
+            submitted = _decimal_or_none(submitted_size)
         if (
             matched is not None
             and submitted is not None
@@ -2754,6 +2756,56 @@ def _venue_submit_order_fact_state(
     if status in {"PARTIALLY_MATCHED", "PARTIAL", "PARTIALLY_FILLED"}:
         return "PARTIALLY_MATCHED"
     return "LIVE"
+
+
+def _venue_submit_wire_size(
+    result: dict,
+    *,
+    side: str | None = None,
+) -> Decimal | None:
+    """Return the share quantity actually encoded in a typed V2 submit.
+
+    The SDK can quantize a requested BUY before signing.  HUMAN response
+    amounts describe the fill, so they cannot prove the original wire size;
+    only the bound signed-order preimage can.  Missing or malformed preimages
+    retain the conservative requested-size comparison.
+    """
+
+    contract = _first_submit_value(result, "_venue_response_contract")
+    side_value = _venue_submit_side(result, side=side)
+    if contract == "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS":
+        envelope = _first_submit_value(result, "_venue_submission_envelope")
+        if not isinstance(envelope, Mapping):
+            return None
+        signed = envelope.get("signed_order")
+        try:
+            if isinstance(signed, bytes):
+                text = signed.decode("utf-8", errors="strict")
+            elif isinstance(signed, str):
+                text = signed.strip()
+                if len(text) >= 3 and text[0] == "b" and text[1] in {"'", '"'}:
+                    quote = text[1]
+                    if text[-1] != quote:
+                        return None
+                    text = text[2:-1]
+            else:
+                return None
+            signed_payload = json.loads(text)
+        except (json.JSONDecodeError, TypeError, ValueError, UnicodeError):
+            return None
+        if not isinstance(signed_payload, Mapping):
+            return None
+        expected_side = "1" if side_value == "SELL" else "0"
+        if str(signed_payload.get("side")) != expected_side:
+            return None
+        key = "makerAmount" if side_value == "SELL" else "takerAmount"
+        amount = _positive_decimal_or_none(signed_payload.get(key))
+        return amount / Decimal("1000000") if amount is not None else None
+    if contract == "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER":
+        return _positive_decimal_or_none(
+            _first_submit_value(result, "_v2_original_size")
+        )
+    return None
 
 
 def _venue_submit_matched_size(
@@ -2806,7 +2858,9 @@ def _venue_submit_remaining_size(
         if matched_size is not None
         else _venue_submit_matched_size(result, side=side)
     )
-    fallback = _decimal_or_none(fallback_size)
+    fallback = _venue_submit_wire_size(result, side=side)
+    if fallback is None:
+        fallback = _decimal_or_none(fallback_size)
     if status in {"MATCHED", "FILLED"} and matched is not None:
         if fallback is not None and fallback > matched:
             return _decimal_text(fallback - matched)
