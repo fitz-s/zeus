@@ -758,6 +758,9 @@ class TestDay0MetarSourceClockTick:
 
         monkeypatch.setattr(im, "_DAY0_METAR_PENDING_COMMITS", [])
         monkeypatch.setattr(im, "_DAY0_METAR_COMMIT_LOCK", threading.Lock())
+        monkeypatch.setattr(im, "_DAY0_METAR_RETRY_LOCK", threading.Lock())
+        monkeypatch.setattr(im, "_DAY0_METAR_RETRY_FAILURES", 0)
+        monkeypatch.setattr(im, "_DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC", 0.0)
         monkeypatch.setattr(im, "_day0_source_family_admission", lambda _eligible: None)
         monkeypatch.setattr(im, "_day0_priority_scopes", lambda: frozenset())
         monkeypatch.setattr(
@@ -1278,6 +1281,73 @@ class TestDay0MetarSourceClockTick:
         assert kwargs["replace_existing"] is True
         assert kwargs["run_date"] is not None
 
+    def test_writer_contention_retry_coalesces_with_bounded_exponential_backoff(
+        self,
+        monkeypatch,
+    ):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        im._DAY0_METAR_PENDING_COMMITS.append((object(), "received", True, None))
+        scheduled = []
+        now_monotonic = [100.0]
+        now_utc = datetime(2026, 7, 19, tzinfo=timezone.utc)
+
+        class _Clock:
+            @classmethod
+            def now(cls, _tz):
+                return now_utc
+
+        monkeypatch.setattr(im, "datetime", _Clock)
+        monkeypatch.setattr(im.time, "monotonic", lambda: now_monotonic[0])
+        monkeypatch.setattr(
+            im,
+            "_scheduler",
+            SimpleNamespace(
+                add_job=lambda *args, **kwargs: scheduled.append((args, kwargs))
+            ),
+        )
+
+        assert im._schedule_day0_metar_commit_retry() is True
+        assert len(scheduled) == 1
+        assert (
+            scheduled[-1][1]["run_date"] - now_utc
+        ).total_seconds() == pytest.approx(0.25)
+
+        now_monotonic[0] = 100.1
+        assert im._schedule_day0_metar_commit_retry() is True
+        assert len(scheduled) == 1
+
+        now_monotonic[0] = 100.25
+        assert im._schedule_day0_metar_commit_retry() is True
+        assert len(scheduled) == 2
+        assert (
+            scheduled[-1][1]["run_date"] - now_utc
+        ).total_seconds() == pytest.approx(0.5)
+
+        now_monotonic[0] = 100.75
+        assert im._schedule_day0_metar_commit_retry() is True
+        assert len(scheduled) == 3
+        assert (
+            scheduled[-1][1]["run_date"] - now_utc
+        ).total_seconds() == pytest.approx(1.0)
+
+        for now in (101.75, 103.75, 107.75, 112.75):
+            now_monotonic[0] = now
+            assert im._schedule_day0_metar_commit_retry() is True
+        assert len(scheduled) == 7
+        assert (
+            scheduled[-1][1]["run_date"] - now_utc
+        ).total_seconds() == pytest.approx(5.0)
+        assert (
+            im._DAY0_METAR_RETRY_FAILURES
+            == im.DAY0_METAR_COMMIT_RETRY_MAX_FAILURES
+        )
+
+        im._reset_day0_metar_commit_retry()
+        assert im._DAY0_METAR_RETRY_FAILURES == 0
+        assert im._DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC == 0.0
+
     def test_unified_writer_gate_contention_defers_before_db_open(
         self,
         monkeypatch,
@@ -1419,6 +1489,8 @@ class TestDay0MetarSourceClockTick:
         assert order.index("commit") < order.index("wake:event-day0")
         assert not im._DAY0_METAR_PENDING_COMMITS
         assert len(scheduled) == 1
+        assert im._DAY0_METAR_RETRY_FAILURES == 0
+        assert im._DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC == 0.0
 
     def test_commit_failure_does_not_advance_memo_before_retry(
         self,

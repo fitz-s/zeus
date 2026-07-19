@@ -53,11 +53,16 @@ REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_
 DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
 DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
 DAY0_METAR_COMMIT_RETRY_SECONDS = 0.25
+DAY0_METAR_COMMIT_RETRY_MAX_SECONDS = 5.0
+DAY0_METAR_COMMIT_RETRY_MAX_FAILURES = 6
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 _DAY0_METAR_EMITTER: Any | None = None
 _DAY0_METAR_COMMIT_LOCK = threading.Lock()
 _DAY0_METAR_PENDING_COMMITS: list[tuple[Any, str, bool, Any | None]] = []
+_DAY0_METAR_RETRY_LOCK = threading.Lock()
+_DAY0_METAR_RETRY_FAILURES = 0
+_DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
@@ -539,30 +544,65 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
 
 
 def _schedule_day0_metar_commit_retry() -> bool:
-    """Schedule one retry only while a prefetched canonical write is pending."""
+    """Coalesce a pending Day0 write into one bounded-backoff retry."""
+
+    global _DAY0_METAR_RETRY_FAILURES, _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC
 
     if _scheduler is None:
         logger.error("DAY0_METAR_COMMIT_RETRY_NOT_SCHEDULED reason=scheduler_unavailable")
         return False
-    _scheduler.add_job(
-        _day0_metar_commit_retry_tick,
-        "date",
-        run_date=datetime.now(timezone.utc)
-        + timedelta(seconds=DAY0_METAR_COMMIT_RETRY_SECONDS),
-        id="ingest_day0_metar_commit_retry",
-        executor="source_clock_db",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=1,
-        replace_existing=True,
-    )
+
+    with _DAY0_METAR_RETRY_LOCK:
+        if not _DAY0_METAR_PENDING_COMMITS:
+            return False
+        now_monotonic = time.monotonic()
+        if now_monotonic < _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC:
+            return True
+        failures = min(
+            _DAY0_METAR_RETRY_FAILURES + 1,
+            DAY0_METAR_COMMIT_RETRY_MAX_FAILURES,
+        )
+        delay_seconds = min(
+            DAY0_METAR_COMMIT_RETRY_SECONDS * (2 ** (failures - 1)),
+            DAY0_METAR_COMMIT_RETRY_MAX_SECONDS,
+        )
+        _scheduler.add_job(
+            _day0_metar_commit_retry_tick,
+            "date",
+            run_date=datetime.now(timezone.utc)
+            + timedelta(seconds=delay_seconds),
+            id="ingest_day0_metar_commit_retry",
+            executor="source_clock_db",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=1,
+            replace_existing=True,
+        )
+        _DAY0_METAR_RETRY_FAILURES = failures
+        _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC = now_monotonic + delay_seconds
+        logger.info(
+            "DAY0_METAR_COMMIT_RETRY_SCHEDULED failures=%d delay_seconds=%.3f",
+            failures,
+            delay_seconds,
+        )
     return True
+
+
+def _reset_day0_metar_commit_retry() -> None:
+    """Clear a contention streak once its pending write has closed."""
+
+    global _DAY0_METAR_RETRY_FAILURES, _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC
+    with _DAY0_METAR_RETRY_LOCK:
+        _DAY0_METAR_RETRY_FAILURES = 0
+        _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 
 
 def _commit_or_schedule_day0_metar(*, origin: str) -> dict:
     result = _commit_pending_day0_metar(origin=origin)
     if result.get("status") in {"COMMIT_ACTIVE", "WRITE_CONTENDED"}:
         _schedule_day0_metar_commit_retry()
+    else:
+        _reset_day0_metar_commit_retry()
     return result
 
 

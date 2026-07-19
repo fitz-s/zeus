@@ -26,6 +26,7 @@ in_scope:
 - src/data/openmeteo_quota.py
 - src/data/bayes_precision_fusion_download.py
 - src/data/replacement_forecast_production.py
+- src/ingest_main.py
 - src/main.py
 - src/engine/position_belief.py
 - src/execution/venue_sync_contract.py
@@ -111,6 +112,7 @@ in_scope:
 - tests/test_risk_allocator.py
 - tests/solve/test_shim_decide.py
 - tests/solve/test_menu_adapter.py
+- tests/solve/test_solver_properties.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py
 - tests/AGENTS.md
 - architecture/test_topology.yaml

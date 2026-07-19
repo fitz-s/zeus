@@ -2653,6 +2653,7 @@ def _positive_fill_trade_fact_summary(
         params = (command_id, str(venue_order_id))
     sql = "WITH " + _canonical_trade_fact_cte() + ", " + _economic_trade_fact_cte() + """
         SELECT fact.filled_size,
+               fact.fill_price,
                fact.source,
                fact.state,
                fact.observed_at,
@@ -2667,6 +2668,8 @@ def _positive_fill_trade_fact_summary(
     ).fetchall()
     count = 0
     filled = Decimal("0")
+    cost = Decimal("0")
+    priced = Decimal("0")
     authenticated_confirmed = True
     valid_source_times = 0
     latest_source_time: tuple[datetime, str] | None = None
@@ -2681,6 +2684,10 @@ def _positive_fill_trade_fact_summary(
             continue
         count += 1
         filled += size
+        price = _positive_decimal_or_none(fact.get("fill_price"))
+        if price is not None:
+            priced += size
+            cost += size * price
         authenticated_confirmed = authenticated_confirmed and (
             str(fact.get("source") or "").upper() == "WS_USER"
             and str(fact.get("state") or "").upper() == "CONFIRMED"
@@ -2696,6 +2703,11 @@ def _positive_fill_trade_fact_summary(
     return {
         "count": count,
         "filled_size": _decimal_text(filled),
+        "fill_price": (
+            _decimal_text(cost / filled)
+            if filled > 0 and priced == filled and cost > 0
+            else ""
+        ),
         "authenticated_confirmed": (
             count > 0
             and authenticated_confirmed
@@ -2946,6 +2958,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
         "venue_commands",
         "venue_trade_facts",
         "position_current",
+        "position_events",
         "venue_submission_envelopes",
         "executable_market_snapshots",
     }
@@ -2975,6 +2988,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                COALESCE(NULLIF(entry_fill.venue_timestamp, ''), entry_fill.observed_at) AS fill_observed_at,
                entry_fill.fill_states AS fill_states,
                entry_fill.trade_fact_id AS source_trade_fact_id,
+               pc.phase AS projected_phase,
                env.condition_id AS env_condition_id,
                env.yes_token_id AS env_yes_token_id,
                env.no_token_id AS env_no_token_id,
@@ -3006,6 +3020,22 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     AND ABS(CAST(COALESCE(pc.shares, '0') AS REAL)) <= 0.000000001
                     AND ABS(CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL)) <= 0.000000001
                     AND COALESCE(pc.fill_authority, '') IN ('', 'none')
+                )
+                OR (
+                    cmd.state = 'PARTIAL'
+                    AND pc.phase IN ('active', 'day0_window')
+                    AND COALESCE(pc.order_id, '') != ''
+                    AND lower(pc.order_id) != lower(cmd.venue_order_id)
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM position_events pe
+                         WHERE pe.position_id = cmd.position_id
+                           AND pe.event_type = 'ENTRY_ORDER_FILLED'
+                           AND (
+                                pe.command_id = cmd.command_id
+                                OR lower(COALESCE(pe.order_id, '')) = lower(cmd.venue_order_id)
+                           )
+                    )
                 )
            )
            AND NOT EXISTS (
@@ -4351,6 +4381,48 @@ def _append_filled_entry_projection_repair(
     from src.state.ledger import append_many_and_project
     from src.state.projection import upsert_position_current
 
+    projected_phase = str(candidate.get("projected_phase") or "")
+    if projected_phase in {"active", "day0_window"}:
+        command_id = str(candidate.get("command_id") or "")
+        position_id = str(candidate.get("position_id") or "")
+        venue_order_id = str(candidate.get("venue_order_id") or "")
+        existing_fill = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND (command_id = ? OR lower(COALESCE(order_id, '')) = lower(?))
+             LIMIT 1
+            """,
+            (position_id, command_id, venue_order_id),
+        ).fetchone()
+        _append_matched_order_fill_projection(
+            conn,
+            command=candidate,
+            venue_order_id=venue_order_id,
+            matched_size=str(candidate.get("fill_filled_size") or ""),
+            fill_price=str(candidate.get("fill_price") or candidate.get("price") or ""),
+            observed_at=str(candidate.get("fill_observed_at") or _now_iso()),
+        )
+        projected_fill = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND (command_id = ? OR lower(COALESCE(order_id, '')) = lower(?))
+             LIMIT 1
+            """,
+            (position_id, command_id, venue_order_id),
+        ).fetchone()
+        if projected_fill is None:
+            raise RuntimeError(
+                "filled entry increment repair did not produce a command-bound "
+                f"projection event: command_id={command_id}"
+            )
+        return existing_fill is None
+
     candidate = _hydrate_command_execution_identity(conn, candidate)
     trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
     if not trade_case:
@@ -4612,11 +4684,34 @@ def ensure_live_entry_projection_for_command(
     ):
         projected_phase = str(current_map.get("projected_phase") or "")
         venue_order_id = str(current_map.get("venue_order_id") or "").strip()
+        fill_summary = (
+            _positive_fill_trade_fact_summary(
+                conn,
+                command_id,
+                venue_order_id=venue_order_id,
+            )
+            if current_state == "PARTIAL" and venue_order_id
+            else {}
+        )
+        projected_fill_size_raw = (
+            fill_summary.get("filled_size")
+            if current_state == "PARTIAL"
+            else current_map.get("size")
+        )
+        projected_fill_size = str(projected_fill_size_raw or "")
+        projected_fill_price = str(
+            (
+                fill_summary.get("fill_price")
+                if current_state == "PARTIAL"
+                else current_map.get("price")
+            )
+            or ""
+        )
         if (
-            current_state == "FILLED"
-            and current_map.get("projected_position_id")
+            current_map.get("projected_position_id")
             and projected_phase in {"active", "day0_window"}
             and venue_order_id
+            and _positive_decimal_or_none(projected_fill_size) is not None
         ):
             existing_fill = conn.execute(
                 """
@@ -4637,9 +4732,13 @@ def ensure_live_entry_projection_for_command(
                 conn,
                 command=current_map,
                 venue_order_id=venue_order_id,
-                matched_size=str(current_map.get("size") or ""),
-                fill_price=str(current_map.get("price") or ""),
-                observed_at=str(current_map.get("updated_at") or _now_iso()),
+                matched_size=projected_fill_size,
+                fill_price=projected_fill_price,
+                observed_at=str(
+                    fill_summary.get("observed_at")
+                    or current_map.get("updated_at")
+                    or _now_iso()
+                ),
             )
             projected_fill = conn.execute(
                 """

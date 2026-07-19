@@ -4578,16 +4578,6 @@ def _ensure_entry_fill_position_event(
         and current_cost is not None
         and str(current.get("order_id") or "").strip() != venue_order_id
     )
-    if incremental_fill and order_status != "filled":
-        logger.error(
-            "exchange_reconcile: refuse non-atomic same-position entry increment "
-            "position_id=%s command_id=%s order_id=%s status=%s",
-            position_id,
-            command.get("command_id"),
-            venue_order_id,
-            order_status,
-        )
-        return
     chain_state_before = str(current.get("chain_state") or "").strip()
     order_fact_source_name = str(order_fact_source or "").upper()
     chain_state_after = current.get("chain_state") or "synced"
@@ -4615,81 +4605,77 @@ def _ensure_entry_fill_position_event(
     projection_order_status = order_status
     projection_size_usd: object = current.get("size_usd") or cost_basis
     if incremental_fill:
-        if existing is None:
-            from src.state.db import query_entry_execution_fill_aggregate
+        from src.state.db import query_entry_execution_fill_aggregate
 
-            historical = query_entry_execution_fill_aggregate(
-                conn,
+        historical = query_entry_execution_fill_aggregate(
+            conn,
+            position_id,
+            strict=True,
+        )
+        if historical is None:
+            logger.error(
+                "exchange_reconcile: refuse entry increment without prior "
+                "command-level fill aggregate position_id=%s command_id=%s",
                 position_id,
-                strict=True,
+                command.get("command_id"),
             )
-            if historical is None:
-                logger.error(
-                    "exchange_reconcile: refuse entry increment without prior "
-                    "command-level fill aggregate position_id=%s command_id=%s",
-                    position_id,
-                    command.get("command_id"),
-                )
-                return
-            historical_shares = _positive_decimal_or_none(
-                historical.get("shares_filled")
+            return
+        historical_shares = _positive_decimal_or_none(
+            historical.get("shares_filled")
+        )
+        historical_cost = _positive_decimal_or_none(
+            historical.get("filled_cost_basis_usd")
+        )
+        if historical_shares is None or historical_cost is None:
+            logger.error(
+                "exchange_reconcile: invalid prior entry aggregate "
+                "position_id=%s command_id=%s",
+                position_id,
+                command.get("command_id"),
             )
-            historical_cost = _positive_decimal_or_none(
-                historical.get("filled_cost_basis_usd")
-            )
-            if historical_shares is None or historical_cost is None:
-                logger.error(
-                    "exchange_reconcile: invalid prior entry aggregate "
-                    "position_id=%s command_id=%s",
-                    position_id,
-                    command.get("command_id"),
-                )
-                return
-            historical_commands = {
-                str(value)
-                for value in historical.get("execution_fact_command_ids", ())
-                if str(value)
-            }
-            current_command_id = str(command.get("command_id") or "")
-            projection_shares = historical_shares
-            projection_cost = historical_cost
-            if current_command_id not in historical_commands:
-                projection_shares += shares_dec
-                projection_cost += cost_basis_dec
+            return
+        historical_commands = {
+            str(value)
+            for value in historical.get("execution_fact_command_ids", ())
+            if str(value)
+        }
+        current_command_id = str(command.get("command_id") or "")
+        projection_shares = historical_shares
+        projection_cost = historical_cost
+        if current_command_id not in historical_commands:
+            # Partial execution facts are deliberately excluded from the
+            # terminal-fill aggregate. Add the command's latest cumulative
+            # venue economics once; re-observation deterministically rebuilds
+            # the same result until the command becomes terminal.
+            projection_shares += shares_dec
+            projection_cost += cost_basis_dec
 
-            # Chain truth can land before the command/event fold.  Consume it
-            # only when it covers the entire command-derived aggregate; never
-            # add a command fill to a mutable projection that may already
-            # include that same fill.
-            chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
-            if chain_shares is not None:
-                chain_delta = chain_shares - projection_shares
-                if abs(chain_delta) <= Decimal("0.000000001"):
-                    # Chain inventory binds quantity, not acquisition cost.  The
-                    # mirror can publish the new token balance before this fill
-                    # fold while retaining the prior chain_cost_basis_usd.  Keep
-                    # cost command-derived even when chain quantity confirms the
-                    # complete aggregate.
-                    projection_shares = chain_shares
-                elif chain_delta > 0:
-                    logger.error(
-                        "exchange_reconcile: refuse entry increment with "
-                        "unattributed excess chain inventory position_id=%s "
-                        "command_id=%s command_aggregate=%s chain_shares=%s",
-                        position_id,
-                        command.get("command_id"),
-                        projection_shares,
-                        chain_shares,
-                    )
-                    return
-            projection_entry_price = projection_cost / projection_shares
-        else:
-            # This atomic FOK increment was already folded. Re-observation only
-            # refreshes its command-level execution fact/lot; it must not add the
-            # same fill to the position a second time.
-            projection_shares = current_shares or shares_dec
-            projection_cost = current_cost or cost_basis_dec
-            projection_entry_price = projection_cost / projection_shares
+        # Chain truth can land before the command/event fold.  Consume it
+        # only when it covers the entire command-derived aggregate; never
+        # add a command fill to a mutable projection that may already
+        # include that same fill.
+        chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+        if chain_shares is not None:
+            chain_delta = chain_shares - projection_shares
+            if abs(chain_delta) <= Decimal("0.000000001"):
+                # Chain inventory binds quantity, not acquisition cost.  The
+                # mirror can publish the new token balance before this fill
+                # fold while retaining the prior chain_cost_basis_usd.  Keep
+                # cost command-derived even when chain quantity confirms the
+                # complete aggregate.
+                projection_shares = chain_shares
+            elif chain_delta > 0:
+                logger.error(
+                    "exchange_reconcile: refuse entry increment with "
+                    "unattributed excess chain inventory position_id=%s "
+                    "command_id=%s command_aggregate=%s chain_shares=%s",
+                    position_id,
+                    command.get("command_id"),
+                    projection_shares,
+                    chain_shares,
+                )
+                return
+        projection_entry_price = projection_cost / projection_shares
         projection_order_id = str(current.get("order_id") or venue_order_id)
         projection_order_status = str(current.get("order_status") or "filled")
         projection_size_usd = _decimal_text(projection_cost)

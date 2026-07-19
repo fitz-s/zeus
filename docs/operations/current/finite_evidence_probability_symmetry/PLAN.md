@@ -876,3 +876,33 @@ expired-external, internal-unconfigured, entry-denial, and held-exit antibody
 tests, compilation, lint, diff checks, independent live-money review, standard
 deployment, and post-restart comparison of keeper truth with allocator and
 execution-capability projections.
+
+## 2026-07-19 live-order capital and projection correction
+
+Six natural post-restart entry commands falsified the assumption that a
+positive robust objective licenses a venue-minimum lot above the configured
+Fractional Kelly target. Five of the six fills ended above the target; the
+sharpest counterexample had seven held shares, a `7.015625` target, and still
+bought five more. Fractional Kelly is therefore a hard terminal-holding budget:
+when no legal venue lot fits below the remaining target, BUY is infeasible and
+the auction chooses HOLD/CASH symmetrically for YES and NO. Positive local EV
+does not authorize an exception to the portfolio budget.
+
+The same window exposed a separate truth gap: an incremental entry command had
+eleven authenticated shares filled while its remainder stayed open, but the
+active canonical position still showed only the prior fill. Every positive
+partial fill is current exposure immediately. The command remains partial and
+its remainder obligation stays open, while canonical trade facts idempotently
+update the command execution fact, position event, lot, and position aggregate
+at their actual weighted fill economics. Restart recovery must repair the same
+shape without requiring venue replay.
+
+Finally, a fixed 250ms retry for one contended Day0 source-clock commit amplified
+WORLD writer contention into a hot loop and starved reactor Window B plus
+command recovery. Retries must coalesce per pending commit, back off to a bounded
+five-second cadence, reset on success, and never drop the pending physical fact
+or create an entry gate. Acceptance requires focused Kelly symmetry, partial
+fill immediate/restart idempotency, actual-fill cost, retry coalescing/reset,
+compilation, diff checks, independent review, standard deployment, and fresh
+runtime proof that minimum-lot repair count is zero, the existing partial fill
+reconciles, and reactor/recovery throughput advances.

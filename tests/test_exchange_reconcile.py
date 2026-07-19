@@ -1884,6 +1884,145 @@ def test_fok_increment_aggregates_into_one_canonical_position(conn):
     assert loaded["entry_economics_source"] == "execution_fact"
 
 
+def test_partial_fak_increment_projects_known_fill_and_keeps_remainder_obligation_open(conn):
+    """A known top-up fill is canonical exposure even while its remainder is unresolved."""
+
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table
+
+    seed_command(conn, size=24, price=0.67)
+    ensure_table(conn)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-initial",
+                    order_id="ord-m5",
+                    size="24",
+                    price="0.67",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    seed_command(
+        conn,
+        command_id="cmd-partial-top-up",
+        venue_order_id="ord-partial-top-up",
+        position_id="pos-m5",
+        size=15,
+        price=0.08,
+        created_at=NOW + timedelta(minutes=1),
+        order_type="FAK",
+    )
+    open_entry_exposure_obligation(
+        conn,
+        command_id="cmd-partial-top-up",
+        owner_domain="trade",
+        token_id=YES_TOKEN,
+        condition_id="condition-m5",
+        shares=15,
+        cost_basis_usd=1.2,
+        now=(NOW + timedelta(minutes=1)).isoformat(),
+    )
+    partial = trade(
+        trade_id="trade-partial-top-up",
+        order_id="ord-partial-top-up",
+        size="11",
+        price="0.058",
+        status="CONFIRMED",
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[partial]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=1),
+    )
+
+    projection = conn.execute(
+        "SELECT shares, cost_basis_usd, entry_price FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+    assert Decimal(str(projection["shares"])) == Decimal("35")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("16.718")
+    assert float(projection["entry_price"]) == pytest.approx(float(Decimal("16.718") / Decimal("35")))
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id='pos-m5' "
+        "AND event_type='ENTRY_ORDER_FILLED' AND command_id='cmd-partial-top-up'"
+    ).fetchone()[0] == 1
+    execution = conn.execute(
+        "SELECT shares, fill_price, venue_status, terminal_exec_status FROM execution_fact "
+        "WHERE command_id='cmd-partial-top-up'"
+    ).fetchone()
+    assert dict(execution) == {
+        "shares": 11.0,
+        "fill_price": 0.058,
+        "venue_status": "PARTIAL",
+        "terminal_exec_status": "partial",
+    }
+    obligation = conn.execute(
+        "SELECT status, shares, cost_basis_usd FROM entry_exposure_obligations "
+        "WHERE command_id='cmd-partial-top-up'"
+    ).fetchone()
+    assert dict(obligation) == {"status": "OPEN", "shares": 15.0, "cost_basis_usd": 1.2}
+
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[partial]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=2),
+    )
+    unchanged = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+    assert Decimal(str(unchanged["shares"])) == Decimal("35")
+    assert Decimal(str(unchanged["cost_basis_usd"])) == Decimal("16.718")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id='pos-m5' "
+        "AND event_type='ENTRY_ORDER_FILLED' AND command_id='cmd-partial-top-up'"
+    ).fetchone()[0] == 1
+
+    later_fill = trade(
+        trade_id="trade-partial-top-up-2",
+        order_id="ord-partial-top-up",
+        size="2",
+        price="0.06",
+        status="CONFIRMED",
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[partial, later_fill]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=3),
+    )
+    advanced = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+    assert Decimal(str(advanced["shares"])) == Decimal("37")
+    assert Decimal(str(advanced["cost_basis_usd"])) == Decimal("16.838")
+    advanced_execution = conn.execute(
+        "SELECT shares, fill_price, terminal_exec_status FROM execution_fact "
+        "WHERE command_id='cmd-partial-top-up'"
+    ).fetchone()
+    assert advanced_execution["shares"] == 13.0
+    assert advanced_execution["fill_price"] == pytest.approx(float(Decimal("0.758") / Decimal("13")))
+    assert advanced_execution["terminal_exec_status"] == "partial"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id='pos-m5' "
+        "AND event_type='ENTRY_ORDER_FILLED' AND command_id='cmd-partial-top-up'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-partial-top-up'"
+    ).fetchone()[0] == "OPEN"
+
+
 def test_maker_fill_materializes_missing_position_projection_after_cancel(conn):
     """A cancel terminalizes the remainder, not the already-filled shares."""
 

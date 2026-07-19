@@ -8551,6 +8551,133 @@ class TestRecoveryResolutionTable:
             client=mock_client,
         ) == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
 
+    @pytest.mark.parametrize("repair_owner", ["immediate", "periodic"])
+    def test_partial_increment_folds_only_confirmed_cumulative_fill(
+        self,
+        conn,
+        mock_client,
+        repair_owner,
+    ):
+        from src.execution.command_recovery import (
+            ensure_live_entry_projection_for_command,
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-first")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-first", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-first",
+            trade_id="trade-first",
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        assert ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )["advanced"] == 1
+
+        _insert(
+            conn,
+            command_id="cmd-002",
+            position_id="pos-001",
+            decision_id="dec-002",
+            size=15.0,
+            price=0.08,
+            created_at="2026-04-26T00:07:00Z",
+        )
+        _advance_to_acked(conn, command_id="cmd-002", venue_order_id="ord-partial-second")
+        _append_order_fact(
+            conn,
+            command_id="cmd-002",
+            order_id="ord-partial-second",
+            state="PARTIALLY_MATCHED",
+            matched_size="11",
+            remaining_size="4",
+            source="REST",
+        )
+        append_event(
+            conn,
+            command_id="cmd-002",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-partial-second",
+                "venue_status": "PARTIALLY_MATCHED",
+                "filled_size": "11",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-002",
+            order_id="ord-partial-second",
+            trade_id="trade-partial-second",
+            state="MATCHED",
+            filled_size="11",
+            fill_price="0.058",
+        )
+
+        summary = (
+            ensure_live_entry_projection_for_command(
+                conn,
+                command_id="cmd-002",
+                client=mock_client,
+            )
+            if repair_owner == "immediate"
+            else reconcile_filled_entry_projection_repairs(conn, client=mock_client)
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            "SELECT shares, cost_basis_usd, entry_price, order_id FROM position_current "
+            "WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "shares": 16.0,
+            "cost_basis_usd": pytest.approx(2.338),
+            "entry_price": pytest.approx(2.338 / 16),
+            "order_id": "ord-first",
+        }
+        execution = conn.execute(
+            "SELECT shares, fill_price, venue_status, terminal_exec_status "
+            "FROM execution_fact WHERE command_id='cmd-002'"
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": 11.0,
+            "fill_price": 0.058,
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
+        assert _get_state(conn, "cmd-002") == "PARTIAL"
+        repeated = (
+            ensure_live_entry_projection_for_command(
+                conn,
+                command_id="cmd-002",
+                client=mock_client,
+            )
+            if repair_owner == "immediate"
+            else reconcile_filled_entry_projection_repairs(conn, client=mock_client)
+        )
+        assert repeated == (
+            {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+            if repair_owner == "immediate"
+            else {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        )
+        assert conn.execute(
+            "SELECT shares FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()[0] == 16.0
+
     def test_partial_entry_repair_promotes_zero_share_pending_projection(
         self,
         conn,
@@ -12040,6 +12167,7 @@ class TestRecoveryResolutionTable:
         assert trade_summary == {
             "count": 1,
             "filled_size": "5",
+            "fill_price": "0.32",
             "authenticated_confirmed": True,
             "observed_at": "2026-04-26T00:05:58Z",
         }
