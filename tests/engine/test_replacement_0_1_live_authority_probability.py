@@ -188,6 +188,12 @@ def test_replacement_0_1_authority_uses_yes_posterior_and_blocks_no_without_nati
         "cond-27": [0.20] * 200,
         "cond-28": [0.80] * 200,
     }
+    assert payload["_edli_spine_posterior_id"] == bundle.posterior_id
+    assert payload["_edli_spine_probability_authority"] == "replacement_0_1"
+    assert (
+        payload["_edli_spine_posterior_identity_hash"]
+        == "fixture-posterior-identity"
+    )
     assert "_edli_spine_joint_q_samples_unavailable_reason" not in payload
 
     assert evidence["probability_authority"] == "replacement_0_1"

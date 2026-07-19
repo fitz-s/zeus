@@ -11289,6 +11289,51 @@ def _global_deterministic_actuation_proofs(
     )
 
 
+def _bind_global_selected_probability_parent(
+    proof: "_CandidateProof",
+    *,
+    prepared_global_family: object,
+    event: OpportunityEvent,
+) -> "_CandidateProof":
+    """Bind a forecast winner to the exact posterior generation it ranked."""
+
+    if event.event_type not in _FORECAST_DECISION_EVENT_TYPES:
+        return proof
+    raw_posterior_id = getattr(prepared_global_family, "posterior_id", None)
+    authority = str(
+        getattr(prepared_global_family, "probability_authority", None) or ""
+    ).strip()
+    try:
+        posterior_id = int(raw_posterior_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISSING") from exc
+    if (
+        isinstance(raw_posterior_id, bool)
+        or posterior_id <= 0
+        or authority != "replacement_0_1"
+    ):
+        raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISSING")
+
+    proof_posterior_id = getattr(proof, "posterior_id", None)
+    proof_authority = str(
+        getattr(proof, "probability_authority", None) or ""
+    ).strip()
+    if proof_posterior_id not in (None, ""):
+        try:
+            proof_posterior_id = int(proof_posterior_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH") from exc
+        if proof_posterior_id != posterior_id:
+            raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH")
+    if proof_authority and proof_authority != authority:
+        raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH")
+    return dataclass_replace(
+        proof,
+        posterior_id=posterior_id,
+        probability_authority=authority,
+    )
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -11401,6 +11446,11 @@ def _global_actuation_selected_proof(
     )
     if current_probability is None:
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
+    proof = _bind_global_selected_probability_parent(
+        proof,
+        prepared_global_family=prepared_global_family,
+        event=event,
+    )
 
     jit_venue_book_hash = str(curve.book_hash or "").strip()
     if not jit_venue_book_hash:
@@ -28138,6 +28188,8 @@ def _prepare_current_global_probability_family(
         ),
         probability_witness=witness,
         candidate_seeds=(),
+        posterior_id=(int(bundle.posterior_id) if bundle is not None else None),
+        probability_authority=("replacement_0_1" if bundle is not None else None),
     )
 
 
@@ -28398,6 +28450,8 @@ def _replacement_authority_probability_and_fdr_proof(
     if not posterior_identity_hash:
         raise ValueError("REPLACEMENT_POSTERIOR_IDENTITY_HASH_MISSING")
     payload["_edli_spine_posterior_identity_hash"] = posterior_identity_hash
+    payload["_edli_spine_posterior_id"] = int(replacement_bundle.posterior_id)
+    payload["_edli_spine_probability_authority"] = "replacement_0_1"
     replacement_no_bound_authority = _replacement_no_bound_authority(
         replacement_bundle,
         posterior_identity_hash=posterior_identity_hash,

@@ -351,6 +351,8 @@ class PreparedGlobalFamily:
     decision_id: str
     probability_witness: Any
     candidate_seeds: tuple["PreparedGlobalCandidateSeed", ...]
+    posterior_id: Optional[int] = None
+    probability_authority: Optional[str] = None
     holdings_snapshot: Optional[Any] = None
     solution_plan: Optional[Any] = None
     solution_projection: Optional[Any] = None
@@ -397,6 +399,8 @@ def _prepare_global_family(
     proofs_by_bin_side: Mapping[tuple[str, str], Any],
     *,
     posterior_identity_hash: str,
+    posterior_id: int | None = None,
+    probability_authority: str | None = None,
     captured_at_utc: datetime,
     max_age: timedelta,
     holdings_snapshot: Any | None = None,
@@ -486,6 +490,8 @@ def _prepare_global_family(
         decision_id=decision.decision_id,
         probability_witness=witness,
         candidate_seeds=tuple(seeds),
+        posterior_id=posterior_id,
+        probability_authority=probability_authority,
         holdings_snapshot=holdings_snapshot,
         solution_plan=solution_plan,
         solution_projection=solution_projection,
@@ -1938,6 +1944,17 @@ def decide_family_via_spine(
                     global_proofs_by_bin_side,
                     posterior_identity_hash=str(
                         payload.get("_edli_spine_posterior_identity_hash") or ""
+                    ),
+                    posterior_id=(
+                        int(payload["_edli_spine_posterior_id"])
+                        if payload.get("_edli_spine_posterior_id") not in (None, "")
+                        else None
+                    ),
+                    probability_authority=(
+                        str(
+                            payload.get("_edli_spine_probability_authority") or ""
+                        ).strip()
+                        or None
                     ),
                     captured_at_utc=captured_at_utc,
                     max_age=global_probability_max_age,

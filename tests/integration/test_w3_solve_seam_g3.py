@@ -2600,6 +2600,8 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
 
     witness = prepared.probability_witness
     assert prepared.candidate_seeds == ()
+    assert prepared.posterior_id == 1
+    assert prepared.probability_authority == "replacement_0_1"
     assert witness.yes_q_samples.shape == (400, 3)
     assert witness.band_alpha == pytest.approx(0.05)
     assert witness.band_basis == "current_coherent_settlement_simplex_v1"
@@ -2618,6 +2620,8 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
     )
     assert bundle_read_count == 2
     refreshed_witness = refreshed.probability_witness
+    assert refreshed.posterior_id == 2
+    assert refreshed.probability_authority == "replacement_0_1"
     assert refreshed_witness.yes_q_samples[0].tolist() == pytest.approx(
         list(fresh_probabilities)
     )
@@ -7427,6 +7431,34 @@ def test_g3_on_mode_fails_closed_without_joint_posterior_samples():
     assert result.no_trade_reason == "SPINE_INPUTS_UNAVAILABLE:SERVED_JOINT_SAMPLES_MISSING"
 
 
+def test_global_selected_proof_binds_exact_prepared_posterior_parent():
+    _family, proofs, _payload = _corpus()[0]
+    proof = replace(proofs[0], posterior_id=None, probability_authority=None)
+    event = SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY")
+    prepared = SimpleNamespace(
+        posterior_id=42,
+        probability_authority="replacement_0_1",
+    )
+
+    bound = era._bind_global_selected_probability_parent(
+        proof,
+        prepared_global_family=prepared,
+        event=event,
+    )
+
+    assert bound.posterior_id == 42
+    assert bound.probability_authority == "replacement_0_1"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH",
+    ):
+        era._bind_global_selected_probability_parent(
+            replace(proof, posterior_id=41),
+            prepared_global_family=prepared,
+            event=event,
+        )
+
+
 def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
     family, proofs, payload = _corpus()[0]
     captured_at = "2026-06-13T11:59:59.900000+00:00"
@@ -7446,6 +7478,8 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
     )
     proofs = (legacy_price_proof, recoverable_proof, *proofs[2:])
     payload = _payload_with_joint_samples(proofs, payload, draws=400)
+    payload["_edli_spine_posterior_id"] = 42
+    payload["_edli_spine_probability_authority"] = "replacement_0_1"
     restore = _set_flag(False)
     try:
         result = bridge.decide_family_via_spine(
@@ -7472,6 +7506,8 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
     assert result.global_prepare_reason is None
     prepared = result.global_family
     assert prepared is not None
+    assert prepared.posterior_id == 42
+    assert prepared.probability_authority == "replacement_0_1"
     probability = prepared.probability_witness
     assert probability.yes_q_samples.shape[0] == 400
     assert all(
