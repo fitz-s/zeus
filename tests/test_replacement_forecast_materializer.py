@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-17
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Last reused/audited: 2026-07-19
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -990,6 +990,15 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
 
     conn = _Connection()
     monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_: conn)
+    monkeypatch.setattr(
+        cli,
+        "_prepare_live_schema_and_manifest",
+        lambda *args, **kwargs: cli._DurablePreparationReceipt(
+            schema_ready=True,
+            anchor_artifact_id=None,
+            manifest_committed=False,
+        ),
+    )
 
     def _run_one(input_json, **kwargs):
         calls.append((input_json, kwargs))
@@ -1017,12 +1026,67 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     assert all(call[1]["conn"] is conn for call in calls)
     assert all(call[1]["commit"] is True for call in calls)
     assert all(call[1]["publish_wake"] is True for call in calls)
+    assert all(call[1]["schema_ready"] is True for call in calls)
+    assert all(call[1]["init_schema"] is False for call in calls)
     envelopes = [
         json.loads(line)
         for line in capsys.readouterr().out.splitlines()
     ]
     assert [Path(envelope["input_json"]) for envelope in envelopes] == inputs
     assert [envelope["returncode"] for envelope in envelopes] == [0, 0]
+
+
+def test_materialize_script_batch_prepares_schema_before_first_input_error(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db as state_db
+
+    inputs = [tmp_path / "malformed.json", tmp_path / "valid.json"]
+    calls = []
+    preparations = []
+
+    class _Connection:
+        def close(self):
+            return None
+
+    conn = _Connection()
+    monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_: conn)
+
+    def _prepare(*args, **kwargs):
+        preparations.append(kwargs)
+        return cli._DurablePreparationReceipt(
+            schema_ready=True,
+            anchor_artifact_id=None,
+            manifest_committed=False,
+        )
+
+    def _run_one(input_json, **kwargs):
+        calls.append((input_json, kwargs))
+        if input_json == inputs[0]:
+            return 2, "", '{"status":"ERROR"}\n'
+        return 0, '{"status":"READY"}\n', ""
+
+    monkeypatch.setattr(cli, "_prepare_live_schema_and_manifest", _prepare)
+    monkeypatch.setattr(cli, "_run_one", _run_one)
+
+    rc = cli.main(
+        [
+            "--batch-input-json",
+            *(str(path) for path in inputs),
+            "--commit",
+            "--init-schema",
+        ]
+    )
+
+    assert rc == 0
+    assert len(preparations) == 1
+    assert preparations[0]["init_schema"] is True
+    assert [call[0] for call in calls] == inputs
+    assert all(call[1]["schema_ready"] is True for call in calls)
+    assert all(call[1]["init_schema"] is False for call in calls)
+    envelopes = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [envelope["returncode"] for envelope in envelopes] == [2, 0]
 
 
 def test_materialize_script_publishes_family_wake_after_commit(monkeypatch) -> None:
@@ -1146,6 +1210,182 @@ def test_materialize_script_recomputes_when_snapshot_changes(
     assert result.ok is True
     assert prepared_values == [0, 1]
     assert written_values == [1]
+
+
+def test_materialize_script_snapshot_retry_exhaustion_never_computes_under_writer_lock(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    versions = iter(range(cli._SNAPSHOT_RETRY_LIMIT * 2))
+    prepare_calls = []
+    write_calls = []
+    monkeypatch.setattr(cli, "_data_version", lambda _conn: next(versions))
+
+    def _prepare(_conn, _request):
+        prepare_calls.append(True)
+        return object()
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda *_args: write_calls.append(True),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="^REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED$",
+    ):
+        cli._commit_from_read_snapshot(
+            conn,
+            SimpleNamespace(
+                city="London",
+                target_date=date(2026, 7, 19),
+                temperature_metric="high",
+            ),
+        )
+    conn.close()
+
+    assert len(prepare_calls) == cli._SNAPSHOT_RETRY_LIMIT
+    assert write_calls == []
+
+
+def test_materialize_script_dry_run_compute_does_not_hold_writer_lock(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    writer = sqlite3.connect(db_path, timeout=0)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.execute("CREATE TABLE frontier (value INTEGER NOT NULL)")
+    reader.commit()
+    trace = []
+    reader.set_trace_callback(trace.append)
+
+    def _prepare(_conn, _request):
+        writer.execute("BEGIN IMMEDIATE")
+        writer.rollback()
+        return SimpleNamespace(
+            posterior=SimpleNamespace(live_eligible=True),
+            anchor_id=None,
+        )
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda _conn, _prepared: materializer_mod.ReplacementForecastMaterializeResult(
+            status="READY",
+            reason_codes=("REPLACEMENT_FORECAST_DRY_RUN_READY",),
+            posterior_id=1,
+            anchor_id=1,
+            readiness_id="ready-1",
+        ),
+    )
+    result = cli._dry_run_from_read_snapshot(reader, _request())
+    reader.close()
+    writer.close()
+
+    assert result.ok is True
+    statements = [statement.upper() for statement in trace]
+    assert statements.index("BEGIN") < statements.index("ROLLBACK")
+    assert statements.index("ROLLBACK") < statements.index("BEGIN IMMEDIATE")
+
+
+def test_materialize_script_dry_run_matches_readiness_cert_regression(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    incumbent = materialize_replacement_forecast_live(
+        conn,
+        _request(computed_at=_dt(11), expires_at=_dt(13)),
+    )
+    conn.commit()
+    before = conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0]
+
+    result = cli._dry_run_from_read_snapshot(
+        conn,
+        _request(computed_at=_dt(9), expires_at=_dt(13)),
+    )
+    after = conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0]
+    conn.close()
+
+    assert incumbent.ok is True
+    assert result.ok is False
+    assert result.reason_codes == ("READINESS_CERT_CYCLE_REGRESSION",)
+    assert after == before
+
+
+def test_materialize_script_reports_durable_manifest_when_posterior_fails(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    payload = {
+        "city": "Shanghai",
+        "city_id": "Shanghai",
+        "city_timezone": "Asia/Shanghai",
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-06T00:00:00+00:00",
+        "computed_at": "2026-06-06T04:00:00+00:00",
+        "expires_at": "2026-06-06T06:00:00+00:00",
+        "baseline_source_run_id": "b0-run",
+        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
+        "openmeteo_payload_json": "anchor.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0}],
+    }
+    input_json = tmp_path / "request.json"
+    input_json.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "anchor.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "precision.json").write_text("{}", encoding="utf-8")
+    receipt = cli._DurablePreparationReceipt(
+        schema_ready=True,
+        anchor_artifact_id=17,
+        manifest_committed=True,
+    )
+
+    monkeypatch.setattr(cli, "extract_openmeteo_ecmwf_ifs9_localday_anchor", lambda *args, **kwargs: _anchor())
+    monkeypatch.setattr(cli, "OpenMeteoIfs9PrecisionMetadata", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "evaluate_openmeteo_ecmwf_ifs9_precision_guard", lambda _metadata: _precision_guard())
+    monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
+    monkeypatch.setattr(cli, "_prepare_live_schema_and_manifest", lambda *args, **kwargs: receipt)
+    monkeypatch.setattr(
+        cli,
+        "_commit_from_read_snapshot",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("posterior failed")),
+    )
+    conn = sqlite3.connect(":memory:")
+
+    returncode, response = cli._materialize(
+        input_json,
+        commit=True,
+        init_schema=False,
+        conn=conn,
+    )
+    conn.close()
+
+    assert returncode == 2
+    assert response["status"] == "ERROR"
+    assert response["error"] == "posterior failed"
+    assert response["posterior_committed"] is False
+    assert response["retry_safe"] is True
+    assert response["durable_preparation"] == {
+        "schema_ready": True,
+        "openmeteo_anchor_artifact_id": 17,
+        "manifest_committed": True,
+    }
 
 
 def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) -> None:

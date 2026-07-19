@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Materialize replacement live forecast posteriors and publish commit wakes.
 # Reuse: Inspect forecast materialization and reactor-wake contracts before changing.
 """Materialize Open-Meteo ECMWF IFS 9km + Bayes fusion posterior."""
@@ -33,7 +33,6 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
     ReplacementForecastMaterializeRequest,
     ReplacementForecastMaterializeResult,
     _ensure_replacement_identity_columns,
-    materialize_replacement_forecast_live,
     prepare_replacement_forecast_live,
     write_prepared_replacement_forecast_live,
 )
@@ -53,6 +52,15 @@ class TemperatureBin:
     display_unit: str = "C"
     settlement_unit: str = "C"
     rounding_rule: str = "wmo_half_up"
+
+
+@dataclass(frozen=True)
+class _DurablePreparationReceipt:
+    """Canonical upstream facts committed before the posterior transaction."""
+
+    schema_ready: bool
+    anchor_artifact_id: int | None
+    manifest_committed: bool
 
 
 def _dt(value: str, *, field_name: str) -> datetime:
@@ -178,9 +186,13 @@ def _prepare_live_schema_and_manifest(
     payload: Mapping[str, Any],
     base_dir: Path,
     anchor_artifact_id: int | None,
-) -> int | None:
+) -> _DurablePreparationReceipt:
     if schema_ready and "openmeteo_manifest_json" not in payload:
-        return anchor_artifact_id
+        return _DurablePreparationReceipt(
+            schema_ready=True,
+            anchor_artifact_id=anchor_artifact_id,
+            manifest_committed=False,
+        )
     conn.execute("BEGIN IMMEDIATE")
     try:
         if init_schema:
@@ -205,7 +217,11 @@ def _prepare_live_schema_and_manifest(
                 root=ROOT,
             )
         conn.commit()
-        return anchor_artifact_id
+        return _DurablePreparationReceipt(
+            schema_ready=True,
+            anchor_artifact_id=anchor_artifact_id,
+            manifest_committed="openmeteo_manifest_json" in payload,
+        )
     except Exception:
         if conn.in_transaction:
             conn.rollback()
@@ -241,21 +257,65 @@ def _commit_from_read_snapshot(
             raise
 
     logging.getLogger(__name__).warning(
-        "forecast DB changed during %s snapshot retries; using serialized fallback for %s %s %s",
+        "forecast DB changed during %s snapshot retries; deferring materialization for %s %s %s",
         _SNAPSHOT_RETRY_LIMIT,
         request.city,
         request.target_date,
         request.temperature_metric,
     )
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        result = materialize_replacement_forecast_live(conn, request)
-        conn.commit()
+    raise RuntimeError("REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED")
+
+
+def _dry_run_from_read_snapshot(
+    conn,
+    request: ReplacementForecastMaterializeRequest,
+) -> ReplacementForecastMaterializeResult:
+    for _attempt in range(_SNAPSHOT_RETRY_LIMIT):
+        version = _data_version(conn)
+        conn.execute("BEGIN")
+        try:
+            prepared = prepare_replacement_forecast_live(conn, request)
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+        if isinstance(prepared, ReplacementForecastMaterializeResult):
+            return prepared
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if _data_version(conn) != version:
+                conn.rollback()
+                continue
+            result = write_prepared_replacement_forecast_live(conn, prepared)
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
         return result
-    except Exception:
-        if conn.in_transaction:
-            conn.rollback()
-        raise
+    raise RuntimeError("REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED")
+
+
+def _error_response(
+    exc: Exception,
+    receipt: _DurablePreparationReceipt | None = None,
+) -> dict[str, object]:
+    response: dict[str, object] = {
+        "status": "ERROR",
+        "error_type": exc.__class__.__name__,
+        "error": str(exc),
+    }
+    if receipt is not None:
+        response.update(
+            {
+                "durable_preparation": {
+                    "schema_ready": receipt.schema_ready,
+                    "openmeteo_anchor_artifact_id": receipt.anchor_artifact_id,
+                    "manifest_committed": receipt.manifest_committed,
+                },
+                "posterior_committed": False,
+                "retry_safe": True,
+            }
+        )
+    return response
 
 
 def _materialize(
@@ -379,9 +439,10 @@ def _materialize(
         from src.state.db import get_forecasts_connection
 
         conn = get_forecasts_connection(write_class="live")
+    receipt: _DurablePreparationReceipt | None = None
     try:
         if commit:
-            anchor_artifact_id = _prepare_live_schema_and_manifest(
+            receipt = _prepare_live_schema_and_manifest(
                 conn,
                 init_schema=init_schema,
                 schema_ready=schema_ready,
@@ -389,40 +450,31 @@ def _materialize(
                 base_dir=base_dir,
                 anchor_artifact_id=anchor_artifact_id,
             )
+            anchor_artifact_id = receipt.anchor_artifact_id
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)
             result = _commit_from_read_snapshot(conn, request)
             if result.ok and publish_wake:
                 wake_published = _publish_materialization_wake(request)
         else:
-            conn.execute("BEGIN IMMEDIATE")
-            if init_schema:
-                from src.state.db import _create_readiness_state
-                from src.state.schema.v2_schema import (
-                    ensure_replacement_forecast_live_schema,
-                )
-
-                ensure_replacement_forecast_live_schema(conn)
-                _create_readiness_state(conn)
             if "openmeteo_manifest_json" in payload:
-                anchor_artifact_id = write_manifest_to_db(
-                    conn,
-                    read_manifest(
-                        _resolve_input_path(
-                            payload["openmeteo_manifest_json"],
-                            base_dir=base_dir,
-                        )
-                    ),
+                read_manifest(
+                    _resolve_input_path(
+                        payload["openmeteo_manifest_json"],
+                        base_dir=base_dir,
+                    )
+                ).verify_artifact(
                     root=ROOT,
                 )
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)
-            result = materialize_replacement_forecast_live(conn, request)
-            conn.rollback()
-    except Exception:
+            result = _dry_run_from_read_snapshot(conn, request)
+    except Exception as exc:
         if conn.in_transaction:
             conn.rollback()
-        raise
+        if receipt is None:
+            raise
+        return 2, _error_response(exc, receipt)
     finally:
         if own_conn:
             conn.close()
@@ -435,6 +487,23 @@ def _materialize(
         "openmeteo_anchor_artifact_id": anchor_artifact_id,
         "committed": commit,
         "reactor_wake_published": wake_published,
+        "schema_init_requested": init_schema,
+        "schema_ready": bool(commit and receipt is not None and receipt.schema_ready),
+        "schema_initialized": bool(
+            commit and init_schema and receipt is not None and receipt.schema_ready
+        ),
+        "durable_preparation": (
+            None
+            if receipt is None
+            else {
+                "schema_ready": receipt.schema_ready,
+                "openmeteo_anchor_artifact_id": receipt.anchor_artifact_id,
+                "manifest_committed": receipt.manifest_committed,
+            }
+        ),
+        "dry_run_scope": (
+            None if commit else "read_snapshot_compute_plus_rollback_write_preview"
+        ),
         "forecast_family": [
             request.city,
             request.target_date.isoformat(),
@@ -469,14 +538,14 @@ def _run_one(
             publish_wake=publish_wake,
             schema_ready=schema_ready,
         )
-        return returncode, json.dumps(response, sort_keys=True) + "\n", log_output.getvalue()
+        encoded = json.dumps(response, sort_keys=True) + "\n"
+        if returncode == 2:
+            return returncode, "", log_output.getvalue() + encoded
+        return returncode, encoded, log_output.getvalue()
     except Exception as exc:
-        error = {
-            "status": "ERROR",
-            "error_type": exc.__class__.__name__,
-            "error": str(exc),
-        }
-        return 2, "", log_output.getvalue() + json.dumps(error, sort_keys=True) + "\n"
+        return 2, "", log_output.getvalue() + json.dumps(
+            _error_response(exc), sort_keys=True
+        ) + "\n"
     finally:
         if handler is not None:
             logging.getLogger().removeHandler(handler)
@@ -538,15 +607,32 @@ def main(argv: list[str] | None = None) -> int:
 
         conn = get_forecasts_connection(write_class="live")
         try:
-            for index, input_json in enumerate(args.batch_input_json):
+            schema_ready = False
+            if args.commit:
+                try:
+                    receipt = _prepare_live_schema_and_manifest(
+                        conn,
+                        init_schema=args.init_schema,
+                        schema_ready=False,
+                        payload={},
+                        base_dir=ROOT,
+                        anchor_artifact_id=None,
+                    )
+                    schema_ready = receipt.schema_ready
+                except Exception as exc:
+                    stderr = json.dumps(_error_response(exc), sort_keys=True) + "\n"
+                    for input_json in args.batch_input_json:
+                        _print_batch_envelope(input_json, 2, "", stderr)
+                    return 0
+            for input_json in args.batch_input_json:
                 returncode, stdout, stderr = _run_one(
                     input_json,
                     commit=args.commit,
-                    init_schema=args.init_schema and index == 0,
+                    init_schema=False,
                     conn=conn,
                     capture_logs=True,
                     publish_wake=True,
-                    schema_ready=index > 0,
+                    schema_ready=schema_ready,
                 )
                 _print_batch_envelope(input_json, returncode, stdout, stderr)
         finally:
