@@ -203,7 +203,7 @@ test_trust_policy:
     tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-07-09", note: "Market-channel ingestor and feasibility evidence tests, including execution_feasibility_latest schema/upsert coverage, compact executable-snapshot latest reads, and append-history fallback isolation."}
+    tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-07-19", note: "Market-channel ingestor and feasibility evidence tests, including execution_feasibility_latest schema/upsert coverage, compact executable-snapshot latest reads, append-history fallback isolation, and fail-soft batched REST depth repair after depth-clearing WebSocket updates."}
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-07-17", note: "EDLI reactor contracts, including urgent Day0 preemption before periodic DB/book work, lock-free global batch epochs, exact receipt coverage, and winner-first finalization."}
     tests/events/test_claim_lock_storm.py: {created: "2026-06-11", last_used: "2026-07-13", note: "World-writer claim contention, including unpaged global-winner claim and queue paths, remains bounded, visible, rollback-safe, pending on miss, and waits at most once per contention episode before same-cycle nonblocking probes."}
     tests/calibration/test_scaled_normal_uniform_q_builder.py: {created: "2026-06-29", last_used: "2026-07-10", note: "Capital-gated city rho mixture math, including row-wise simplex bootstrap-draw mixing so served q, bounds, empirical edge confidence, and CVaR share one probability world."}
@@ -384,6 +384,8 @@ test_trust_policy:
     tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/test_day0_admission.py: {created: "2026-06-17", last_used: "2026-07-19", note: "Day0 live admission contracts, including strict quote-after-observation ordering, current source-health classification, final-localday no-entry geometry, one-bin stress, and maker-only routing."}
+    tests/test_day0_extreme_updated_materialization_bridge.py: {created: "2026-07-19", last_used: "2026-07-19", note: "Event-driven Day0 posterior rematerialization bridge: one seed per current observation, monotone newer-observation advance, held-family priority, and fail-soft event emission."}
     tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-17", note: "Fast METAR publication persistence, event identities, and exact committed-family wake propagation."}
     tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-17", note: "Day0 METAR source-clock scheduling, bounded commit retry, and durable event/family wake ordering."}
@@ -900,6 +902,8 @@ categories:
     - tests/test_replacement_forecast_current_target_plan.py
     - tests/test_replacement_forecast_materializer_cycle_policy.py
     - tests/test_replacement_fused_q_shape.py
+    - tests/test_day0_admission.py
+    - tests/test_day0_extreme_updated_materialization_bridge.py
     # T0-1 conn-across-IO ordering invariant (2026-06-13): riskguard._tick_once
     # must fetch the bankroll (wallet NETWORK fetch) BEFORE opening any
     # write-class DB conn. RED-on-revert relationship test.
@@ -1865,6 +1869,26 @@ test_metadata:
     notes: >
       Proves that runtime Day0 observation context stays on the intended truth
       plane rather than silently collapsing to a convenient feed.
+  tests/test_day0_admission.py:
+    modules: [engine, execution]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+    notes: >
+      Protects current Day0 entry admission ordering, source health, local-day
+      runway, one-bin stress, and maker-only execution semantics.
+  tests/test_day0_extreme_updated_materialization_bridge.py:
+    modules: [data, events]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/operations/current_source_validity.md
+    notes: >
+      Proves that a committed current Day0 observation triggers one monotone,
+      fail-soft posterior rematerialization seed without inventing another
+      probability authority or blocking event delivery.
   tests/test_tier_resolver.py:
     modules: [data]
     category: core_law_antibody

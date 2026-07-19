@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-19
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
 from __future__ import annotations
 
@@ -570,6 +570,7 @@ def test_quote_cache_seeded_from_rest_on_connect():
     assert len(results) == 1
     assert cache.get("token-1") is not None
     assert results[0].inserted is True
+    assert results[0].evidence_written is True
     assert results[0].opportunity_event_persisted is False
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
@@ -938,7 +939,6 @@ def test_subscribed_seed_fetches_off_event_loop_thread():
             }
         ),
     )
-
     written = asyncio.run(
         service.seed_rest_books_after_subscribe(
             token_ids={"token-1"},
@@ -1547,6 +1547,286 @@ def test_priority_rest_seed_precedes_ws_covered_broad_fallback():
 
     assert written == 1
     assert fetch_calls == ["token-priority"]
+
+
+def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
+    db_path = tmp_path / "market-channel-repair.db"
+    conn = sqlite3.connect(db_path)
+    init_schema(conn)
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    ensure_table(conn)
+    writer = EventWriter(conn)
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        coalescer=coalescer,
+    )
+    fetch_batches: list[list[str]] = []
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda _token_id: {},
+        fetch_orderbooks=lambda token_ids: (
+            fetch_batches.append(list(token_ids))
+            or {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": "0xcondition",
+                    "bids": [{"price": "0.49", "size": "10"}],
+                    "asks": [{"price": "0.51", "size": "10"}],
+                    "hash": f"repair-{token_id}",
+                }
+                for token_id in token_ids
+            }
+        ),
+    )
+    book = {
+        "event_type": "book",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+        "hash": "initial-book",
+    }
+    ingestor.handle_message(book, received_at="2026-07-19T09:00:00+00:00")
+    service._record_current_generation_depth(book)
+    ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
+    bba = {
+        "event_type": "best_bid_ask",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "best_bid": "0.49",
+        "best_ask": "0.51",
+    }
+    ingestor.handle_message(bba, received_at="2026-07-19T09:00:01+00:00")
+    service._record_current_generation_depth(bba)
+    ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
+    service._quote_projection_pump_active = True
+    assert service._missing_depth_tokens == {"token-1"}
+    assert service._current_generation_depth_tokens == set()
+
+    quote_flush_wake = asyncio.Event()
+    written = asyncio.run(
+        service._repair_missing_depth_once(
+            active_token_ids={"token-1"},
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            quote_flush_wake=quote_flush_wake,
+            logger=None,
+        )
+    )
+
+    assert written == 1
+    assert fetch_batches == [["token-1"]]
+    assert service._missing_depth_tokens == {"token-1"}
+    assert service._depth_repair_inflight_tokens == {"token-1"}
+    assert ingestor.quote_cache.get("token-1").depth_json is not None
+    assert quote_flush_wake.is_set()
+    assert conn.in_transaction is False
+
+    independent = sqlite3.connect(db_path)
+    assert independent.execute(
+        "SELECT depth_before_json FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()[0] is None
+
+    def fail_commit() -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        ingestor.flush_coalesced(commit=fail_commit, rollback=conn.rollback)
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+    assert service._missing_depth_tokens == {"token-1"}
+    assert service._depth_repair_inflight_tokens == {"token-1"}
+    assert independent.execute(
+        "SELECT depth_before_json FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()[0] is None
+
+    connection_done = asyncio.Event()
+    connection_done.set()
+    initial_seed_done = asyncio.Event()
+    initial_seed_done.set()
+    asyncio.run(
+        service._flush_quote_projection_forever(
+            wake=quote_flush_wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids={"token-1"},
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+            logger=None,
+            depth_repair_wake=asyncio.Event(),
+        )
+    )
+    assert service._missing_depth_tokens == set()
+    assert service._depth_repair_inflight_tokens == set()
+    assert independent.execute(
+        "SELECT depth_before_json FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()[0] is not None
+    independent.close()
+
+
+def test_unchanged_bba_old_durable_depth_does_not_satisfy_repair():
+    conn, writer = _conn_writer()
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        coalescer=coalescer,
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda _token_id: {},
+    )
+    book = {
+        "event_type": "book",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "bids": [{"price": "0.49", "size": "10"}],
+        "asks": [{"price": "0.51", "size": "10"}],
+        "hash": "old-full-book",
+    }
+    ingestor.handle_message(book, received_at="2026-07-19T09:00:00+00:00")
+    ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
+
+    unchanged_bba = {
+        "event_type": "best_bid_ask",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "best_bid": "0.49",
+        "best_ask": "0.51",
+    }
+    assert (
+        ingestor.handle_message(
+            unchanged_bba,
+            received_at="2026-07-19T09:00:01+00:00",
+        )
+        is None
+    )
+    service._record_current_generation_depth(unchanged_bba)
+
+    assert ingestor.quote_cache.get("token-1").depth_json is None
+    assert service._missing_depth_tokens == {"token-1"}
+    assert service._clear_durable_missing_depth_tokens(logger=None) == 0
+    assert service._missing_depth_tokens == {"token-1"}
+
+
+def test_depth_repair_failure_does_not_escape_background_lane(monkeypatch):
+    from src.events.triggers import market_channel_ingestor as market_channel
+
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    ingestor.handle_message(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "best_bid": "0.49",
+            "best_ask": "0.51",
+        },
+        received_at="2026-07-19T09:00:01+00:00",
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda _token_id: {},
+        fetch_orderbooks=lambda _token_ids: (_ for _ in ()).throw(
+            TimeoutError("depth repair timeout")
+        ),
+    )
+    service._missing_depth_tokens.add("token-1")
+    wake = asyncio.Event()
+    wake.set()
+    connection_done = asyncio.Event()
+    initial_seed_done = asyncio.Event()
+    initial_seed_done.set()
+
+    async def bounded_sleep(delay: float) -> None:
+        if delay == market_channel.MARKET_CHANNEL_DEPTH_REPAIR_RETRY_SECONDS:
+            connection_done.set()
+
+    monkeypatch.setattr(market_channel.asyncio, "sleep", bounded_sleep)
+    asyncio.run(
+        service._repair_missing_depth_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids={"token-1"},
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            quote_flush_wake=asyncio.Event(),
+            logger=None,
+        )
+    )
+
+    assert service.depth_repair_fetch_count == 1
+    assert service.depth_repair_failure_count == 1
+    assert service._missing_depth_tokens == {"token-1"}
+
+
+def test_depth_durability_probe_waits_for_market_backlog_to_drain(monkeypatch):
+    conn, writer = _conn_writer()
+    token_ids = {f"token-{index}" for index in range(129)}
+    metadata = {
+        token_id: _metadata(token_id)[token_id]
+        for token_id in token_ids
+    }
+    coalescer = EventCoalescer(max_market_keys=256)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=token_ids,
+        token_metadata=metadata,
+        coalescer=coalescer,
+    )
+    service = MarketChannelOnlineService(ingestor)
+    for token_id in token_ids:
+        ingestor.handle_message(
+            {
+                "event_type": "book",
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "bids": [{"price": "0.49", "size": "10"}],
+                "asks": [{"price": "0.51", "size": "10"}],
+            },
+            received_at="2026-07-19T09:00:00+00:00",
+        )
+
+    pending_at_probe: list[dict[str, int]] = []
+
+    def record_probe(*, logger):  # noqa: ANN001
+        pending_at_probe.append(coalescer.pending_counts())
+        return 0
+
+    monkeypatch.setattr(service, "_clear_durable_missing_depth_tokens", record_probe)
+    wake = asyncio.Event()
+    wake.set()
+    connection_done = asyncio.Event()
+    connection_done.set()
+    initial_seed_done = asyncio.Event()
+    initial_seed_done.set()
+    asyncio.run(
+        service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids=token_ids,
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+    )
+
+    assert pending_at_probe == [{"lossless": 0, "market": 0}]
 
 
 def test_websocket_routes_quote_and_world_events_to_independent_write_lanes(

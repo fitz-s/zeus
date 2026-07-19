@@ -37,6 +37,8 @@ MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS = 0.01
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS = 0.05
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS = 1.0
+MARKET_CHANNEL_DEPTH_REPAIR_DEBOUNCE_SECONDS = 0.05
+MARKET_CHANNEL_DEPTH_REPAIR_RETRY_SECONDS = 1.0
 _logger = logging.getLogger(__name__)
 
 
@@ -333,6 +335,7 @@ class MarketChannelIngestor:
         received_at: str,
         pre_cached: "dict[str, dict] | None" = None,
         token_ids: Iterable[str] | None = None,
+        coalesce_market_events: bool = False,
     ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         """REST-seed current books on connect/reconnect before channel deltas.
 
@@ -383,7 +386,18 @@ class MarketChannelIngestor:
             if event is None or self._market_quote_is_older(event):
                 continue
             self._cache_event_payload(event)
-            result = self._commit_market_event(event)
+            if coalesce_market_events:
+                result = self._write_market_event(event)
+                if result is None:
+                    result = MarketChannelQuoteResult(
+                        event_id=event.event_id,
+                        event_type=event.event_type,
+                        inserted=True,
+                        duplicate=False,
+                        evidence_written=False,
+                    )
+            else:
+                result = self._commit_market_event(event)
             results.append(result)
         return results
 
@@ -1243,6 +1257,21 @@ class MarketChannelOnlineService:
     _refresh_window_start: datetime | None = None
     _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
     _current_generation_depth_tokens: set[str] = field(default_factory=set)
+    _missing_depth_tokens: set[str] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
+    _depth_repair_inflight_tokens: set[str] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
+    _depth_repair_quote_seen_at: dict[str, str] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _continuity_last_publish_monotonic: float | None = field(default=None, init=False)
     _continuity_last_connected: bool | None = field(default=None, init=False)
     _refresh_worker_lock: threading.Lock = field(
@@ -1265,18 +1294,24 @@ class MarketChannelOnlineService:
     subscription_remove_count: int = field(default=0, init=False)
     universe_refresh_error_count: int = field(default=0, init=False)
     quote_projection_backpressure_count: int = field(default=0, init=False)
+    depth_repair_fetch_count: int = field(default=0, init=False)
+    depth_repair_failure_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self._refresh_worker_idle.set()
 
     def _record_current_generation_depth(self, message: dict[str, Any]) -> None:
         event_type = str(message.get("event_type") or message.get("type") or "")
-        if event_type != "book":
+        if event_type not in {"book", "best_bid_ask", "price_change"}:
             return
         token_id = _message_token_id(message)
         cached = self.ingestor.quote_cache.get(token_id)
         if cached is not None and cached.depth_json not in (None, ""):
             self._current_generation_depth_tokens.add(token_id)
+            return
+        self._current_generation_depth_tokens.discard(token_id)
+        if token_id in self.ingestor.active_token_ids_open_at(token_ids=(token_id,)):
+            self._missing_depth_tokens.add(token_id)
 
     def _publish_continuity(
         self,
@@ -1435,6 +1470,7 @@ class MarketChannelOnlineService:
                     received_at=received_at,
                     pre_cached=captured,
                     token_ids=captured.keys(),
+                    coalesce_market_events=True,
                 )
                 written += len(results)
                 continue
@@ -1633,6 +1669,11 @@ class MarketChannelOnlineService:
             )
         subscribed_token_ids.clear()
         subscribed_token_ids.update(desired_token_ids)
+        self._current_generation_depth_tokens.difference_update(removed)
+        self._missing_depth_tokens.difference_update(removed)
+        self._depth_repair_inflight_tokens.difference_update(removed)
+        for token_id in removed:
+            self._depth_repair_quote_seen_at.pop(token_id, None)
         self.subscription_add_count += len(added)
         self.subscription_remove_count += len(removed)
         if logger is not None:
@@ -1694,6 +1735,7 @@ class MarketChannelOnlineService:
         commit: Callable[[], None] | None,
         rollback: Callable[[], None] | None,
         logger: Any | None,
+        depth_repair_wake: asyncio.Event | None = None,
     ) -> None:
         if self.ingestor._coalescer is None:
             return
@@ -1766,10 +1808,171 @@ class MarketChannelOnlineService:
                 logger=logger,
             )
             queued = self.ingestor._coalescer.pending_counts()
+            if not queued["market"]:
+                self._clear_durable_missing_depth_tokens(logger=logger)
+                self._depth_repair_inflight_tokens.clear()
+            if self._missing_depth_tokens and depth_repair_wake is not None:
+                depth_repair_wake.set()
             if queued["lossless"] or queued["market"]:
                 wake.set()
             elif connection_done.is_set() and initial_seed_done.is_set():
                 return
+
+    async def _repair_missing_depth_once(
+        self,
+        *,
+        active_token_ids: set[str],
+        write_gate: Any,
+        commit: Callable[[], None] | None,
+        quote_flush_wake: asyncio.Event,
+        logger: Any | None,
+    ) -> int:
+        for token_id in tuple(self._missing_depth_tokens):
+            if token_id not in active_token_ids:
+                self._missing_depth_tokens.discard(token_id)
+                self._depth_repair_inflight_tokens.discard(token_id)
+                self._depth_repair_quote_seen_at.pop(token_id, None)
+        batch = sorted(
+            self._missing_depth_tokens - self._depth_repair_inflight_tokens
+        )[:REST_SEED_FETCH_BATCH_SIZE]
+        if not batch:
+            return 0
+        self.depth_repair_fetch_count += 1
+        written = await self.seed_rest_books_after_subscribe(
+            token_ids=batch,
+            write_gate=write_gate,
+            commit=commit,
+            logger=logger,
+        )
+        accepted: set[str] = set()
+        for token_id in batch:
+            cached = self.ingestor.quote_cache.get(token_id)
+            if cached is not None and cached.depth_json not in (None, ""):
+                accepted.add(token_id)
+                self._depth_repair_quote_seen_at[token_id] = cached.quote_seen_at
+        self._depth_repair_inflight_tokens.update(accepted)
+        if written:
+            quote_flush_wake.set()
+            if not self._quote_projection_pump_active:
+                self._clear_durable_missing_depth_tokens(logger=logger)
+        return written
+
+    async def _repair_missing_depth_forever(
+        self,
+        *,
+        wake: asyncio.Event,
+        connection_done: asyncio.Event,
+        initial_seed_done: asyncio.Event,
+        active_token_ids: set[str],
+        write_gate: Any,
+        commit: Callable[[], None] | None,
+        quote_flush_wake: asyncio.Event,
+        logger: Any | None,
+    ) -> None:
+        await initial_seed_done.wait()
+        while not connection_done.is_set():
+            if not wake.is_set():
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=0.25)
+                except TimeoutError:
+                    continue
+            wake.clear()
+            await asyncio.sleep(MARKET_CHANNEL_DEPTH_REPAIR_DEBOUNCE_SECONDS)
+            if connection_done.is_set():
+                return
+            try:
+                written = await self._repair_missing_depth_once(
+                    active_token_ids=active_token_ids,
+                    write_gate=write_gate,
+                    commit=commit,
+                    quote_flush_wake=quote_flush_wake,
+                    logger=logger,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - repair cannot own socket liveness
+                self.depth_repair_failure_count += 1
+                if logger is not None:
+                    logger.warning(
+                        "EDLI market-channel depth repair failed: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                written = 0
+            pending_fetch = (
+                self._missing_depth_tokens - self._depth_repair_inflight_tokens
+            )
+            if pending_fetch:
+                if not written:
+                    await asyncio.sleep(MARKET_CHANNEL_DEPTH_REPAIR_RETRY_SECONDS)
+                wake.set()
+
+    def _clear_durable_missing_depth_tokens(self, *, logger: Any | None) -> int:
+        pending = sorted(
+            self._missing_depth_tokens & self._depth_repair_quote_seen_at.keys()
+        )
+        if not pending:
+            return 0
+        schema = self.ingestor._feasibility_schema
+        if schema:
+            latest_table = f"{schema}.execution_feasibility_latest"
+        else:
+            from src.state.owner_routed_write import owner_write_target
+
+            latest_table = owner_write_target(
+                self.ingestor._feasibility_conn,
+                "execution_feasibility_latest",
+            )
+        if latest_table is None:
+            return 0
+        durable: set[str] = set()
+        try:
+            for offset in range(0, len(pending), REST_SEED_FETCH_BATCH_SIZE):
+                batch = pending[offset: offset + REST_SEED_FETCH_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in batch)
+                rows = self.ingestor._feasibility_conn.execute(
+                    f"""
+                    SELECT DISTINCT token_id, quote_seen_at
+                      FROM {latest_table}
+                     WHERE token_id IN ({placeholders})
+                       AND direction IN ('buy_yes', 'buy_no')
+                       AND depth_before_json IS NOT NULL
+                       AND depth_before_json != ''
+                    """,
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    token_id = str(row[0])
+                    quote_seen_at = str(row[1])
+                    cached = self.ingestor.quote_cache.get(token_id)
+                    repair_quote_seen_at = self._depth_repair_quote_seen_at.get(
+                        token_id
+                    )
+                    if (
+                        cached is None
+                        or cached.depth_json in (None, "")
+                        or repair_quote_seen_at is None
+                        or _quote_instant(cached.quote_seen_at)
+                        != _quote_instant(quote_seen_at)
+                        or _quote_instant(quote_seen_at)
+                        < _quote_instant(repair_quote_seen_at)
+                    ):
+                        continue
+                    durable.add(token_id)
+        except sqlite3.Error as exc:
+            self.depth_repair_failure_count += 1
+            if logger is not None:
+                logger.warning(
+                    "EDLI market-channel depth repair durability probe failed: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+            return 0
+        self._missing_depth_tokens.difference_update(durable)
+        self._depth_repair_inflight_tokens.difference_update(durable)
+        for token_id in durable:
+            self._depth_repair_quote_seen_at.pop(token_id, None)
+        return len(durable)
 
     def _fetch_rest_seed_books(
         self,
@@ -2051,6 +2254,9 @@ class MarketChannelOnlineService:
                     self.gap_start = None
                     self._connected_at = connected_at
                     self._current_generation_depth_tokens.clear()
+                    self._missing_depth_tokens.clear()
+                    self._depth_repair_inflight_tokens.clear()
+                    self._depth_repair_quote_seen_at.clear()
                     with _quote_write_gate:
                         insert_market_channel_connectivity_event(
                             self.ingestor._feasibility_conn,
@@ -2076,6 +2282,7 @@ class MarketChannelOnlineService:
                     connection_done = asyncio.Event()
                     initial_seed_done = asyncio.Event()
                     quote_flush_wake = asyncio.Event()
+                    depth_repair_wake = asyncio.Event()
                     self._quote_projection_pump_active = (
                         self.ingestor._coalescer is not None
                     )
@@ -2114,6 +2321,19 @@ class MarketChannelOnlineService:
                                 write_gate=_quote_write_gate,
                                 commit=commit,
                                 rollback=rollback,
+                                logger=logger,
+                                depth_repair_wake=depth_repair_wake,
+                            )
+                        )
+                        depth_repair_task = tasks.create_task(
+                            self._repair_missing_depth_forever(
+                                wake=depth_repair_wake,
+                                connection_done=connection_done,
+                                initial_seed_done=initial_seed_done,
+                                active_token_ids=active_token_ids,
+                                write_gate=_quote_write_gate,
+                                commit=commit,
+                                quote_flush_wake=quote_flush_wake,
                                 logger=logger,
                             )
                         )
@@ -2178,6 +2398,7 @@ class MarketChannelOnlineService:
                                                     commit()
                                         if self.ingestor._market_event_sink_independently_coordinated:
                                             self.ingestor.flush_deferred_market_event_sink()
+                                    self._clear_durable_missing_depth_tokens(logger=logger)
                                 except (TimeoutError, sqlite3.OperationalError) as exc:
                                     if not _is_sqlite_write_contention(exc):
                                         raise
@@ -2195,6 +2416,9 @@ class MarketChannelOnlineService:
                                             ),
                                             exc,
                                         )
+
+                            if self._missing_depth_tokens:
+                                depth_repair_wake.set()
 
                             pending_world_messages.extend(world_messages)
                             if pending_world_messages:
@@ -2242,6 +2466,7 @@ class MarketChannelOnlineService:
                             for _action in pending_actions:
                                 self._enqueue_refresh_action(_action)
                         connection_done.set()
+                        depth_repair_task.cancel()
                         quote_flush_wake.set()
                     self._quote_projection_pump_active = False
                     if stop_event is None or not stop_event.is_set():

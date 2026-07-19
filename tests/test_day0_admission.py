@@ -1,4 +1,5 @@
 # Created: 2026-06-17
+# Last reused/audited: 2026-07-19
 # Authority basis: operator delta-package v2 (real_upgrade #3) — Day0 live admission circuit breakers.
 """Contract tests for day0_live_admission_rejection_reason (8 gates + admit + bypass).
 

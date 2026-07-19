@@ -1,4 +1,5 @@
 # Created: 2026-07-19
+# Last reused/audited: 2026-07-19
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
 #   book) + docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md (the
 #   measured bottleneck is the ~40-min SCHEDULED posterior recompute cadence, HOP 2b p50 39.9 min
