@@ -526,6 +526,7 @@ def select_prepared_global_auction(
     ]
     | None = None,
     preflight_excluded_by_family: Mapping[str, str] | None = None,
+    buy_disabled_family_keys: frozenset[str] | None = None,
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
     | None = None,
     cancelled: Callable[[], bool] | None = None,
@@ -556,6 +557,7 @@ def select_prepared_global_auction(
     ):
         return _no_trade("GLOBAL_EXCLUDED_FAMILY_INVALID")
     excluded = frozenset(excluded_by_family)
+    buy_disabled = frozenset(buy_disabled_family_keys or ())
     probability_witnesses = {}
     event_by_family: dict[str, str] = {}
     candidates: list[GlobalSingleOrderAnyCandidate] = []
@@ -602,6 +604,8 @@ def select_prepared_global_auction(
 
     if not excluded.issubset(probability_witnesses):
         return _no_trade("GLOBAL_EXCLUDED_FAMILY_UNKNOWN")
+    if not buy_disabled.issubset(probability_witnesses):
+        return _no_trade("GLOBAL_BUY_DISABLED_FAMILY_UNKNOWN")
 
     if book_epoch is not None:
         if venue_universe_identity != book_epoch.witness_identity:
@@ -674,7 +678,7 @@ def select_prepared_global_auction(
             probability = probability_witnesses.get(asset.family_key)
             if probability is None:
                 return _no_trade("GLOBAL_BOOK_FAMILY_PROBABILITY_MISSING")
-            if asset.family_key in excluded:
+            if asset.family_key in excluded or asset.family_key in buy_disabled:
                 continue
             native = SimpleNamespace(
                 no_trade_reason=None,

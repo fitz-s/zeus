@@ -565,6 +565,59 @@ def test_day0_monitor_reuses_family_snapshot_across_sibling_bins(monkeypatch) ->
     assert read_counter("monitor_day0_family_snapshot_cache_hit_total") == 1
 
 
+def test_unobserved_prefix_monitor_uses_global_sample_mean_not_scalar_point() -> None:
+    import numpy as np
+
+    condition_id = "0x" + "73" * 32
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                bin_id="14C",
+                condition_id=condition_id,
+                yes_token_id="yes-14",
+                no_token_id="no-14",
+            ),
+        ),
+        yes_q_samples=np.array([[0.2], [0.4]]),
+        witness_identity="unobserved-prefix-witness",
+        q_version="unobserved-prefix-q",
+        source_truth_identity="unobserved-prefix-truth",
+        band_basis="current_coherent_settlement_simplex_v1",
+        band_alpha=0.05,
+    )
+    snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=((condition_id, "yes-14", "no-14"),),
+        deterministic_condition_ids=frozenset(),
+        day0_payload={},
+        metric="low",
+        probability_authority=(
+            "replacement_unobserved_day0_prefix_global_probability_v1"
+        ),
+    )
+    pos = _make_position()
+    pos.condition_id = condition_id
+    pos.direction = "buy_yes"
+    pos.token_id = "yes-14"
+    pos.no_token_id = "no-14"
+
+    probability, refreshed, fresh = (
+        monitor_refresh_module._materialize_current_global_day0_probability(
+            pos,
+            snapshot,
+        )
+    )
+
+    assert probability == pytest.approx(0.3)
+    assert fresh is True
+    assert refreshed.selected_method == "replacement_posterior"
+    receipt = refreshed._day0_monitor_probability_receipt
+    assert receipt["probability_authority"] == (
+        "replacement_unobserved_day0_prefix_global_probability_v1"
+    )
+    assert receipt["remaining_window"] is None
+
+
 def test_day0_family_cache_keeps_partial_exact_witness_condition_local() -> None:
     from datetime import timedelta
 

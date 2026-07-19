@@ -7765,6 +7765,56 @@ def event_bound_live_adapter_from_trade_conn(
                 )
             return receipt
 
+        def _prepare_held_current_scope_event(event, at):
+            """Prepare a held-only pre-observation witness; never entry authority."""
+
+            from src.contracts.executable_market_snapshot import (
+                FRESHNESS_WINDOW_DEFAULT,
+            )
+
+            if event.event_type != "DAY0_EXTREME_UPDATED":
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=(
+                        "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
+                        f"{_FAMILY_AUTHORITY_UNAVAILABLE}:"
+                        "GLOBAL_HELD_UNOBSERVED_DAY0_CARRIER_REQUIRED"
+                    ),
+                    proof_accepted=False,
+                )
+            try:
+                prepared = _prepare_current_global_probability_family(
+                    event,
+                    forecast_conn=forecast_conn,
+                    topology_conn=topology_conn,
+                    observation_conn=calibration_conn,
+                    decision_time=at,
+                    max_age=FRESHNESS_WINDOW_DEFAULT,
+                    allow_unobserved_day0_replacement=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - held authority remains fail closed
+                failure_type = type(exc).__name__
+                if (
+                    isinstance(exc, sqlite3.OperationalError)
+                    and _is_sqlite_lock_error(exc)
+                ):
+                    failure_type = _TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE
+                elif _is_global_probability_family_unavailable(exc):
+                    failure_type = _FAMILY_AUTHORITY_UNAVAILABLE
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=(
+                        "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:"
+                        f"{failure_type}:{exc}"
+                    ),
+                    proof_accepted=False,
+                )
+            return _prepared_global_event_receipt(event, prepared)
+
         def _actuate(event, actuation, at):
             return _stamp_live_adapter_lane(
                 _submit_inner(event, at, global_actuation=actuation),
@@ -9115,6 +9165,7 @@ def event_bound_live_adapter_from_trade_conn(
                 trade_conn=trade_conn,
                 payload_reader=_payload,
                 prepare_event=_prepare_current_scope_event,
+                prepare_held_event=_prepare_held_current_scope_event,
                 actuate_winner=_actuate,
                 preflight_winner=_preflight,
                 actuate_preflighted_winner=GlobalOneShotActuator(
@@ -12284,6 +12335,10 @@ def _current_global_actuation_prepared_family(
         required_condition_id=required_condition_id,
         allow_partial_deterministic=isinstance(
             selected, DeterministicBinPayoffWitness
+        ),
+        allow_unobserved_day0_replacement=(
+            str(getattr(candidate, "action", "BUY") or "BUY").upper()
+            == "SELL"
         ),
     )
     current_witness = getattr(current, "probability_witness", None)
@@ -28666,6 +28721,7 @@ def _prepare_current_global_probability_family(
     cache_metadata_out: dict[str, str] | None = None,
     required_condition_id: str | None = None,
     allow_partial_deterministic: bool | None = None,
+    allow_unobserved_day0_replacement: bool = False,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -28700,6 +28756,8 @@ def _prepare_current_global_probability_family(
         raise ValueError("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
     if max_age <= timedelta(0):
         raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
+    if not isinstance(allow_unobserved_day0_replacement, bool):
+        raise ValueError("GLOBAL_UNOBSERVED_DAY0_REPLACEMENT_POLICY_INVALID")
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
     rows = _event_family_market_topology_rows(topology_conn, payload)
@@ -28728,6 +28786,7 @@ def _prepare_current_global_probability_family(
     if cache_metadata_out is not None:
         cache_metadata_out["family_binding_hash"] = str(family.binding_hash)
     is_day0 = event.event_type == "DAY0_EXTREME_UPDATED"
+    use_unobserved_day0_replacement = False
     current_day0_payload: dict[str, object] | None = None
     day0_observation_conn = observation_conn or forecast_conn
     day0_snapshot: Mapping[str, object] | None = None
@@ -28739,6 +28798,43 @@ def _prepare_current_global_probability_family(
         city = runtime_cities_by_name().get(str(family.city))
         if city is None:
             raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
+        local_target = date.fromisoformat(str(family.target_date))
+        local_now = decision_time.astimezone(ZoneInfo(str(city.timezone)))
+        observation_table = day0_observation_conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='observation_instants'"
+        ).fetchone()
+        if observation_table is None:
+            raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
+        has_target_observation = (
+            day0_observation_conn.execute(
+                "SELECT 1 FROM observation_instants "
+                "WHERE city = ? AND target_date = ? LIMIT 1",
+                (str(family.city), str(family.target_date)),
+            ).fetchone()
+            is not None
+        )
+        if (
+            allow_unobserved_day0_replacement
+            and not has_target_observation
+            and local_now.date() == local_target
+        ):
+            from src.data.observation_client import (
+                _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
+            )
+
+            local_midnight = local_now.replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+                fold=0,
+            )
+            use_unobserved_day0_replacement = (
+                timedelta(0) <= local_now - local_midnight <= timedelta(
+                    hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
+                )
+            )
         from src.execution.day0_hard_fact_exit import (
             _final_daily_observation_extreme,
         )
@@ -28750,9 +28846,49 @@ def _prepare_current_global_probability_family(
             now=decision_time,
             conn=forecast_conn,
         )
-        local_target = date.fromisoformat(str(family.target_date))
-        local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
         if final_daily_observation is not None:
+            use_unobserved_day0_replacement = False
+        local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
+        if use_unobserved_day0_replacement:
+            readiness = _latest_replacement_readiness(
+                forecast_conn,
+                city=family.city,
+                target_date=family.target_date,
+                temperature_metric=family.metric,
+                decision_time=decision_time,
+            )
+            if readiness is None:
+                raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
+            result = read_replacement_forecast_bundle(
+                forecast_conn,
+                baseline_bundle=None,
+                readiness=readiness,
+                city=family.city,
+                target_date=family.target_date,
+                temperature_metric=family.metric,
+                decision_time=decision_time,
+                require_baseline_bundle=False,
+                current_bin_topology_hash=current_topology_hash,
+                enforce_raw_input_hwm=True,
+            )
+            if not result.ok or result.bundle is None:
+                raise ValueError(
+                    "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+                    f"{result.reason_code}"
+                )
+            bundle = result.bundle
+            posterior_identity_hash = str(
+                bundle.posterior_identity_hash or ""
+            ).strip()
+            dependency_hash = str(bundle.dependency_hash or "").strip()
+            posterior_config_hash = str(bundle.posterior_config_hash or "").strip()
+            if not all(
+                (posterior_identity_hash, dependency_hash, posterior_config_hash)
+            ):
+                raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
+            source_cycle_raw = bundle.source_cycle_time
+            source_available_at = str(bundle.source_available_at or "").strip()
+        elif final_daily_observation is not None:
             source_cycle_raw = final_daily_observation.fetched_at.isoformat()
             source_available_at = source_cycle_raw
             day0_base_identity = stable_hash(
@@ -28771,12 +28907,6 @@ def _prepare_current_global_probability_family(
         else:
             if local_target < local_today:
                 raise ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
-            observation_table = day0_observation_conn.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type='table' AND name='observation_instants'"
-            ).fetchone()
-            if observation_table is None:
-                raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
             day0_snapshot = _forecast_snapshot_row_for_event(
                 forecast_conn,
                 event=event,
@@ -28855,13 +28985,13 @@ def _prepare_current_global_probability_family(
     except ValueError as exc:
         reason = (
             "GLOBAL_DAY0_SOURCE_CYCLE_INVALID"
-            if is_day0
+            if is_day0 and not use_unobserved_day0_replacement
             else "GLOBAL_CURRENT_SOURCE_CYCLE_INVALID"
         )
         raise ValueError(reason) from exc
     if source_cycle.tzinfo is None:
         source_cycle = source_cycle.replace(tzinfo=UTC)
-    if is_day0:
+    if is_day0 and not use_unobserved_day0_replacement:
         try:
             available_at = datetime.fromisoformat(
                 source_available_at.replace("Z", "+00:00")
@@ -28875,7 +29005,7 @@ def _prepare_current_global_probability_family(
         source_cycle_time_utc=source_cycle.astimezone(UTC),
     )
     omega = build_outcome_space(family, case)
-    if is_day0:
+    if is_day0 and not use_unobserved_day0_replacement:
         if final_daily_observation is not None:
             current_day0_payload = _global_final_daily_probability_payload(
                 family=family,

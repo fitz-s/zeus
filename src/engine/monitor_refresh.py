@@ -125,6 +125,7 @@ class _CurrentGlobalDay0FamilySnapshot:
     deterministic_condition_ids: frozenset[str]
     day0_payload: dict[str, object]
     metric: str
+    probability_authority: str = "day0_remaining_day_global_probability_v1"
 
 
 @dataclass
@@ -4341,16 +4342,21 @@ def _materialize_current_global_day0_probability(
         witness.band_basis
         == _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS
     )
-    selected_method = (
-        SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
-        if is_final_daily
-        else SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    is_unobserved_prefix_replacement = (
+        snapshot.probability_authority
+        == "replacement_unobserved_day0_prefix_global_probability_v1"
     )
-    probability_authority = (
-        "final_daily_observation_exact_global_probability_v1"
-        if is_final_daily
-        else "day0_remaining_day_global_probability_v1"
-    )
+    if is_final_daily:
+        selected_method = SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
+        probability_authority = (
+            "final_daily_observation_exact_global_probability_v1"
+        )
+    elif is_unobserved_prefix_replacement:
+        selected_method = "replacement_posterior"
+        probability_authority = snapshot.probability_authority
+    else:
+        selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        probability_authority = "day0_remaining_day_global_probability_v1"
     refreshed.selected_method = selected_method
     _append_monitor_validation(
         refreshed,
@@ -4366,6 +4372,12 @@ def _materialize_current_global_day0_probability(
             selected_method=selected_method,
             kind="exact_final_daily_observation",
             metric=snapshot.metric,
+        )
+    elif is_unobserved_prefix_replacement:
+        _append_monitor_validation(
+            refreshed,
+            "day0_unobserved_prefix_within_start_grace:"
+            "replacement_global_probability_authority",
         )
     else:
         _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
@@ -4396,7 +4408,7 @@ def _materialize_current_global_day0_probability(
             },
             "observation": dict(observation) if isinstance(observation, dict) else {},
             "remaining_window": None
-            if is_final_daily
+            if is_final_daily or is_unobserved_prefix_replacement
             else {
                 "source": "current_global_probability_builder",
                 "finite_evidence_member_count": snapshot.day0_payload.get(
@@ -4473,6 +4485,16 @@ def _build_current_global_day0_family_snapshot(
 
         day0_payload: dict[str, object] = {}
         cache_metadata: dict[str, str] = {}
+        city = cities_by_name.get(str(position.city))
+        unobserved_prefix = bool(
+            city is not None
+            and not _target_day_has_canonical_observation(world, position)
+            and _within_day0_observation_start_grace(
+                city,
+                position.target_date,
+                now=now,
+            )
+        )
         try:
             prepared = _prepare_current_global_probability_family(
                 event,
@@ -4484,6 +4506,7 @@ def _build_current_global_day0_family_snapshot(
                 day0_payload_out=day0_payload,
                 cache_metadata_out=cache_metadata,
                 required_condition_id=condition_id,
+                allow_unobserved_day0_replacement=unobserved_prefix,
             )
         except ValueError as exc:
             if (
@@ -4566,6 +4589,11 @@ def _build_current_global_day0_family_snapshot(
         deterministic_condition_ids=deterministic_condition_ids,
         day0_payload=day0_payload,
         metric=metric,
+        probability_authority=(
+            "replacement_unobserved_day0_prefix_global_probability_v1"
+            if unobserved_prefix
+            else "day0_remaining_day_global_probability_v1"
+        ),
     )
 
 

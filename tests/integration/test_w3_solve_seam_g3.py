@@ -3052,7 +3052,10 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         ),
     )
     observations = sqlite3.connect(":memory:")
-    observations.execute("CREATE TABLE observation_instants (marker INTEGER)")
+    observations.execute(
+        "CREATE TABLE observation_instants ("
+        "city TEXT, target_date TEXT, marker INTEGER)"
+    )
 
     def replacement_readiness_must_not_run(*_args, **_kwargs):
         raise AssertionError("Day0 must not read full-day replacement readiness")
@@ -12044,6 +12047,29 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         if evaluation.action == "SELL"
     }
     assert sell_evaluations == {"position-evaluated"}
+    held_only_selected = select_prepared_global_auction(
+        prepared_with_holdings,
+        **{
+            **auction_kwargs,
+            "venue_universe_identity": book_venue_identity,
+            "current_venue_universe_identity_resolver": lambda: book_venue_identity,
+            "book_epoch": held_book_epoch,
+            "current_capital_limit_resolver": current_capital_limit,
+            "buy_disabled_family_keys": frozenset(
+                {held_probability.family_key}
+            ),
+        },
+    )
+    assert any(
+        evaluation.action == "SELL"
+        and evaluation.family_key == held_probability.family_key
+        for evaluation in held_only_selected.decision.candidate_evaluations
+    )
+    assert not any(
+        evaluation.action == "BUY"
+        and evaluation.family_key == held_probability.family_key
+        for evaluation in held_only_selected.decision.candidate_evaluations
+    )
     assert capital_scopes
     assert all(
         gamma_market_id == f"gamma-{condition_id}"
@@ -13125,6 +13151,155 @@ def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
         "GLOBAL_FAMILY_INELIGIBLE:"
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
         "FamilyAuthorityUnavailable:test"
+    )
+
+
+def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
+    monkeypatch,
+):
+    import src.data.replacement_input_hwm as replacement_hwm
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,),
+        captured_at_utc=decision_at,
+    )
+    family_key = scope.family_keys[0]
+    witness = SimpleNamespace(
+        family_key=family_key,
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="held-q",
+        q_version="held-q-version",
+        family_binding_identity="held-binding",
+        sample_matrix_identity="held-samples",
+        band_alpha=0.05,
+        band_basis="lower-tail",
+    )
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="held-position",
+        family_key=family_key,
+        bin_label="21C",
+        condition_id="held-condition",
+        side="YES",
+        token_id="held-yes",
+        held_shares=Decimal("5"),
+    )
+    selected_kwargs = {}
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (("Alpha", "2026-07-11", "high"),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_obligations",
+        lambda *_: (obligation,),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-witness",
+            economic_identity="wealth-economic",
+            ledger_snapshot_id="ledger",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_complete_holding_coverage",
+        lambda coverage, **_: tuple(coverage),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_publish_global_holding_coverage",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def select(*_args, **kwargs):
+        from src.engine.global_single_order_auction import (
+            PreparedGlobalAuctionResult,
+        )
+
+        selected_kwargs.update(kwargs)
+        return PreparedGlobalAuctionResult(
+            decision=GlobalSingleOrderDecision(
+                shares=Decimal("0"),
+                cost_usd=Decimal("0"),
+                robust_delta_log_wealth=0.0,
+                robust_ev_usd=0.0,
+                capital_efficiency=0.0,
+                candidate=None,
+                no_trade_reason="CASH_DOMINATES",
+                rejection_reasons={},
+                candidate_evaluations=(),
+            ),
+            winner_event_id=None,
+            actuation=None,
+            holding_coverage=(),
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            reason=(
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:test"
+            ),
+        ),
+        prepare_held_event=lambda item, _at: EventSubmissionReceipt(
+            False,
+            item.event_id,
+            item.causal_snapshot_id,
+            prepared_global_family=SimpleNamespace(probability_witness=witness),
+        ),
+        actuate_winner=lambda *_: pytest.fail("cash-dominant auction must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        portfolio_state_provider=lambda: object(),
+    )
+
+    assert selected_kwargs["buy_disabled_family_keys"] == frozenset({family_key})
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"
     )
 
 

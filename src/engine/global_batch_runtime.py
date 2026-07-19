@@ -2103,6 +2103,10 @@ def process_current_global_batch(
     venue_submit_count: Callable[[], int],
     current_execution: Callable[[object, datetime], object | None],
     current_time_provider: Callable[[], datetime],
+    prepare_held_event: Callable[
+        [OpportunityEvent, datetime], EventSubmissionReceipt
+    ]
+    | None = None,
     preflight_winner: Callable[
         [OpportunityEvent, object, datetime, GlobalPreflightAuthority],
         GlobalWinnerPreflight,
@@ -2669,6 +2673,10 @@ def process_current_global_batch(
             claimed_by_family[family_key] = event
 
         prepared_by_event = {}
+        held_only_family_keys: set[str] = set()
+        held_obligation_family_keys = {
+            obligation.family_key for obligation in holding_obligations
+        }
         full_scope_event_by_family = dict(decision_scope.events_by_family)
         ineligible_by_family: dict[str, str] = {}
         ineligible_by_event: dict[str, str] = {}
@@ -2682,15 +2690,25 @@ def process_current_global_batch(
             prepared = prepared_receipt.prepared_global_family
             if prepared is None:
                 if _current_probability_ineligible(prepared_receipt):
-                    reason = str(prepared_receipt.reason)
-                    ineligible_by_family[family_key] = reason
-                    if family_key in claimed_by_family:
-                        ineligible_by_event[owner.event_id] = reason
-                    continue
-                return reject(
-                    "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
-                    f"{family_key}:{prepared_receipt.reason or 'missing'}"
-                )
+                    if (
+                        prepare_held_event is not None
+                        and family_key in held_obligation_family_keys
+                    ):
+                        held_receipt = prepare_held_event(scope_event, scope_at)
+                        prepared = held_receipt.prepared_global_family
+                        if prepared is not None:
+                            held_only_family_keys.add(family_key)
+                    if prepared is None:
+                        reason = str(prepared_receipt.reason)
+                        ineligible_by_family[family_key] = reason
+                        if family_key in claimed_by_family:
+                            ineligible_by_event[owner.event_id] = reason
+                        continue
+                else:
+                    return reject(
+                        "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
+                        f"{family_key}:{prepared_receipt.reason or 'missing'}"
+                    )
             if not _forecast_carrier_matches(
                 scope_event,
                 payload_reader(scope_event),
@@ -2918,6 +2936,7 @@ def process_current_global_batch(
                 current_capital_limit_resolver=current_capital_limit_resolver,
                 candidate_policy_rejection_resolver=candidate_policy,
                 preflight_excluded_by_family=preflight_excluded_by_family,
+                buy_disabled_family_keys=frozenset(held_only_family_keys),
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 cancelled=selection_cancelled,
             )
