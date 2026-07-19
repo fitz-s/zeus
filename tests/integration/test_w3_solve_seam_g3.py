@@ -4415,6 +4415,12 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
         "src.data.polymarket_client.PolymarketClient",
         FakeClient,
     )
+    if event_type == "DAY0_EXTREME_UPDATED":
+        monkeypatch.setattr(
+            era,
+            "_global_speculative_executable_prefetch_tokens",
+            lambda *_a, **_k: None,
+        )
     if projection_mode == "expires_after_fetch":
         monkeypatch.setattr(
             era,
@@ -4523,7 +4529,7 @@ def test_live_adapter_urgent_day0_preempts_parallel_book_prefetch(monkeypatch):
     monkeypatch.setattr(
         era,
         "_global_speculative_executable_prefetch_tokens",
-        lambda *_a, **_k: ("yes-token", "no-token"),
+        lambda *_a, **_k: None,
     )
     monkeypatch.setattr(
         era,
@@ -4581,7 +4587,10 @@ def test_live_adapter_urgent_day0_preempts_parallel_book_prefetch(monkeypatch):
         topology_conn=topology,
         calibration_conn=world,
     )
-    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="DAY0_EXTREME_UPDATED",
+    )
     adapter.process_global_batch(
         (event,),
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),

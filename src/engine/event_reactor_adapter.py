@@ -8346,7 +8346,11 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if _urgent_book_preemption("after_current_metadata"):
                     return probabilities, None
-            elif day0_urgent_batch and speculative_prefetch_tokens is None:
+            elif (
+                day0_urgent_batch
+                and speculative_prefetch_tokens is None
+                and prefetch_token_hint is None
+            ):
                 rebound_probabilities.update(
                     _bind(
                         bind_slice,
