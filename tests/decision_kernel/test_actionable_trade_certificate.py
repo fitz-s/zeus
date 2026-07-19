@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-25; last_reviewed=2026-07-13; last_reused=2026-07-13
+# Lifecycle: created=2026-05-25; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Prove actionable trade certificates bind every live probability and execution parent.
 # Reuse: Re-audit canonical parent identity and selected-leg probability closure before live use.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
@@ -502,7 +502,7 @@ def test_actionable_day0_reproof_accepts_possible_bin():
 
 
 def test_actionable_day0_reproof_rejects_impossible_bin_nonzero_q():
-    """M-13 law 1: a bin the Day0 support transform makes impossible must carry q == 0."""
+    """M-13 law 1: an impossible bin must carry YES q == 0."""
     parents, action = actionable_graph(
         action_payload=_day0_reproof_action_payload(),
         parent_overrides={claims.CANDIDATE_EVIDENCE: {"bin_label": "18°F"}},
@@ -511,6 +511,108 @@ def test_actionable_day0_reproof_rejects_impossible_bin_nonzero_q():
 
     with pytest.raises(CertificateVerificationError, match="DAY0_IMPOSSIBLE_BIN_NONZERO_Q"):
         verify_actionable_trade(action, parents)
+
+
+def _day0_impossible_buy_no_graph(
+    *,
+    q_live: float,
+    bin_label: str = "18°F",
+    city: str | None = None,
+    obs_extreme: float = 20.0,
+):
+    transform = {
+        **_day0_lcb_transform(),
+        "yes_lcb_by_condition": {"condition-1": 0.0},
+        "no_lcb_by_condition": {"condition-1": 0.2},
+        "rounded_extreme": obs_extreme,
+    }
+    probability_authority = {
+        **_day0_probability_authority(),
+        "rounded_value": obs_extreme,
+        "lcb_transform": transform,
+    }
+    economics = {
+        **_day0_qkernel_economics(),
+        "side": "NO",
+        "payoff_q_point": q_live,
+        "payoff_q_lcb": 0.2,
+        "cost": 0.1,
+        "edge_lcb": 0.1,
+        "selection_guard_q_safe": 0.2,
+    }
+    return actionable_graph(
+        action_payload=_day0_reproof_action_payload(
+            token_id="no-1",
+            direction="buy_no",
+            q_live=q_live,
+            q_lcb_5pct=0.2,
+            c_fee_adjusted=0.1,
+            c_cost_95pct=0.1,
+            trade_score=0.1,
+            action_score=0.1,
+            raw_value=obs_extreme,
+            rounded_value=obs_extreme,
+            day0_probability_authority=probability_authority,
+            _edli_day0_lcb_transform=transform,
+            qkernel_execution_economics=economics,
+        ),
+        parent_overrides={
+            claims.EXECUTABLE_SNAPSHOT: {"token_id": "no-1"},
+            claims.QUOTE_FEASIBILITY: {
+                "token_id": "no-1",
+                "direction": "buy_no",
+            },
+            claims.COST_MODEL: {
+                "token_id": "no-1",
+                "direction": "buy_no",
+            },
+            claims.CANDIDATE_EVIDENCE: {
+                "selected_token_id": "no-1",
+                "direction": "buy_no",
+                "hypothesis_id": "family-1:no-1",
+                "bin_label": bin_label,
+            },
+            claims.FDR: {"selected_hypotheses": ("family-1:no-1",)},
+        },
+        extra_parent_payloads=_day0_authority_parents(
+            metric="high",
+            city=city,
+            raw_value=obs_extreme,
+            rounded_value=obs_extreme,
+        ),
+    )
+
+
+def test_actionable_day0_reproof_accepts_certain_no_for_impossible_yes_bin():
+    """An impossible YES bin is exactly the absorbing q=1 BUY NO case."""
+    parents, action = _day0_impossible_buy_no_graph(q_live=1.0)
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_rejects_understated_no_for_impossible_yes_bin():
+    """BUY NO is not bypassed: its complement must still prove YES q=0."""
+    parents, action = _day0_impossible_buy_no_graph(q_live=0.9)
+
+    with pytest.raises(CertificateVerificationError, match="yes_q_live=0.099"):
+        verify_actionable_trade(action, parents)
+
+
+@pytest.mark.parametrize("q_live", [1.0, 0.99])
+def test_actionable_day0_reproof_hong_kong_29c_observed_30_buy_no(q_live):
+    """Production regression: HKO 29°C YES is impossible after observed high 30°C."""
+    parents, action = _day0_impossible_buy_no_graph(
+        q_live=q_live,
+        bin_label="29°C",
+        city="Hong Kong",
+        obs_extreme=30.0,
+    )
+
+    if q_live == 1.0:
+        verify_actionable_trade(action, parents)
+    else:
+        with pytest.raises(CertificateVerificationError, match="yes_q_live=0.010"):
+            verify_actionable_trade(action, parents)
 
 
 def test_actionable_day0_reproof_rejects_unrecognized_metric_orientation():

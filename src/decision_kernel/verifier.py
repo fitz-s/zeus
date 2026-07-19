@@ -604,15 +604,15 @@ def _verify_day0_impossible_bin_reproof(
     payload: dict,
     parent: dict[str, DecisionCertificate],
 ) -> None:
-    """Re-derive the Day0 impossible-bin q==0 law from primitives (M-13 defense-in-depth).
+    """Re-derive the Day0 impossible-bin YES-q==0 law (M-13 defense-in-depth).
 
     Fails open (returns without raising) for non-Day0 certificates and whenever any field
     needed to re-derive the bound is absent -- absence is "not applicable", never a new
     failure. When every needed field IS present, this independently recomputes whether the
     candidate bin is settlement-impossible under the observed extreme and REJECTS a live
-    certificate that claims positive q on it, or that carries an unrecognized metric
-    orientation -- the two failure modes a metric/side swap or wrong-obs bug upstream would
-    otherwise smuggle through undetected.
+    certificate that claims positive YES probability on it, or that carries an unrecognized
+    metric orientation. ``q_live`` is the selected payoff-side probability, so BUY NO must
+    be complemented before checking the underlying bin event.
     """
     if str(payload.get("event_type") or "").strip() != DAY0_ACTIONABLE_EVENT_TYPE:
         return
@@ -643,6 +643,10 @@ def _verify_day0_impossible_bin_reproof(
         q_live_value = float(q_live)
     except (TypeError, ValueError):
         return
+    native_side = native_curve_side_for_direction(payload.get("direction"))
+    if native_side is None:
+        return
+    yes_q_live = q_live_value if native_side == "YES" else 1.0 - q_live_value
 
     # Raises DAY0_METRIC_ORIENTATION_INVALID for a metric outside {"high", "low"}.
     support_lower, support_upper = _day0_support_bound(metric, obs_extreme)
@@ -655,11 +659,12 @@ def _verify_day0_impossible_bin_reproof(
     impossible = (support_lower is not None and hi <= support_lower) or (
         support_upper is not None and lo >= support_upper
     )
-    if impossible and q_live_value > DAY0_IMPOSSIBLE_BIN_Q_TOLERANCE:
+    if impossible and yes_q_live > DAY0_IMPOSSIBLE_BIN_Q_TOLERANCE:
         raise CertificateVerificationError(
             "DAY0_IMPOSSIBLE_BIN_NONZERO_Q:"
             f"metric={metric}:obs_extreme={obs_extreme!r}:bin=[{lo!r},{hi!r}):"
-            f"q_live={q_live_value!r}"
+            f"direction={payload.get('direction')!r}:q_live={q_live_value!r}:"
+            f"yes_q_live={yes_q_live!r}"
         )
 
 
