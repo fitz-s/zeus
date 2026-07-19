@@ -494,7 +494,7 @@ class PortfolioGovernor:
     ) -> GovernorState:
         health = _coerce_heartbeat_health(heartbeat)
         m5_reconcile_required = bool(_mapping_get(ws_status, "m5_reconcile_required", False))
-        ws_gap_active = bool(m5_reconcile_required or _mapping_get(ws_status, "ws_gap_active", False))
+        ws_gap_active = bool(_mapping_get(ws_status, "ws_gap_active", False))
         ws_gap_seconds = int(_mapping_get(ws_status, "gap_seconds", 0) or _mapping_get(ws_status, "ws_gap_seconds", 0) or 0)
         drawdown = float(getattr(ledger, "current_drawdown_pct", _mapping_get(ledger, "current_drawdown_pct", 0.0)) or 0.0)
         risk_level = _coerce_risk_level(getattr(ledger, "risk_level", _mapping_get(ledger, "risk_level", RiskLevel.GREEN)))

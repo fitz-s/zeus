@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-16
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Last reused/audited: 2026-07-19
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: Lock INV-NEW-R RiskAllocator / PortfolioGovernor cap and kill-switch behavior.
 # Reuse: Run for A2 allocator/governor, executor pre-submit, and live-readiness gate changes.
@@ -607,17 +607,22 @@ def test_update_state_threads_m5_reconcile_required_independently_of_ws_gap_seco
     state = governor.update_state(
         {},
         HeartbeatStatus(HeartbeatHealth.HEALTHY, None, 0, "h", 5),
-        {"m5_reconcile_required": True},
+        {
+            "m5_reconcile_required": True,
+            "ws_gap_active": False,
+            "ws_gap_seconds": 16,
+        },
         0,
         0,
     )
 
     assert state.m5_reconcile_required is True
-    assert state.ws_gap_active is True
-    assert state.ws_gap_seconds == 0
-    # The graded kill-switch threshold never fires at ws_gap_seconds=0 --
-    # unaffected by this change -- but reduce-only still trips via the
-    # independent m5 latch.
+    assert state.ws_gap_active is False
+    assert state.ws_gap_seconds == 16
+    assert state.kill_switch_armed is False
+    assert state.manual_reason is None
+    # M5 remains reduce-only proof even when an unrelated duration value is
+    # above the raw-WS threshold; it must not be folded into a kill switch.
     allocator = RiskAllocator()
     assert allocator.kill_switch_reason(state) is None
     assert allocator.reduce_only_mode_active(state) is True
