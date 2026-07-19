@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import sqlite3
 from dataclasses import replace
@@ -39,10 +40,12 @@ from src.engine.event_reactor_adapter import (
     _snapshot_unit,
     _probability_vector_hash,
     _forecast_authority_payload_from_posterior,
+    _global_batch_wakes_supersede,
 )
 from src.config import runtime_cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, ForecastSnapshotReadyPayload, make_day0_extreme_updated_event, make_opportunity_event
+from src.events.candidate_binding import weather_family_id
 from src.riskguard.risk_level import RiskLevel
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.sizing.portfolio_reservation import PortfolioReservationLedger
@@ -5035,3 +5038,104 @@ def test_refresher_never_called_inside_open_txn():
 
     assert observed, "refresher must have been invoked on the stale row"
     assert observed[0] is False, "no trade-DB txn may be open across the refresher's NET fetch"
+
+
+def test_global_batch_wake_supersession_is_scoped_to_invalidated_truth():
+    paris = ("Paris", "2026-07-20", "high")
+    shanghai = ("Shanghai", "2026-07-20", "high")
+    paris_key = weather_family_id(
+        city=paris[0],
+        target_date=paris[1],
+        metric=paris[2],
+    )
+
+    def wake(reason, families=()):
+        return SimpleNamespace(reason=reason, forecast_families=families)
+
+    scope = frozenset({paris_key})
+    assert not _global_batch_wakes_supersede(
+        (wake("market_price_advanced"),),
+        day0_urgent_batch=False,
+        delta_scope_family_keys=scope,
+    )
+    assert not _global_batch_wakes_supersede(
+        (wake("forecast_posterior_advanced", (shanghai,)),),
+        day0_urgent_batch=False,
+        delta_scope_family_keys=scope,
+    )
+    assert _global_batch_wakes_supersede(
+        (wake("forecast_posterior_advanced", (paris,)),),
+        day0_urgent_batch=False,
+        delta_scope_family_keys=scope,
+    )
+    assert _global_batch_wakes_supersede(
+        (wake("day0_extreme_event_committed"),),
+        day0_urgent_batch=False,
+        delta_scope_family_keys=scope,
+    )
+
+
+def test_day0_batch_ignores_lower_authority_wakes_but_not_new_day0():
+    paris = ("Paris", "2026-07-20", "high")
+    paris_key = weather_family_id(
+        city=paris[0],
+        target_date=paris[1],
+        metric=paris[2],
+    )
+
+    def wake(reason, families=()):
+        return SimpleNamespace(reason=reason, forecast_families=families)
+
+    scope = frozenset({paris_key})
+    assert not _global_batch_wakes_supersede(
+        (
+            wake("forecast_posterior_advanced", (paris,)),
+            wake("market_price_advanced"),
+        ),
+        day0_urgent_batch=True,
+        delta_scope_family_keys=scope,
+    )
+    assert _global_batch_wakes_supersede(
+        (wake("day0_extreme_event_committed"),),
+        day0_urgent_batch=True,
+        delta_scope_family_keys=scope,
+    )
+
+
+@pytest.mark.parametrize(
+    "families,scope",
+    [
+        ((), frozenset({"family"})),
+        ((("Paris", "2026-07-20", "high"),), None),
+    ],
+)
+def test_forecast_wake_without_comparable_scope_supersedes(families, scope):
+    wake = SimpleNamespace(
+        reason="forecast_posterior_advanced",
+        forecast_families=families,
+    )
+
+    assert _global_batch_wakes_supersede(
+        (wake,),
+        day0_urgent_batch=False,
+        delta_scope_family_keys=scope,
+    )
+
+
+def test_live_adapter_wires_scope_aware_wake_supersession_probe():
+    from src.engine.event_reactor_adapter import (
+        event_bound_live_adapter_from_trade_conn,
+    )
+
+    source = inspect.getsource(event_bound_live_adapter_from_trade_conn)
+    from src.events.reactor import run_edli_event_reactor_cycle
+
+    reactor_source = inspect.getsource(run_edli_event_reactor_cycle)
+
+    assert "pending_wakes = reactor_wakes_since(" in source
+    assert "exclude_wake_ids=_global_batch_owned_wake_ids" in source
+    assert "marker = reactor_urgent_wake_identity()" in source
+    assert "marker_wake_id not in _global_batch_owned_wake_ids" in source
+    assert "_global_batch_wakes_supersede(" in source
+    assert "producer_wake_ids=producer_wake_ids" in reactor_source
+    assert "producer_wake_published_at=producer_wake_published_at" in reactor_source

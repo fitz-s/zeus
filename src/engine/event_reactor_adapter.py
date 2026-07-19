@@ -1421,6 +1421,53 @@ def _global_book_refresh_family_keys(
     )
 
 
+def _global_batch_wakes_supersede(
+    wakes: Iterable[object],
+    *,
+    day0_urgent_batch: bool,
+    delta_scope_family_keys: frozenset[str] | None,
+) -> bool:
+    """Return whether queued producer facts invalidate this auction scope."""
+
+    for wake in wakes:
+        reason = str(getattr(wake, "reason", "") or "")
+        if reason == "market_price_advanced":
+            # Selection crosses an exact JIT book preflight. A changed selected
+            # curve is overlaid and the auction reruns before any venue effect.
+            continue
+        if day0_urgent_batch and reason == "forecast_posterior_advanced":
+            # Current-day physical authority dominates a forecast refresh.
+            continue
+        if reason != "forecast_posterior_advanced":
+            return True
+        if delta_scope_family_keys is None:
+            return True
+
+        raw_families = tuple(getattr(wake, "forecast_families", ()) or ())
+        if not raw_families:
+            return True
+        wake_family_keys: set[str] = set()
+        for raw_family in raw_families:
+            if not isinstance(raw_family, (tuple, list)) or len(raw_family) != 3:
+                return True
+            city, target_date, metric = (
+                str(value or "").strip() for value in raw_family
+            )
+            metric = metric.lower()
+            if not city or not target_date or metric not in {"high", "low"}:
+                return True
+            wake_family_keys.add(
+                weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+            )
+        if wake_family_keys & delta_scope_family_keys:
+            return True
+    return False
+
+
 def _global_projected_book_refresh_tokens(
     events: Iterable[object],
 ) -> dict[str, frozenset[str] | None]:
@@ -6198,6 +6245,8 @@ def event_bound_live_adapter_from_trade_conn(
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
     entry_live_health_authority_provider: Callable[[], Mapping[str, object] | None] | None = None,
     auction_capital_authority: "AuctionCapitalAuthority | None" = None,
+    producer_wake_ids: tuple[str, ...] = (),
+    producer_wake_published_at: str | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -6233,13 +6282,24 @@ def event_bound_live_adapter_from_trade_conn(
     _consumed_global_preflight_tokens: dict[str, datetime] = {}
     _global_entry_policy_by_family: dict[str, tuple[str, str]] = {}
     from src.runtime.reactor_wake import (
+        reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
         reactor_urgent_wake_revision,
+        reactor_wakes_since,
     )
 
     # Seal before process_pending fetches its page. A Day0 fact committed after
     # this point must supersede that page even if it arrives before the global
     # batch begins; sampling inside _process_global_batch loses exactly that race.
+    _global_batch_wake_cutoff = (
+        str(producer_wake_published_at or "").strip()
+        or datetime.now(UTC).isoformat()
+    )
+    _global_batch_owned_wake_ids = frozenset(
+        wake_id
+        for raw_wake_id in producer_wake_ids
+        if (wake_id := str(raw_wake_id or "").strip())
+    )
     _global_batch_urgent_wake_revision = [reactor_urgent_wake_revision()]
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
@@ -7074,15 +7134,33 @@ def event_bound_live_adapter_from_trade_conn(
                 or current == _global_batch_urgent_wake_revision[0]
             ):
                 return False
-            if (
-                day0_urgent_batch
-                and reactor_urgent_wake_reason()
-                in {"forecast_posterior_advanced", "market_price_advanced"}
+            pending_wakes = reactor_wakes_since(
+                _global_batch_wake_cutoff,
+                exclude_wake_ids=_global_batch_owned_wake_ids,
+            )
+            if not pending_wakes:
+                marker = reactor_urgent_wake_identity()
+                if marker is None:
+                    return True
+                marker_wake_id, marker_reason = marker
+                if marker_wake_id not in _global_batch_owned_wake_ids:
+                    if marker_reason == "market_price_advanced":
+                        _global_batch_urgent_wake_revision[0] = current
+                        return False
+                    if (
+                        day0_urgent_batch
+                        and marker_reason == "forecast_posterior_advanced"
+                    ):
+                        _global_batch_urgent_wake_revision[0] = current
+                        return False
+                    return True
+                _global_batch_urgent_wake_revision[0] = current
+                return False
+            if not _global_batch_wakes_supersede(
+                pending_wakes,
+                day0_urgent_batch=day0_urgent_batch,
+                delta_scope_family_keys=delta_scope_family_keys,
             ):
-                # The affected Day0 q has a shorter alpha clock than an
-                # unrelated forecast or quote tick. The selected leg still
-                # crosses the exact JIT book/probability/wealth preflight
-                # before submit.
                 _global_batch_urgent_wake_revision[0] = current
                 return False
             return True
