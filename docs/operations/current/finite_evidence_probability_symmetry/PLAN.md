@@ -733,3 +733,26 @@ tests and `6` key integration tests pass.  Its overall release verdict remains
 red only because the same two unrelated W3 `epoch_superseded()` baseline
 fixtures fail outside this diff; that residual is reported separately rather
 than treated as evidence against this authority chain.
+
+## 2026-07-19 Day0 held-SELL family completeness
+
+Fresh production receipts falsified the monitor-to-auction handoff for three
+Day0 positions.  Tokyo 35C NO and Kuala Lumpur 29C YES / 32C NO were refreshed
+by the held monitor, yet each appeared zero times in hundreds of applicable
+global-auction receipts.  The probability preparer had replaced the complete
+conditional family simplex with a partial deterministic witness as soon as any
+sibling bin became pathwise dead.  Book capture therefore saw only those dead
+siblings and could not materialize the unresolved held legs as SELL candidates.
+
+Whole-family preparation must retain a coherent remaining-day joint witness
+whenever unresolved siblings exist.  A partial deterministic witness is valid
+only for an explicitly required exact condition, and JIT revalidation must
+preserve the selected witness kind rather than silently switching authority.
+Every hard-fact payoff carried inside the joint witness must remain exactly
+zero or one in both its sample column and point probability; conflict fails
+closed.  This changes neither Kelly, price policy, operator control, risk level,
+nor venue submission.  Acceptance requires a mixed exact/unresolved Day0 family
+test, joint-witness JIT continuity, hard-fact conflict rejection, standard live
+restart, and new receipts proving each affected position is represented as a
+SELL evaluation or an explicit typed exclusion.  A positive SELL may execute
+only through the ordinary robust objective and reduce-only pre-submit path.

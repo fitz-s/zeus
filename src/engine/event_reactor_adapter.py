@@ -11987,6 +11987,7 @@ def _current_global_actuation_prepared_family(
     decision_time: datetime,
 ):
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.solve.solver import DeterministicBinPayoffWitness
 
     selected = getattr(global_actuation, "probability_witness", None)
     if selected is None:
@@ -12008,6 +12009,9 @@ def _current_global_actuation_prepared_family(
         max_age=FRESHNESS_WINDOW_DEFAULT,
         day0_payload_out=current_day0_payload,
         required_condition_id=required_condition_id,
+        allow_partial_deterministic=isinstance(
+            selected, DeterministicBinPayoffWitness
+        ),
     )
     current_witness = getattr(current, "probability_witness", None)
     if current_witness is None or any(
@@ -28324,8 +28328,14 @@ def _prepare_current_global_probability_family(
     day0_payload_out: dict[str, object] | None = None,
     cache_metadata_out: dict[str, str] | None = None,
     required_condition_id: str | None = None,
+    allow_partial_deterministic: bool | None = None,
 ):
-    """Build current simplex or exact-bin payoff authority without price dependency."""
+    """Build current simplex or exact-bin payoff authority without price dependency.
+
+    Whole-family preparation keeps every unresolved sibling in one joint Day0
+    simplex.  An exact partial witness is valid only for an explicitly required
+    condition, and JIT revalidation preserves the selected witness kind.
+    """
 
     from src.data.replacement_forecast_bundle_reader import (
         market_bin_topology_hash_from_rows,
@@ -28571,9 +28581,14 @@ def _prepare_current_global_probability_family(
         if len(required_bindings) != 1:
             raise ValueError("GLOBAL_REQUIRED_CONDITION_BINDING_INVALID")
         required_bin_id = required_bindings[0].bin_id
+    if allow_partial_deterministic is None:
+        allow_partial_deterministic = required_bin_id is not None
+    elif not isinstance(allow_partial_deterministic, bool):
+        raise ValueError("GLOBAL_PARTIAL_DETERMINISTIC_POLICY_INVALID")
     resolution_identity = _event_resolution_identity(omega.resolution)
     probability_authority = "replacement_current_global_probability_v1"
     components = None
+    exact_yes_payoffs: tuple[tuple[str, int], ...] = ()
     if final_daily_observation is not None:
         components = _final_daily_exact_probability_components(
             omega=omega,
@@ -28618,8 +28633,11 @@ def _prepare_current_global_probability_family(
                     ),
                     separators=(",", ":"),
                 )
-            if exact_yes_payoffs and (
-                required_bin_id is None or required_bin_id in exact_bin_ids
+            if (
+                exact_yes_payoffs
+                and allow_partial_deterministic
+                and required_bin_id is not None
+                and required_bin_id in exact_bin_ids
             ):
                 probability_authority = "day0_deterministic_bin_payoff_v1"
                 source_truth_identity = stable_hash(
@@ -28777,6 +28795,25 @@ def _prepare_current_global_probability_family(
     if components is None:
         raise ValueError("GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID")
     samples, point_q, band_basis = components
+    if exact_yes_payoffs:
+        column_by_bin = {
+            binding.bin_id: index for index, binding in enumerate(bindings)
+        }
+        for bin_id, payoff in exact_yes_payoffs:
+            column = column_by_bin.get(bin_id)
+            expected = float(payoff)
+            if (
+                column is None
+                or not np.allclose(
+                    samples[:, column], expected, rtol=0.0, atol=1e-12
+                )
+                or not math.isclose(
+                    float(point_q[column]), expected, rel_tol=0.0, abs_tol=1e-12
+                )
+            ):
+                raise ValueError(
+                    f"GLOBAL_DAY0_DETERMINISTIC_PAYOFF_CONFLICT:{bin_id}"
+                )
     if (
         current_day0_payload is not None
         and final_daily_observation is None

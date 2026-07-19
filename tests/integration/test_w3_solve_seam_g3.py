@@ -2831,7 +2831,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     )
 
     observed_extreme["value"] = 71.0
-    deterministic_payload: dict[str, object] = {}
+    joint_payload: dict[str, object] = {}
     deterministic_event = _global_day0_scope_event(
         city="Dallas",
         source_run_id="run-dallas",
@@ -2839,40 +2839,67 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     deterministic_cut = _dt.datetime(
         2026, 7, 11, 18, 0, 0, 500000, tzinfo=_dt.timezone.utc
     )
-    deterministic = era._prepare_current_global_probability_family(
+    joint = era._prepare_current_global_probability_family(
         deterministic_event,
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
         decision_time=deterministic_cut,
         max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=deterministic_payload,
+        day0_payload_out=joint_payload,
     )
 
-    assert remaining_day_calls == 1
+    assert remaining_day_calls == 2
     assert isinstance(
-        deterministic.probability_witness,
-        DeterministicBinPayoffWitness,
+        joint.probability_witness,
+        JointOutcomeProbabilityWitness,
     )
-    exact_payoffs = dict(deterministic.probability_witness.exact_yes_payoffs)
-    exact_conditions = [
+    assert joint.probability_witness.yes_q_samples[0].tolist() == pytest.approx(
+        [0.0, 0.2, 0.8]
+    )
+    from src.solve.solver import actionable_family_payoff_bindings
+
+    assert tuple(
         binding.condition_id
-        for binding in deterministic.probability_witness.bindings
-        if binding.bin_id in exact_payoffs
-    ]
-    assert exact_conditions == ["c0"]
-    assert tuple(exact_payoffs.values()) == (0,)
-    assert deterministic_payload["_edli_day0_exact_yes_payoffs"] == exact_payoffs
-    assert deterministic_payload["q_source"] == "day0_deterministic_bin_payoff"
+        for binding in actionable_family_payoff_bindings(
+            joint.probability_witness
+        )
+    ) == ("c0", "c1", "c2")
+    assert joint_payload["q_source"] == "day0_remaining_day"
     current_authority = era.current_global_probability_authority(
         forecast,
         deterministic_event,
-        deterministic.probability_witness,
+        joint.probability_witness,
         decision_time=deterministic_cut + _dt.timedelta(milliseconds=1),
     )
     assert current_authority is not None
     assert current_authority.witness_identity == (
-        deterministic.probability_witness.witness_identity
+        joint.probability_witness.witness_identity
+    )
+
+    revalidated_joint, revalidated_joint_payload = (
+        era._current_global_actuation_prepared_family(
+            deterministic_event,
+            global_actuation=SimpleNamespace(
+                probability_witness=joint.probability_witness,
+                decision=SimpleNamespace(
+                    candidate=SimpleNamespace(condition_id="c0")
+                ),
+            ),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=deterministic_cut + _dt.timedelta(milliseconds=2),
+        )
+    )
+    assert remaining_day_calls == 3
+    assert isinstance(
+        revalidated_joint.probability_witness,
+        JointOutcomeProbabilityWitness,
+    )
+    assert revalidated_joint_payload["q_source"] == "day0_remaining_day"
+    assert revalidated_joint.probability_witness.witness_identity == (
+        joint.probability_witness.witness_identity
     )
 
     selected_dead_payload: dict[str, object] = {}
@@ -2881,17 +2908,27 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=2),
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=3),
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=selected_dead_payload,
         required_condition_id="c0",
     )
-    assert remaining_day_calls == 1
+    assert remaining_day_calls == 3
     assert isinstance(
         selected_dead.probability_witness,
         DeterministicBinPayoffWitness,
     )
+    exact_payoffs = dict(selected_dead.probability_witness.exact_yes_payoffs)
+    exact_conditions = [
+        binding.condition_id
+        for binding in selected_dead.probability_witness.bindings
+        if binding.bin_id in exact_payoffs
+    ]
+    assert exact_conditions == ["c0"]
+    assert tuple(exact_payoffs.values()) == (0,)
     assert dict(selected_dead.probability_witness.exact_yes_payoffs) == exact_payoffs
+    assert selected_dead_payload["_edli_day0_exact_yes_payoffs"] == exact_payoffs
+    assert selected_dead_payload["q_source"] == "day0_deterministic_bin_payoff"
 
     revalidated, revalidated_payload = era._current_global_actuation_prepared_family(
         deterministic_event,
@@ -2902,9 +2939,9 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=3),
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=4),
     )
-    assert remaining_day_calls == 1
+    assert remaining_day_calls == 3
     assert isinstance(
         revalidated.probability_witness,
         DeterministicBinPayoffWitness,
@@ -2918,13 +2955,13 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=4),
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=5),
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=held_unknown_payload,
         cache_metadata_out=held_unknown_cache_metadata,
         required_condition_id="c1",
     )
-    assert remaining_day_calls == 2
+    assert remaining_day_calls == 4
     assert isinstance(
         held_unknown.probability_witness,
         JointOutcomeProbabilityWitness,
@@ -2935,6 +2972,38 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     assert json.loads(
         held_unknown_cache_metadata["deterministic_condition_ids_json"]
     ) == ["c0"]
+
+    def conflicting_remaining_day_components(*_args, **_kwargs):
+        matrix = np.asarray([[0.1, 0.1, 0.8]] * 400, dtype=float)
+        return (
+            matrix,
+            np.asarray([0.1, 0.1, 0.8], dtype=float),
+            "current_coherent_day0_remaining_finite_evidence_v2",
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        conflicting_remaining_day_components,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_DETERMINISTIC_PAYOFF_CONFLICT",
+    ):
+        era._prepare_current_global_probability_family(
+            deterministic_event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=deterministic_cut + _dt.timedelta(milliseconds=6),
+            max_age=_dt.timedelta(seconds=30),
+            allow_partial_deterministic=False,
+        )
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        remaining_day_components,
+    )
 
     observed_extreme["value"] = 72.0
     exact_payload: dict[str, object] = {}
@@ -2948,7 +3017,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         day0_payload_out=exact_payload,
     )
 
-    assert remaining_day_calls == 2
+    assert remaining_day_calls == 4
     assert exact.probability_witness.band_basis == (
         "day0_absorbing_observation_exact_settlement_simplex_v1"
     )
