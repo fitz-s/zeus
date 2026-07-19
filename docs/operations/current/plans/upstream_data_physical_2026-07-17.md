@@ -349,3 +349,13 @@ OPERATOR DECISION OPEN:
 Arm settlement_coverage_hierarchy_enabled directly in the live Kelly/admission path once the walk-forward proof + invariant tests (highq_overconfidence.md §5 item 6) pass — recommended; no staged/diagnostic-only tier first.
 
 DEAD (per operator ruling 2026-07-19 — fixed-offset-on-continuous-value proposals do not exist from source): re-opening the RAW law for a validated center de-bias via the DebiasAuthority blueprint (src/forecast/debias_authority.py, built-not-wired) is a constant/fitted additive correction applied to a continuously-varying forecast center — this class is eliminated at the source, not merely rejected pending more validation. The blueprint stays built-not-wired and is not a live option; do not re-propose. eb_bias re-import remains regression-blocked in the capture module.
+
+## Shadow eradication complete (2026-07-19)
+
+Operator ruling executed at all three layers:
+- CODE: 0f3f5a883 — shadow-test harness deleted (zero callers proven); F1 hierarchy live layer untouched. Only shadow-named file repo-wide eliminated. src/reconcile + src/reduce flagged: inert R2-rebuild scaffolding (own plan, no flag, no callers) — categorically not shadow machinery, not swept.
+- DOCS: e0c3cf1a8 — wait/shadow/fixed-offset proposal shapes rewritten to live-direct decision shapes; RAW-law-reopen option (b) marked DEAD.
+- AUTHORITY: 9cde55bce — §10.3 shadow lane excised from architecture law (30-day-parallel-data + 7-day-reversible-cutover protocol was the codified source of the forbidden shape); promotion = proof on settled history + operator approval; rollback = git revert.
+- DATA: state/ shadow artifacts deleted (source_clock_vnext_shadow_20260625.db + sidecars, emos_shadow_ledger.jsonl 292MB, shadow_comparator.json) — zero code references, zero open file handles (lsof clean; the fresh -shm mtime was a stale sidecar, wal empty 0 bytes). All June-era dead runs.
+
+Arm decision for settlement_coverage_hierarchy_enabled now gates ONLY on the q-shrink math consult (in flight) — no shadow step, no waiting period.
