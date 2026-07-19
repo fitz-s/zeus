@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-07-19
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
@@ -333,6 +333,68 @@ def _prior_terminal_no_resting_order_fact(
     if str(row["state"] or "") == "MATCHED" and not _decimal_text_is_zero(row["remaining_size"]):
         return None
     return row
+
+
+def _terminal_partial_correction_proven(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    command_id: str,
+    state: str,
+    remaining_size: str | None,
+    matched_size: str | None,
+    raw_payload_json: Any,
+    prior_terminal: sqlite3.Row | None,
+) -> bool:
+    """Allow only an exact terminal-partial correction of a false full-fill fact."""
+
+    if (
+        state != "PARTIALLY_MATCHED"
+        or not _decimal_text_is_zero(remaining_size)
+        or not _positive_finite_decimal_text(matched_size)
+        or prior_terminal is None
+        or str(prior_terminal["state"] or "") != "MATCHED"
+        or not _decimal_text_is_zero(prior_terminal["remaining_size"])
+        or not _decimal_text_equal(prior_terminal["matched_size"], matched_size)
+        or not isinstance(raw_payload_json, Mapping)
+        or raw_payload_json.get("proof_class") != "terminal_partial_order_fact"
+    ):
+        return False
+    predicates = raw_payload_json.get("required_predicates")
+    required = {
+        "terminal_order_remainder_zero",
+        "canonical_trade_facts_match_terminal_order_fact",
+        "cumulative_fill_below_requested_size",
+    }
+    if not isinstance(predicates, Mapping) or any(
+        predicates.get(name) is not True for name in required
+    ):
+        return False
+    command = conn.execute(
+        """
+        SELECT state, intent_kind, side, size, venue_order_id
+          FROM venue_commands
+         WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    if (
+        command is None
+        or str(command["state"] or "").upper() != "PARTIAL"
+        or str(command["intent_kind"] or "").upper() != "ENTRY"
+        or str(command["side"] or "").upper() != "BUY"
+        or str(command["venue_order_id"] or "") != venue_order_id
+    ):
+        return False
+    requested = _decimal_or_none(command["size"])
+    matched = _decimal_or_none(matched_size)
+    return (
+        requested is not None
+        and requested > 0
+        and matched is not None
+        and matched > 0
+        and requested - matched >= Decimal("0.01")
+    )
 
 
 def _optimistic_source_trade_fact_ids_for_failed_trade(
@@ -3143,7 +3205,17 @@ def append_order_fact(
                 venue_order_id=venue_order_id,
                 command_id=command_id,
             )
-            if prior_terminal is not None:
+            terminal_partial_correction = _terminal_partial_correction_proven(
+                conn,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+                state=state,
+                remaining_size=remaining_size,
+                matched_size=matched_size,
+                raw_payload_json=raw_payload_json,
+                prior_terminal=prior_terminal,
+            )
+            if prior_terminal is not None and not terminal_partial_correction:
                 from src.execution.order_truth_reducer import (
                     TERMINAL_FILLED,
                     TERMINAL_PARTIAL,

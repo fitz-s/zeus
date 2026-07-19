@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-19
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1159,7 +1159,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             selected_token_id: str | None = None,
             outcome_label: str | None = None,
             event_slug: str | None = None,
-            side="BUY", size=10.0, price=0.5,
+            side="BUY", order_type="GTC", size=10.0, price=0.5,
             created_at="2026-04-26T00:00:00Z"):
     """Insert a command row and return its command_id."""
     from src.state.venue_command_repo import insert_command
@@ -1189,6 +1189,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             selected_outcome_token_id=selected_token_id,
             outcome_label=outcome_label,
             side=side,
+            order_type=order_type,
             price=price,
             size=size,
         ),
@@ -7405,13 +7406,13 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(projection["entry_price"])) == Decimal("0.67")
         assert projection["order_status"] == "partial"
 
-    def test_partial_entry_finalizes_when_latest_order_fact_is_fully_matched(
+    def test_partial_entry_upgrades_only_when_cumulative_fill_reaches_requested_size(
         self,
         conn,
         mock_client,
     ):
         """Relationship: complete order truth closes a prior partial command."""
-        _insert(conn, size=5.0, price=0.34)
+        _insert(conn, size=15.0, price=0.34)
         _seed_pending_entry_projection(conn)
         _advance_to_partial(conn, venue_order_id="ord-001")
         _append_trade_fact(
@@ -7420,10 +7421,10 @@ class TestRecoveryResolutionTable:
             order_id="ord-001",
             trade_id="trade-001",
             state="MATCHED",
-            filled_size="4.99",
+            filled_size="15",
             fill_price="0.34",
         )
-        _append_order_fact(conn, state="MATCHED", matched_size="4.99", remaining_size="0")
+        _append_order_fact(conn, state="MATCHED", matched_size="15", remaining_size="0")
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 
@@ -7435,8 +7436,156 @@ class TestRecoveryResolutionTable:
         assert events[-1]["event_type"] == "FILL_CONFIRMED"
         payload = json.loads(events[-1]["payload_json"])
         assert payload["proof_class"] == "completed_partial_order_fact"
-        assert payload["matched_size"] == "4.99"
+        assert payload["matched_size"] == "15"
         assert payload["remaining_size"] == "0"
+
+    def test_terminal_partial_fak_never_upgrades_to_full_fill_and_releases_obligation(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A terminal FAK partial is final order state, not a full-fill claim."""
+        _insert(conn, order_type="FAK", size=15.0, price=0.08)
+        _seed_pending_entry_projection(conn)
+        _open_test_entry_obligation(conn, "cmd-001")
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-terminal-partial",
+            state="CONFIRMED",
+            filled_size="11",
+            fill_price="0.08",
+        )
+        _append_order_fact(
+            conn,
+            state="MATCHED",
+            matched_size="11",
+            remaining_size="0",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import (
+            _latest_order_fact_for_command_order,
+            reconcile_unresolved_commands,
+        )
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert summary["filled_entry_execution_fact_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert summary["post_maker_execution_fact_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        assert [event["event_type"] for event in _get_events(conn, "cmd-001")].count(
+            "FILL_CONFIRMED"
+        ) == 0
+        terminal = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+               AND json_extract(raw_payload_json, '$.proof_class')
+                   = 'terminal_partial_order_fact'
+             LIMIT 1
+            """
+        ).fetchone()
+        assert terminal is not None
+        assert terminal["state"] == "PARTIALLY_MATCHED"
+        assert terminal["matched_size"] == "11"
+        assert terminal["remaining_size"] == "0"
+        assert json.loads(terminal["raw_payload_json"])["proof_class"] == (
+            "terminal_partial_order_fact"
+        )
+        canonical = _latest_order_fact_for_command_order(
+            conn,
+            command_id="cmd-001",
+            venue_order_id="ord-001",
+        )
+        assert {
+            key: canonical[key]
+            for key in ("state", "matched_size", "remaining_size")
+        } == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "11",
+            "remaining_size": "0",
+        }
+        execution = conn.execute(
+            """
+            SELECT shares, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE command_id = 'cmd-001'
+               AND order_role = 'entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": 11.0,
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
+        obligation = conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+
+        repeated = reconcile_unresolved_commands(conn, mock_client)
+        assert repeated["completed_partial_order_facts"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+
+    def test_terminal_partial_correction_requires_canonical_partial_command_state(
+        self,
+        conn,
+    ):
+        """A proof-shaped payload cannot demote a non-partial command's terminal fact."""
+
+        _insert(conn, order_type="FAK", size=15.0, price=0.08)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        terminal_id = _append_order_fact(
+            conn,
+            state="MATCHED",
+            matched_size="11",
+            remaining_size="0",
+        )
+        correction_id = _append_order_fact(
+            conn,
+            state="PARTIALLY_MATCHED",
+            matched_size="11",
+            remaining_size="0",
+            raw_payload_json={
+                "proof_class": "terminal_partial_order_fact",
+                "required_predicates": {
+                    "terminal_order_remainder_zero": True,
+                    "canonical_trade_facts_match_terminal_order_fact": True,
+                    "cumulative_fill_below_requested_size": True,
+                },
+            },
+        )
+
+        assert correction_id == terminal_id
+        facts = conn.execute(
+            "SELECT state FROM venue_order_facts WHERE command_id = 'cmd-001'"
+        ).fetchall()
+        assert [row["state"] for row in facts] == ["MATCHED"]
 
     def test_partial_entry_uses_canonical_order_truth_over_later_weaker_fact(
         self,
@@ -7453,11 +7602,11 @@ class TestRecoveryResolutionTable:
             order_id="ord-001",
             trade_id="trade-001",
             state="MATCHED",
-            filled_size="4.99",
+            filled_size="5",
             fill_price="0.34",
         )
-        _append_order_fact(conn, state="MATCHED", matched_size="4.99", remaining_size="0")
-        _append_order_fact(conn, state="RESTING", matched_size="4.99", remaining_size="0.01")
+        _append_order_fact(conn, state="MATCHED", matched_size="5", remaining_size="0")
+        _append_order_fact(conn, state="RESTING", matched_size="5", remaining_size="0.01")
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-13
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-19
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -257,6 +257,13 @@ _TERMINAL_ENTRY_NO_FILL_EVENT_TYPES = frozenset({
 def _order_fact_proof_rank_sql(alias: str) -> str:
     return f"""
         CASE
+            WHEN UPPER(COALESCE({alias}.state, '')) IN ('PARTIALLY_MATCHED', 'PARTIAL')
+                 AND CAST(COALESCE({alias}.matched_size, '0') AS REAL) > 0
+                 AND CAST(COALESCE({alias}.remaining_size, '0') AS REAL) = 0
+                 AND json_valid({alias}.raw_payload_json)
+                 AND json_extract({alias}.raw_payload_json, '$.proof_class')
+                     = 'terminal_partial_order_fact'
+            THEN 650
             WHEN UPPER(COALESCE({alias}.state, '')) IN ('MATCHED', 'FILLED')
                  AND CAST(COALESCE({alias}.matched_size, '0') AS REAL) > 0
                  AND CAST(COALESCE({alias}.remaining_size, '0') AS REAL) = 0
@@ -2495,6 +2502,45 @@ def _matched_order_fact_state(*, event_type: str, venue_status: str, remaining_s
     if _decimal_is_zero(remaining_size):
         return "MATCHED"
     return "PARTIALLY_MATCHED"
+
+
+def _append_terminal_partial_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    command_id: str,
+    matched_size: str,
+    source: str,
+    observed_at: str,
+    payload: dict,
+) -> int:
+    """Append a repo-validated terminal-partial correction."""
+
+    payload_hash = _payload_hash(payload)
+    fact_id = append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state="PARTIALLY_MATCHED",
+        remaining_size="0",
+        matched_size=matched_size,
+        source=source,
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=payload_hash,
+        raw_payload_json=payload,
+    )
+    written = conn.execute(
+        "SELECT state, raw_payload_hash FROM venue_order_facts WHERE fact_id = ?",
+        (fact_id,),
+    ).fetchone()
+    if (
+        written is not None
+        and str(written["state"] or "") == "PARTIALLY_MATCHED"
+        and str(written["raw_payload_hash"] or "") == payload_hash
+    ):
+        return int(fact_id)
+    raise RuntimeError("terminal partial correction was rejected by order-fact authority")
 
 
 def _coerce_iso_datetime(value: str) -> datetime:
@@ -7034,6 +7080,9 @@ def reconcile_terminal_entry_exposure_obligations(
         f"""
         SELECT obligation.command_id,
                command.state AS command_state,
+               command.venue_order_id,
+               command.size AS command_size,
+               command.side AS command_side,
                EXISTS (
                    SELECT 1
                      FROM venue_command_events event
@@ -7102,7 +7151,9 @@ def reconcile_terminal_entry_exposure_obligations(
         SELECT fact.command_id,
                fact.state,
                fact.matched_size,
-               fact.remaining_size
+               fact.remaining_size,
+               fact.source,
+               fact.raw_payload_json
           FROM canonical_order_truth fact
           JOIN entry_exposure_obligations obligation
             ON obligation.command_id = fact.command_id
@@ -7149,7 +7200,15 @@ def reconcile_terminal_entry_exposure_obligations(
             and not bool(row.get("execution_fill_or_unknown"))
             and terminal_zero_orders
         )
-        if not (terminal_fill or terminal_no_fill):
+        terminal_partial = _terminal_partial_entry_obligation_proven(
+            conn,
+            command=row,
+            canonical_orders=canonical_orders,
+            command_bound_projection=bool(
+                row.get("positive_command_bound_position_projection")
+            ),
+        )
+        if not (terminal_fill or terminal_no_fill or terminal_partial):
             summary["stayed"] += 1
             continue
         try:
@@ -7165,6 +7224,74 @@ def reconcile_terminal_entry_exposure_obligations(
             )
             summary["errors"] += 1
     return summary
+
+
+def _terminal_partial_entry_obligation_proven(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    canonical_orders: list[dict],
+    command_bound_projection: bool,
+) -> bool:
+    """Prove a terminal partial entry has no unaccounted future side effect."""
+
+    if (
+        str(command.get("command_state") or "").upper() != CommandState.PARTIAL.value
+        or not command_bound_projection
+        or not canonical_orders
+    ):
+        return False
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    if not command_id or not venue_order_id:
+        return False
+    for order in canonical_orders:
+        payload = _json_dict(order.get("raw_payload_json"))
+        if (
+            str(order.get("state") or "").upper() != "PARTIALLY_MATCHED"
+            or _decimal_or_none(order.get("matched_size")) is None
+            or _decimal_or_none(order.get("remaining_size")) != 0
+            or str(order.get("source") or "") not in _LIVE_TERMINAL_ORDER_FACT_SOURCES
+            or payload.get("proof_class") != "terminal_partial_order_fact"
+        ):
+            return False
+    fill_summary = _positive_fill_trade_fact_summary(
+        conn,
+        command_id,
+        venue_order_id=venue_order_id,
+    )
+    filled_size = _positive_decimal_or_none(fill_summary.get("filled_size"))
+    if filled_size is None:
+        return False
+    terminal_matched = _positive_decimal_or_none(canonical_orders[0].get("matched_size"))
+    if terminal_matched is None or abs(filled_size - terminal_matched) > Decimal("0.000001"):
+        return False
+    if _fill_size_completes_limit_order(
+        filled_size,
+        command.get("command_size"),
+        side=command.get("command_side"),
+    ):
+        return False
+    execution_rows = conn.execute(
+        """
+        SELECT shares, terminal_exec_status, venue_status
+          FROM execution_fact
+         WHERE command_id = ?
+           AND order_role = 'entry'
+           AND voided_at IS NULL
+        """,
+        (command_id,),
+    ).fetchall()
+    if len(execution_rows) != 1:
+        return False
+    execution = _dict_row(execution_rows[0])
+    execution_shares = _positive_decimal_or_none(execution.get("shares"))
+    return (
+        execution_shares is not None
+        and abs(execution_shares - filled_size) <= Decimal("0.000001")
+        and str(execution.get("terminal_exec_status") or "").lower() == "partial"
+        and str(execution.get("venue_status") or "").upper() == "PARTIAL"
+    )
 
 
 def reconcile_filled_entry_position_lot_repairs(conn: sqlite3.Connection) -> dict:
@@ -8611,7 +8738,7 @@ def reconcile_matched_order_facts(
 
 
 def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
-    """Finalize PARTIAL commands when order truth says the remainder is gone."""
+    """Finalize only fully covered PARTIAL commands; preserve terminal partial fills."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     for row in _latest_completed_partial_order_fact_candidates(conn):
@@ -8621,6 +8748,66 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
         try:
             intent_kind = str(row.get("intent_kind") or "").upper()
             observed_at = str(row.get("order_fact_observed_at") or _now_iso())
+            matched_size = str(row.get("order_fact_matched_size") or "")
+            fill_summary = _positive_fill_trade_fact_summary(
+                conn,
+                command_id,
+                venue_order_id=order_id,
+            )
+            filled_size = str(fill_summary.get("filled_size") or "")
+            if not _fill_size_completes_limit_order(
+                filled_size,
+                row.get("size"),
+                side=row.get("side"),
+            ):
+                payload = {
+                    "reason": "terminal_partial_order_fact_corrected",
+                    "proof_class": "terminal_partial_order_fact",
+                    "venue_order_id": order_id,
+                    "command_id": command_id,
+                    "matched_size": filled_size,
+                    "remaining_size": "0",
+                    "requested_size": str(row.get("size") or ""),
+                    "latest_order_fact_id": row.get("order_fact_id"),
+                    "latest_order_fact_state": row.get("order_fact_state"),
+                    "latest_order_fact_source": row.get("order_fact_source"),
+                    "latest_order_fact_observed_at": row.get("order_fact_observed_at"),
+                    "required_predicates": {
+                        "terminal_order_remainder_zero": True,
+                        "canonical_trade_facts_match_terminal_order_fact": True,
+                        "cumulative_fill_below_requested_size": True,
+                    },
+                }
+                safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+                sp_name = f"sp_terminal_partial_order_{safe_command_id}"
+                conn.execute(f"SAVEPOINT {sp_name}")
+                try:
+                    _append_terminal_partial_order_fact(
+                        conn,
+                        venue_order_id=order_id,
+                        command_id=command_id,
+                        matched_size=filled_size,
+                        source=str(row.get("order_fact_source") or "REST"),
+                        observed_at=observed_at,
+                        payload=payload,
+                    )
+                    if intent_kind == "ENTRY":
+                        _append_matched_order_fill_projection(
+                            conn,
+                            command=row,
+                            venue_order_id=order_id,
+                            matched_size=filled_size,
+                            fill_price=str(fill_summary.get("fill_price") or row.get("price") or ""),
+                            observed_at=observed_at,
+                            order_fact_source=str(row.get("order_fact_source") or "REST"),
+                        )
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                except Exception:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    raise
+                summary["advanced"] += 1
+                continue
             payload = {
                 "reason": (
                     "partial_exit_order_fact_completed"
@@ -8630,7 +8817,7 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
                 "proof_class": "completed_partial_order_fact",
                 "venue_order_id": order_id,
                 "command_id": command_id,
-                "matched_size": str(row.get("order_fact_matched_size") or ""),
+                "matched_size": matched_size,
                 "remaining_size": str(row.get("order_fact_remaining_size") or ""),
                 "latest_order_fact_id": row.get("order_fact_id"),
                 "latest_order_fact_state": row.get("order_fact_state"),
@@ -17438,6 +17625,15 @@ def _reconcile_passes_inline(
         summary["recorded_maker_fill_economics"] = maker_fill_summary
         summary["advanced"] += maker_fill_summary["corrected"]
         summary["errors"] += maker_fill_summary["errors"]
+
+        # Maker-fill reconciliation may refresh an execution_fact from a
+        # stale terminal MATCHED order fact. Re-apply canonical trade/order
+        # truth so a terminal FAK partial is still recorded as PARTIAL.
+        post_maker_execution_summary = reconcile_filled_entry_execution_fact_repairs(conn)
+        summary["post_maker_execution_fact_repair"] = post_maker_execution_summary
+        summary["advanced"] += post_maker_execution_summary["advanced"]
+        summary["stayed"] += post_maker_execution_summary["stayed"]
+        summary["errors"] += post_maker_execution_summary["errors"]
 
         closed_shift_summary = release_closed_shift_bin_exit_leases(
             conn,
