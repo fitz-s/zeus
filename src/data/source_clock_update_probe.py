@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -83,9 +84,18 @@ def _write_cursor(path: Path, cursor: Mapping[str, str]) -> None:
     path.write_text(json.dumps(dict(sorted(cursor.items())), indent=2) + "\n", encoding="utf-8")
 
 
+def _source_route_identity(model: str) -> str:
+    cities = affected_cities_for_source_updates((model,))
+    payload = "\0".join(cities).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _cursor_for_updates(updates: tuple[OpenMeteoModelUpdate, ...]) -> dict[str, str]:
     return {
-        update.model: update.last_run_availability_time.isoformat()
+        update.model: (
+            f"v2:{update.last_run_availability_time.isoformat()}:"
+            f"{_source_route_identity(update.model)}"
+        )
         for update in updates
     }
 

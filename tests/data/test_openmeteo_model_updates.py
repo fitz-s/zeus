@@ -167,6 +167,54 @@ def test_source_clock_probe_can_defer_cursor_until_download_success(tmp_path) ->
     assert cursor_path.exists()
 
 
+def test_source_clock_cursor_replays_current_run_when_city_route_changes(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.source_clock_update_probe as probe
+
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    write_model_updates_jsonl(
+        updates_path,
+        [
+            OpenMeteoModelUpdate(
+                model="ecmwf_ifs",
+                last_run_initialisation_time=datetime(2000, 1, 1, 0, 0, tzinfo=UTC),
+                last_run_availability_time=datetime(2000, 1, 1, 4, 0, tzinfo=UTC),
+            )
+        ],
+    )
+    routes = [("Paris",)]
+    monkeypatch.setattr(
+        probe,
+        "affected_cities_for_source_updates",
+        lambda _sources: routes[0],
+    )
+
+    first = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+    )
+    unchanged = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+    )
+    routes[0] = ("Paris", "Seoul")
+    expanded = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+
+    assert first.updated_sources == ("ecmwf_ifs",)
+    assert unchanged.updated_sources == ()
+    assert expanded.updated_sources == ("ecmwf_ifs",)
+    assert expanded.affected_cities == ("Paris", "Seoul")
+
+
 def test_source_clock_probe_filters_nbm_metadata_runs_not_served_by_single_runs(tmp_path) -> None:
     updates_path = tmp_path / "updates.jsonl"
     cursor_path = tmp_path / "cursor.json"
