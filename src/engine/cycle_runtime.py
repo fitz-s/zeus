@@ -6670,6 +6670,11 @@ def execute_monitoring_phase(
                         clob=clob,
                         conn=conn,
                         exit_intent=exit_intent,
+                        hard_fact_authority=(
+                            _hard_fact
+                            if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
+                            else None
+                        ),
                     )
                     if outcome.startswith("exit_filled:"):
                         tracker.record_exit(pos)

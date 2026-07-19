@@ -51,6 +51,7 @@ from src.decision_kernel.certificate import build_certificate
 from src.engine.global_single_order_auction import (
     _candidate_portfolio_endowment,
     GlobalHoldingAuctionCoverage,
+    GlobalSingleOrderActuation,
     global_single_order_actuation_identity,
     global_single_order_economic_identity,
     select_prepared_global_auction,
@@ -16521,15 +16522,46 @@ def _adapter_sell_actuation(event, *, selected_shares="10"):
         ),
     )
     witness = SimpleNamespace(
+        family_key="Alpha|2026-07-14|high",
+        witness_identity="probability-1",
+        family_binding_identity="family-binding-1",
+        sample_matrix_identity="sample-matrix-1",
+        q_version="q-version-1",
+        band_alpha=0.05,
+        band_basis="current-evidence",
         bin_ids=("20C",),
         yes_q_samples=np.asarray([[0.30], [0.30]], dtype=np.float64),
     )
-    return SimpleNamespace(
+    selection_cut = at
+    decision_at = at + _dt.timedelta(seconds=1)
+    wealth_witness_identity = "wealth-witness-1"
+    wealth_economic_identity = "wealth-1"
+    actuation_identity = global_single_order_actuation_identity(
         decision=decision,
         winner_event_id=event.event_id,
+        universe_witness_identity="universe-1",
+        wealth_witness_identity=wealth_witness_identity,
+        selection_epoch_identity="selection-epoch-1",
+        selection_cut_at_utc=selection_cut,
+        decision_at_utc=decision_at,
+    )
+    economic_identity = global_single_order_economic_identity(
+        decision=decision,
         probability_witness=witness,
-        actuation_identity="sell-actuation-1",
-        wealth_economic_identity="wealth-1",
+        wealth_economic_identity=wealth_economic_identity,
+    )
+    return GlobalSingleOrderActuation(
+        decision=decision,
+        winner_event_id=event.event_id,
+        universe_witness_identity="universe-1",
+        wealth_witness_identity=wealth_witness_identity,
+        selection_epoch_identity="selection-epoch-1",
+        probability_witness=witness,
+        selection_cut_at_utc=selection_cut,
+        decision_at_utc=decision_at,
+        actuation_identity=actuation_identity,
+        wealth_economic_identity=wealth_economic_identity,
+        economic_identity=economic_identity,
     )
 
 
@@ -16607,6 +16639,12 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
 
     def execute_exit(portfolio_arg, position_arg, context, **kwargs):
         exits.append((portfolio_arg, position_arg, context, kwargs))
+        from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+        authority = kwargs["global_sell_authority"]
+        assert isinstance(authority, GlobalSellExecutionAuthority)
+        assert authority.actuation is actuation
+        assert authority.jit_candidate.executable_sell_curve.book_hash
         intent = kwargs["exit_intent"]
         assert intent.exact_limit_price == pytest.approx(0.50)
         assert intent.shares == pytest.approx(6.0)
@@ -16770,6 +16808,123 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         "if real_order_submit_enabled and not durable_submit_outbox_enabled"
     )
     assert "executor_submit" not in inspect.getsource(era._submit_current_global_sell)
+
+
+def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
+    monkeypatch,
+):
+    from src.execution.exit_lifecycle import (
+        ExitIntent,
+        GlobalSellExecutionAuthority,
+        _global_sell_capital_certificate_error,
+    )
+
+    event = _global_scope_event(city="Alpha", source_run_id="run-sell-authority")
+    actuation = _adapter_sell_actuation(event, selected_shares="6")
+    captured_at = _dt.datetime.now(_dt.timezone.utc)
+    jit = era._global_sell_candidate_from_raw_book(
+        actuation.decision.candidate,
+        {
+            "asset_id": "yes-token",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [
+                {"price": "0.60", "size": "4"},
+                {"price": "0.50", "size": "6"},
+            ],
+        },
+        captured_at_utc=captured_at,
+    )
+    authority = GlobalSellExecutionAuthority.from_current(
+        actuation=actuation,
+        jit_candidate=jit,
+    )
+    decision = actuation.decision
+    candidate = decision.candidate
+    certificate = {
+        "action": "SELL",
+        "candidate_id": candidate.candidate_id,
+        "actuation_identity": actuation.actuation_identity,
+        "economic_identity": actuation.economic_identity,
+        "probability_witness_identity": candidate.probability_witness_identity,
+        "selection_epoch_identity": actuation.selection_epoch_identity,
+        "wealth_witness_identity": actuation.wealth_witness_identity,
+        "execution_authority_identity": authority.authority_identity,
+        "jit_book_hash": jit.executable_sell_curve.book_hash,
+        "jit_curve_identity": jit.execution_curve_identity,
+        "robust_delta_log_wealth": decision.robust_delta_log_wealth,
+        "robust_ev_usd": decision.robust_ev_usd,
+        "held_shares": str(candidate.held_shares),
+        "sellable_shares": str(candidate.held_shares),
+        "selected_shares": str(decision.shares),
+        "selected_cash_proceeds_usd": str(decision.cash_proceeds_usd),
+        "exact_limit_price": str(decision.limit_price),
+    }
+    intent = ExitIntent(
+        trade_id=candidate.position_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=candidate.token_id,
+        shares=float(decision.shares),
+        current_market_price=float(decision.expected_fill_price_before_fee),
+        best_bid=float(jit.executable_sell_curve.levels[0].price),
+        exact_limit_price=float(decision.limit_price),
+        submit_order_type="FAK",
+        close_position=False,
+        capital_certificate=certificate,
+    )
+    position = SimpleNamespace(
+        trade_id=candidate.position_id,
+        condition_id=candidate.condition_id,
+        direction="buy_yes",
+        token_id=candidate.token_id,
+        no_token_id="no-token",
+        effective_shares=float(candidate.held_shares),
+        chain_shares=float(candidate.held_shares),
+    )
+    snapshot = SimpleNamespace(
+        executable_snapshot_hash="snapshot-hash",
+        selected_outcome_token_id=candidate.token_id,
+        condition_id=candidate.condition_id,
+        outcome_label=candidate.side,
+        raw_orderbook_hash=jit.executable_sell_curve.book_hash,
+        min_tick_size=jit.executable_sell_curve.min_tick,
+        min_order_size=jit.executable_sell_curve.min_order_size,
+        orderbook_top_bid=jit.executable_sell_curve.levels[0].price,
+        freshness_deadline=captured_at + _dt.timedelta(seconds=30),
+        tradeability_status=SimpleNamespace(executable_allowed=True),
+    )
+    monkeypatch.setattr("src.state.snapshot_repo.get_snapshot", lambda *_: snapshot)
+    context = {
+        "executable_snapshot_id": "snapshot-1",
+        "executable_snapshot_hash": "snapshot-hash",
+    }
+    conn = sqlite3.connect(":memory:")
+
+    assert _global_sell_capital_certificate_error(
+        position,
+        intent,
+        authority,
+        conn=conn,
+        snapshot_context=context,
+        now=captured_at + _dt.timedelta(seconds=1),
+    ) is None
+    snapshot.raw_orderbook_hash = "superseded-book"
+    assert _global_sell_capital_certificate_error(
+        position,
+        intent,
+        authority,
+        conn=conn,
+        snapshot_context=context,
+        now=captured_at + _dt.timedelta(seconds=1),
+    ) == "global_sell_execution_snapshot_superseded"
+    assert _global_sell_capital_certificate_error(
+        position,
+        intent,
+        None,
+        conn=conn,
+        snapshot_context=context,
+        now=captured_at + _dt.timedelta(seconds=1),
+    ) == "global_sell_execution_authority_required"
 
 
 def test_global_sell_worse_jit_bid_batch_blocks_without_buy_overlay():

@@ -3318,6 +3318,113 @@ def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, mon
         configure_global_ledger(None)
 
 
+def test_exit_authority_deadline_is_rechecked_at_final_venue_seam(conn, monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    venue_calls = []
+
+    class Client:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            venue_calls.append(kwargs)
+            raise AssertionError("expired authority reached the venue")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-exit-expired-authority")
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-expired-authority",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_hash=_snapshot_hash(conn, snapshot_id),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+                execution_authority_deadline_utc="2000-01-01T00:00:00+00:00",
+            ),
+            conn=conn,
+            decision_id="exit-expired-authority",
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "exit_execution_authority_expired_before_venue_submit"
+        assert result.venue_call_started is False
+        assert venue_calls == []
+        command = conn.execute(
+            "SELECT state FROM venue_commands WHERE position_id = ?",
+            ("pos-expired-authority",),
+        ).fetchone()
+        assert command["state"] == "REJECTED"
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def test_exit_snapshot_deadline_cannot_be_extended_by_caller(conn, monkeypatch):
+    from types import SimpleNamespace
+
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state import snapshot_repo
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    venue_calls = []
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-exit-canonical-deadline")
+    bound = {"value": False}
+    real_get_snapshot = snapshot_repo.get_snapshot
+
+    def current_snapshot(*args, **kwargs):
+        snapshot = real_get_snapshot(*args, **kwargs)
+        if snapshot is not None and bound["value"]:
+            return SimpleNamespace(
+                freshness_deadline=datetime(2000, 1, 1, tzinfo=timezone.utc)
+            )
+        return snapshot
+
+    monkeypatch.setattr(snapshot_repo, "get_snapshot", current_snapshot)
+
+    class Client:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+            bound["value"] = True
+
+        def place_limit_order(self, **kwargs):
+            venue_calls.append(kwargs)
+            raise AssertionError("expired canonical snapshot reached the venue")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-canonical-deadline",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_hash=_snapshot_hash(conn, snapshot_id),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+                execution_authority_deadline_utc="2099-01-01T00:00:00+00:00",
+            ),
+            conn=conn,
+            decision_id="exit-canonical-deadline",
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "exit_execution_authority_expired_before_venue_submit"
+        assert result.venue_call_started is False
+        assert venue_calls == []
+    finally:
+        _clear_exit_submit_prereqs()
+
+
 def test_execute_exit_order_rejects_submit_connection_snapshot_hash_drift(monkeypatch):
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.db import init_schema
@@ -3699,6 +3806,30 @@ def test_direct_sell_adapter_requires_verified_execution_proof(monkeypatch):
 
     assert result.status == "rejected"
     assert result.reason == "exit_execution_proof_required"
+
+
+def test_direct_sell_adapter_requires_time_bounded_execution_proof(monkeypatch):
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unbounded direct adapter proof must not reach the executor")
+        ),
+    )
+
+    result = exit_lifecycle.place_sell_order(
+        trade_id="pos-unbounded-direct-sell",
+        token_id=YES_TOKEN,
+        shares=5.0,
+        current_price=0.50,
+        best_bid=0.49,
+        execution_proof_verified=True,
+    )
+
+    assert result.status == "rejected"
+    assert result.reason == "exit_execution_authority_deadline_required"
 
 
 def test_exit_lifecycle_requires_snapshot_selected_token_for_native_side(conn):
@@ -4270,15 +4401,15 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
     monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
     monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", lambda *args, **kwargs: None)
 
-    def fake_execute_exit_order(intent, decision_id=""):
+    def fake_place_sell_order(**kwargs):
         return exit_lifecycle.OrderResult(
-            trade_id=intent.trade_id,
+            trade_id=kwargs["trade_id"],
             status="pending",
             order_id="ord-quick-confirmed-no-fill-price",
             external_order_id="ord-quick-confirmed-no-fill-price",
         )
 
-    monkeypatch.setattr(exit_lifecycle, "execute_exit_order", fake_execute_exit_order)
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", fake_place_sell_order)
 
     class FakeClob:
         def get_order_status(self, order_id):
@@ -4542,6 +4673,7 @@ def test_live_exit_missing_executable_snapshot_retries_before_executor(conn, mon
 
 def test_live_exit_snapshot_capture_exception_retries_after_intent(conn, monkeypatch):
     from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
     position = Position(
@@ -4562,12 +4694,21 @@ def test_live_exit_snapshot_capture_exception_retries_after_intent(conn, monkeyp
         state="holding",
         strategy_key="opening_inertia",
     )
+    position.exit_reason = "red_force_exit"
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
-        exit_reason="EDGE_REVERSAL",
+        exit_reason="RED_FORCE_EXIT",
         current_market_price=0.50,
         current_market_price_is_fresh=True,
         best_bid=0.49,
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_force_exit_review",
+        lambda: False,
     )
 
     monkeypatch.setattr(
@@ -5533,6 +5674,7 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
 
 def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypatch):
     from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
     _ensure_snapshot(
@@ -5567,8 +5709,9 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
         strategy_key="forecast_qkernel_entry",
         env="live",
     )
+    position.exit_reason = "red_force_exit"
     exit_context = ExitContext(
-        exit_reason="SETTLEMENT_IMMINENT",
+        exit_reason="RED_FORCE_EXIT",
         current_market_price=0.0,
         current_market_price_is_fresh=True,
         best_bid=0.0,
@@ -5576,6 +5719,14 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
         hours_to_settlement=1.0,
         position_state="day0_window",
         day0_active=True,
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_force_exit_review",
+        lambda: False,
     )
     monkeypatch.setattr(
         exit_lifecycle,

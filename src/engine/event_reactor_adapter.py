@@ -10876,6 +10876,7 @@ def _submit_current_global_sell(
             from src.execution.exit_lifecycle import (
                 ExitExecutionEvidence,
                 ExitIntent,
+                GlobalSellExecutionAuthority,
                 execute_exit,
             )
             from src.state.portfolio import ExitContext
@@ -10893,6 +10894,10 @@ def _submit_current_global_sell(
             state_raw = getattr(position, "state", "")
             position_state = str(getattr(state_raw, "value", state_raw) or "")
             best_bid = float(current_candidate.executable_sell_curve.levels[0].price)
+            execution_authority = GlobalSellExecutionAuthority.from_current(
+                actuation=global_actuation,
+                jit_candidate=current_candidate,
+            )
             exit_context = ExitContext(
                 exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
                 fresh_prob=held_q,
@@ -10933,6 +10938,19 @@ def _submit_current_global_sell(
                     "probability_witness_identity": str(
                         getattr(candidate, "probability_witness_identity", "") or ""
                     ),
+                    "selection_epoch_identity": str(
+                        getattr(global_actuation, "selection_epoch_identity", "") or ""
+                    ),
+                    "wealth_witness_identity": str(
+                        getattr(global_actuation, "wealth_witness_identity", "") or ""
+                    ),
+                    "execution_authority_identity": execution_authority.authority_identity,
+                    "jit_book_hash": str(
+                        current_candidate.executable_sell_curve.book_hash
+                    ),
+                    "jit_curve_identity": str(
+                        current_candidate.execution_curve_identity
+                    ),
                     "held_probability_point": held_q,
                     "sell_favorable_probability_lcb": float(
                         getattr(decision.terminal_wealth, "win_probability_lcb")
@@ -10960,6 +10978,7 @@ def _submit_current_global_sell(
                 conn=trade_conn,
                 exit_intent=exit_intent,
                 execution_evidence=exit_evidence,
+                global_sell_authority=execution_authority,
             )
     except Exception as exc:  # noqa: BLE001 - exit safety remains fail closed
         if exit_evidence is not None and exit_evidence.venue_call_started:

@@ -37,6 +37,7 @@ from src.execution.executor import (
     OrderResult,
     create_exit_order_intent,
     execute_exit_order,
+    _exit_execution_authority_deadline_error,
     _refresh_exit_collateral_snapshot_for_submit,
 )
 from src.state.lifecycle_manager import (
@@ -734,6 +735,114 @@ class ExitExecutionEvidence:
         self.result_reason = str(result.reason or "")
 
 
+@dataclass(frozen=True)
+class GlobalSellExecutionAuthority:
+    """Immutable auction authority rebound to the submit-time SELL book."""
+
+    actuation: object
+    jit_candidate: object
+    authority_identity: str
+
+    @classmethod
+    def from_current(
+        cls,
+        *,
+        actuation: object,
+        jit_candidate: object,
+    ) -> "GlobalSellExecutionAuthority":
+        return cls(
+            actuation=actuation,
+            jit_candidate=jit_candidate,
+            authority_identity=cls._identity(actuation, jit_candidate),
+        )
+
+    @staticmethod
+    def _identity(actuation: object, jit_candidate: object) -> str:
+        from src.engine.global_single_order_auction import GlobalSingleOrderActuation
+        from src.solve.solver import (
+            GlobalSingleOrderSellCandidate,
+            executable_curve_identity,
+        )
+
+        if not isinstance(actuation, GlobalSingleOrderActuation):
+            raise ValueError("GLOBAL_SELL_EXECUTION_ACTUATION_TYPE_INVALID")
+        if not isinstance(jit_candidate, GlobalSingleOrderSellCandidate):
+            raise ValueError("GLOBAL_SELL_EXECUTION_JIT_CANDIDATE_TYPE_INVALID")
+        actuation.__post_init__()
+        jit_candidate.__post_init__()
+        decision = actuation.decision
+        selected = decision.candidate
+        if not isinstance(selected, GlobalSingleOrderSellCandidate):
+            raise ValueError("GLOBAL_SELL_EXECUTION_SELECTED_ACTION_INVALID")
+        fixed_fields = (
+            "candidate_id",
+            "family_key",
+            "bin_id",
+            "condition_id",
+            "side",
+            "token_id",
+            "position_id",
+            "held_shares",
+            "probability_witness_identity",
+            "ledger_snapshot_id",
+            "resolution_identity",
+        )
+        if any(
+            getattr(selected, field) != getattr(jit_candidate, field)
+            for field in fixed_fields
+        ):
+            raise ValueError("GLOBAL_SELL_EXECUTION_JIT_IDENTITY_SUPERSEDED")
+        curve = jit_candidate.executable_sell_curve
+        if (
+            jit_candidate.execution_curve_identity
+            != executable_curve_identity(curve)
+            or jit_candidate.book_snapshot_id != curve.snapshot_id
+            or not str(curve.book_hash or "").strip()
+            or decision.shares <= 0
+            or decision.shares > jit_candidate.held_shares
+            or not math.isfinite(decision.robust_delta_log_wealth)
+            or decision.robust_delta_log_wealth <= 0
+            or not math.isfinite(decision.robust_ev_usd)
+            or decision.robust_ev_usd <= 0
+        ):
+            raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_INVALID")
+        proceeds, _vwap, limit = curve.proceeds_for_shares(decision.shares)
+        if proceeds < decision.cash_proceeds_usd or limit < decision.limit_price:
+            raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_WORSENED")
+        deadline = jit_candidate.book_captured_at_utc + curve.quote_ttl
+        digest = hashlib.sha256()
+        for value in (
+            actuation.actuation_identity,
+            actuation.economic_identity,
+            actuation.selection_epoch_identity,
+            actuation.wealth_witness_identity,
+            actuation.wealth_economic_identity,
+            jit_candidate.candidate_id,
+            jit_candidate.position_id,
+            jit_candidate.condition_id,
+            jit_candidate.token_id,
+            jit_candidate.probability_witness_identity,
+            jit_candidate.book_snapshot_id,
+            curve.book_hash,
+            jit_candidate.execution_curve_identity,
+            jit_candidate.book_captured_at_utc.isoformat(),
+            deadline.isoformat(),
+            decision.shares,
+            decision.limit_price,
+            decision.cash_proceeds_usd,
+            repr(decision.robust_delta_log_wealth),
+            repr(decision.robust_ev_usd),
+        ):
+            digest.update(str(value).encode("utf-8"))
+            digest.update(b"\x1f")
+        return digest.hexdigest()
+
+    def __post_init__(self) -> None:
+        expected = self._identity(self.actuation, self.jit_candidate)
+        if self.authority_identity != expected:
+            raise ValueError("GLOBAL_SELL_EXECUTION_AUTHORITY_IDENTITY_MISMATCH")
+
+
 def place_sell_order(
     *,
     trade_id: str,
@@ -752,6 +861,7 @@ def place_sell_order(
     executable_snapshot_orderbook_top_ask: object | None = None,
     decision_id: str = "",
     execution_proof_verified: bool = False,
+    execution_authority_deadline_utc: str = "",
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
 
@@ -775,7 +885,15 @@ def place_sell_order(
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
+        execution_authority_deadline_utc=execution_authority_deadline_utc,
     )
+    deadline_error = _exit_execution_authority_deadline_error(intent)
+    if deadline_error is not None:
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=deadline_error,
+        )
     if decision_id:
         try:
             params = signature(execute_exit_order).parameters
@@ -1981,66 +2099,211 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
 def _global_sell_capital_certificate_error(
     position: Position,
     exit_intent: ExitIntent,
+    authority: GlobalSellExecutionAuthority | None,
+    *,
+    conn: sqlite3.Connection | None,
+    snapshot_context: Mapping[str, object],
+    now: datetime,
 ) -> str | None:
-    """Return the missing global-auction proof for a live non-emergency SELL."""
+    """Validate typed auction, JIT book, canonical snapshot, and exact intent."""
 
     if str(exit_intent.reason or "").strip() != "GLOBAL_CAPITAL_OPTIMAL_SELL":
         return "global_capital_optimal_sell_intent_required"
+    if not isinstance(authority, GlobalSellExecutionAuthority):
+        return "global_sell_execution_authority_required"
+    try:
+        authority.__post_init__()
+    except (TypeError, ValueError):
+        return "global_sell_execution_authority_invalid"
+    actuation = authority.actuation
+    decision = actuation.decision
+    candidate = decision.candidate
+    jit = authority.jit_candidate
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+    expected_direction = "buy_yes" if candidate.side == "YES" else "buy_no"
+    held_token = (
+        str(getattr(position, "token_id", "") or "")
+        if candidate.side == "YES"
+        else str(getattr(position, "no_token_id", "") or "")
+    )
+    if (
+        str(getattr(position, "trade_id", "") or "") != candidate.position_id
+        or str(getattr(position, "condition_id", "") or "")
+        != candidate.condition_id
+        or direction != expected_direction
+        or held_token != candidate.token_id
+    ):
+        return "global_sell_execution_position_identity_mismatch"
+
+    def matches_decimal(actual: object, expected: object) -> bool:
+        try:
+            left = Decimal(str(actual))
+            right = Decimal(str(expected))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        return left.is_finite() and right.is_finite() and left == right
+
+    try:
+        exact_held = Decimal(str(position.effective_shares))
+        chain_held = Decimal(str(getattr(position, "chain_shares", 0)))
+    except (InvalidOperation, TypeError, ValueError):
+        return "global_sell_execution_position_economics_mismatch"
+    sellable = exact_held.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    if not (
+        exact_held.is_finite()
+        and exact_held > 0
+        and chain_held == exact_held
+        and matches_decimal(candidate.held_shares, sellable)
+        and matches_decimal(exit_intent.shares, decision.shares)
+        and matches_decimal(exit_intent.exact_limit_price, decision.limit_price)
+    ):
+        return "global_sell_execution_position_economics_mismatch"
     certificate = exit_intent.capital_certificate
     if not isinstance(certificate, Mapping):
         return "capital_certificate_required"
-    if str(certificate.get("action") or "").strip().upper() != "SELL":
-        return "capital_certificate_action_not_sell"
-    for field in (
-        "candidate_id",
-        "actuation_identity",
-        "economic_identity",
-        "probability_witness_identity",
+    expected_text = {
+        "action": "SELL",
+        "candidate_id": candidate.candidate_id,
+        "actuation_identity": actuation.actuation_identity,
+        "economic_identity": actuation.economic_identity,
+        "probability_witness_identity": candidate.probability_witness_identity,
+        "selection_epoch_identity": actuation.selection_epoch_identity,
+        "wealth_witness_identity": actuation.wealth_witness_identity,
+        "execution_authority_identity": authority.authority_identity,
+        "jit_book_hash": jit.executable_sell_curve.book_hash,
+        "jit_curve_identity": jit.execution_curve_identity,
+    }
+    if any(
+        str(certificate.get(field) or "") != str(expected)
+        for field, expected in expected_text.items()
     ):
-        if not str(certificate.get(field) or "").strip():
-            return f"capital_certificate_{field}_missing"
+        return "capital_certificate_identity_mismatch"
+    expected_decimal = {
+        "robust_delta_log_wealth": decision.robust_delta_log_wealth,
+        "robust_ev_usd": decision.robust_ev_usd,
+        "held_shares": exact_held,
+        "sellable_shares": candidate.held_shares,
+        "selected_shares": decision.shares,
+        "selected_cash_proceeds_usd": decision.cash_proceeds_usd,
+        "exact_limit_price": decision.limit_price,
+    }
+    if any(
+        not matches_decimal(certificate.get(field), expected)
+        for field, expected in expected_decimal.items()
+    ):
+        return "capital_certificate_economics_mismatch"
+    if conn is None:
+        return "global_sell_execution_snapshot_authority_unavailable"
+    snapshot_id = str(snapshot_context.get("executable_snapshot_id") or "")
+    snapshot_hash = str(snapshot_context.get("executable_snapshot_hash") or "")
+    if not snapshot_id or not snapshot_hash:
+        return "global_sell_execution_snapshot_authority_unavailable"
+    from src.state.snapshot_repo import get_snapshot
 
-    def positive_finite(field: str) -> bool:
-        try:
-            value = Decimal(str(certificate.get(field)))
-        except (InvalidOperation, TypeError, ValueError):
-            return False
-        return value.is_finite() and value > 0
-
-    if not positive_finite("robust_delta_log_wealth"):
-        return "capital_certificate_robust_delta_log_wealth_not_positive"
-    if not positive_finite("robust_ev_usd"):
-        return "capital_certificate_robust_ev_usd_not_positive"
-
-    def matches_decimal(field: str, expected: object) -> bool:
-        try:
-            certified = Decimal(str(certificate.get(field)))
-            actual = Decimal(str(expected))
-        except (InvalidOperation, TypeError, ValueError):
-            return False
-        return certified.is_finite() and actual.is_finite() and certified == actual
-
-    if not matches_decimal("held_shares", position.effective_shares):
-        return "capital_certificate_held_shares_mismatch"
-    try:
-        exact_held = Decimal(str(position.effective_shares))
-        selected = Decimal(str(exit_intent.shares))
-    except (InvalidOperation, TypeError, ValueError):
-        return "capital_certificate_sellable_shares_mismatch"
-    sellable = exact_held.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
-    if not matches_decimal("sellable_shares", sellable):
-        return "capital_certificate_sellable_shares_mismatch"
-    if not selected.is_finite() or selected <= 0 or selected > sellable:
-        return "capital_certificate_selected_shares_exceeds_sellable"
-    if not matches_decimal("selected_shares", exit_intent.shares):
-        return "capital_certificate_selected_shares_mismatch"
-    if exit_intent.exact_limit_price is None:
-        return "capital_certificate_limit_price_missing"
-    if not matches_decimal("exact_limit_price", exit_intent.exact_limit_price):
-        return "capital_certificate_limit_price_mismatch"
+    snapshot = get_snapshot(conn, snapshot_id)
+    if snapshot is None:
+        return "global_sell_execution_snapshot_missing"
+    status = snapshot.tradeability_status
+    jit_deadline = jit.book_captured_at_utc + jit.executable_sell_curve.quote_ttl
+    if (
+        snapshot.executable_snapshot_hash != snapshot_hash
+        or snapshot.selected_outcome_token_id != candidate.token_id
+        or snapshot.condition_id != candidate.condition_id
+        or snapshot.outcome_label != candidate.side
+        or snapshot.raw_orderbook_hash != jit.executable_sell_curve.book_hash
+        or snapshot.min_tick_size != jit.executable_sell_curve.min_tick
+        or snapshot.min_order_size != jit.executable_sell_curve.min_order_size
+        or snapshot.orderbook_top_bid
+        != jit.executable_sell_curve.levels[0].price
+        or snapshot.freshness_deadline < now
+        or jit_deadline < now
+        or status is None
+        or not status.executable_allowed
+    ):
+        return "global_sell_execution_snapshot_superseded"
     return None
 
 
+def _hard_fact_sell_authority_valid(
+    position: Position,
+    authority: object | None,
+    *,
+    conn: sqlite3.Connection | None,
+    now: datetime,
+) -> bool:
+    """Re-read current source evidence and recompute this position's bin death."""
+
+    from src.execution.day0_hard_fact_exit import (
+        HardFactVerdict,
+        evaluate_hard_fact_exit,
+        hard_fact_bin_verdict,
+    )
+
+    if (
+        conn is None
+        or not isinstance(authority, HardFactVerdict)
+        or authority.action != "EXIT_DEAD_BIN"
+    ):
+        return False
+    try:
+        from src.config import runtime_cities_by_name
+        from src.data.market_scanner import _parse_temp_range
+
+        city = runtime_cities_by_name().get(str(getattr(position, "city", "") or ""))
+        if city is None:
+            return False
+        current = evaluate_hard_fact_exit(
+            position=position,
+            city=city,
+            now=now,
+            world_conn=conn,
+        )
+        if not isinstance(current, HardFactVerdict):
+            return False
+        low, high = _parse_temp_range(str(getattr(position, "bin_label", "") or ""))
+        raw_direction = getattr(position, "direction", "")
+        direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+        if direction in {"yes", "no"}:
+            direction = f"buy_{direction}"
+        metric = str(getattr(position, "temperature_metric", "") or "high").lower()
+        expected = hard_fact_bin_verdict(
+            metric=metric,
+            direction=direction,
+            bin_low=low,
+            bin_high=high,
+            effective_extreme=float(authority.rounded_extreme),
+        )
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        expected is not None
+        and current.action == authority.action
+        and current.reason == authority.reason
+        and current.metric == authority.metric
+        and current.rounded_extreme == authority.rounded_extreme
+        and current.source == authority.source
+        and expected.action == authority.action
+        and expected.reason == authority.reason
+        and expected.metric == authority.metric == metric
+        and expected.rounded_extreme == authority.rounded_extreme
+        and str(authority.source or "").strip()
+    )
+
+
+def _red_force_exit_authorized(position: Position, exit_context: ExitContext) -> bool:
+    """Require both the sweep marker and current durable RED/review authority."""
+
+    if (
+        str(getattr(position, "exit_reason", "") or "").strip().lower()
+        != "red_force_exit"
+        or str(exit_context.exit_reason or "").upper() != "RED_FORCE_EXIT"
+    ):
+        return False
+    from src.riskguard.risk_level import RiskLevel
+    from src.riskguard.riskguard import get_current_level, get_force_exit_review
+
+    return bool(get_current_level() == RiskLevel.RED or get_force_exit_review())
 def is_exit_cooldown_active(position: Position) -> bool:
     """Check if position is in retry cooldown period."""
     if position.exit_state != "retry_pending":
@@ -3120,16 +3383,15 @@ def execute_exit(
     conn: sqlite3.Connection | None = None,
     exit_intent: ExitIntent | None = None,
     execution_evidence: ExitExecutionEvidence | None = None,
+    global_sell_authority: GlobalSellExecutionAuthority | None = None,
+    hard_fact_authority: object | None = None,
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """
-    is_red_force_exit = (
-        getattr(position, "exit_reason", "") == "red_force_exit"
-        or str(exit_context.exit_reason or "").upper() == "RED_FORCE_EXIT"
-    )
+    is_red_force_exit = _red_force_exit_authorized(position, exit_context)
     # PR-S1 Bug #3: block SELL for tokens with unresolved aggregate violations.
     _eff_token_id = (
         position.token_id if getattr(position, "direction", "") == "buy_yes"
@@ -3188,6 +3450,8 @@ def execute_exit(
         conn=conn,
         execution_evidence=execution_evidence,
         is_red_force_exit=is_red_force_exit,
+        global_sell_authority=global_sell_authority,
+        hard_fact_authority=hard_fact_authority,
     )
 
 
@@ -3201,6 +3465,8 @@ def _execute_live_exit(
     conn: sqlite3.Connection | None,
     execution_evidence: ExitExecutionEvidence | None,
     is_red_force_exit: bool,
+    global_sell_authority: GlobalSellExecutionAuthority | None,
+    hard_fact_authority: object | None,
 ) -> str:
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
@@ -3251,27 +3517,69 @@ def _execute_live_exit(
                 reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
             )
 
-    if (
+    live_non_red = (
         not is_red_force_exit
         and str(getattr(position, "env", "live") or "live").lower() == "live"
-    ):
-        certificate_error = _global_sell_capital_certificate_error(position, exit_intent)
-        if certificate_error is not None:
-            logger.warning(
-                "EXIT_SUBMIT_BLOCKED_GLOBAL_CAPITAL_PROOF trade_id=%s reason=%s",
-                position.trade_id,
-                certificate_error,
+    )
+    hard_fact_authorized = bool(
+        live_non_red
+        and str(exit_intent.reason or "").startswith("DAY0_HARD_FACT_BIN_DEAD")
+        and _hard_fact_sell_authority_valid(
+            position,
+            hard_fact_authority,
+            conn=conn,
+            now=_utcnow(),
+        )
+    )
+    global_authorized = False
+    if live_non_red and not hard_fact_authorized:
+        if isinstance(global_sell_authority, GlobalSellExecutionAuthority):
+            try:
+                global_sell_authority.__post_init__()
+            except (TypeError, ValueError):
+                preliminary_error = "global_sell_execution_authority_invalid"
+            else:
+                global_authorized = (
+                    str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+                )
+                preliminary_error = (
+                    None
+                    if global_authorized
+                    else "global_capital_optimal_sell_intent_required"
+                )
+        else:
+            preliminary_error = (
+                "global_sell_execution_authority_required"
+                if str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+                else "global_capital_optimal_sell_intent_required"
             )
-            return f"exit_blocked: {certificate_error}"
+        continuing_existing_exit = bool(
+            str(getattr(position, "last_exit_order_id", "") or "")
+        )
+        if preliminary_error is not None and not continuing_existing_exit:
+            logger.warning(
+                "EXIT_SUBMIT_BLOCKED_CAPITAL_AUTHORITY trade_id=%s reason=%s",
+                position.trade_id,
+                preliminary_error,
+            )
+            return f"exit_blocked: {preliminary_error}"
+    else:
+        continuing_existing_exit = False
 
     _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
     try:
+        required_book_hash = (
+            global_sell_authority.jit_candidate.executable_sell_curve.book_hash
+            if global_sell_authority is not None
+            else None
+        )
         snapshot_context = _latest_or_capture_exit_snapshot_context(
             conn,
             clob,
             position,
             token_id,
+            required_raw_orderbook_hash=required_book_hash,
         )
     except Exception as exc:  # noqa: BLE001
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_ERROR]"
@@ -3299,6 +3607,28 @@ def _execute_live_exit(
                 error=snapshot_error,
             )
         return "exit_blocked: executable_snapshot_error"
+    if live_non_red:
+        if global_authorized:
+            authority_error = _global_sell_capital_certificate_error(
+                position,
+                exit_intent,
+                global_sell_authority,
+                conn=conn,
+                snapshot_context=snapshot_context,
+                now=_utcnow(),
+            )
+        elif hard_fact_authorized or continuing_existing_exit:
+            authority_error = None
+        else:
+            authority_error = "hard_fact_sell_authority_invalid"
+        if authority_error is not None:
+            logger.warning(
+                "EXIT_SUBMIT_BLOCKED_CAPITAL_AUTHORITY trade_id=%s reason=%s",
+                position.trade_id,
+                authority_error,
+            )
+            return f"exit_blocked: {authority_error}"
+
     dust_error = _below_snapshot_min_order_error(
         position,
         snapshot_context,
@@ -3585,7 +3915,34 @@ def _execute_live_exit(
                 _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_{outcome.status}]", error=outcome.reason or outcome.status, conn=conn)
                 return f"exit_blocked: cancel_{outcome.status.lower()}"
 
+    if live_non_red and continuing_existing_exit and not (
+        global_authorized or hard_fact_authorized
+    ):
+        logger.warning(
+            "EXIT_REPLACEMENT_BLOCKED_FRESH_CAPITAL_AUTHORITY trade_id=%s",
+            position.trade_id,
+        )
+        return "exit_blocked: fresh_capital_authority_required_after_cancel"
+
     try:
+        submit_snapshot_context = dict(snapshot_context)
+        execution_authority_deadline_utc = str(
+            submit_snapshot_context.get("execution_authority_deadline_utc") or ""
+        ).strip()
+        if global_authorized and global_sell_authority is not None:
+            jit = global_sell_authority.jit_candidate
+            jit_deadline = (
+                jit.book_captured_at_utc + jit.executable_sell_curve.quote_ttl
+            )
+            snapshot_deadline = _parse_iso(execution_authority_deadline_utc)
+            execution_authority_deadline_utc = (
+                min(snapshot_deadline, jit_deadline).isoformat()
+                if snapshot_deadline is not None
+                else ""
+            )
+        submit_snapshot_context["execution_authority_deadline_utc"] = (
+            execution_authority_deadline_utc
+        )
         raw_sell_result = place_sell_order(
             trade_id=position.trade_id,
             token_id=token_id,
@@ -3596,7 +3953,7 @@ def _execute_live_exit(
             submit_order_type=exit_intent.submit_order_type,
             decision_id=f"exit:{position.trade_id}",
             execution_proof_verified=True,
-            **snapshot_context,
+            **submit_snapshot_context,
         )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
         if execution_evidence is not None:
@@ -3865,6 +4222,7 @@ def _latest_exit_snapshot_context(
         row = conn.execute(
             f"""
             SELECT snapshot_id, min_tick_size, min_order_size, neg_risk,
+                   freshness_deadline,
                    orderbook_top_bid, orderbook_top_ask
               FROM executable_market_snapshots
              WHERE freshness_deadline >= ?
@@ -3892,6 +4250,7 @@ def _latest_exit_snapshot_context(
         "executable_snapshot_min_tick_size": str(row["min_tick_size"]),
         "executable_snapshot_min_order_size": str(row["min_order_size"]),
         "executable_snapshot_neg_risk": bool(row["neg_risk"]),
+        "execution_authority_deadline_utc": str(row["freshness_deadline"]),
         "executable_snapshot_orderbook_top_bid": str(row["orderbook_top_bid"]),
         "executable_snapshot_orderbook_top_ask": str(row["orderbook_top_ask"]),
     }
@@ -4108,6 +4467,7 @@ def _latest_or_capture_exit_snapshot_context(
     token_id: str,
     *,
     now: datetime | None = None,
+    required_raw_orderbook_hash: str | None = None,
 ) -> dict[str, object]:
     """Return fresh snapshot kwargs for exits, capturing one when possible.
 
@@ -4118,8 +4478,22 @@ def _latest_or_capture_exit_snapshot_context(
     executor rejects through the existing executable_snapshot_gate.
     """
 
+    def matches_required_book(context: Mapping[str, object]) -> bool:
+        required = str(required_raw_orderbook_hash or "").strip()
+        if not required:
+            return True
+        if conn is None:
+            return False
+        snapshot_id = str(context.get("executable_snapshot_id") or "")
+        if not snapshot_id:
+            return False
+        from src.state.snapshot_repo import get_snapshot
+
+        snapshot = get_snapshot(conn, snapshot_id)
+        return bool(snapshot is not None and snapshot.raw_orderbook_hash == required)
+
     context = _latest_exit_snapshot_context(conn, token_id, now=now)
-    if context:
+    if context and matches_required_book(context):
         return context
     no_bid_context = _latest_exit_snapshot_context(
         conn,
@@ -4235,6 +4609,11 @@ def _latest_or_capture_exit_snapshot_context(
             "executable_snapshot_min_tick_size": fields.get("executable_snapshot_min_tick_size"),
             "executable_snapshot_min_order_size": fields.get("executable_snapshot_min_order_size"),
             "executable_snapshot_neg_risk": fields.get("executable_snapshot_neg_risk"),
+            "execution_authority_deadline_utc": (
+                snapshot.freshness_deadline.isoformat()
+                if snapshot is not None
+                else ""
+            ),
         }
     except Exception as exc:
         logger.warning(

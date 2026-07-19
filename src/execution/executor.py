@@ -4544,6 +4544,7 @@ class ExitOrderIntent:
     executable_snapshot_min_tick_size: Decimal | str | None = None
     executable_snapshot_min_order_size: Decimal | str | None = None
     executable_snapshot_neg_risk: bool | None = None
+    execution_authority_deadline_utc: str = ""
 
 
 def _orderresult_from_existing(
@@ -5452,6 +5453,7 @@ def create_exit_order_intent(
     executable_snapshot_min_tick_size: Decimal | str | None = None,
     executable_snapshot_min_order_size: Decimal | str | None = None,
     executable_snapshot_neg_risk: bool | None = None,
+    execution_authority_deadline_utc: str = "",
 ) -> ExitOrderIntent:
     """Build the explicit executor contract for a live sell/exit order."""
 
@@ -5470,7 +5472,47 @@ def create_exit_order_intent(
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
+        execution_authority_deadline_utc=execution_authority_deadline_utc,
     )
+
+
+def _exit_execution_authority_deadline_error(
+    intent: ExitOrderIntent,
+    *,
+    conn: sqlite3.Connection | None = None,
+    now: datetime | None = None,
+) -> str | None:
+    """Recheck the earliest JIT/snapshot deadline before the venue side effect."""
+
+    raw = str(intent.execution_authority_deadline_utc or "").strip()
+    deadlines: list[datetime] = []
+    if raw:
+        try:
+            explicit = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return "exit_execution_authority_deadline_invalid"
+        if explicit.tzinfo is None:
+            return "exit_execution_authority_deadline_naive"
+        deadlines.append(explicit.astimezone(timezone.utc))
+    if conn is not None and str(intent.executable_snapshot_id or "").strip():
+        from src.state.snapshot_repo import get_snapshot
+
+        try:
+            snapshot = get_snapshot(conn, intent.executable_snapshot_id)
+        except sqlite3.OperationalError:
+            return "exit_execution_authority_snapshot_deadline_unavailable"
+        if snapshot is None:
+            return "exit_execution_authority_snapshot_deadline_unavailable"
+        snapshot_deadline = snapshot.freshness_deadline
+        if snapshot_deadline.tzinfo is None:
+            return "exit_execution_authority_snapshot_deadline_naive"
+        deadlines.append(snapshot_deadline.astimezone(timezone.utc))
+    if not deadlines:
+        return "exit_execution_authority_deadline_required"
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if moment > min(deadlines):
+        return "exit_execution_authority_expired_before_venue_submit"
+    return None
 
 
 def place_sell_order(
@@ -6174,6 +6216,39 @@ def execute_exit_order(
             )
         if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
             client.bind_submission_envelope(pre_submit_envelope)
+        authority_deadline_error = _exit_execution_authority_deadline_error(
+            intent,
+            conn=conn,
+        )
+        if authority_deadline_error is not None:
+            rej_time = datetime.now(timezone.utc).isoformat()
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type="SUBMIT_REJECTED",
+                occurred_at=rej_time,
+                payload={
+                    "reason": authority_deadline_error,
+                    "side_effect_boundary_crossed": False,
+                    "sdk_submit_attempted": False,
+                    "execution_authority_deadline_utc": (
+                        intent.execution_authority_deadline_utc
+                    ),
+                },
+            )
+            conn.commit()
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=authority_deadline_error,
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+                command_id=command_id,
+                command_state="REJECTED",
+            )
         # PR 6 (2026-05-19): capture zeus_submit_intent_time immediately before network call.
         _zeus_submit_intent_time = datetime.now(timezone.utc).isoformat()
         try:

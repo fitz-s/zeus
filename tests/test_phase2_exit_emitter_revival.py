@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -689,8 +691,38 @@ class TestCanonicalExitOrderPostedProvenance:
     """A successful spine place_sell_order must append a canonical
     position_events.EXIT_ORDER_POSTED with source_module=src.execution.exit_lifecycle."""
 
+    def test_fabricated_hard_fact_source_cannot_authorize_live_sell(self):
+        from src.execution.day0_hard_fact_exit import hard_fact_bin_verdict
+        from src.execution.exit_lifecycle import _hard_fact_sell_authority_valid
+
+        pos = _make_position(
+            state="day0_window",
+            exit_state="",
+            bin_label="30-31°C",
+        )
+        authority = replace(
+            hard_fact_bin_verdict(
+                metric="high",
+                direction="buy_yes",
+                bin_low=30.0,
+                bin_high=31.0,
+                effective_extreme=32.0,
+            ),
+            source="fabricated_nonempty_source",
+        )
+
+        assert not _hard_fact_sell_authority_valid(
+            pos,
+            authority,
+            conn=_db(),
+            now=datetime(2026, 6, 20, 14, 0, tzinfo=timezone.utc),
+        )
+
     def test_spine_post_writes_canonical_exit_order_posted(self):
+        from src.riskguard.risk_level import RiskLevel
+
         pos = _make_position(state="pending_exit", exit_state="exit_intent")
+        pos.exit_reason = "red_force_exit"
         conn = _db()
         _seed_position_current(conn, pos)
 
@@ -700,7 +732,7 @@ class TestCanonicalExitOrderPostedProvenance:
             best_bid=0.5,
             fresh_prob=0.4,
             hours_to_settlement=3.0,
-            exit_reason="EDGE_REVERSAL",
+            exit_reason="RED_FORCE_EXIT",
         )
         exit_intent = build_exit_intent(pos, exit_context)
 
@@ -718,6 +750,14 @@ class TestCanonicalExitOrderPostedProvenance:
              patch(
                  "src.execution.exit_lifecycle._refresh_exit_collateral_snapshot_for_submit",
                  return_value=None,
+             ), \
+             patch(
+                 "src.riskguard.riskguard.get_current_level",
+                 return_value=RiskLevel.RED,
+             ), \
+             patch(
+                 "src.riskguard.riskguard.get_force_exit_review",
+                 return_value=False,
              ):
             # clob=None so the quick-fill check is skipped (stays sell_pending).
             outcome = execute_exit(
@@ -757,9 +797,30 @@ class TestCanonicalExitOrderPostedProvenance:
         )
 
     def test_exit_intent_writes_decision_evidence_payload(self):
-        pos = _make_position(state="day0_window", exit_state="")
+        from src.execution.day0_hard_fact_exit import hard_fact_bin_verdict
+
+        pos = _make_position(
+            state="day0_window",
+            exit_state="",
+            bin_label="30-31°C",
+        )
         conn = _db()
         _seed_position_current(conn, pos)
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, local_timestamp,
+                utc_timestamp, utc_offset_minutes, time_basis, running_max,
+                temp_unit, imported_at, authority, causality_status,
+                temperature_metric
+            ) VALUES (
+                'London', '2026-06-20', 'wu_hourly', 'Europe/London',
+                '2026-06-20T14:00:00', '2026-06-20T13:00:00+00:00',
+                60, 'local', 32.0, 'C', '2026-06-20T13:00:01+00:00',
+                'VERIFIED', 'OK', 'high'
+            )
+            """
+        )
 
         exit_context = ExitContext(
             current_market_price=0.5,
@@ -772,9 +833,19 @@ class TestCanonicalExitOrderPostedProvenance:
             hours_to_settlement=0.5,
             position_state="day0_window",
             day0_active=True,
-            exit_reason="SETTLEMENT_IMMINENT",
+            exit_reason="DAY0_HARD_FACT_BIN_DEAD",
         )
         exit_intent = build_exit_intent(pos, exit_context)
+        hard_fact_authority = replace(
+            hard_fact_bin_verdict(
+                metric="high",
+                direction="buy_yes",
+                bin_low=30.0,
+                bin_high=31.0,
+                effective_extreme=32.0,
+            ),
+            source="durable_observation_instants",
+        )
         placed = {"orderID": "ord-exit-intent-1", "status": "placed", "price": 0.48, "shares": 10.0}
 
         with patch("src.execution.exit_lifecycle.place_sell_order", return_value=placed), \
@@ -797,6 +868,7 @@ class TestCanonicalExitOrderPostedProvenance:
                 clob=None,
                 conn=conn,
                 exit_intent=exit_intent,
+                hard_fact_authority=hard_fact_authority,
             )
         conn.commit()
 
@@ -813,7 +885,7 @@ class TestCanonicalExitOrderPostedProvenance:
         ).fetchone()
         assert row is not None
         payload = json.loads(row["payload_json"])
-        assert payload["exit_intent_reason"] == "SETTLEMENT_IMMINENT"
+        assert payload["exit_intent_reason"] == "DAY0_HARD_FACT_BIN_DEAD"
         assert payload["exit_intent_current_market_price"] == pytest.approx(0.5)
         assert payload["exit_intent_best_bid"] == pytest.approx(0.48)
         assert payload["exit_intent_best_ask"] == pytest.approx(0.52)

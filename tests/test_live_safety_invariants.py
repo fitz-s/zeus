@@ -10097,21 +10097,33 @@ def test_collateral_check_fails_closed_on_api_error():
 # ---- Bonus: Live exit blocked by collateral goes to retry ----
 
 
-def test_live_exit_collateral_blocked_goes_to_retry():
+def test_live_exit_collateral_blocked_goes_to_retry(monkeypatch):
     """Live exit that fails collateral check transitions to retry_pending."""
+    from src.riskguard.risk_level import RiskLevel
+
     pos = _make_position(state="holding")
+    pos.exit_reason = "red_force_exit"
     portfolio = _make_portfolio(pos)
     clob = _make_clob(balance=0.01)  # Not enough
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_force_exit_review",
+        lambda: False,
+    )
 
     outcome = execute_exit(
         portfolio=portfolio,
         position=pos,
-        exit_context=_global_sell_exit_context(),
-        clob=clob,
-        exit_intent=_global_sell_exit_intent(
-            pos,
-            certificate=_valid_global_sell_certificate(pos),
+        exit_context=ExitContext(
+            exit_reason="RED_FORCE_EXIT",
+            current_market_price=0.45,
+            current_market_price_is_fresh=False,
+            best_bid=0.45,
         ),
+        clob=clob,
     )
 
     assert "collateral_blocked" in outcome
@@ -12030,12 +12042,12 @@ def test_invalid_global_sell_capital_certificate_cannot_reach_venue(
         exit_intent=_global_sell_exit_intent(pos, certificate=certificate),
     )
 
-    assert outcome.startswith("exit_blocked: capital_certificate_")
+    assert outcome == "exit_blocked: global_sell_execution_authority_required"
     assert pos.exit_state == ""
 
 
-def test_complete_global_sell_capital_certificate_can_reach_venue(monkeypatch):
-    """A positive, identity-complete global SELL certificate reaches the venue seam."""
+def test_mapping_only_global_sell_certificate_cannot_reach_venue(monkeypatch):
+    """Caller-authored strings are not a typed global-auction authority."""
 
     from src.execution import exit_lifecycle
 
@@ -12080,10 +12092,96 @@ def test_complete_global_sell_capital_certificate_can_reach_venue(monkeypatch):
         ),
     )
 
-    assert outcome == "sell_pending: order=global-sell-order, status=OPEN"
+    assert outcome == "exit_blocked: global_sell_execution_authority_required"
+    assert submitted == []
+
+
+def test_spoofed_red_context_without_sweep_marker_cannot_reach_venue(monkeypatch):
+    """A caller string cannot mint the RED exemption."""
+
+    from src.execution import exit_lifecycle
+
+    pos = _make_position(state="holding")
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: pytest.fail("context-only RED must not consult risk authority"),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: pytest.fail("spoofed RED reached venue"),
+    )
+    outcome = execute_exit(
+        _make_portfolio(pos),
+        pos,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT",
+            current_market_price=0.45,
+            current_market_price_is_fresh=True,
+            best_bid=0.45,
+        ),
+        clob=object(),
+    )
+
+    assert outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
+
+
+def test_cycle_normalized_current_red_marker_bypasses_global_auction_authority(monkeypatch):
+    """The cycle's upper-case RED marker retains the emergency exit path."""
+
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+
+    pos = _make_position(state="holding")
+    pos.exit_reason = "RED_FORCE_EXIT"
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_force_exit_review",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    submitted = []
+
+    def place(**kwargs):
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=pos.trade_id,
+            status="pending",
+            order_id="red-sell-order",
+            external_order_id="red-sell-order",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", place)
+
+    class Clob:
+        @staticmethod
+        def get_order_status(_order_id):
+            return {"status": "OPEN"}
+
+    context = ExitContext(
+        exit_reason="RED_FORCE_EXIT",
+        current_market_price=0.45,
+        current_market_price_is_fresh=False,
+        best_bid=0.45,
+    )
+    outcome = execute_exit(_make_portfolio(pos), pos, context, clob=Clob())
+
+    assert outcome == "sell_pending: order=red-sell-order, status=OPEN"
     assert len(submitted) == 1
-    assert submitted[0]["shares"] == Decimal("7.03")
-    assert submitted[0]["exact_limit_price"] == 0.45
+    assert submitted[0]["shares"] == pos.effective_shares
+    assert submitted[0]["exact_limit_price"] is None
 
 
 # ---- Autonomous Discovery Tests ----

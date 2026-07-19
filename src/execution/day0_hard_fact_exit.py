@@ -230,7 +230,8 @@ def _final_daily_observation_extreme(
 
 
 def _normalize_direction(direction: Any) -> str:
-    return str(getattr(direction, "value", direction) or "")
+    value = str(getattr(direction, "value", direction) or "").strip().lower()
+    return f"buy_{value}" if value in {"yes", "no"} else value
 
 
 def hard_fact_bin_verdict(
