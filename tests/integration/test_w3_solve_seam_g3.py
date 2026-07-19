@@ -11251,6 +11251,137 @@ def test_global_batch_restricts_urgent_scope_to_changed_families(monkeypatch):
     )
 
 
+def test_global_batch_isolates_missing_restricted_family(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    requested_scope = current_global_auction_scope_from_events(
+        (event_a, event_b),
+        captured_at_utc=decision_at,
+    )
+    current_scope = current_global_auction_scope_from_events(
+        (event_a,),
+        captured_at_utc=decision_at,
+    )
+    missing_family_key = next(
+        iter(set(requested_scope.family_keys) - set(current_scope.family_keys))
+    )
+    prepared_events = []
+    selected_scopes = []
+    current_probability = object()
+    venue_calls = [0]
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: current_scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+
+    def select(*_args, **kwargs):
+        selected_scopes.append(kwargs["current_scope"])
+        return SimpleNamespace(
+            decision=SimpleNamespace(
+                candidate=object(),
+                no_trade_reason=None,
+                rejection_reasons={},
+                candidate_evaluations=(),
+            ),
+            winner_event_id=event_a.event_id,
+            actuation=SimpleNamespace(actuation_identity="actuation-a"),
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        select,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime.CurrentFamilyProbabilityAuthority,
+        "from_witness",
+        classmethod(lambda cls, witness: current_probability),
+    )
+
+    def prepare(event, _at):
+        prepared_events.append(event.event_id)
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=SimpleNamespace(
+                probability_witness=SimpleNamespace(
+                    family_key=current_scope.family_keys[0],
+                    captured_at_utc=decision_at,
+                    posterior_identity_hash="run-a",
+                    witness_identity="q-a",
+                    q_version="q-a",
+                    family_binding_identity="binding-a",
+                    sample_matrix_identity="samples-a",
+                    band_alpha=0.05,
+                    band_basis="lower-tail",
+                )
+            ),
+        )
+
+    def actuate(winner, chosen, _at):
+        assert winner.event_id == event_a.event_id
+        assert chosen.actuation_identity == "actuation-a"
+        venue_calls[0] += 1
+        return EventSubmissionReceipt(
+            True,
+            winner.event_id,
+            winner.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=prepare,
+        actuate_winner=actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue_calls[0],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        restrict_to_family_keys=frozenset(requested_scope.family_keys),
+    )
+
+    assert prepared_events == [event_a.event_id]
+    assert len(selected_scopes) == 1
+    assert selected_scopes[0].family_keys == current_scope.family_keys
+    assert venue_calls == [1]
+    assert result.venue_submit_count == 1
+    assert result.winner_event_id == event_a.event_id
+    assert result.receipts[event_a.event_id].submitted is True
+    assert result.receipts[event_b.event_id].reason == (
+        "GLOBAL_FAMILY_INELIGIBLE:GLOBAL_AUCTION_RESTRICTED_SCOPE_MISSING:"
+        f"{missing_family_key}"
+    )
+
+
 def test_global_batch_requeues_claimed_epoch_when_new_durable_fact_arrives(
     monkeypatch,
 ):

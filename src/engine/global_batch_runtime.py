@@ -1542,6 +1542,7 @@ def process_current_global_batch(
     claimed_target_by_scope_and_economics: dict[
         tuple[str, str], OpportunityEvent
     ] = {}
+    scoped_rejection_by_event: dict[str, str] = {}
     release_selection_snapshot: Callable[[], None] = lambda: None
     batch_started = time.monotonic()
     stage_started = batch_started
@@ -1824,7 +1825,7 @@ def process_current_global_batch(
                         False,
                         event.event_id,
                         event.causal_snapshot_id,
-                        reason=reason,
+                        reason=scoped_rejection_by_event.get(event.event_id, reason),
                         proof_accepted=False,
                     )
                 )
@@ -1914,15 +1915,39 @@ def process_current_global_batch(
                 current_family_keys
             )
             if missing_family_keys:
-                return reject(
-                    "GLOBAL_AUCTION_RESTRICTED_SCOPE_MISSING:"
-                    + ",".join(sorted(missing_family_keys))
+                scoped_rejection_by_event.update(
+                    {
+                        event.event_id: (
+                            "GLOBAL_FAMILY_INELIGIBLE:"
+                            "GLOBAL_AUCTION_RESTRICTED_SCOPE_MISSING:"
+                            f"{family_key}"
+                        )
+                        for event in event_tuple
+                        for family_key in (
+                            _family_key(event, payload_reader(event)),
+                        )
+                        if family_key in missing_family_keys
+                    }
                 )
+                if missing_family_keys == restrict_to_family_keys:
+                    return reject(
+                        "GLOBAL_AUCTION_RESTRICTED_SCOPE_MISSING:"
+                        + ",".join(sorted(missing_family_keys))
+                    )
+                _LOG.warning(
+                    "global batch isolated missing restricted families: missing=%s "
+                    "continuing=%d",
+                    ",".join(sorted(missing_family_keys)),
+                    len(restrict_to_family_keys) - len(missing_family_keys),
+                )
+            current_restricted_family_keys = restrict_to_family_keys.difference(
+                missing_family_keys
+            )
             decision_scope = current_global_auction_scope_from_events(
                 tuple(
                     event
                     for family_key, event in full_scope.events_by_family
-                    if family_key in restrict_to_family_keys
+                    if family_key in current_restricted_family_keys
                 ),
                 captured_at_utc=scope_at,
             )
@@ -2602,6 +2627,16 @@ def process_current_global_batch(
             event.event_id: (
                 winner_receipt
                 if event.event_id == winner_id
+                else stamp_receipt(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=scoped_rejection_by_event[event.event_id],
+                        proof_accepted=False,
+                    )
+                )
+                if event.event_id in scoped_rejection_by_event
                 else stamp_receipt(
                     EventSubmissionReceipt(
                         False,
