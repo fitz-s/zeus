@@ -6203,6 +6203,24 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
+            "classes=EXECUTION_PRICE_MISSING=1",
+            "CANDIDATE_BLOCKED",
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:execution_price:input=2:"
+            "classes=EXECUTION_PRICE_MISSING=1",
+            "BATCH_BLOCKED",
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
+            "classes=EXECUTION_PRICE_MISSING=0",
+            "BATCH_BLOCKED",
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED",
             "BATCH_BLOCKED",
         ),
@@ -13283,7 +13301,11 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         sell_assets=(asset,),
     )
     calls = {"select": 0, "wealth": 0, "preflight": [], "books": 0, "venue": 0}
-    reason = "GLOBAL_CANDIDATE_ALL_SIZES_INFEASIBLE:candidate=candidate-a"
+    reason = (
+        "GLOBAL_ACTUATION_PREPARE_FAILED:"
+        "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
+        "classes=EXECUTION_PRICE_MISSING=1"
+    )
 
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
@@ -13332,7 +13354,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         calls["preflight"].append(candidate.candidate_id)
         if candidate is candidate_a:
             return global_batch_runtime.GlobalWinnerPreflight(
-                status="CANDIDATE_BLOCKED",
+                status=era._global_preflight_block_status(reason),
                 reason=reason,
             )
         return global_batch_runtime.GlobalWinnerPreflight(

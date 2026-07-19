@@ -10505,6 +10505,14 @@ def _global_preflight_block_status(reason: str) -> str:
 
     if reason.startswith("QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"):
         return "CANDIDATE_BLOCKED"
+    if reason == (
+        "GLOBAL_ACTUATION_PREPARE_FAILED:"
+        "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
+        "classes=EXECUTION_PRICE_MISSING=1"
+    ):
+        # The selected token/side lost its executable quote at JIT preflight.
+        # That invalidates this candidate, not the frozen q/book/wealth epoch.
+        return "CANDIDATE_BLOCKED"
     if (
         reason.startswith(
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
