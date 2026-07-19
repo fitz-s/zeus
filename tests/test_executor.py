@@ -958,6 +958,200 @@ class TestExecutor:
             == 0
         )
 
+    @pytest.mark.parametrize(
+        ("failure_site", "failure_kind"),
+        (
+            ("src.state.venue_command_repo.append_event", "locked"),
+            ("src.execution.executor._persist_prebuilt_submit_envelope", "snapshot"),
+            ("src.execution.executor._reserve_collateral_for_buy", "collateral"),
+            ("src.state.venue_command_repo.insert_command", "integrity"),
+            ("src.state.venue_command_repo.append_event", "operational"),
+            ("src.state.venue_command_repo.append_event", "unexpected"),
+            ("src.execution.executor._open_entry_risk_reservation", "risk_reservation"),
+        ),
+    )
+    def test_pre_venue_failure_rolls_back_entire_entry_admission(
+        self,
+        monkeypatch,
+        failure_site,
+        failure_kind,
+    ):
+        """Every pre-venue failure must release the writer and erase admission."""
+        from src.contracts.executable_market_snapshot import MarketSnapshotError
+        from src.engine.event_bound_final_intent import PreVenueSubmitError
+        from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
+        from src.state.schema.entry_exposure_obligations_schema import ensure_table
+
+        CollateralLedger(_TEST_CONN)
+        ensure_table(_TEST_CONN)
+
+        final_intent = _final_execution_intent(
+            token_id="yes-token-pre-venue-lock",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+
+        class ClientShouldNotBeConstructed:
+            def __init__(self):  # pragma: no cover - tripwire
+                raise AssertionError("pre-venue lock must not construct the client")
+
+        def allow(component):
+            return lambda *args, **kwargs: {
+                "component": component,
+                "allowed": True,
+                "reason": "test",
+            }
+
+        monkeypatch.setattr(
+            "src.execution.executor._assert_risk_allocator_allows_submit",
+            lambda intent: None,
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda conn, snapshot_id: "FOK",
+        )
+        for function, component in (
+            ("_entry_taker_quality_component", "entry_taker_quality"),
+            ("_entry_economics_component", "entry_economics"),
+            ("_entry_control_pause_component", "entries_pause_control_override"),
+            ("_entry_duplicate_same_token_component", "entry_duplicate_same_token"),
+            ("_entry_same_token_cooldown_component", "entry_same_token_cooldown"),
+            ("_entry_decision_source_component", "decision_source_integrity"),
+            ("_entry_replacement_input_hwm_component", "replacement_input_hwm"),
+            ("_corrected_entry_identity_component", "corrected_execution_identity"),
+            ("_assert_heartbeat_allows_submit", "heartbeat_supervisor"),
+            ("_assert_ws_gap_allows_submit", "ws_gap_guard"),
+            ("_refresh_entry_collateral_snapshot_for_submit", "collateral_snapshot_refresh"),
+            ("_assert_collateral_allows_buy", "collateral_ledger"),
+        ):
+            monkeypatch.setattr(
+                f"src.execution.executor.{function}",
+                allow(component),
+            )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_actionable_certificate_payload_and_component",
+            lambda *args, **kwargs: (
+                {
+                    "component": "entry_actionable_certificate",
+                    "allowed": True,
+                    "reason": "test",
+                },
+                {"qkernel_execution_economics": {}},
+            ),
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_economics_component",
+            lambda *args, **kwargs: {
+                "component": "entry_economics",
+                "allowed": True,
+                "reason": "test",
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_q_version_from_authority",
+            lambda *args, **kwargs: "test-q-version",
+        )
+        monkeypatch.setattr(
+            "src.data.polymarket_client.PolymarketClient",
+            ClientShouldNotBeConstructed,
+        )
+        monkeypatch.setattr(
+            "src.state.venue_command_repo._validate_entry_submit_payload",
+            lambda **_kwargs: None,
+        )
+        failure = {
+            "locked": sqlite3.OperationalError("database is locked"),
+            "snapshot": MarketSnapshotError("snapshot changed"),
+            "collateral": CollateralInsufficient("collateral changed"),
+            "integrity": sqlite3.IntegrityError("idempotency race"),
+            "operational": sqlite3.OperationalError("disk I/O error"),
+            "unexpected": RuntimeError("unexpected admission failure"),
+            "risk_reservation": RuntimeError("risk reservation failure"),
+        }[failure_kind]
+
+        if failure_kind == "risk_reservation":
+            def reserve_collateral(command_id, _intent, conn, *, spend_micro):
+                conn.execute(
+                    """
+                    INSERT INTO collateral_reservations (
+                        command_id, reservation_type, amount, created_at
+                    ) VALUES (?, 'PUSD_BUY', ?, ?)
+                    """,
+                    (command_id, spend_micro, _NOW.isoformat()),
+                )
+
+            monkeypatch.setattr(
+                "src.execution.executor._reserve_collateral_for_buy",
+                reserve_collateral,
+            )
+
+        def fail_admission(*args, **kwargs):
+            if failure_kind == "risk_reservation":
+                conn = args[0]
+                admission_intent = kwargs["intent"]
+                conn.execute(
+                    """
+                    INSERT INTO entry_exposure_obligations (
+                        command_id, owner_domain, token_id, condition_id,
+                        shares, cost_basis_usd, created_at, updated_at
+                    ) VALUES (?, 'executor_test', ?, ?, 10, 3.3, ?, ?)
+                    """,
+                    (
+                        kwargs["command_id"],
+                        admission_intent.token_id,
+                        admission_intent.market_id,
+                        _NOW.isoformat(),
+                        _NOW.isoformat(),
+                    ),
+                )
+            raise failure
+
+        monkeypatch.setattr(
+            failure_site,
+            fail_admission,
+        )
+        _TEST_CONN.commit()
+
+        if failure_kind in {
+            "integrity",
+            "operational",
+            "unexpected",
+            "risk_reservation",
+        }:
+            with pytest.raises(PreVenueSubmitError, match=str(failure)):
+                execute_final_intent(
+                    final_intent,
+                    conn=_TEST_CONN,
+                    decision_id="decision-pre-venue-lock",
+                )
+        else:
+            result = execute_final_intent(
+                final_intent,
+                conn=_TEST_CONN,
+                decision_id="decision-pre-venue-lock",
+            )
+            assert result.status == "rejected"
+            if failure_kind == "locked":
+                assert result.reason == (
+                    "pre_submit_db_locked_transient: database is locked"
+                )
+
+        assert _TEST_CONN.in_transaction is False
+        assert _TEST_CONN.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE decision_id = ?",
+            ("decision-pre-venue-lock",),
+        ).fetchone()[0] == 0
+        assert _TEST_CONN.execute(
+            "SELECT COUNT(*) FROM venue_submission_envelopes "
+            "WHERE envelope_id LIKE 'pre-submit:%'"
+        ).fetchone()[0] == 0
+        assert _TEST_CONN.execute(
+            "SELECT COUNT(*) FROM collateral_reservations"
+        ).fetchone()[0] == 0
+        assert _TEST_CONN.execute(
+            "SELECT COUNT(*) FROM entry_exposure_obligations"
+        ).fetchone()[0] == 0
+
     def test_entry_ack_persistence_retry_is_idempotent_after_ack_committed(self, monkeypatch):
         final_intent = _final_execution_intent(
             final_limit_price=Decimal("0.33"),

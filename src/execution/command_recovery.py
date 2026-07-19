@@ -13618,7 +13618,10 @@ def reconcile_stale_intent_created_no_submit(
     row is not an unresolved venue side effect, but leaving it active misleads
     operators and downstream projections.  The predicates here are intentionally
     local and strict: no submit event, no venue order id, no order/trade facts,
-    and no position projection.
+    and no position event caused by this command.  ``position_current`` itself
+    is not a command-scoped predicate: a Kelly increment correctly points at an
+    already-active position, so requiring position absence strands precisely
+    the safe pre-venue shell this recovery owns.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -13645,8 +13648,8 @@ def reconcile_stale_intent_created_no_submit(
                  WHERE fact.command_id = cmd.command_id
            )
            AND NOT EXISTS (
-                SELECT 1 FROM position_current pc
-                 WHERE pc.position_id = cmd.position_id
+                SELECT 1 FROM position_events pe
+                 WHERE pe.command_id = cmd.command_id
            )
          ORDER BY cmd.updated_at, cmd.command_id
         """,
@@ -13672,7 +13675,7 @@ def reconcile_stale_intent_created_no_submit(
                     "no_venue_order_id": True,
                     "no_order_facts": True,
                     "no_trade_facts": True,
-                    "no_position_current": True,
+                    "no_command_position_events": True,
                     "updated_before_recovery_started_at": cutoff,
                 },
                 "reviewed_by": "command_recovery",

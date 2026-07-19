@@ -158,6 +158,7 @@ def test_post_venue_unknown_still_blocks_as_post_submit_unknown():
         "executable_snapshot_gate:BOOK_WITNESS_STALE",
         "pre_submit_collateral_reservation_failed:INSUFFICIENT_PUSD",
         "pre_submit_collateral_refresh_failed:WALLET_READ_FAILED",
+        "pre_submit_db_locked_transient:database is locked",
         "risk_allocator_pre_submit_blocked:DAY_CAP_EXHAUSTED",
         "entry_decision_identity:token_id mismatch",
         "corrected_execution_identity:condition_id mismatch",

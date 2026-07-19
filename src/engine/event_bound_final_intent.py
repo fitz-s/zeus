@@ -443,6 +443,7 @@ def _executor_rejection_is_pre_submit(reason: str) -> bool:
             "executable_snapshot_gate:",
             "pre_submit_collateral_reservation_failed:",
             "pre_submit_collateral_refresh_failed:",
+            "pre_submit_db_locked_transient:",
             "risk_allocator_pre_submit_blocked:",
             "entry_decision_identity:",
             "corrected_execution_identity:",

@@ -3755,10 +3755,21 @@ def _reserve_collateral_for_buy(
     *,
     spend_micro: int,
 ) -> None:
-    """Reserve pUSD on the same connection as the venue command row."""
+    """Reserve pUSD in the venue-command admission transaction.
+
+    Preflight has already initialized the ledger schema.  Reconstructing a
+    ``CollateralLedger`` here would run ``executescript()``, whose implicit
+    SQLite commit would split the command from its reservation.  This CAS is
+    the under-writer-lock authority and performs DML only.
+    """
     from src.state.collateral_ledger import CollateralLedger
 
-    CollateralLedger(conn).reserve_pusd_for_buy(command_id, spend_micro)
+    CollateralLedger._cas_insert_pusd_reservation(
+        conn,
+        command_id,
+        int(spend_micro),
+        datetime.now(timezone.utc).isoformat(),
+    )
 
 
 def _reserve_collateral_for_sell(
@@ -7221,6 +7232,14 @@ def _live_order(
                 post_only=submit_post_only,
                 captured_at=now_str,
             )
+            # Admission is one durable fact: envelope + command journal +
+            # collateral/risk reservations. Ledger preflight above may run
+            # executescript(), whose SQLite contract commits any open
+            # transaction. Acquire the writer only after that schema/read
+            # phase and before the first admission write. The reservation
+            # helper below performs CAS DML without another schema touch.
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             try:
                 # The envelope insert acquires SQLite's single-writer lock.  The
                 # exact position generation and wealth endowment are re-read
@@ -7410,6 +7429,10 @@ def _live_order(
             )
             conn.commit()
         except MarketSnapshotError as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return OrderResult(
                 trade_id=trade_id,
                 status="rejected",
@@ -7436,47 +7459,17 @@ def _live_order(
                 command_state="REJECTED",
             )
         except CollateralInsufficient as exc:
-            rej_time = datetime.now(timezone.utc).isoformat()
-            if _venue_command_exists(conn, command_id):
-                try:
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="SUBMIT_REJECTED",
-                        occurred_at=rej_time,
-                        payload={
-                            "reason": "pre_submit_collateral_reservation_failed",
-                            "detail": str(exc),
-                            "exception_type": type(exc).__name__,
-                            "side_effect_boundary_crossed": False,
-                            "sdk_submit_attempted": False,
-                        },
-                    )
-                    if _own_conn:
-                        conn.commit()
-                except Exception as inner:
-                    logger.error(
-                        "_live_order: SUBMIT_REJECTED append_event failed after "
-                        "pre-submit collateral reservation failure (command_id=%s "
-                        "trade_id=%s): inner=%s original=%s",
-                        command_id,
-                        trade_id,
-                        inner,
-                        exc,
-                    )
-            else:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                logger.warning(
-                    "_live_order: pre-command collateral rejection "
-                    "(command_id=%s trade_id=%s) — no venue command/event to append; "
-                    "no order placed: %s",
-                    command_id,
-                    trade_id,
-                    exc,
-                )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "_live_order: atomic admission rejected before venue for "
+                "command_id=%s trade_id=%s; no order placed: %s",
+                command_id,
+                trade_id,
+                exc,
+            )
             return OrderResult(
                 trade_id=trade_id,
                 status="rejected",
@@ -7491,6 +7484,10 @@ def _live_order(
         except sqlite3.IntegrityError as exc:
             # Race-condition safety belt: another process inserted between our
             # lookup and our INSERT. Existing command is the canonical record.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             logger.warning(
                 "_live_order: idempotency key collision (race) for trade_id=%s idem=%s: %s",
                 trade_id, idem.value, exc,
@@ -7528,15 +7525,11 @@ def _live_order(
                     order_role="entry",
                 )
             # Defensive fallback: row not found despite collision
-            return OrderResult(
-                trade_id=trade_id,
-                status="rejected",
-                reason=f"idempotency_collision: {exc}",
-                submitted_price=intent.limit_price,
-                shares=shares,
-                order_role="entry",
-                idempotency_key=idem.value,
-            )
+            from src.engine.event_bound_final_intent import PreVenueSubmitError
+
+            raise PreVenueSubmitError(
+                f"pre_submit_admission_failed:{type(exc).__name__}: {exc}"
+            ) from exc
         except sqlite3.OperationalError as exc:
             # C-DBLOCK-UNKNOWN (2026-06-16): a transient 'database is locked' in this
             # PRE-VENUE persist phase (insert_command + SUBMIT_REQUESTED + collateral
@@ -7552,12 +7545,16 @@ def _live_order(
             # return a CLEAN transient rejection so the candidate re-attempts next cycle
             # instead of halting the lane on a phantom unknown. Non-lock OperationalError
             # re-raises (unchanged). See docs/evidence/timing_audit/exec_submit_reject_breakdown_2026-06-16.md.
-            if "database is locked" not in str(exc).lower():
-                raise
             try:
                 conn.rollback()
             except Exception:
                 pass
+            if "database is locked" not in str(exc).lower():
+                from src.engine.event_bound_final_intent import PreVenueSubmitError
+
+                raise PreVenueSubmitError(
+                    f"pre_submit_admission_failed:{type(exc).__name__}: {exc}"
+                ) from exc
             logger.warning(
                 "_live_order: pre-venue persist 'database is locked' (command_id=%s "
                 "trade_id=%s) — no order placed; transient reject, retry next cycle: %s",
@@ -7572,6 +7569,18 @@ def _live_order(
                 order_role="entry",
                 idempotency_key=idem.value,
             )
+        except Exception as exc:
+            # Nothing below the admission commit has crossed the venue
+            # boundary.  Never return or propagate with the writer lease held.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            from src.engine.event_bound_final_intent import PreVenueSubmitError
+
+            raise PreVenueSubmitError(
+                f"pre_submit_admission_failed:{type(exc).__name__}: {exc}"
+            ) from exc
 
         # -----------------------------------------------------------------------
         # Phase 4: V2 endpoint-identity preflight (INV-25 / K5)

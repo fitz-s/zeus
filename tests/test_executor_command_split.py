@@ -3372,12 +3372,12 @@ class TestLiveOrderCommandSplit:
         assert cmd is not None
         assert cmd["state"] == "REJECTED"
 
-    def test_pre_sdk_collateral_reservation_failure_writes_rejected_event(
+    def test_pre_sdk_collateral_reservation_failure_rolls_back_admission(
         self,
         mem_conn,
         monkeypatch,
     ):
-        """Collateral reservation failure after SUBMIT_REQUESTED is terminal."""
+        """Collateral reservation failure leaves no partial durable command."""
         from src.execution.executor import _live_order
         from src.risk_allocator.governor import count_unknown_side_effects
         from src.state.collateral_ledger import CollateralInsufficient
@@ -3437,18 +3437,8 @@ class TestLiveOrderCommandSplit:
 
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
-        assert cmd is not None
-        assert cmd["state"] == "REJECTED"
-        events = list_events(mem_conn, command_ids_seen[0])
-        event_types = [event["event_type"] for event in events]
-        assert "SUBMIT_REQUESTED" in event_types
-        assert "SUBMIT_REJECTED" in event_types
-        assert "REVIEW_REQUIRED" not in event_types
-        rejected = [event for event in events if event["event_type"] == "SUBMIT_REJECTED"][0]
-        payload = json.loads(rejected["payload_json"])
-        assert payload["reason"] == "pre_submit_collateral_reservation_failed"
-        assert payload["side_effect_boundary_crossed"] is False
-        assert payload["sdk_submit_attempted"] is False
+        assert cmd is None
+        assert list_events(mem_conn, command_ids_seen[0]) == []
         unknown_count, unknown_markets = count_unknown_side_effects(mem_conn)
         assert unknown_count == 0
         assert unknown_markets == ()

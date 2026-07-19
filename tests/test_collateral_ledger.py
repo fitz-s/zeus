@@ -46,6 +46,7 @@ from src.state.collateral_ledger import (
     CollateralInsufficient,
     CollateralLedger,
     CollateralSnapshot,
+    COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS,
     COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
     DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS,
     SQLITE_SIGNED_INTEGER_MAX,
@@ -1780,6 +1781,84 @@ def test_cas_reserve_pusd_for_buy_blocks_second_racer_via_cas_not_preflight(conn
         "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations WHERE released_at IS NULL"
     ).fetchone()[0]
     assert total == 6_000_000
+
+
+def test_cas_reserve_pusd_for_buy_rechecks_allowance_after_writer_wait(tmp_path):
+    """Two stale read-preflights cannot reserve beyond the latest allowance."""
+    db_path = tmp_path / "allowance-race.db"
+    writer_a = sqlite3.connect(db_path)
+    writer_b = sqlite3.connect(db_path)
+    try:
+        for connection in (writer_a, writer_b):
+            connection.row_factory = sqlite3.Row
+            init_collateral_schema(connection)
+        ledger_a = CollateralLedger(writer_a)
+        ledger_b = CollateralLedger(writer_b)
+        ledger_a.set_snapshot(
+            _snapshot(pusd=100_000_000, pusd_allowance=10_000_000)
+        )
+        writer_a.commit()
+        intent = _buy_intent(size_usd=6.0)
+
+        assert ledger_a.buy_preflight(intent, spend_micro=6_000_000) is True
+        assert ledger_b.buy_preflight(intent, spend_micro=6_000_000) is True
+
+        writer_a.execute("BEGIN IMMEDIATE")
+        CollateralLedger._cas_insert_pusd_reservation(
+            writer_a,
+            "cmd-a",
+            6_000_000,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        writer_a.commit()
+        writer_b.execute("BEGIN IMMEDIATE")
+        with pytest.raises(CollateralInsufficient, match="pusd_insufficient_cas"):
+            CollateralLedger._cas_insert_pusd_reservation(
+                writer_b,
+                "cmd-b",
+                6_000_000,
+                datetime.now(timezone.utc).isoformat(),
+            )
+        writer_b.rollback()
+
+        total = writer_a.execute(
+            "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations "
+            "WHERE released_at IS NULL"
+        ).fetchone()[0]
+        assert total == 6_000_000
+    finally:
+        writer_a.close()
+        writer_b.close()
+
+
+@pytest.mark.parametrize(
+    "invalidity",
+    ("degraded", "stale", "future"),
+)
+def test_cas_reserve_pusd_for_buy_rechecks_snapshot_authority_and_time(conn, invalidity):
+    """Writer-time CAS cannot consume degraded, stale, or future truth."""
+    now = datetime.now(timezone.utc)
+    snapshot = {
+        "degraded": _snapshot(authority="DEGRADED", captured_at=now),
+        "stale": _snapshot(
+            captured_at=now
+            - timedelta(seconds=COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS + 60),
+        ),
+        "future": _snapshot(
+            captured_at=now
+            + timedelta(seconds=COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS + 60),
+        ),
+    }[invalidity]
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(snapshot)
+
+    with pytest.raises(CollateralInsufficient, match="pusd_insufficient_cas"):
+        CollateralLedger._cas_insert_pusd_reservation(
+            conn,
+            "cmd-invalid-snapshot",
+            1_000_000,
+            datetime.now(timezone.utc).isoformat(),
+        )
 
 
 @pytest.mark.parametrize("mode", ["memory", "caller_conn_file", "db_path"])

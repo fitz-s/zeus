@@ -524,19 +524,51 @@ class CollateralLedger:
         try:
             cursor = conn.execute(
                 """
+                WITH latest AS (
+                  SELECT pusd_balance_micro, pusd_allowance_micro,
+                         captured_at, authority_tier
+                    FROM collateral_ledger_snapshots
+                   ORDER BY id DESC
+                   LIMIT 1
+                ), committed AS (
+                  SELECT
+                    COALESCE((SELECT SUM(amount)
+                                FROM collateral_reservations
+                               WHERE reservation_type='PUSD_BUY'
+                                 AND released_at IS NULL), 0)
+                    +
+                    COALESCE((SELECT SUM(amount_micro)
+                                FROM collateral_unsettled_proceeds
+                               WHERE direction='OUTGOING_DEDUCTION'
+                                 AND settled_at IS NULL), 0) AS amount
+                )
                 INSERT INTO collateral_reservations (
                   command_id, reservation_type, token_id, amount, converted_amount, created_at
                 )
                 SELECT ?, 'PUSD_BUY', NULL, ?, 0, ?
-                 WHERE (
-                   (SELECT pusd_balance_micro FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1)
-                   - COALESCE((SELECT SUM(amount) FROM collateral_reservations
-                               WHERE reservation_type='PUSD_BUY' AND released_at IS NULL), 0)
-                   - COALESCE((SELECT SUM(amount_micro) FROM collateral_unsettled_proceeds
-                               WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL), 0)
-                 ) >= ?
+                  FROM latest, committed
+                 WHERE latest.authority_tier != 'DEGRADED'
+                   AND julianday(latest.captured_at) >= (
+                       julianday(?) - (? / 86400.0)
+                   )
+                   AND julianday(latest.captured_at) <= (
+                       julianday(?) + (? / 86400.0)
+                   )
+                   AND latest.pusd_balance_micro - committed.amount >= ?
+                   AND latest.pusd_allowance_micro - committed.amount >= ?
+                RETURNING command_id
                 """,
-                (command_id, amount, now, amount),
+                (
+                    command_id,
+                    amount,
+                    now,
+                    now,
+                    COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
+                    now,
+                    COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS,
+                    amount,
+                    amount,
+                ),
             )
         except sqlite3.IntegrityError as exc:
             if "COLLATERAL_OVERRESERVE" in str(exc):
@@ -544,7 +576,7 @@ class CollateralLedger:
                     f"pusd_insufficient_trigger: command_id={command_id} amount_micro={amount}"
                 ) from exc
             raise
-        if cursor.rowcount == 0:
+        if cursor.fetchone() is None:
             raise CollateralInsufficient(
                 f"pusd_insufficient_cas: command_id={command_id} amount_micro={amount}"
             )

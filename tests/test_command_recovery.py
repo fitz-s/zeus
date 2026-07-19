@@ -2732,6 +2732,49 @@ class TestRecoveryResolutionTable:
         assert payload["venue_order_created"] is False
         assert payload["safe_replay_permitted"] is True
 
+    def test_stale_increment_intent_terminalizes_with_existing_position(
+        self,
+        conn,
+        mock_client,
+    ):
+        """An existing position is exposure truth, not proof this shell submitted."""
+        _insert(conn, position_id="existing-pos")
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, strategy_key, updated_at, temperature_metric,
+                shares, chain_shares
+            ) VALUES (?, 'active', 'center_bin_buy', ?, 'high', 22, 22)
+            """,
+            ("existing-pos", "2026-04-25T23:59:00+00:00"),
+        )
+        conn.commit()
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["stale_intent_created_no_submit"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "SUBMIT_REJECTED"
+        position = conn.execute(
+            "SELECT shares, chain_shares FROM position_current WHERE position_id = ?",
+            ("existing-pos",),
+        ).fetchone()
+        assert tuple(position) == (22.0, 22.0)
+        rejected = [
+            event
+            for event in _get_events(conn, "cmd-001")
+            if event["event_type"] == "SUBMIT_REJECTED"
+        ][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["required_predicates"]["no_command_position_events"] is True
+        mock_client.get_order.assert_not_called()
+
     # Case 2: SUBMITTING + no venue_order_id -> idempotency/absence recovery
     # A deterministic venue 400 can fail to persist SUBMIT_REJECTED if the local
     # DB is locked after the HTTP response. Recovery must not park that row in
