@@ -464,23 +464,6 @@ class RejectionReason(str, Enum):
         "its probability. The quote prices a stale, pre-update book — an incoherent "
         "decision input, refused on correctness grounds (NOT a time-window cap).",
     )
-    DAY0_LIVE_ADMISSION_REJECTED = (
-        "DAY0_LIVE_ADMISSION_REJECTED",
-        RejectionCategory.DESIGNED_GATE,
-        "day0_live_admission_rejection_reason (src/engine/day0_admission.py) refused a "
-        "Day0 live-lane candidate at the final submit seam. Wraps one of the module's "
-        "named gates as the colon-suffixed detail (DAY0_CITY_NOT_ALLOWLISTED, "
-        "DAY0_METRIC_NOT_IN_STAGE, DAY0_FAST_OBS_UNSUPPORTED, "
-        "DAY0_SOURCE_HEALTH_NOT_ADMISSIBLE, DAY0_QUOTE_TIME_MISSING, "
-        "DAY0_QUOTE_STALE_VS_OBSERVATION, DAY0_ONE_BIN_EDGE_FRAGILE, "
-        "DAY0_FINAL_LOCALDAY_NOENTRY, DAY0_TAKER_ENTRY_FORBIDDEN, "
-        "DAY0_SUBMIT_TIME_BIN_DEAD). A deliberate promotion circuit breaker, not a "
-        "build failure — registered (2026-07-19 receipt-persistence fix, docs/evidence/"
-        "capital_efficiency_2026_07_19/nosubmit_gates.md §5) so it classifies TERMINAL "
-        "(via _registry_terminal_money_path_reasons) and persists to "
-        "edli_no_submit_receipts instead of silently defaulting to the fail-open "
-        "UNKNOWN-base requeue.",
-    )
 
     # ----- ARTIFICIAL_SUSPECT ---------------------------------------------
     EDLI_LIVE_CERTIFICATE_BUILD_FAILED = (
