@@ -27,7 +27,6 @@ _MAKER_MODES = frozenset({"maker", "maker_only", "post_only", "rest", "rest_then
 @dataclass(frozen=True, slots=True)
 class Day0AdmissionContext:
     event_type: str
-    city: str
     metric: str
     settlement_source_type: str
     fast_obs_supported: bool
@@ -42,8 +41,8 @@ class Day0AdmissionContext:
     # one-bin-edge fragility
     selected_bin_edge_distance_quanta: float
     edge_survives_one_bin_stress: bool
-    # stage policy (the caller supplies the current stage's allowlists / admissible health set)
-    city_allowlist: frozenset[str]
+    # stage policy (the caller supplies the current stage's admissible metric/health set;
+    # M-13 2026-07-19: city_allowlist REMOVED here — see the deleted gate 1 comment below)
     metric_allowlist: frozenset[str] = field(default_factory=lambda: frozenset({"high", "low"}))
     allowed_health_states: frozenset[str] = field(default_factory=lambda: frozenset({"OK_FAST_AND_WU", "OK_FAST_ONLY"}))
     maker_only_required: bool = True
@@ -58,9 +57,32 @@ def day0_live_admission_rejection_reason(ctx: Day0AdmissionContext) -> str | Non
         return None
 
     # 1) city not allowlisted for the current stage.
-    if ctx.city not in ctx.city_allowlist:
-        return "DAY0_CITY_NOT_ALLOWLISTED"
-
+    #
+    # M-13 (receipt-persistence audit 2026-07-19, docs/evidence/capital_efficiency_2026_07_19/
+    # nosubmit_gates.md): DELETED. The sole live call site
+    # (event_reactor_adapter.py:_day0_live_submit_admission_rejection_reason) built
+    # city_allowlist=frozenset({the candidate's own city}) — a tautology that can never
+    # reject anything, the exact §3B "guard exists, tested in isolation, does nothing"
+    # pattern the Day0 first-principles audit (M-3 above) already condemned once. Two
+    # findings ruled out repair-in-place:
+    #   (a) No real "stage" concept exists to source a genuine per-city allowlist from.
+    #       config/settings.json's edli section has no per-city Day0 field at all; the only
+    #       scope knob, edli_live_scope, is a LANE-TYPE switch (forecast vs day0), not a city
+    #       list.
+    #   (b) The operator explicitly killed staged/canary Day0 rollout twice, BEFORE this
+    #       module was even created: edli_live_scope's own notes record 2026-06-09 ("全部打开"
+    #       — promote Day0 into forecast_plus_day0) and 2026-06-12 ("现在就解除这些限制" — day0
+    #       LIVE NOW, no shadow staging, no canary, "the 06-10 interim revert is over"). This
+    #       module's authority-basis header dates it 2026-06-17 — five days AFTER that final
+    #       word — so a per-city stage gate was never a live policy this module could have
+    #       inherited; it was speculative scaffolding for a promotion design the operator had
+    #       already foreclosed. Wiring a "defaults to all configured cities" allowlist instead
+    #       of deleting would resurrect exactly the canary/staging machinery the operator
+    #       twice rejected, just with an always-true default standing in for it.
+    # metric_allowlist and allowed_health_states are UNCHANGED — both are real, currently-
+    # exercised gates (metric/health do vary per candidate; city never could here), so gate 1
+    # is the only tautology in this predicate.
+    #
     # 2) metric not in the current stage set.
     if ctx.metric not in ctx.metric_allowlist:
         return "DAY0_METRIC_NOT_IN_STAGE"

@@ -1,12 +1,19 @@
 # Created: 2026-06-17
 # Last reused/audited: 2026-07-19
 # Authority basis: operator delta-package v2 (real_upgrade #3) — Day0 live admission circuit breakers.
-"""Contract tests for day0_live_admission_rejection_reason (8 gates + admit + bypass).
+"""Contract tests for day0_live_admission_rejection_reason (7 gates + admit + bypass).
 
 M-3 (Day0 first-principles audit 2026-07-18): `in_post_extreme_quiet_window`
 (former gate 6) was deleted — see the commit body and day0_admission.py's gate
 6 comment for why it was judged redundant with the strict quote>observation
 ordering gate + the H-2 submit-time hard-fact re-check.
+
+M-13 (receipt-persistence audit 2026-07-19): the former gate 1, city_allowlist,
+was deleted along with the ``city``/``city_allowlist`` fields — see
+day0_admission.py's deleted-gate-1 comment. The sole live call site built the
+allowlist from the candidate's own city, so the gate could never fire; no real
+per-city stage concept exists, and the operator's 06-09/06-12 directives already
+foreclosed staged/canary Day0 rollout before this module was even created.
 """
 from __future__ import annotations
 
@@ -22,13 +29,12 @@ T = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)
 
 def _ctx(**kw) -> Day0AdmissionContext:
     base = dict(
-        event_type="DAY0_EXTREME_UPDATED", city="Chicago", metric="high",
+        event_type="DAY0_EXTREME_UPDATED", metric="high",
         settlement_source_type="wu_icao", fast_obs_supported=True,
         source_health_state="OK_FAST_AND_WU", execution_mode="maker",
         quote_time_utc=T, latest_observation_available_at_utc=T - timedelta(minutes=5),
         in_final_localday_noentry_window=False,
         selected_bin_edge_distance_quanta=3.0, edge_survives_one_bin_stress=True,
-        city_allowlist=frozenset({"Chicago"}),
     )
     base.update(kw)
     return Day0AdmissionContext(**base)
@@ -39,11 +45,7 @@ def test_admissible_returns_none() -> None:
 
 
 def test_non_day0_event_bypasses() -> None:
-    assert day0_live_admission_rejection_reason(_ctx(event_type="FORECAST_SNAPSHOT_READY", city="Nowhere", city_allowlist=frozenset())) is None
-
-
-def test_city_not_allowlisted() -> None:
-    assert day0_live_admission_rejection_reason(_ctx(city="Lagos")) == "DAY0_CITY_NOT_ALLOWLISTED"
+    assert day0_live_admission_rejection_reason(_ctx(event_type="FORECAST_SNAPSHOT_READY")) is None
 
 
 def test_low_metric_is_live_by_default() -> None:
