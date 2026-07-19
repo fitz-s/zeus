@@ -696,6 +696,18 @@ def test_market_channel_seed_first_falls_back_to_candidates_without_open_positio
     ) == {"candidate-yes", "candidate-no"}
 
 
+def test_market_channel_depth_repair_excludes_broad_day0_until_candidate():
+    from src.ingest.price_channel_ingest import (
+        _edli_market_channel_depth_repair_token_ids,
+    )
+
+    assert _edli_market_channel_depth_repair_token_ids(
+        held_priority_token_ids={"held"},
+        open_rest_priority_token_ids={"rest"},
+        candidate_priority_token_ids={"candidate"},
+    ) == ("held", "rest", "candidate")
+
+
 def test_current_day0_priority_uses_each_city_local_date(monkeypatch):
     from types import SimpleNamespace
 
@@ -1410,7 +1422,13 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
 
     version = [10, 10, "2026-07-17T17:00:00+00:00"]
     held = {"held-token"}
-    calls = {"active": 0, "held": 0, "closed": 0}
+    open_rest = {"rest-token"}
+    day0 = {"day0-token"}
+    candidates = {"candidate-token"}
+    priorities = held | open_rest | day0 | candidates
+    initial_priorities = set(priorities)
+    initial_repair = held | open_rest | candidates
+    calls = {"active": 0, "entry": 0, "exit": 0, "closed": 0}
 
     class Cursor:
         def fetchone(self):
@@ -1423,17 +1441,22 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
         def close(self):
             calls["closed"] += 1
 
-    def active_metadata(_conn):  # noqa: ANN001
+    def active_metadata(_conn, *, priority_token_ids):  # noqa: ANN001
         calls["active"] += 1
+        assert set(priority_token_ids) == priorities
         return {"active-token": object()}
 
-    def held_metadata(_conn, *, token_ids, purpose):  # noqa: ANN001
-        calls["held"] += 1
-        assert set(token_ids) == held
-        assert purpose == "exit"
+    def targeted_metadata(_conn, *, token_ids, purpose):  # noqa: ANN001
+        calls[purpose] += 1
+        if purpose == "exit":
+            assert set(token_ids) == held
+        else:
+            assert set(token_ids) == priorities
         return {token_id: object() for token_id in token_ids}
 
     monkeypatch.setattr(db, "get_trade_connection", lambda *, write_class=None: Connection())
+    monkeypatch.setattr(db, "get_world_connection", lambda *, write_class=None: Connection())
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", Connection)
     monkeypatch.setattr(
         market_channel_ingestor,
         "active_weather_token_metadata_from_snapshots",
@@ -1442,12 +1465,32 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
     monkeypatch.setattr(
         market_channel_ingestor,
         "active_weather_token_metadata_for_tokens",
-        held_metadata,
+        targeted_metadata,
     )
     monkeypatch.setattr(
         price_channel_ingest,
         "_edli_held_position_priority_token_ids",
         lambda _conn: set(held),
+    )
+    monkeypatch.setattr(
+        price_channel_ingest,
+        "_edli_open_rest_priority_token_ids",
+        lambda _conn: set(open_rest),
+    )
+    monkeypatch.setattr(
+        price_channel_ingest,
+        "_edli_current_day0_priority_token_ids",
+        lambda _trade, _forecasts: tuple(day0),
+    )
+    monkeypatch.setattr(
+        price_channel_ingest,
+        "_edli_candidate_priority_token_ids",
+        lambda _world, *, limit: list(candidates),
+    )
+    monkeypatch.setattr(
+        price_channel_ingest,
+        "_edli_priority_family_token_ids",
+        lambda _trade, _forecasts, token_ids: set(token_ids),
     )
 
     reload_token_metadata = (
@@ -1455,23 +1498,48 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
     )
     first = reload_token_metadata()
     second = reload_token_metadata()
+    candidates.add("day0-token")
+    promoted = reload_token_metadata()
+    candidates.discard("day0-token")
+    demoted = reload_token_metadata()
+    candidates.add("candidate-token-2")
+    priorities.add("candidate-token-2")
+    priority_only = reload_token_metadata()
     version[0] += 1
     third = reload_token_metadata()
 
-    assert set(first) == {"active-token", "held-token"}
-    assert second is first
-    assert third is not first
-    assert calls == {"active": 2, "held": 2, "closed": 3}
+    assert set(first.token_metadata) == {"active-token", "held-token"}
+    assert set(first.seed_first_token_ids) == initial_priorities
+    assert set(first.depth_repair_token_ids) == initial_repair
+    assert second.token_metadata is first.token_metadata
+    assert "day0-token" in promoted.depth_repair_token_ids
+    assert "day0-token" not in demoted.depth_repair_token_ids
+    assert "candidate-token-2" in priority_only.token_metadata
+    assert priority_only.token_metadata is not first.token_metadata
+    assert third.token_metadata is not first.token_metadata
+    assert calls == {"active": 2, "entry": 3, "exit": 5, "closed": 18}
 
     cached = {"cached-token": object()}
     cached_reload = price_channel_ingest._edli_market_channel_token_metadata_reloader(
         initial_token_metadata=cached,
-        initial_fingerprint=((version[0], version[0]), tuple(sorted(held))),
+        initial_fingerprint=(
+            (version[0], version[0]),
+            tuple(sorted(priorities)),
+            tuple(sorted(held | open_rest | candidates)),
+        ),
+        initial_seed_first_token_ids=tuple(sorted(priorities)),
+        initial_depth_repair_token_ids=tuple(
+            sorted(held | open_rest | candidates)
+        ),
     )
     cached_result = cached_reload()
 
-    assert cached_result is cached
-    assert calls == {"active": 2, "held": 2, "closed": 4}
+    assert cached_result.token_metadata is cached
+    assert set(cached_result.seed_first_token_ids) == priorities
+    assert set(cached_result.depth_repair_token_ids) == (
+        held | open_rest | candidates
+    )
+    assert calls == {"active": 2, "entry": 3, "exit": 5, "closed": 21}
 
 
 def test_price_channel_redecision_wake_is_targeted_urgent_fast_path():

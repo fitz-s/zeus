@@ -105,6 +105,15 @@ class MarketTokenMetadata:
     market_end_at: str | None = None
 
 
+@dataclass(frozen=True)
+class MarketTokenUniverse:
+    """One atomic subscription and money-path repair-priority snapshot."""
+
+    token_metadata: dict[str, MarketTokenMetadata]
+    seed_first_token_ids: tuple[str, ...]
+    depth_repair_token_ids: tuple[str, ...]
+
+
 @dataclass
 class QuoteCache:
     """In-memory online quote cache seeded by REST and refreshed by channel events."""
@@ -127,7 +136,9 @@ class QuoteCache:
 
 RestOrderbookFetch = Callable[[str], dict[str, Any]]
 RestOrderbookBatchFetch = Callable[[list[str]], dict[str, dict]]
-TokenMetadataReload = Callable[[], dict[str, MarketTokenMetadata]]
+TokenMetadataReload = Callable[
+    [], dict[str, MarketTokenMetadata] | MarketTokenUniverse
+]
 
 
 class MarketChannelIngestor:
@@ -1247,6 +1258,7 @@ class MarketChannelOnlineService:
     max_refresh_actions_per_window: int = 5
     refresh_window_seconds: float = 60.0
     seed_first_token_ids: Iterable[str] = field(default_factory=tuple)
+    depth_repair_token_ids: Iterable[str] | None = None
     initial_book_grace_seconds: float = MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS
     continuity_publish_interval_seconds: float = (
         MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS
@@ -1298,7 +1310,39 @@ class MarketChannelOnlineService:
     depth_repair_failure_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
+        self._replace_seed_first_token_ids(self.seed_first_token_ids)
+        repair_tokens = (
+            self.seed_first_token_ids
+            if self.depth_repair_token_ids is None
+            else self.depth_repair_token_ids
+        )
+        self._replace_depth_repair_token_ids(repair_tokens)
         self._refresh_worker_idle.set()
+
+    def _replace_seed_first_token_ids(self, token_ids: Iterable[str]) -> None:
+        self.seed_first_token_ids = tuple(
+            dict.fromkeys(
+                str(token_id)
+                for token_id in token_ids
+                if str(token_id or "").strip()
+            )
+        )
+    def _replace_depth_repair_token_ids(self, token_ids: Iterable[str]) -> None:
+        self.depth_repair_token_ids = tuple(
+            dict.fromkeys(
+                str(token_id)
+                for token_id in token_ids
+                if str(token_id or "").strip()
+            )
+        )
+        priority = set(self.depth_repair_token_ids)
+        self._missing_depth_tokens.intersection_update(priority)
+        self._depth_repair_inflight_tokens.intersection_update(priority)
+        self._depth_repair_quote_seen_at = {
+            token_id: quote_seen_at
+            for token_id, quote_seen_at in self._depth_repair_quote_seen_at.items()
+            if token_id in priority
+        }
 
     def _record_current_generation_depth(self, message: dict[str, Any]) -> None:
         event_type = str(message.get("event_type") or message.get("type") or "")
@@ -1310,7 +1354,10 @@ class MarketChannelOnlineService:
             self._current_generation_depth_tokens.add(token_id)
             return
         self._current_generation_depth_tokens.discard(token_id)
-        if token_id in self.ingestor.active_token_ids_open_at(token_ids=(token_id,)):
+        if (
+            token_id in self.depth_repair_token_ids
+            and token_id in self.ingestor.active_token_ids_open_at(token_ids=(token_id,))
+        ):
             self._missing_depth_tokens.add(token_id)
 
     def _publish_continuity(
@@ -1632,12 +1679,24 @@ class MarketChannelOnlineService:
         if self.reload_token_metadata is None:
             return
         try:
-            token_metadata = await asyncio.to_thread(self.reload_token_metadata)
+            reloaded = await asyncio.to_thread(self.reload_token_metadata)
         except Exception as exc:  # noqa: BLE001 - retain the current proven subscription
             self.universe_refresh_error_count += 1
             if logger is not None:
                 logger.warning("EDLI market-channel universe refresh failed: %s", exc)
             return
+        if isinstance(reloaded, MarketTokenUniverse):
+            token_metadata = reloaded.token_metadata
+            seed_first_token_ids: Iterable[str] | None = (
+                reloaded.seed_first_token_ids
+            )
+            depth_repair_token_ids: Iterable[str] | None = (
+                reloaded.depth_repair_token_ids
+            )
+        else:
+            token_metadata = reloaded
+            seed_first_token_ids = None
+            depth_repair_token_ids = None
         if not token_metadata and subscribed_token_ids:
             self.universe_refresh_error_count += 1
             if logger is not None:
@@ -1649,6 +1708,10 @@ class MarketChannelOnlineService:
             return
 
         desired_token_ids = self.ingestor.replace_token_metadata(token_metadata)
+        if seed_first_token_ids is not None:
+            self._replace_seed_first_token_ids(seed_first_token_ids)
+        if depth_repair_token_ids is not None:
+            self._replace_depth_repair_token_ids(depth_repair_token_ids)
         added = desired_token_ids - subscribed_token_ids
         removed = subscribed_token_ids - desired_token_ids
         if not added and not removed:
@@ -1844,8 +1907,21 @@ class MarketChannelOnlineService:
             commit=commit,
             logger=logger,
         )
+        batch_set = set(batch)
+        accepted_scope = (
+            batch_set
+            & set(self.depth_repair_token_ids)
+            & set(active_token_ids)
+        )
+        accepted_scope &= self.ingestor.active_token_ids_open_at(
+            token_ids=accepted_scope
+        )
+        for token_id in batch_set - accepted_scope:
+            self._missing_depth_tokens.discard(token_id)
+            self._depth_repair_inflight_tokens.discard(token_id)
+            self._depth_repair_quote_seen_at.pop(token_id, None)
         accepted: set[str] = set()
-        for token_id in batch:
+        for token_id in accepted_scope:
             cached = self.ingestor.quote_cache.get(token_id)
             if cached is not None and cached.depth_json not in (None, ""):
                 accepted.add(token_id)

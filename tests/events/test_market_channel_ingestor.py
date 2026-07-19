@@ -1285,6 +1285,72 @@ def test_subscription_universe_sync_sends_only_delta_off_event_loop():
     assert service.subscription_remove_count == 1
 
 
+def test_subscription_reload_atomically_refreshes_money_path_depth_repair_priority():
+    from src.events.triggers.market_channel_ingestor import MarketTokenUniverse
+
+    conn, writer = _conn_writer()
+    sent: list[dict] = []
+
+    class FakeWebSocket:
+        async def send(self, payload):  # noqa: ANN001
+            sent.append(json.loads(payload))
+
+    priority_tokens = {
+        "new-held",
+        "new-candidate",
+        "new-rest",
+        "new-day0",
+    }
+    metadata = {
+        token_id: next(iter(_metadata(token_id).values()))
+        for token_id in priority_tokens
+    }
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"old"},
+            token_metadata=_metadata("old"),
+        ),
+        reload_token_metadata=lambda: MarketTokenUniverse(
+            token_metadata=metadata,
+            seed_first_token_ids=tuple(sorted(priority_tokens)),
+            depth_repair_token_ids=tuple(
+                sorted(priority_tokens - {"new-day0"})
+            ),
+        ),
+        seed_first_token_ids={"old"},
+    )
+    subscribed = {"old"}
+
+    asyncio.run(
+        service._sync_subscription_universe(
+            FakeWebSocket(),
+            subscribed_token_ids=subscribed,
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            logger=None,
+        )
+    )
+    for token_id in priority_tokens:
+        service._record_current_generation_depth(
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "best_bid": "0.49",
+                "best_ask": "0.51",
+            }
+        )
+
+    assert subscribed == priority_tokens
+    assert set(service.seed_first_token_ids) == priority_tokens
+    assert service._missing_depth_tokens == priority_tokens - {"new-day0"}
+    assert sent == [
+        {"operation": "subscribe", "assets_ids": sorted(priority_tokens)},
+        {"operation": "unsubscribe", "assets_ids": ["old"]},
+    ]
+
+
 def test_websocket_adds_new_token_without_reconnect(monkeypatch):
     import websockets
 
@@ -1581,6 +1647,7 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
                 for token_id in token_ids
             }
         ),
+        seed_first_token_ids={"token-1"},
     )
     book = {
         "event_type": "book",
@@ -1683,6 +1750,7 @@ def test_unchanged_bba_old_durable_depth_does_not_satisfy_repair():
     service = MarketChannelOnlineService(
         ingestor,
         fetch_orderbook=lambda _token_id: {},
+        seed_first_token_ids={"token-1"},
     )
     book = {
         "event_type": "book",
@@ -1715,6 +1783,103 @@ def test_unchanged_bba_old_durable_depth_does_not_satisfy_repair():
     assert service._missing_depth_tokens == {"token-1"}
     assert service._clear_durable_missing_depth_tokens(logger=None) == 0
     assert service._missing_depth_tokens == {"token-1"}
+
+
+def test_bba_only_quote_does_not_repair_nonpriority_depth():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda _token_id: {},
+    )
+    bba = {
+        "event_type": "best_bid_ask",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "best_bid": "0.49",
+        "best_ask": "0.51",
+    }
+
+    ingestor.handle_message(bba, received_at="2026-07-19T09:00:01+00:00")
+    service._record_current_generation_depth(bba)
+
+    assert service._missing_depth_tokens == set()
+
+
+def test_depth_repair_return_cannot_resurrect_demoted_inflight_marker():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        depth_repair_token_ids={"token-1"},
+    )
+    service._missing_depth_tokens.add("token-1")
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_seed(**_kwargs):  # noqa: ANN003
+            started.set()
+            await release.wait()
+            ingestor.handle_message(
+                {
+                    "event_type": "book",
+                    "asset_id": "token-1",
+                    "market": "0xcondition",
+                    "bids": [{"price": "0.49", "size": "10"}],
+                    "asks": [{"price": "0.51", "size": "10"}],
+                    "hash": "late-repair",
+                },
+                received_at="2026-07-19T09:00:02+00:00",
+            )
+            return 1
+
+        service.seed_rest_books_after_subscribe = delayed_seed
+        repair = asyncio.create_task(
+            service._repair_missing_depth_once(
+                active_token_ids={"token-1"},
+                write_gate=nullcontext(),
+                commit=conn.commit,
+                quote_flush_wake=asyncio.Event(),
+                logger=None,
+            )
+        )
+        await started.wait()
+        service._replace_depth_repair_token_ids(())
+        release.set()
+        await repair
+
+        assert service._missing_depth_tokens == set()
+        assert service._depth_repair_inflight_tokens == set()
+        assert service._depth_repair_quote_seen_at == {}
+
+        service._replace_depth_repair_token_ids(("token-1",))
+        bba = {
+            "event_type": "best_bid_ask",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "best_bid": "0.49",
+            "best_ask": "0.51",
+        }
+        ingestor.handle_message(bba, received_at="2026-07-19T09:00:03+00:00")
+        service._record_current_generation_depth(bba)
+
+        assert service._missing_depth_tokens == {"token-1"}
+        assert service._depth_repair_inflight_tokens == set()
+        assert (
+            service._missing_depth_tokens - service._depth_repair_inflight_tokens
+        ) == {"token-1"}
+
+    asyncio.run(scenario())
 
 
 def test_depth_repair_failure_does_not_escape_background_lane(monkeypatch):

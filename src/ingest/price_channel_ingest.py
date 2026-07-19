@@ -2408,6 +2408,26 @@ def _edli_market_channel_seed_first_token_ids(
     )
 
 
+def _edli_market_channel_depth_repair_token_ids(
+    *,
+    held_priority_token_ids: set[str],
+    open_rest_priority_token_ids: set[str] | None = None,
+    candidate_priority_token_ids,
+) -> tuple[str, ...]:
+    """Tokens whose live exposure or current decision needs durable depth.
+
+    The broad Day0 universe remains seed-first, but it does not earn recurring
+    REST repair until it becomes a held/resting/current-candidate money path.
+    """
+
+    return _edli_market_channel_seed_first_token_ids(
+        held_priority_token_ids=held_priority_token_ids,
+        open_rest_priority_token_ids=open_rest_priority_token_ids,
+        day0_priority_token_ids=(),
+        candidate_priority_token_ids=candidate_priority_token_ids,
+    )
+
+
 def _edli_schema_prefix(schema: str = "") -> str:
     clean = str(schema or "").strip()
     return f"{clean}." if clean else ""
@@ -2952,7 +2972,11 @@ def _edli_held_quote_refresh_cycle() -> dict:
     return result
 
 
-def _edli_market_channel_token_metadata_fingerprint(trade_read, held_token_ids):
+def _edli_market_channel_token_metadata_fingerprint(
+    trade_read,
+    seed_first_token_ids,
+    depth_repair_token_ids,
+):
     # Existing-row quote refreshes change captured_at/snapshot_id but cannot change
     # the subscription identity. Count + last rowid detects inserts, deletes, and
     # replace-style churn without turning every price refresh into a full reload.
@@ -2967,7 +2991,8 @@ def _edli_market_channel_token_metadata_fingerprint(trade_read, held_token_ids):
             int(row_count[0] or 0) if row_count is not None else 0,
             int(last_rowid[0] or 0) if last_rowid is not None else 0,
         ),
-        tuple(sorted(held_token_ids)),
+        tuple(sorted(seed_first_token_ids)),
+        tuple(sorted(depth_repair_token_ids)),
     )
 
 
@@ -2975,28 +3000,96 @@ def _edli_market_channel_token_metadata_reloader(
     *,
     initial_token_metadata=None,
     initial_fingerprint=None,
+    initial_seed_first_token_ids=(),
+    initial_depth_repair_token_ids=(),
+    candidate_priority_limit: int = 32,
 ):
     fingerprint = initial_fingerprint
     token_metadata = initial_token_metadata
+    seed_first_token_ids = tuple(initial_seed_first_token_ids)
+    depth_repair_token_ids = tuple(initial_depth_repair_token_ids)
 
     def _reload():
-        nonlocal fingerprint, token_metadata
+        nonlocal depth_repair_token_ids, fingerprint, seed_first_token_ids, token_metadata
         from src.events.triggers.market_channel_ingestor import (
+            MarketTokenUniverse,
             active_weather_token_metadata_for_tokens,
             active_weather_token_metadata_from_snapshots,
         )
-        from src.state.db import get_trade_connection
+        from src.state.db import (
+            get_forecasts_connection_read_only,
+            get_trade_connection,
+            get_world_connection,
+        )
 
-        trade_read = get_trade_connection(write_class=None)
+        world_read = None
+        forecasts_read = None
+        trade_read = None
         try:
+            world_read = get_world_connection(write_class=None)
+            forecasts_read = get_forecasts_connection_read_only()
+            trade_read = get_trade_connection(write_class=None)
+            candidate_priority_token_ids = _edli_candidate_priority_token_ids(
+                world_read,
+                limit=max(1, int(candidate_priority_limit)),
+            )
             held_token_ids = _edli_held_position_priority_token_ids(trade_read)
+            open_rest_token_ids = _edli_open_rest_priority_token_ids(trade_read)
+            day0_token_ids = _edli_current_day0_priority_token_ids(
+                trade_read,
+                forecasts_read,
+            )
+            current_seed_first = _edli_market_channel_seed_first_token_ids(
+                held_priority_token_ids=held_token_ids,
+                open_rest_priority_token_ids=open_rest_token_ids,
+                day0_priority_token_ids=day0_token_ids,
+                candidate_priority_token_ids=candidate_priority_token_ids,
+            )
+            current_depth_repair = _edli_market_channel_depth_repair_token_ids(
+                held_priority_token_ids=held_token_ids,
+                open_rest_priority_token_ids=open_rest_token_ids,
+                candidate_priority_token_ids=candidate_priority_token_ids,
+            )
             current_fingerprint = _edli_market_channel_token_metadata_fingerprint(
                 trade_read,
-                held_token_ids,
+                set(current_seed_first),
+                set(current_depth_repair),
             )
             if token_metadata is not None and current_fingerprint == fingerprint:
-                return token_metadata
-            refreshed = active_weather_token_metadata_from_snapshots(trade_read)
+                return MarketTokenUniverse(
+                    token_metadata=token_metadata,
+                    seed_first_token_ids=seed_first_token_ids,
+                    depth_repair_token_ids=depth_repair_token_ids,
+                )
+            priority_token_ids = _edli_priority_family_token_ids(
+                trade_read,
+                forecasts_read,
+                set(current_seed_first),
+            )
+            projection_changed = (
+                token_metadata is None
+                or fingerprint is None
+                or current_fingerprint[0] != fingerprint[0]
+            )
+            if projection_changed:
+                refreshed = active_weather_token_metadata_from_snapshots(
+                    trade_read,
+                    priority_token_ids=priority_token_ids,
+                )
+            else:
+                # Priority churn is frequent; do not rerun the broad compact-
+                # projection scan just because a candidate/held/rest/Day0 token
+                # changed. Indexed targeted reads add the new money-path tokens.
+                # Demoted tokens lose repair priority immediately and age out of
+                # the subscription on the next broad projection-identity change.
+                refreshed = dict(token_metadata)
+                refreshed.update(
+                    active_weather_token_metadata_for_tokens(
+                        trade_read,
+                        token_ids=priority_token_ids,
+                        purpose="entry",
+                    )
+                )
             refreshed.update(
                 active_weather_token_metadata_for_tokens(
                     trade_read,
@@ -3006,9 +3099,17 @@ def _edli_market_channel_token_metadata_reloader(
             )
             fingerprint = current_fingerprint
             token_metadata = refreshed
-            return token_metadata
+            seed_first_token_ids = current_seed_first
+            depth_repair_token_ids = current_depth_repair
+            return MarketTokenUniverse(
+                token_metadata=token_metadata,
+                seed_first_token_ids=seed_first_token_ids,
+                depth_repair_token_ids=depth_repair_token_ids,
+            )
         finally:
-            trade_read.close()
+            for conn in (trade_read, forecasts_read, world_read):
+                if conn is not None:
+                    conn.close()
 
     return _reload
 
@@ -3135,6 +3236,11 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             day0_priority_token_ids=day0_priority_token_ids,
             candidate_priority_token_ids=candidate_priority_token_ids,
         )
+        depth_repair_token_ids = _edli_market_channel_depth_repair_token_ids(
+            held_priority_token_ids=held_priority_token_ids,
+            open_rest_priority_token_ids=open_rest_priority_token_ids,
+            candidate_priority_token_ids=candidate_priority_token_ids,
+        )
         priority_token_ids = _edli_priority_family_token_ids(
             trade_conn,
             forecasts_read,
@@ -3154,7 +3260,8 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         )
         token_metadata_fingerprint = _edli_market_channel_token_metadata_fingerprint(
             trade_conn,
-            held_priority_token_ids,
+            set(seed_first_token_ids),
+            set(depth_repair_token_ids),
         )
         token_ids = set(token_metadata)
     finally:
@@ -3331,6 +3438,9 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                 reload_token_metadata = _edli_market_channel_token_metadata_reloader(
                     initial_token_metadata=token_metadata,
                     initial_fingerprint=token_metadata_fingerprint,
+                    initial_seed_first_token_ids=seed_first_token_ids,
+                    initial_depth_repair_token_ids=depth_repair_token_ids,
+                    candidate_priority_limit=candidate_priority_limit,
                 )
                 service = MarketChannelOnlineService(
                     MarketChannelIngestor(
@@ -3364,6 +3474,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     ),
                     refresh_window_seconds=float(edli_cfg.get("market_channel_refresh_window_seconds", 60.0) or 60.0),
                     seed_first_token_ids=seed_first_token_ids,
+                    depth_repair_token_ids=depth_repair_token_ids,
                     continuity_sink=_write_market_channel_continuity,
                 )
                 run_market_channel_service_forever(
