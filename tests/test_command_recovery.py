@@ -1650,6 +1650,78 @@ def test_terminal_entry_obligation_releases_proven_no_fill_but_not_conflict(conn
     assert statuses[unknown_live] == "OPEN"
 
 
+def test_multiwinner_loop_recovers_k_sequential_commands_independently(conn):
+    """ANTIBODY (docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md
+    §5, item 6): simulate a crash after K sequential submits in one wake (the
+    multi-winner loop keeps submits strictly serialized, so K commands each
+    fully commit before the next epoch begins -- identical in kind to today's
+    cross-cycle pattern, just repeated in-wake). Each command_id must recover/
+    terminalize independently through venue_command_repo.append_event
+    (INV-42), with no collapse across commands and no double-release: a crash
+    leaving one command mid-flight (SUBMIT_REQUESTED only, never ACKED) must
+    not block or corrupt the two prior commands that already reached a fill,
+    and re-running recovery must be idempotent (no double-advance)."""
+    from src.execution.command_recovery import (
+        reconcile_terminal_entry_exposure_obligations,
+    )
+
+    # Two epochs fully committed and filled before the crash (K=2 durable
+    # winners), one epoch mid-flight when the crash hit (SUBMIT_REQUESTED
+    # only -- never reached SUBMIT_ACKED/FILL_CONFIRMED).
+    filled_winners = []
+    for index in range(2):
+        command_id = f"cmd-epoch-winner-{index}"
+        _insert(conn, command_id=command_id)
+        _open_test_entry_obligation(conn, command_id)
+        _append_test_entry_fill(conn, command_id, with_trade=True)
+        filled_winners.append(command_id)
+
+    crashed_mid_flight = "cmd-epoch-winner-crashed"
+    _insert(conn, command_id=crashed_mid_flight)
+    _open_test_entry_obligation(conn, crashed_mid_flight)
+    from src.state.venue_command_repo import append_event
+
+    append_event(
+        conn,
+        command_id=crashed_mid_flight,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-07-14T08:00:01+00:00",
+        payload=_entry_submit_payload(),
+    )
+
+    summary = reconcile_terminal_entry_exposure_obligations(conn)
+
+    # Each command_id recovers independently: the two authoritatively-filled
+    # winners advance to RESOLVED; the mid-flight crash victim stays OPEN
+    # (never terminalized without proof) -- no collapse across commands.
+    assert summary == {"scanned": 3, "advanced": 2, "stayed": 1, "errors": 0}
+    statuses = dict(
+        conn.execute(
+            "SELECT command_id, status FROM entry_exposure_obligations"
+        ).fetchall()
+    )
+    for winner in filled_winners:
+        assert statuses[winner] == "RESOLVED"
+    assert statuses[crashed_mid_flight] == "OPEN"
+
+    # No double-release: re-running recovery only re-scans the still-open
+    # command and does not re-advance (or regress) the already-resolved ones.
+    assert reconcile_terminal_entry_exposure_obligations(conn) == {
+        "scanned": 1,
+        "advanced": 0,
+        "stayed": 1,
+        "errors": 0,
+    }
+    statuses_after_rerun = dict(
+        conn.execute(
+            "SELECT command_id, status FROM entry_exposure_obligations"
+        ).fetchall()
+    )
+    for winner in filled_winners:
+        assert statuses_after_rerun[winner] == "RESOLVED"
+    assert statuses_after_rerun[crashed_mid_flight] == "OPEN"
+
+
 def _ensure_snapshot(
     conn,
     *,

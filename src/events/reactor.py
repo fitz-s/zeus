@@ -964,6 +964,24 @@ class GlobalBatchSubmitResult:
 
 
 @dataclass(frozen=True)
+class GlobalEpochOutcome:
+    """What one ``_process_global_event_batch`` epoch did, for the caller loop.
+
+    ``attempted`` is the event-count budget consumed (unchanged semantics from
+    the prior bare-int return). ``submitted`` is whether this epoch placed a
+    venue order (``GlobalBatchSubmitResult.venue_submit_count == 1``) — the
+    multi-winner loop's natural, no-caps terminator: an epoch with no positive
+    winner is retried identically only by a submit that moved cash/holdings,
+    so ``submitted is False`` means the current cash/cap cut is exhausted and
+    the loop must stop (docs/operations/current/plans/
+    auction_multiwinner_plan_2026-07-19.md §4.1).
+    """
+
+    attempted: int
+    submitted: bool
+
+
+@dataclass(frozen=True)
 class _PreSubmitCheck:
     disposition: str | None
     should_submit: bool
@@ -1194,19 +1212,70 @@ class OpportunityEventReactor:
                 # targeted-winner, and cross-lane order. A second forecast-first
                 # weave here would move a targeted forecast ahead of stale Day0
                 # recovery and permit new exposure before unknown in-flight work.
-                attempted = self._process_global_event_batch(
-                    events,
-                    decision_time=decision_time,
-                    result=result,
-                    budget=budget,
-                    cycle_start=cycle_start,
-                    remaining=remaining,
-                    cancelled=cycle_cancelled,
-                )
-                if remaining is not None:
-                    remaining -= attempted
-                # One global auction epoch may start at most one venue submit. Do not
-                # page into a second auction inside the same reactor cycle.
+                #
+                # MULTI-WINNER LOOP (docs/operations/current/plans/
+                # auction_multiwinner_plan_2026-07-19.md, Option b). Re-invoke the
+                # existing, unmodified single-winner epoch back-to-back within this
+                # wake instead of sleeping ~1 min between submits. Each iteration is
+                # a complete independent epoch: fresh scope scan, fresh q/book/
+                # wealth cut, fresh one-shot actuator, fresh preflight, fresh
+                # reservation — the money-path core is byte-for-byte unchanged;
+                # only the idle inter-submit sleep is removed. Submits stay
+                # strictly serialized (one fully durable command commits before the
+                # next epoch begins), so every per-epoch invariant
+                # (GlobalBatchSubmitResult, GlobalOneShotActuator, the certificate
+                # binding guard, the frozen wealth/q/book cut) holds trivially
+                # across iterations exactly as it already holds across two
+                # consecutive 1-min cycles.
+                epochs_run = 0
+                submits_made = 0
+                while True:
+                    epoch = self._process_global_event_batch(
+                        events,
+                        decision_time=decision_time,
+                        result=result,
+                        budget=budget,
+                        cycle_start=cycle_start,
+                        remaining=remaining,
+                        cancelled=cycle_cancelled,
+                    )
+                    epochs_run += 1
+                    if remaining is not None:
+                        remaining -= epoch.attempted
+                    if epoch.submitted:
+                        submits_made += 1
+                    # STOP 1: no winner this epoch. A full-universe auction sized
+                    # against the current cash/caps that finds no positive-robust-
+                    # EV order will find none on an identical retry — only a submit
+                    # (which moved cash/holdings) can make the next-best candidate a
+                    # winner. This is the loop's natural, no-caps terminator.
+                    if not epoch.submitted:
+                        break
+                    # STOP 2: preemption (existing hook, same guard a single wake
+                    # already honors).
+                    if cycle_cancelled():
+                        break
+                    # STOP 3: per-wake wall-clock budget (existing guard).
+                    if budget is not None and (time.monotonic() - cycle_start) >= budget:
+                        break
+                    # STOP 4: per-wake event-count budget (existing guard).
+                    if remaining is not None and remaining <= 0:
+                        break
+                    # Re-fetch: winner #1's family is now held (position_current ->
+                    # _current_held_weather_families) and its reservation is in the
+                    # wealth witness, so the next epoch's scope scan and wealth cut
+                    # see the updated world — the same re-decision lane the engine
+                    # already runs cross-cycle.
+                    events = self._store.fetch_pending(**fetch_kwargs)
+                    if not events:
+                        break
+                if epochs_run > 1:
+                    logging.getLogger("zeus.events.reactor").info(
+                        "global auction ran multiple epochs in one wake: "
+                        "epochs_run=%d submits_made=%d",
+                        epochs_run,
+                        submits_made,
+                    )
                 return result
             events = _fair_lane_interleave(events)
             for event in events:
@@ -1251,8 +1320,12 @@ class OpportunityEventReactor:
         cycle_start: float,
         remaining: int | None,
         cancelled: Callable[[], bool],
-    ) -> int:
-        """Claim/gate all epoch events, then let one opaque adapter auction act once."""
+    ) -> GlobalEpochOutcome:
+        """Claim/gate all epoch events, then let one opaque adapter auction act once.
+
+        Returns whether this epoch submitted, so the caller (``process_pending``'s
+        multi-winner loop) knows whether to run another epoch or stop.
+        """
 
         claimed: list[OpportunityEvent] = []
         claim_generations: dict[str, str] = {}
@@ -1278,7 +1351,7 @@ class OpportunityEventReactor:
             if cancelled():
                 break
         if not claimed:
-            return attempted
+            return GlobalEpochOutcome(attempted=attempted, submitted=False)
 
         process_batch = getattr(self._submit, "process_global_batch")
 
@@ -1360,7 +1433,7 @@ class OpportunityEventReactor:
                     decision_time=_finalization_time(event),
                     result=result,
                 )
-            return attempted
+            return GlobalEpochOutcome(attempted=attempted, submitted=False)
 
         # A real venue call creates a must-settle result. Persist that winner
         # before side-effect-free losers, regardless of the claim/page order.
@@ -1403,7 +1476,10 @@ class OpportunityEventReactor:
             )
             if not finalized:
                 finalization_lock_busy = True
-        return attempted
+        return GlobalEpochOutcome(
+            attempted=attempted,
+            submitted=batch_result.venue_submit_count == 1,
+        )
 
     def _queue_global_winner_for_claim(
         self,

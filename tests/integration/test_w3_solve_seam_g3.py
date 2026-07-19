@@ -12048,6 +12048,126 @@ def test_current_portfolio_wealth_witness_refuses_unknown_inventory():
         )
 
 
+# --- ANTIBODY (docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md
+# §5, items 3 and 4): the multi-winner reactor loop re-witnesses wealth fresh each
+# epoch and gates on in-flight-buy boundedness. These tests exercise the REAL
+# current_portfolio_wealth_witness / probe_inflight_buy_ambiguity seams the loop
+# relies on for correct K-winner sizing and safe re-decision — no reactor loop
+# scaffolding needed, since these are the exact per-epoch primitives the plan
+# says make K-winner sizing "correct for free" (§TL;DR bullet 4).
+
+
+def _record_clean_winner(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    token_id: str,
+    amount_micro: int,
+    created_at: str,
+) -> None:
+    """Cleanly record one winner: reservation bound to a persisted command +
+    obligation, exactly what one serialized epoch commits before the next
+    epoch's wealth witness is captured (executor.py:7338-7357 one-txn order)."""
+
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        (command_id, f"position-{command_id}", token_id, "BUY", 20.0, 0.5, "ENTRY", "POST_ACKED"),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        (command_id, "OPEN", token_id, 20.0, amount_micro / 1_000_000, 0, created_at),
+    )
+    conn.execute(
+        "INSERT INTO collateral_reservations ("
+        "command_id,reservation_type,token_id,amount,created_at"
+        ") VALUES (?,?,?,?,?)",
+        (command_id, "PUSD_BUY", None, amount_micro, created_at),
+    )
+
+
+def test_multiwinner_wealth_witness_strictly_decreases_and_terminates_on_exhaustion():
+    """ANTIBODY #3 (wealth re-witness monotonicity + termination): each fresh
+    epoch's current_portfolio_wealth_witness.spendable_cash_usd strictly
+    decreases by the prior epoch's committed reservation, and the loop's
+    natural, no-caps terminator (an epoch sized against drawn-down cash that
+    can no longer fund the next candidate) is exactly a witness shortfall —
+    never a hard opportunity-count cap."""
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    portfolio = PortfolioState(authority="canonical_db", authority_scope="runtime_exposure")
+    conn = _wealth_test_conn(captured_at=decision_at, allowance_micro=1_000_000_000)
+
+    def _witness():
+        return current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=portfolio,
+        )
+
+    candidate_size_usd = Decimal("10")
+    w0 = _witness()
+    assert w0.spendable_cash_usd == Decimal("25")
+
+    _record_clean_winner(
+        conn,
+        command_id="epoch-winner-0",
+        token_id="token-w0",
+        amount_micro=10_000_000,
+        created_at=decision_at.isoformat(),
+    )
+    w1 = _witness()
+    assert w1.spendable_cash_usd == w0.spendable_cash_usd - candidate_size_usd
+    assert w1.spendable_cash_usd == Decimal("15")
+
+    _record_clean_winner(
+        conn,
+        command_id="epoch-winner-1",
+        token_id="token-w1",
+        amount_micro=10_000_000,
+        created_at=decision_at.isoformat(),
+    )
+    w2 = _witness()
+    assert w2.spendable_cash_usd == w1.spendable_cash_usd - candidate_size_usd
+    assert w2.spendable_cash_usd == Decimal("5")
+
+    # Natural terminator: drawn-down spendable cash ($5) can no longer fund
+    # another $10 candidate. This is the loop's stop condition (§4.1) — no
+    # hard K opportunity cap, just edge/cash exhaustion.
+    assert w2.spendable_cash_usd < candidate_size_usd
+
+
+def test_multiwinner_loop_inflight_gate_accepts_bounded_prior_buy_but_not_unbounded():
+    """ANTIBODY #4 (in-flight gate accepts bounded prior buys): after a
+    cleanly-recorded winner #1 (reservation + venue_commands row bound),
+    probe_inflight_buy_ambiguity returns False and the next epoch may proceed
+    without tripping CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS. An *unbounded*
+    pending buy (a reservation with no persisted command bound) still raises
+    it — the fail-closed guard is preserved even with a clean winner already
+    in flight."""
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+
+    _record_clean_winner(
+        conn,
+        command_id="winner-0",
+        token_id="token-0",
+        amount_micro=10_000_000,
+        created_at=decision_at.isoformat(),
+    )
+    assert probe_inflight_buy_ambiguity(conn) is False
+
+    # A second reservation with NO persisted command bound: cash reserved but
+    # we cannot say for which order — the genuine fail-closed case — blocks
+    # even though winner-0 remains cleanly bound.
+    conn.execute(
+        "INSERT INTO collateral_reservations ("
+        "command_id,reservation_type,token_id,amount,created_at"
+        ") VALUES (?,?,?,?,?)",
+        ("unbounded-buy", "PUSD_BUY", None, 5_000_000, decision_at.isoformat()),
+    )
+    assert probe_inflight_buy_ambiguity(conn) is True
+
+
 def test_global_batch_rejects_inflight_buy_before_scope_scan(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")

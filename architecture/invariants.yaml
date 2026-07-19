@@ -971,3 +971,47 @@ invariants:
       - tests/test_executor.py
     basis: operator first-principles live venue price directive 2026-07-18
     added: 2026-07-15
+
+  - id: INV-44
+    zones: [K2_runtime, live_venue_submit]
+    statement: >
+      In-wake epochs of the global auction are strictly serialized: at most
+      one command is mid-submit at any instant, and each epoch is a complete,
+      unmodified single-winner epoch (fresh scope scan, fresh q/book/wealth
+      cut, fresh one-shot actuator, fresh preflight, fresh reservation) —
+      never a shared or reused capability across epochs. The reactor's
+      caller-level loop (src/events/reactor.py process_pending global-batch
+      branch) terminates on edge/cash/cap exhaustion (an epoch that submits
+      no winner), on preemption (cycle_cancelled), or on the existing
+      per-wake wall-clock / event-count budget — never a hard opportunity-
+      count cap.
+    why: >
+      Relaxing "one venue submit per wake" to "one venue submit per epoch,
+      possibly several epochs per wake" (auction_multiwinner_plan_2026-07-19.md)
+      only removes the idle inter-submit sleep. It is safe with no money-path
+      core change ONLY because every per-epoch invariant (GlobalBatchSubmitResult
+      venue_submit_count in {0,1}, GlobalOneShotActuator single consume(), the
+      certificate binding guard, the frozen wealth/q/book cut) composes
+      trivially across strictly-serialized epochs — identical in kind to how
+      it already held across two consecutive 1-minute reactor cycles. If a
+      future change let two epochs' actuations overlap (parallel submits,
+      a shared actuator, or a stale wealth witness reused across epochs),
+      this invariant is what would catch it.
+    enforced_by:
+      tests:
+        - tests/events/test_reactor.py::test_multiwinner_loop_double_submit_impossible_within_wake
+        - tests/events/test_reactor.py::test_multiwinner_loop_stops_on_preemption_leaving_remainder_pending
+        - tests/events/test_reactor.py::test_multiwinner_loop_stops_on_elapsed_wall_clock_budget
+        - tests/test_collateral_ledger.py::test_multiwinner_loop_reservation_atomicity_under_k_winners
+        - tests/integration/test_w3_solve_seam_g3.py::test_multiwinner_wealth_witness_strictly_decreases_and_terminates_on_exhaustion
+        - tests/integration/test_w3_solve_seam_g3.py::test_multiwinner_loop_inflight_gate_accepts_bounded_prior_buy_but_not_unbounded
+        - tests/test_command_recovery.py::test_multiwinner_loop_recovers_k_sequential_commands_independently
+      negative_constraints: []
+    capability_tags: [live_venue_submit, global_auction, venue_command_write]
+    relationship_tests:
+      - tests/events/test_reactor.py
+      - tests/test_collateral_ledger.py
+      - tests/integration/test_w3_solve_seam_g3.py
+      - tests/test_command_recovery.py
+    basis: docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md §5
+    added: 2026-07-19

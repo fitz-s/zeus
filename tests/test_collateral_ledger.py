@@ -656,6 +656,45 @@ def test_buy_preflight_nets_existing_reservations_from_pusd_allowance(conn):
         ledger.buy_preflight(_buy_intent(size_usd=5.0))
 
 
+# --- ANTIBODY (docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md
+# §5, item 2): K sequential BUY winners in one reactor wake against a bounded
+# wallet. Each fresh epoch re-invokes reserve_pusd_for_buy -> the CAS insert
+# (_cas_insert_pusd_reservation, collateral_ledger.py:520-550), which re-reads
+# live COMMITTED reservation state at insert time (not a frozen auction
+# witness). Assert committed reservations never exceed the bankroll and the
+# first winner whose size would overspend is rejected fail-closed, never
+# partially committed.
+def test_multiwinner_loop_reservation_atomicity_under_k_winners(conn):
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=25_000_000, pusd_allowance=1_000_000_000))
+
+    ledger.reserve_pusd_for_buy("epoch-winner-0", 10_000_000)
+    ledger.reserve_pusd_for_buy("epoch-winner-1", 10_000_000)
+
+    reserved_total = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM collateral_reservations "
+        "WHERE reservation_type = 'PUSD_BUY' AND released_at IS NULL"
+    ).fetchone()[0]
+    assert reserved_total == 20_000_000
+    assert reserved_total <= 25_000_000
+
+    # Winner #3 would push total reserved to $30 against a $25 bankroll — the
+    # CAS insert re-reads live committed state and rejects it fail-closed.
+    with pytest.raises(CollateralInsufficient):
+        ledger.reserve_pusd_for_buy("epoch-winner-2", 10_000_000)
+
+    # Fail-closed, not partially committed: no row for the rejected winner,
+    # and the committed total is unchanged — never an overspend.
+    reserved_after_reject = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM collateral_reservations "
+        "WHERE reservation_type = 'PUSD_BUY' AND released_at IS NULL"
+    ).fetchone()[0]
+    assert reserved_after_reject == 20_000_000
+    assert conn.execute(
+        "SELECT COUNT(*) FROM collateral_reservations WHERE command_id = 'epoch-winner-2'"
+    ).fetchone()[0] == 0
+
+
 def test_sell_preflight_blocks_when_token_balance_insufficient(conn):
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 9}))

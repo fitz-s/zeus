@@ -4585,3 +4585,220 @@ def test_build_regret_envelope_json_does_not_mutate_store_conn_row_factory():
         "reactor._build_regret_envelope_json mutated store.conn.row_factory — "
         "cursor-local row_factory must be used instead of conn-level save/restore"
     )
+
+
+# --- antibody: multi-winner auction loop (docs/operations/current/plans/ -----------------------
+# auction_multiwinner_plan_2026-07-19.md §5, items 1 and 5). process_pending's global-batch
+# branch now loops the existing, unmodified single-winner epoch back-to-back within one wake
+# instead of returning after exactly one epoch. These tests drive that loop directly through a
+# fake ``process_global_batch`` adapter (same seam every other global-batch test in this file
+# fakes), proving the loop's per-epoch isolation and its stop conditions — not re-testing the
+# real solver/collateral/actuation stack, which has its own coverage elsewhere
+# (tests/integration/test_w3_solve_seam_g3.py, tests/test_collateral_ledger.py,
+# tests/test_command_recovery.py carry the reservation/wealth-witness/command-recovery
+# antibodies for this same plan).
+
+
+def _multiwinner_events(prefix: str, count: int):
+    return tuple(
+        _forecast_event(f"{prefix}-{index}", target_date=f"2026-05-{25 + index}")
+        for index in range(count)
+    )
+
+
+def _requeue_losers_finalize(reactor):
+    """A ``_finalize_deferred_event_unit`` fake: winners count as accepted and
+    stay claimed (consumed); losers are put back to PENDING via the real store
+    API (the same outcome the production transient-retry path already
+    produces for a ``SUBMIT_ABORTED_PRICE_MOVED`` reason — see
+    test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam above).
+    Isolates these tests from the certificate/proof-bundle plumbing
+    ``_process_one_post_submit`` requires for a real accept, which is covered
+    elsewhere."""
+
+    def _finalize(event, receipt, *, decision_time, result, wait_ms=None):
+        del decision_time, wait_ms
+        if receipt.submitted:
+            result.proof_accepted += 1
+        else:
+            reactor._store.requeue_pending(event.event_id, last_error=receipt.reason)
+            result.retried += 1
+        return True
+
+    return _finalize
+
+
+def _multiwinner_reactor(store, process_global_batch):
+    def _direct_submit(*_args, **_kwargs):
+        pytest.fail("global batch path must not invoke per-event submit")
+
+    _direct_submit.process_global_batch = process_global_batch  # type: ignore[attr-defined]
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_direct_submit,
+        reject=lambda *_args: None,
+        config=ReactorConfig(reactor_mode="live_no_submit"),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    reactor._finalize_deferred_event_unit = _requeue_losers_finalize(reactor)
+    return reactor
+
+
+def _sequential_winner_batch(claimed, _decision_time, *, claim_unpaged_winner=None, on_winner=None):
+    """Fake ``process_global_batch``: pick the lexically-first still-pending
+    event as this epoch's winner (submits), requeue the rest transiently —
+    models K sequential winners draining a candidate pool one epoch at a
+    time, exactly the loop's re-decision lane."""
+
+    del claim_unpaged_winner
+    winner = min(claimed, key=lambda event: event.event_id)
+    if on_winner is not None:
+        on_winner(winner)
+    receipts = {
+        winner.event_id: EventSubmissionReceipt(
+            submitted=True,
+            event_id=winner.event_id,
+            causal_snapshot_id=winner.causal_snapshot_id,
+            side_effect_status="VENUE_SUBMIT_ACKED",
+            venue_call_started=True,
+            venue_ack_received=True,
+            reason="TEST_WINNER_SUBMITTED",
+        )
+    }
+    for event in claimed:
+        if event.event_id == winner.event_id:
+            continue
+        receipts[event.event_id] = EventSubmissionReceipt(
+            submitted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            reason="SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_LOSER_REQUEUE",
+            proof_accepted=False,
+        )
+    return GlobalBatchSubmitResult(
+        receipts=receipts,
+        winner_event_id=winner.event_id,
+        venue_submit_count=1,
+    )
+
+
+def test_multiwinner_loop_double_submit_impossible_within_wake():
+    """ANTIBODY #1 (auction_multiwinner_plan_2026-07-19 §5, item 1): two
+    consecutive epochs in one wake never have two commands mid-submit. Each
+    epoch mints a FRESH GlobalOneShotActuator — the real production one-shot
+    capability (src/engine/global_batch_runtime.py:178-189) — and a second
+    ``consume()`` on a PRIOR epoch's actuator still raises
+    GLOBAL_ACTUATION_CAPABILITY_CONSUMED. Total venue submits over the wake
+    == number of submitting epochs, each == exactly 1."""
+    from src.engine.global_batch_runtime import GlobalOneShotActuator
+
+    conn, store = _store()
+    events = _multiwinner_events("mw", 3)
+    for event in events:
+        store.insert_or_ignore(event)
+
+    observations = {"batch_calls": 0, "actuators": [], "submitted_event_ids": []}
+
+    def _process_global_batch(claimed, decision_time, *, claim_unpaged_winner=None):
+        observations["batch_calls"] += 1
+
+        def _on_winner(winner):
+            actuator = GlobalOneShotActuator(lambda: None)
+            actuator.consume()
+            observations["actuators"].append(actuator)
+            observations["submitted_event_ids"].append(winner.event_id)
+            # ONE-SHOT within this epoch: a second consume() on THIS epoch's
+            # actuator raises immediately, even misused inside its own epoch.
+            with pytest.raises(RuntimeError, match="GLOBAL_ACTUATION_CAPABILITY_CONSUMED"):
+                actuator.consume()
+
+        return _sequential_winner_batch(
+            claimed, decision_time, claim_unpaged_winner=claim_unpaged_winner, on_winner=_on_winner
+        )
+
+    reactor = _multiwinner_reactor(store, _process_global_batch)
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=None)
+
+    # K=3 winners, one epoch per event — three fresh actuators, three
+    # submitted receipts, no epoch ever produced more than one submit.
+    assert observations["batch_calls"] == 3
+    assert observations["submitted_event_ids"] == sorted(
+        event.event_id for event in events
+    )
+    assert len(observations["actuators"]) == 3
+    assert len({id(actuator) for actuator in observations["actuators"]}) == 3
+
+    # A STALE actuator from ANY prior epoch stays permanently consumed — reuse
+    # from a later epoch's context still raises.
+    for actuator in observations["actuators"]:
+        with pytest.raises(RuntimeError, match="GLOBAL_ACTUATION_CAPABILITY_CONSUMED"):
+            actuator.consume()
+
+    assert all(
+        _processing_status(conn, event.event_id) == "processing" for event in events
+    ), "all three winners must be consumed (claimed, never returned to pending)"
+
+
+def test_multiwinner_loop_stops_on_preemption_leaving_remainder_pending():
+    """ANTIBODY #5a (loop preemption): a tripped ``cycle_cancelled()`` stops
+    the loop mid-wake — checked with the SAME hook a single wake already
+    honors — leaving the remaining candidates PENDING for the next wake."""
+    conn, store = _store()
+    events = _multiwinner_events("pre", 3)
+    for event in events:
+        store.insert_or_ignore(event)
+
+    # ``cancelled`` fires True only once epoch #1's process_global_batch has
+    # actually run (never mid-claim — _process_global_event_batch's OWN claim
+    # loop also polls this same hook per event, so tying the trip to the batch
+    # call itself, not a raw call count, is what isolates "preempt strictly
+    # BETWEEN epochs" from "preempt mid-claim").
+    batch_calls = {"n": 0}
+
+    def _counting_batch(claimed, decision_time, *, claim_unpaged_winner=None):
+        outcome = _sequential_winner_batch(
+            claimed, decision_time, claim_unpaged_winner=claim_unpaged_winner
+        )
+        batch_calls["n"] += 1
+        return outcome
+
+    reactor = _multiwinner_reactor(store, _counting_batch)
+
+    def _cancelled():
+        return batch_calls["n"] >= 1
+
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=None, cancelled=_cancelled)
+
+    statuses = {event.event_id: _processing_status(conn, event.event_id) for event in events}
+    assert sorted(statuses.values()) == ["pending", "pending", "processing"], (
+        "preemption must stop after exactly one submitting epoch, leaving the "
+        f"rest PENDING for the next wake: {statuses}"
+    )
+
+
+def test_multiwinner_loop_stops_on_elapsed_wall_clock_budget(monkeypatch):
+    """ANTIBODY #5b (loop budget): an elapsed per-wake wall-clock budget stops
+    the loop mid-wake — the SAME existing guard that already bounds a single
+    wake — leaving the remaining candidates PENDING for the next wake."""
+    monkeypatch.setenv("ZEUS_REACTOR_CYCLE_BUDGET_SECONDS", "0.05")
+    conn, store = _store()
+    events = _multiwinner_events("budget", 3)
+    for event in events:
+        store.insert_or_ignore(event)
+
+    def _slow_batch(claimed, decision_time, *, claim_unpaged_winner=None):
+        time.sleep(0.1)  # spend the tiny budget during epoch #1
+        return _sequential_winner_batch(claimed, decision_time, claim_unpaged_winner=claim_unpaged_winner)
+
+    reactor = _multiwinner_reactor(store, _slow_batch)
+
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=None)
+
+    statuses = {event.event_id: _processing_status(conn, event.event_id) for event in events}
+    assert sorted(statuses.values()) == ["pending", "pending", "processing"], (
+        "an elapsed wake budget must stop after exactly one submitting epoch, "
+        f"leaving the rest PENDING for the next wake: {statuses}"
+    )
