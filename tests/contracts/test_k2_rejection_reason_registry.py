@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-07-19
 # Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K2.1
 """K2.1 antibody: every rejection-reason emit site uses a registered base.
 
@@ -102,6 +102,50 @@ def test_registry_lookup_strips_detail_suffix():
     raw = "EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day:verified_gamma"
     assert lookup_rejection_reason(raw) is RejectionReason.EVENT_BOUND_MARKET_PHASE_CLOSED
     assert classify_rejection_reason(raw) is RejectionCategory.HONEST_MARKET
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "CASH_DOMINATES",
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        "ROBUST_MAJORITY_LOSS",
+    ],
+)
+def test_global_auction_no_trade_classifies_economic_inner(inner):
+    raw = f"GLOBAL_AUCTION_NO_TRADE:{inner}"
+
+    assert base_reason(raw) == "GLOBAL_AUCTION_NO_TRADE"
+    assert lookup_rejection_reason(raw) is RejectionReason.GLOBAL_AUCTION_NO_TRADE
+    assert is_registered_rejection_reason(raw)
+    assert classify_rejection_reason(raw) is RejectionCategory.HONEST_MARKET
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "GLOBAL_SELECTION_CANCELLED",
+        "GLOBAL_EPOCH_SUPERSEDED",
+    ],
+)
+def test_global_auction_no_trade_does_not_terminalize_transient_inner(inner):
+    raw = f"GLOBAL_AUCTION_NO_TRADE:{inner}"
+
+    assert is_registered_rejection_reason(raw)
+    assert classify_rejection_reason(raw) is RejectionCategory.HONEST_DATA
+    assert classify_rejection_reason(raw) is not RejectionCategory.HONEST_MARKET
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "GLOBAL_AUCTION_NO_TRADE",
+        "GLOBAL_AUCTION_NO_TRADE:SOME_FUTURE_UNDECLARED_INNER",
+    ],
+)
+def test_global_auction_no_trade_missing_or_unknown_inner_is_suspect(raw):
+    assert is_registered_rejection_reason(raw)
+    assert classify_rejection_reason(raw) is RejectionCategory.ARTIFICIAL_SUSPECT
 
 
 @pytest.mark.parametrize(

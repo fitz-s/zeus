@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-07-19
 # Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K2.1
 # (rejection-reason taxonomy) + /tmp/funnel_autopsy.md (operator-ratified categories).
 """Typed registry for no_trade_regret_events.rejection_reason (K2.1).
@@ -16,6 +16,10 @@ THE CONTRACT:
 - Detail stays a colon-suffix (string value preserved for DB compat):
   ``f"{RejectionReason.X.value}:{detail}"`` or the existing literal whose base
   equals a registered value.
+- A transparent envelope may carry inner reasons with different categories.
+  Its base is registered for runtime/AST hygiene, while ``classify()`` assigns
+  the category from the declared inner vocabulary and treats unknown inners as
+  ``ARTIFICIAL_SUSPECT``.
 - CI antibody (tests/contracts/test_k2_rejection_reason_registry.py) AST-scans
   every EventSubmissionReceipt(reason=...) emit site: a string literal whose
   base is not registered FAILS CI.
@@ -522,9 +526,24 @@ class RejectionReason(str, Enum):
         "row here is a bug (raw exception text in rejection_reason is the disease "
         "this registry exists to kill).",
     )
+    GLOBAL_AUCTION_NO_TRADE = (
+        "GLOBAL_AUCTION_NO_TRADE",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Transparent global-auction envelope. classify_rejection_reason assigns "
+        "the category from its declared inner reason; a missing or unknown inner "
+        "reason remains suspect instead of inheriting one mixed wrapper category.",
+    )
 
 
 _REGISTRY_BY_VALUE: dict[str, RejectionReason] = {m.value: m for m in RejectionReason}
+
+_GLOBAL_AUCTION_NO_TRADE_INNER_CATEGORIES: dict[str, RejectionCategory] = {
+    "CASH_DOMINATES": RejectionCategory.HONEST_MARKET,
+    "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER": RejectionCategory.HONEST_MARKET,
+    "ROBUST_MAJORITY_LOSS": RejectionCategory.HONEST_MARKET,
+    "GLOBAL_SELECTION_CANCELLED": RejectionCategory.HONEST_DATA,
+    "GLOBAL_EPOCH_SUPERSEDED": RejectionCategory.HONEST_DATA,
+}
 
 
 def base_reason(raw: object) -> str:
@@ -546,6 +565,12 @@ def classify_rejection_reason(raw: object) -> RejectionCategory:
     BY DEFINITION: a reason no one declared is a defect signal (free-text leak,
     new spelling, raw exception) until someone registers and categorizes it."""
     member = lookup_rejection_reason(raw)
+    if member is RejectionReason.GLOBAL_AUCTION_NO_TRADE:
+        inner = str(raw).partition(":")[2].strip()
+        return _GLOBAL_AUCTION_NO_TRADE_INNER_CATEGORIES.get(
+            base_reason(inner),
+            RejectionCategory.ARTIFICIAL_SUSPECT,
+        )
     if member is not None:
         return member.category
     return RejectionCategory.ARTIFICIAL_SUSPECT
