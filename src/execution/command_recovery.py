@@ -2005,7 +2005,7 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
          WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
-           AND cmd.state = 'PARTIAL'
+           AND cmd.state IN ('PARTIAL', 'FILLED')
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
            AND fact.venue_order_id = cmd.venue_order_id
@@ -8629,6 +8629,8 @@ def reconcile_matched_order_facts(
                 if review_required_command and event_type == CommandEventType.FILL_CONFIRMED.value
                 else {}
             )
+            if required_predicates:
+                required_predicates["trade_facts_cover_command_or_leave_only_dust"] = True
             payload = {
                 "reason": (
                     payload_reason
@@ -8766,6 +8768,7 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
                     "venue_order_id": order_id,
                     "command_id": command_id,
                     "matched_size": filled_size,
+                    "filled_size": filled_size,
                     "remaining_size": "0",
                     "requested_size": str(row.get("size") or ""),
                     "latest_order_fact_id": row.get("order_fact_id"),
@@ -8782,6 +8785,14 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
                 sp_name = f"sp_terminal_partial_order_{safe_command_id}"
                 conn.execute(f"SAVEPOINT {sp_name}")
                 try:
+                    if str(row.get("state") or "").upper() == CommandState.FILLED.value:
+                        append_event(
+                            conn,
+                            command_id=command_id,
+                            event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
+                            occurred_at=observed_at,
+                            payload=payload,
+                        )
                     _append_terminal_partial_order_fact(
                         conn,
                         venue_order_id=order_id,
@@ -15537,9 +15548,9 @@ def _fill_size_completes_limit_order(filled_size, command_size, *, side: object)
     residual = requested - filled
     normalized_side = str(side or "").upper()
     if normalized_side == "BUY":
-        return residual < Decimal("0.01")
+        return residual <= Decimal("0.01")
     if normalized_side == "SELL":
-        return -Decimal("0.000001") <= residual < Decimal("0.01")
+        return -Decimal("0.000001") <= residual <= Decimal("0.01")
     return False
 
 
@@ -16062,24 +16073,51 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
             (cmd.command_id,),
         ).fetchone()
     )
+    complete = _fill_size_completes_limit_order(
+        filled_size,
+        command.get("size"),
+        side=command.get("side"),
+    )
     payload = {
         "schema_version": 1,
-        "reason": "review_cleared_confirmed_fill",
+        "reason": (
+            "review_cleared_confirmed_fill"
+            if complete
+            else "terminal_partial_order_fact_corrected"
+        ),
         "command_id": cmd.command_id,
         "decision_id": str(command.get("decision_id") or ""),
         "venue_order_id": venue_order_id,
         "trade_id": trade_id,
         "filled_size": filled_size,
         "fill_price": fill_price,
-        "proof_class": "review_required_matched_order_fact_with_positive_trade_fact",
+        "proof_class": (
+            "review_required_matched_order_fact_with_positive_trade_fact"
+            if complete
+            else "terminal_partial_order_fact"
+        ),
         "side_effect_boundary_crossed": True,
         "sdk_submit_attempted": True,
         "required_predicates": {
-            "command_state_review_required": True,
-            "latest_event_is_review_boundary": True,
-            "positive_trade_fact": True,
-            "matched_order_fact_positive": True,
+            **(
+                {
+                    "command_state_review_required": True,
+                    "latest_event_is_review_boundary": True,
+                    "positive_trade_fact": True,
+                    "matched_order_fact_positive": True,
+                    "trade_facts_cover_command_or_leave_only_dust": True,
+                }
+                if complete
+                else {
+                    "terminal_order_remainder_zero": True,
+                    "canonical_trade_facts_match_terminal_order_fact": True,
+                    "cumulative_fill_below_requested_size": True,
+                }
+            )
         },
+        "matched_size": filled_size,
+        "remaining_size": "0",
+        "requested_size": str(command.get("size") or ""),
         "trade_fact_proof": {
             "trade_fact_id": trade_fact.get("trade_fact_id"),
             "state": trade_fact.get("state"),
@@ -16104,7 +16142,7 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
             conn,
             venue_order_id=venue_order_id,
             command_id=cmd.command_id,
-            state="MATCHED",
+            state="MATCHED" if complete else "PARTIALLY_MATCHED",
             remaining_size="0",
             matched_size=filled_size,
             source=str(trade_fact.get("source") or "REST"),
@@ -16112,6 +16150,17 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
             venue_timestamp=str(trade_fact.get("venue_timestamp") or observed_at),
             raw_payload_hash=_payload_hash({**payload, "fact_type": "order"}),
             raw_payload_json=payload,
+        )
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=(
+                CommandEventType.FILL_CONFIRMED.value
+                if complete
+                else CommandEventType.PARTIAL_FILL_OBSERVED.value
+            ),
+            occurred_at=observed_at,
+            payload=payload,
         )
         _append_matched_order_fill_projection(
             conn,
@@ -16122,22 +16171,16 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
             observed_at=observed_at,
             order_fact_source=str(trade_fact.get("source") or "REST"),
         )
-        append_event(
-            conn,
-            command_id=cmd.command_id,
-            event_type=CommandEventType.FILL_CONFIRMED.value,
-            occurred_at=observed_at,
-            payload=payload,
-        )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
         raise
     logger.info(
-        "recovery: command %s REVIEW_REQUIRED already-canceled -> FILLED "
+        "recovery: command %s REVIEW_REQUIRED already-canceled -> %s "
         "(venue_order_id=%s trade_id=%s filled_size=%s)",
         cmd.command_id,
+        "FILLED" if complete else "PARTIAL",
         venue_order_id,
         trade_id,
         filled_size,

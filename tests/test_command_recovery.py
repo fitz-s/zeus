@@ -7587,6 +7587,117 @@ class TestRecoveryResolutionTable:
         ).fetchall()
         assert [row["state"] for row in facts] == ["MATCHED"]
 
+    def test_legacy_false_filled_terminal_partial_returns_to_partial_truth(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A historical short FILL_CONFIRMED cannot remain canonical FILLED."""
+
+        _insert(conn, order_type="FAK", size=15.0, price=0.08)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-terminal-partial",
+            state="CONFIRMED",
+            filled_size="11",
+            fill_price="0.08",
+        )
+        _append_order_fact(
+            conn,
+            state="MATCHED",
+            matched_size="11",
+            remaining_size="0",
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-001",
+                "filled_size": "11",
+                "fill_price": "0.08",
+            },
+        )
+        with pytest.raises(
+            ValueError,
+            match="terminal partial command correction order size does not match",
+        ):
+            append_event(
+                conn,
+                command_id="cmd-001",
+                event_type="PARTIAL_FILL_OBSERVED",
+                occurred_at="2026-04-26T00:06:01Z",
+                payload={
+                    "reason": "terminal_partial_order_fact_corrected",
+                    "proof_class": "terminal_partial_order_fact",
+                    "command_id": "cmd-001",
+                    "venue_order_id": "ord-001",
+                    "filled_size": "10",
+                    "requested_size": "15.0",
+                    "required_predicates": {
+                        "terminal_order_remainder_zero": True,
+                        "canonical_trade_facts_match_terminal_order_fact": True,
+                        "cumulative_fill_below_requested_size": True,
+                    },
+                },
+            )
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "PARTIAL_FILL_OBSERVED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "terminal_partial_order_fact"
+        assert payload["requested_size"] == "15.0"
+        terminal = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+               AND json_extract(raw_payload_json, '$.proof_class')
+                   = 'terminal_partial_order_fact'
+            """
+        ).fetchone()
+        assert dict(terminal) == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "11",
+            "remaining_size": "0",
+        }
+        execution = conn.execute(
+            """
+            SELECT shares, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE command_id = 'cmd-001'
+               AND order_role = 'entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": 11.0,
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
+
+        repeated = reconcile_unresolved_commands(conn, mock_client)
+        assert repeated["completed_partial_order_facts"]["scanned"] == 0
+
     def test_partial_entry_uses_canonical_order_truth_over_later_weaker_fact(
         self,
         conn,
@@ -8969,7 +9080,7 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["advanced"] >= 1
-        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
         command_events = [
             row["event_type"]
             for row in conn.execute(
@@ -8981,18 +9092,21 @@ class TestRecoveryResolutionTable:
                 """
             ).fetchall()
         ]
-        assert command_events[-1] == "FILL_CONFIRMED"
-        latest_order_fact = conn.execute(
-            """
-            SELECT state, matched_size, remaining_size
-              FROM venue_order_facts
-             WHERE command_id = 'cmd-001'
-             ORDER BY local_sequence DESC
-             LIMIT 1
-            """
-        ).fetchone()
-        assert dict(latest_order_fact) == {
-            "state": "MATCHED",
+        assert command_events[-1] == "PARTIAL_FILL_OBSERVED"
+        from src.execution.command_recovery import (
+            _latest_order_fact_for_command_order,
+        )
+
+        canonical_order_fact = _latest_order_fact_for_command_order(
+            conn,
+            command_id="cmd-001",
+            venue_order_id="ord-partial-canceled",
+        )
+        assert {
+            key: canonical_order_fact[key]
+            for key in ("state", "matched_size", "remaining_size")
+        } == {
+            "state": "PARTIALLY_MATCHED",
             "matched_size": "2.127658",
             "remaining_size": "0",
         }
@@ -9008,7 +9122,7 @@ class TestRecoveryResolutionTable:
             "shares": 2.127658,
             "cost_basis_usd": pytest.approx(2.127658 * 0.5300001222000904),
             "entry_price": pytest.approx(0.5300001222000904),
-            "order_status": "filled",
+            "order_status": "partial",
         }
 
     def test_matched_cancel_review_required_pass_clears_already_canceled_positive_trade_fact(
@@ -9061,13 +9175,11 @@ class TestRecoveryResolutionTable:
         summary = reconcile_matched_cancel_review_required_entries(conn)
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
-        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
         events = _get_events(conn, "cmd-001")
-        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        assert events[-1]["event_type"] == "PARTIAL_FILL_OBSERVED"
         payload = json.loads(events[-1]["payload_json"])
-        assert payload["source_proof"]["source_reason"] == (
-            "cancel_failed_already_canceled_positive_entry_fill"
-        )
+        assert payload["proof_class"] == "terminal_partial_order_fact"
 
     def test_filled_entry_repair_without_trade_case_stays_non_error(
         self,

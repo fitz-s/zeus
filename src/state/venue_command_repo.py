@@ -139,6 +139,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("PARTIAL", "REVIEW_REQUIRED"):           "REVIEW_REQUIRED",
 
     # from FILLED
+    ("FILLED", "PARTIAL_FILL_OBSERVED"):      "PARTIAL",
     ("FILLED", "REVIEW_REQUIRED"):            "REVIEW_REQUIRED",
 
     # from CANCEL_PENDING
@@ -154,6 +155,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"): "REJECTED",
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_NO_VENUE_EXPOSURE"):    "EXPIRED",
     ("REVIEW_REQUIRED", "REVIEW_CLEARED_VENUE_ORDER_LIVE"):     "ACKED",
+    ("REVIEW_REQUIRED", "PARTIAL_FILL_OBSERVED"):                "PARTIAL",
     ("REVIEW_REQUIRED", "FILL_CONFIRMED"):                      "FILLED",
 }
 
@@ -393,7 +395,7 @@ def _terminal_partial_correction_proven(
         and requested > 0
         and matched is not None
         and matched > 0
-        and requested - matched >= Decimal("0.01")
+        and requested - matched > Decimal("0.01")
     )
 
 
@@ -1260,6 +1262,13 @@ def append_event(
             payload=payload,
             command_id=command_id,
         )
+        _validate_terminal_partial_command_correction_payload(
+            conn=conn,
+            current_state=current_state,
+            event_type=event_type,
+            payload=payload,
+            command_id=command_id,
+        )
 
         state_after = _TRANSITIONS[key]
 
@@ -1392,6 +1401,103 @@ def _validate_entry_submit_payload(
             "ENTRY SUBMIT_REQUESTED entry_economics missing details: "
             + ",".join(detail_missing)
         )
+
+
+def _validate_terminal_partial_command_correction_payload(
+    *,
+    conn: sqlite3.Connection,
+    current_state: str,
+    event_type: str,
+    payload: Optional[dict],
+    command_id: str,
+) -> None:
+    """Allow a false full-fill command to return to proven terminal PARTIAL."""
+
+    if event_type != "PARTIAL_FILL_OBSERVED" or current_state not in {
+        "FILLED",
+        "REVIEW_REQUIRED",
+    }:
+        return
+    if not isinstance(payload, dict):
+        raise ValueError("terminal partial command correction requires proof payload")
+    if (
+        payload.get("reason") != "terminal_partial_order_fact_corrected"
+        or payload.get("proof_class") != "terminal_partial_order_fact"
+        or payload.get("command_id") != command_id
+    ):
+        raise ValueError("terminal partial command correction proof is invalid")
+    required = payload.get("required_predicates")
+    names = (
+        "terminal_order_remainder_zero",
+        "canonical_trade_facts_match_terminal_order_fact",
+        "cumulative_fill_below_requested_size",
+    )
+    if not isinstance(required, Mapping) or any(
+        required.get(name) is not True for name in names
+    ):
+        raise ValueError("terminal partial command correction predicates are incomplete")
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """
+            SELECT intent_kind, side, size, venue_order_id
+              FROM venue_commands
+             WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        latest_order = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC, fact_id DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    venue_order_id = str(payload.get("venue_order_id") or "")
+    if command is None:
+        raise ValueError("terminal partial command correction command is missing")
+    if (
+        str(command["intent_kind"] or "").upper() != "ENTRY"
+        or str(command["side"] or "").upper() != "BUY"
+        or str(command["venue_order_id"] or "") != venue_order_id
+    ):
+        raise ValueError("terminal partial command correction command identity does not match")
+    if latest_order is None:
+        raise ValueError("terminal partial command correction order fact is missing")
+    if str(latest_order["state"] or "").upper() not in {
+        "MATCHED",
+        "PARTIALLY_MATCHED",
+        "PARTIAL",
+    }:
+        raise ValueError("terminal partial command correction order state is invalid")
+    if not _decimal_text_is_zero(latest_order["remaining_size"]):
+        raise ValueError("terminal partial command correction order remainder is not zero")
+    if not _decimal_text_equal(
+        latest_order["matched_size"], payload.get("filled_size")
+    ):
+        raise ValueError(
+            "terminal partial command correction order size does not match: "
+            f"order={latest_order['matched_size']} trade={payload.get('filled_size')}"
+        )
+    requested = _decimal_or_none(command["size"])
+    filled = _decimal_or_none(payload.get("filled_size"))
+    if (
+        requested is None
+        or filled is None
+        or requested <= 0
+        or filled <= 0
+        or requested - filled <= Decimal("0.01")
+        or not _decimal_text_equal(requested, payload.get("requested_size"))
+    ):
+        raise ValueError("terminal partial command correction is not a short fill")
+    actual = _actual_review_confirmed_fill_predicates(conn, command_id, payload)
+    if not (
+        actual.get("positive_trade_facts")
+        and actual.get("matched_order_fact_positive")
+    ):
+        raise ValueError("terminal partial command correction trade proof does not match")
 
 
 def _validate_review_clearance_payload(
@@ -2238,6 +2344,7 @@ def _validate_review_confirmed_fill_payload(
             "latest_event_is_review_boundary",
             "positive_trade_fact",
             "matched_order_fact_positive",
+            "trade_facts_cover_command_or_leave_only_dust",
         )
     elif proof_class == "review_required_terminal_order_fact_with_held_projection":
         required_true = (
