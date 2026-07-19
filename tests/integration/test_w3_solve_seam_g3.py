@@ -105,7 +105,11 @@ from src.contracts.executable_market_snapshot import (
 )
 from src.contracts.semantic_types import Direction
 from src.strategy import utility_ranker
-from src.state.collateral_ledger import init_collateral_schema
+from src.state.collateral_ledger import (
+    CollateralLedger,
+    CollateralSnapshot,
+    init_collateral_schema,
+)
 from src.state.portfolio import PortfolioState
 from src.state.snapshot_repo import get_snapshot, init_snapshot_schema, insert_snapshot
 from src.state.schema.opportunity_events_schema import (
@@ -11395,6 +11399,132 @@ def test_current_portfolio_wealth_witness_uses_one_chain_generation():
     assert witness.wealth_floor_usd == Decimal("27")
     assert witness.wealth_ceiling_usd == Decimal("27")
     assert repeated.witness_identity == witness.witness_identity
+
+
+def test_current_portfolio_wealth_uses_fresh_trusted_snapshot_across_degraded_attempt():
+    trusted_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    decision_at = trusted_at + _dt.timedelta(seconds=10)
+    conn = _wealth_test_conn(captured_at=trusted_at)
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "fill-after-trusted",
+            "position-after-trusted",
+            "token-after-trusted",
+            "BUY",
+            5.0,
+            1.0,
+            "ENTRY",
+            "FILLED",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        (
+            "fill-after-trusted",
+            "OPEN",
+            "token-after-trusted",
+            5.0,
+            5.0,
+            0,
+            (trusted_at + _dt.timedelta(seconds=1)).isoformat(),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO collateral_unsettled_proceeds "
+        "(command_id,direction,reservation_type,token_id,amount_micro,created_at) "
+        "VALUES ('fill-after-trusted','OUTGOING_DEDUCTION','PUSD_BUY',NULL,?,?)",
+        (
+            5_000_000,
+            (trusted_at + _dt.timedelta(seconds=1)).isoformat(),
+        ),
+    )
+    conn.commit()
+    CollateralLedger(conn).set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=0,
+            pusd_allowance_micro=0,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=decision_at,
+            authority_tier="DEGRADED",
+            raw_balance_payload_hash="failed-refresh",
+        )
+    )
+    portfolio = PortfolioState(
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.spendable_cash_usd == Decimal("20")
+    assert witness.wealth_floor_usd == Decimal("22")
+
+
+def test_current_portfolio_wealth_rejects_degraded_history_without_trusted_snapshot():
+    trusted_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    decision_at = trusted_at + _dt.timedelta(seconds=31)
+    conn = _wealth_test_conn(captured_at=trusted_at)
+    conn.execute(
+        "UPDATE collateral_ledger_snapshots SET authority_tier = 'DEGRADED'"
+    )
+
+    with pytest.raises(ValueError, match="CURRENT_WEALTH_COLLATERAL_DEGRADED"):
+        current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=PortfolioState(
+                authority="canonical_db",
+                authority_scope="runtime_exposure",
+            ),
+        )
+
+
+def test_current_portfolio_wealth_does_not_extend_expired_trusted_snapshot():
+    trusted_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    decision_at = trusted_at + _dt.timedelta(seconds=31)
+    conn = _wealth_test_conn(captured_at=trusted_at)
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots ("
+        "pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
+        "ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,"
+        "captured_at,authority_tier,raw_balance_payload_hash"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            0,
+            0,
+            0,
+            "{}",
+            "{}",
+            0,
+            "{}",
+            decision_at.isoformat(),
+            "DEGRADED",
+            "failed-refresh",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="CURRENT_WEALTH_COLLATERAL_EXPIRED"):
+        current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=PortfolioState(
+                authority="canonical_db",
+                authority_scope="runtime_exposure",
+            ),
+        )
 
 
 def test_position_token_uses_typed_direction_value():

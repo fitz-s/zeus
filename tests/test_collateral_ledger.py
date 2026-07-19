@@ -2231,6 +2231,49 @@ def test_clearing_does_not_settle_row_within_clock_skew_tolerance(conn):
     assert row[0] is None
 
 
+def test_degraded_snapshot_never_settles_unsettled_cash_generation(conn):
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+    conn.execute(
+        """
+        INSERT INTO collateral_unsettled_proceeds
+          (command_id, direction, reservation_type, token_id, amount_micro, created_at)
+        VALUES ('cmd-degraded', 'OUTGOING_DEDUCTION', 'PUSD_BUY', NULL, 5_000_000, ?)
+        """,
+        (old_time.isoformat(),),
+    )
+    conn.commit()
+
+    ledger = CollateralLedger(conn)
+    future = old_time + timedelta(days=1)
+    ledger.set_snapshot(
+        _snapshot(
+            pusd=0,
+            authority="DEGRADED",
+            captured_at=future,
+        )
+    )
+
+    row = conn.execute(
+        "SELECT settled_at, settle_reason FROM collateral_unsettled_proceeds "
+        "WHERE command_id = 'cmd-degraded'"
+    ).fetchone()
+    assert tuple(row) == (None, None)
+
+    ledger.set_snapshot(
+        _snapshot(
+            pusd=45_000_000,
+            authority="CHAIN",
+            captured_at=future + timedelta(seconds=1),
+        )
+    )
+    row = conn.execute(
+        "SELECT settled_at, settle_reason FROM collateral_unsettled_proceeds "
+        "WHERE command_id = 'cmd-degraded'"
+    ).fetchone()
+    assert row[0] is not None
+    assert row[1] == "BALANCE_REFRESH_OBSERVED"
+
+
 def test_idempotent_derivation_replay_duplicate_partial_fact_stream(conn):
     """tests_required: replay the same PARTIALLY_MATCHED fact stream (WS +
     reconcile + recovery duplicates) — derived live remaining invariant under

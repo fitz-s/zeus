@@ -812,3 +812,20 @@ full W3 file passes `229` and retains only the two unrelated pre-existing
 pass.  Standard deployment and fresh natural auction/venue reconciliation are
 still required; this continuity repair neither changes operator entry posture
 nor authorizes a forced order.
+
+## 2026-07-19 transient collateral refresh continuity
+
+Canonical trade-ledger evidence showed intermittent `DEGRADED` refresh rows
+between successful `CHAIN` snapshots.  A degraded row proves that refresh
+failed; it does not prove zero collateral.  Global wealth selection therefore
+uses the newest `CHAIN` or `VENUE` snapshot only while the auction's existing
+freshness bound still accepts its own capture time.  Current reservations,
+in-flight obligations, and portfolio claims are reread inside the same pinned
+transaction, so cached cash cannot escape newer commitments.  No trusted
+snapshot, a future capture, or an expired trusted snapshot remains fail-closed.
+
+Live evidence at review time contained `94 CHAIN / 6 DEGRADED` rows in the most
+recent 100 collateral refreshes.  Collateral-ledger suites pass `76`, focused
+wealth tests pass `20`, executor collateral tests pass `2`, and the full W3 file
+passes `229` with only its two known `epoch_superseded()` baseline failures.
+Deployment and natural receipt evidence remain required.

@@ -2637,11 +2637,26 @@ def current_portfolio_wealth_witness(
     if owns_txn:
         trade_conn.execute("BEGIN")
     try:
+        # DEGRADED rows describe a failed refresh attempt, not authoritative
+        # zero collateral. Match CollateralLedger.refresh() fallback semantics:
+        # reuse the newest trusted snapshot only while this caller's freshness
+        # contract allows it.
         cur = trade_conn.execute(
-            "SELECT * FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM collateral_ledger_snapshots "
+            "WHERE authority_tier IN ('CHAIN', 'VENUE') "
+            "ORDER BY id DESC LIMIT 1"
         )
         raw_row = cur.fetchone()
         if raw_row is None:
+            latest = trade_conn.execute(
+                "SELECT authority_tier FROM collateral_ledger_snapshots "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if (
+                latest is not None
+                and str(latest[0] or "").strip().upper() == "DEGRADED"
+            ):
+                raise ValueError("CURRENT_WEALTH_COLLATERAL_DEGRADED")
             raise ValueError("CURRENT_WEALTH_COLLATERAL_MISSING")
         row = _row_dict(cur, raw_row)
         authority = str(row.get("authority_tier") or "DEGRADED").strip().upper()

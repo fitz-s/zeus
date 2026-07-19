@@ -825,7 +825,11 @@ class CollateralLedger:
         with self._connection_scope() as conn:
             if conn is None:
                 return
-            _clear_matured_unsettled_proceeds(conn, captured_at=_snapshot_time(snapshot))
+            if snapshot.authority_tier in {"CHAIN", "VENUE"}:
+                _clear_matured_unsettled_proceeds(
+                    conn,
+                    captured_at=_snapshot_time(snapshot),
+                )
             conn.execute(
                 """
                 INSERT INTO collateral_ledger_snapshots (
