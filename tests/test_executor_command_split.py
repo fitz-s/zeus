@@ -2657,6 +2657,11 @@ class TestLiveOrderCommandSplit:
             "matched_size": "0",
             "source": "REST",
         }
+        obligation = mem_conn.execute(
+            "SELECT status, resolved_at FROM entry_exposure_obligations WHERE command_id = ?",
+            (command_ids_seen[0],),
+        ).fetchone()
+        assert dict(obligation) == {"status": "OPEN", "resolved_at": None}
 
     def test_entry_submit_result_returns_submit_and_ack_times(self, mem_conn, monkeypatch):
         """Entry submit facts must flow back to cycle_runtime after the SDK boundary."""
@@ -2768,12 +2773,55 @@ class TestLiveOrderCommandSplit:
             return _real_insert(*args, **kwargs)
 
         projection_calls: list[str] = []
+        release_calls: list[str] = []
+        _real_release = executor_module._release_entry_risk_reservation
 
         def _project_now(_conn, *, command_id: str, client=None):
             assert _conn.in_transaction is False
             projection_calls.append(command_id)
             assert client is mock_inst
+            command = _conn.execute(
+                "SELECT position_id, venue_order_id FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            _conn.execute(
+                """
+                INSERT INTO position_current (
+                    position_id, phase, strategy_key, shares, cost_basis_usd,
+                    size_usd, entry_price, order_id, updated_at, temperature_metric
+                ) VALUES (?, 'active', 'center_buy', 5.0, 1.70, 1.70, 0.34, ?, ?, 'high')
+                """,
+                (command["position_id"], command["venue_order_id"], _NOW.isoformat()),
+            )
+            _conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key, command_id,
+                    order_id, source_module, env, payload_json
+                ) VALUES (?, ?, 1, 1, 'ENTRY_ORDER_FILLED', ?, 'pending_entry',
+                          'active', 'center_buy', ?, ?, 'tests.executor', 'test', ?)
+                """,
+                (
+                    f"{command_id}:filled:1",
+                    command["position_id"],
+                    _NOW.isoformat(),
+                    command_id,
+                    command["venue_order_id"],
+                    json.dumps({"shares": 5.0, "size_usd": 1.70, "entry_price": 0.34}),
+                ),
+            )
+            _conn.execute(
+                "UPDATE venue_commands SET updated_at = updated_at WHERE command_id = ?",
+                (command_id,),
+            )
+            assert _conn.in_transaction is True
             return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+        def _release_after_projection(_conn, *, command_id: str):
+            assert _conn.in_transaction is True
+            release_calls.append(command_id)
+            return _real_release(_conn, command_id=command_id)
 
         with patch(
             "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
@@ -2783,6 +2831,11 @@ class TestLiveOrderCommandSplit:
             monkeypatch.setattr(
                 "src.execution.command_recovery.ensure_live_entry_projection_for_command",
                 _project_now,
+            )
+            monkeypatch.setattr(
+                executor_module,
+                "_release_entry_risk_reservation",
+                _release_after_projection,
             )
             mock_inst.v2_preflight.return_value = None
             bound = _capture_bound_submission_envelope(mock_inst)
@@ -2822,6 +2875,14 @@ class TestLiveOrderCommandSplit:
         assert len(command_ids_seen) == 1
         command_id = command_ids_seen[0]
         assert projection_calls == [command_id]
+        assert release_calls == [command_id]
+        obligation = mem_conn.execute(
+            "SELECT status, resolved_at FROM entry_exposure_obligations WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert obligation is not None
+        assert obligation["status"] == "RESOLVED"
+        assert obligation["resolved_at"] is not None
         cmd = get_command(mem_conn, command_id)
         assert cmd is not None
         assert cmd["state"] == "FILLED"
@@ -3054,6 +3115,137 @@ class TestLiveOrderCommandSplit:
         ).fetchone()
         assert position is not None
         assert Decimal(str(position["shares"])) == Decimal("3.25")
+        obligation = mem_conn.execute(
+            "SELECT status, resolved_at FROM entry_exposure_obligations WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert dict(obligation) == {"status": "OPEN", "resolved_at": None}
+
+    def test_matched_submit_zero_event_economics_keeps_obligation_open(
+        self, mem_conn, monkeypatch
+    ):
+        """Aggregate position economics cannot replace this command's event proof."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        certificate_hash = "e" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            limit_price=0.34,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        def _projection_stays(_conn, *, command_id: str, client=None):
+            command = _conn.execute(
+                "SELECT position_id, venue_order_id FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            _conn.execute(
+                """
+                INSERT INTO position_current (
+                    position_id, phase, strategy_key, shares, cost_basis_usd,
+                    size_usd, entry_price, order_id, updated_at, temperature_metric
+                ) VALUES (?, 'active', 'center_buy', 5.0, 1.70, 1.70, 0.34, ?, ?, 'high')
+                """,
+                (command["position_id"], command["venue_order_id"], _NOW.isoformat()),
+            )
+            _conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key, command_id,
+                    order_id, source_module, env, payload_json
+                ) VALUES (?, ?, 1, 1, 'ENTRY_ORDER_FILLED', ?, 'pending_entry',
+                          'active', 'center_buy', ?, ?, 'tests.executor', 'test', ?)
+                """,
+                (
+                    f"{command_id}:filled:1",
+                    command["position_id"],
+                    _NOW.isoformat(),
+                    command_id,
+                    command["venue_order_id"],
+                    json.dumps({"shares": 0.0, "size_usd": 0.0, "entry_price": 0.34}),
+                ),
+            )
+            return {"scanned": 0, "advanced": 0, "stayed": 1, "errors": 0}
+
+        def _unexpected_release(*args, **kwargs):
+            raise AssertionError("zero-economics event must not release obligation")
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            monkeypatch.setattr(
+                "src.execution.command_recovery.ensure_live_entry_projection_for_command",
+                _projection_stays,
+            )
+            monkeypatch.setattr(
+                executor_module,
+                "_release_entry_risk_reservation",
+                _unexpected_release,
+            )
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(
+                    bound,
+                    order_id="ord-matched-projection-failure",
+                    status="matched",
+                    success=True,
+                    raw_extra={
+                        "makingAmount": "1.6966",
+                        "takingAmount": "4.99",
+                        "transactionsHashes": ["0xhash-projection-failure"],
+                    },
+                )
+            )
+            mock_inst.get_order.return_value = {
+                "id": "ord-matched-projection-failure",
+                "status": "MATCHED",
+                "size_matched": "5",
+                "price": "0.34",
+                "associate_trades": ["trade-matched-projection-failure"],
+            }
+
+            result = _live_order(
+                trade_id="trd-matched-projection-failure",
+                intent=intent,
+                shares=5.0,
+                conn=mem_conn,
+                decision_id="dec-matched-projection-failure",
+            )
+
+        assert result.status == "filled"
+        command_id = command_ids_seen[0]
+        obligation = mem_conn.execute(
+            "SELECT status, resolved_at FROM entry_exposure_obligations WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert dict(obligation) == {"status": "OPEN", "resolved_at": None}
 
     def test_matched_submit_without_fill_evidence_requires_review(self, mem_conn, monkeypatch):
         """Matched venue status without fill size/price/trade proof is unresolved."""

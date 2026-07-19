@@ -964,6 +964,81 @@ def test_live_tick_db_budget_defers_remaining_passes(monkeypatch):
     }
 
 
+def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_defer(monkeypatch):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        return sqlite3.connect(":memory:")
+
+    def _obligations(_conn):
+        calls.append("terminal_entry_exposure_obligations")
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    def _matched_cancel_review(_conn):
+        calls.append("matched_cancel_review_required_entries")
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    def _terminal_order_facts(_conn, **_kwargs):
+        calls.append("terminal_order_facts")
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    original_run = command_recovery._run_recovery_pass_with_lock_policy
+
+    def _run_priority_pass(label, fn, **kwargs):
+        if label in {
+            "edli_post_submit_unknown_absence_fast",
+            "review_required_exit_mutex_release",
+            "recorded_exit_fill_projection",
+            "cancel_ack_terminal_no_fill_facts",
+        }:
+            return None
+        return original_run(label, fn, **kwargs)
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_terminal_entry_exposure_obligations",
+        _obligations,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_matched_cancel_review_required_entries",
+        _matched_cancel_review,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_terminal_order_facts",
+        _terminal_order_facts,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_run_recovery_pass_with_lock_policy",
+        _run_priority_pass,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-07-19T00:00:00+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        "terminal_entry_exposure_obligations",
+        "matched_cancel_review_required_entries",
+        "terminal_order_facts",
+    ]
+    assert summary["db_budget_deferred"] is True
+    assert summary["db_budget_deferred_at"] == "terminal_order_facts"
+
+
 def test_full_recovery_does_not_swallow_sqlite_interrupt():
     from src.execution import command_recovery
 
@@ -1201,27 +1276,105 @@ def test_terminal_entry_obligation_releases_only_on_authoritative_fill(conn):
         reconcile_terminal_entry_exposure_obligations,
     )
 
-    proven = _insert(conn, command_id="cmd-obligation-proven")
+    no_projection = _insert(
+        conn,
+        command_id="cmd-obligation-no-projection",
+        position_id="pos-obligation-no-projection",
+    )
+    _open_test_entry_obligation(conn, no_projection)
+    _append_test_entry_fill(conn, no_projection, with_trade=True)
+
+    zero_economics = _insert(
+        conn,
+        command_id="cmd-obligation-zero-economics",
+        position_id="pos-obligation-zero-economics",
+        token_id="tok-obligation-zero-economics",
+    )
+    _open_test_entry_obligation(conn, zero_economics)
+    _append_test_entry_fill(conn, zero_economics, with_trade=True)
+    zero_order_id = f"order-{zero_economics}"
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-obligation-zero-economics",
+        command_id=zero_economics,
+        order_id=zero_order_id,
+        token_id="tok-obligation-zero-economics",
+    )
+    _append_test_filled_entry_projection(
+        conn,
+        position_id="pos-obligation-zero-economics",
+        command_id=zero_economics,
+        order_id=zero_order_id,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        size_usd=0.0,
+        entry_price=0.0,
+        event_payload={"shares": 10.0, "size_usd": 5.0, "entry_price": 0.5},
+    )
+
+    invalid_event_economics = _insert(
+        conn,
+        command_id="cmd-obligation-invalid-event-economics",
+        position_id="pos-obligation-invalid-event-economics",
+        token_id="tok-obligation-invalid-event-economics",
+    )
+    _open_test_entry_obligation(conn, invalid_event_economics)
+    _append_test_entry_fill(conn, invalid_event_economics, with_trade=True)
+    invalid_order_id = f"order-{invalid_event_economics}"
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-obligation-invalid-event-economics",
+        command_id=invalid_event_economics,
+        order_id=invalid_order_id,
+        token_id="tok-obligation-invalid-event-economics",
+    )
+    _append_test_filled_entry_projection(
+        conn,
+        position_id="pos-obligation-invalid-event-economics",
+        command_id=invalid_event_economics,
+        order_id=invalid_order_id,
+        event_payload={"shares": 10.0, "size_usd": 5.0, "entry_price": 1.0},
+    )
+
+    proven = _insert(
+        conn,
+        command_id="cmd-obligation-proven",
+        position_id="pos-obligation-proven",
+        token_id="tok-obligation-proven",
+    )
     _open_test_entry_obligation(conn, proven)
     _append_test_entry_fill(conn, proven, with_trade=True)
-    unproven = _insert(conn, command_id="cmd-obligation-unproven")
-    _open_test_entry_obligation(conn, unproven)
-    _append_test_entry_fill(conn, unproven, with_trade=False)
+    proven_order_id = f"order-{proven}"
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-obligation-proven",
+        command_id=proven,
+        order_id=proven_order_id,
+        token_id="tok-obligation-proven",
+    )
+    _append_test_filled_entry_projection(
+        conn,
+        position_id="pos-obligation-proven",
+        command_id=proven,
+        order_id=proven_order_id,
+    )
 
     summary = reconcile_terminal_entry_exposure_obligations(conn)
 
-    assert summary == {"scanned": 2, "advanced": 1, "stayed": 1, "errors": 0}
+    assert summary == {"scanned": 4, "advanced": 1, "stayed": 3, "errors": 0}
     statuses = dict(
         conn.execute(
             "SELECT command_id, status FROM entry_exposure_obligations"
         ).fetchall()
     )
     assert statuses[proven] == "RESOLVED"
-    assert statuses[unproven] == "OPEN"
+    assert statuses[no_projection] == "OPEN"
+    assert statuses[zero_economics] == "OPEN"
+    assert statuses[invalid_event_economics] == "OPEN"
     assert reconcile_terminal_entry_exposure_obligations(conn) == {
-        "scanned": 1,
+        "scanned": 3,
         "advanced": 0,
-        "stayed": 1,
+        "stayed": 3,
         "errors": 0,
     }
 
@@ -2046,6 +2199,7 @@ def _seed_pending_entry_projection(
     position_id="pos-001",
     command_id="cmd-001",
     order_id="ord-001",
+    token_id="tok-001",
 ):
     from src.state.ledger import append_many_and_project
 
@@ -2119,8 +2273,8 @@ def _seed_pending_entry_projection(
         "edge_source": "opening_inertia",
         "discovery_mode": "opening_hunt",
         "chain_state": "local_only",
-        "token_id": "tok-001",
-        "no_token_id": "tok-001-no",
+        "token_id": token_id,
+        "no_token_id": f"{token_id}-no",
         "condition_id": "condition-test",
         "order_id": order_id,
         "order_status": "pending",
@@ -2148,6 +2302,74 @@ def _seed_pending_entry_projection(
         "next_exit_retry_at": None,
     }
     append_many_and_project(conn, events, projection)
+
+
+def _append_test_filled_entry_projection(
+    conn,
+    *,
+    position_id: str,
+    command_id: str,
+    order_id: str,
+    shares: float = 10.0,
+    cost_basis_usd: float = 5.0,
+    size_usd: float = 5.0,
+    entry_price: float = 0.5,
+    event_payload: dict | None = None,
+) -> None:
+    from src.state.ledger import append_many_and_project
+
+    projection = dict(
+        conn.execute(
+            "SELECT * FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    )
+    projection.update(
+        phase="active",
+        shares=shares,
+        cost_basis_usd=cost_basis_usd,
+        size_usd=size_usd,
+        entry_price=entry_price,
+        order_id=order_id,
+        order_status="filled",
+        updated_at="2026-07-14T08:00:02+00:00",
+    )
+    payload = (
+        event_payload
+        if event_payload is not None
+        else {
+            "shares": shares,
+            "size_usd": size_usd,
+            "entry_price": entry_price,
+        }
+    )
+    append_many_and_project(
+        conn,
+        [
+            {
+                "event_id": f"{position_id}:filled:{command_id}",
+                "position_id": position_id,
+                "event_version": 1,
+                "sequence_no": 3,
+                "event_type": "ENTRY_ORDER_FILLED",
+                "occurred_at": "2026-07-14T08:00:02+00:00",
+                "phase_before": "pending_entry",
+                "phase_after": "active",
+                "strategy_key": "opening_inertia",
+                "decision_id": "dec-001",
+                "snapshot_id": "snap-pos-001",
+                "order_id": order_id,
+                "command_id": command_id,
+                "caused_by": None,
+                "idempotency_key": f"{position_id}:filled:{command_id}",
+                "venue_status": "FILLED",
+                "source_module": "tests.test_command_recovery",
+                "env": "live",
+                "payload_json": json.dumps(payload, sort_keys=True),
+            }
+        ],
+        projection,
+    )
 
 
 def _append_order_fact(
@@ -3171,17 +3393,19 @@ class TestRecoveryResolutionTable:
             "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
             (seeded["position_id"],),
         ).fetchone()[0] == position_events_before
+        # The absorbed position is aggregate evidence only; without a
+        # command/order-bound fill projection it cannot release this command.
         assert reconcile_terminal_entry_exposure_obligations(conn) == {
             "scanned": 1,
-            "advanced": 1,
-            "stayed": 0,
+            "advanced": 0,
+            "stayed": 1,
             "errors": 0,
         }
         obligation = conn.execute(
             "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
             (seeded["command_id"],),
         ).fetchone()
-        assert obligation["status"] == "RESOLVED"
+        assert obligation["status"] == "OPEN"
         assert reconcile_edli_confirmed_legacy_command_repairs(conn) == {
             "scanned": 0,
             "advanced": 0,

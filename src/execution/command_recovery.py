@@ -4269,6 +4269,12 @@ def _entry_recovery_event(
         "no_token_id": position.no_token_id,
         "venue_status": venue_status,
     }
+    if event_type == "ENTRY_ORDER_FILLED":
+        payload.update(
+            shares=position.shares,
+            size_usd=position.size_usd,
+            entry_price=position.entry_price,
+        )
     event_venue_status = str(
         venue_status
         or position.fill_states
@@ -6884,6 +6890,45 @@ def reconcile_terminal_entry_exposure_obligations(
     }
     if not all(_table_exists(conn, table) for table in required):
         return summary
+    projection_gate_sql = "0"
+    if _table_exists(conn, "position_current") and _table_exists(conn, "position_events"):
+        projection_gate_sql = """
+               EXISTS (
+                   SELECT 1
+                     FROM position_current position
+                    WHERE position.position_id = command.position_id
+                      AND position.phase IN ('active', 'day0_window')
+                      AND position.shares > 0.0
+                      AND position.shares < 1e308
+                      AND position.cost_basis_usd > 0.0
+                      AND position.cost_basis_usd < 1e308
+                      AND position.size_usd > 0.0
+                      AND position.size_usd < 1e308
+                      AND position.entry_price > 0.0
+                      AND position.entry_price < 1.0
+                      AND EXISTS (
+                          SELECT 1
+                            FROM position_events event
+                           WHERE event.position_id = position.position_id
+                             AND event.event_type = 'ENTRY_ORDER_FILLED'
+                             AND json_valid(event.payload_json)
+                             AND CAST(json_extract(event.payload_json, '$.shares') AS REAL) > 0.0
+                             AND CAST(json_extract(event.payload_json, '$.shares') AS REAL) < 1e308
+                             AND CAST(json_extract(event.payload_json, '$.size_usd') AS REAL) > 0.0
+                             AND CAST(json_extract(event.payload_json, '$.size_usd') AS REAL) < 1e308
+                             AND CAST(json_extract(event.payload_json, '$.entry_price') AS REAL) > 0.0
+                             AND CAST(json_extract(event.payload_json, '$.entry_price') AS REAL) < 1.0
+                             AND (
+                                 event.command_id = obligation.command_id
+                                 OR (
+                                     TRIM(COALESCE(command.venue_order_id, '')) <> ''
+                                     AND LOWER(COALESCE(event.order_id, '')) =
+                                         LOWER(command.venue_order_id)
+                                 )
+                             )
+                      )
+               )
+        """
     no_fill_states = tuple(sorted(_TERMINAL_ENTRY_NO_FILL_COMMAND_STATES))
     no_fill_events = tuple(sorted(_TERMINAL_ENTRY_NO_FILL_EVENT_TYPES))
     rows = conn.execute(
@@ -6939,7 +6984,8 @@ def reconcile_terminal_entry_exposure_obligations(
                       AND fact.voided_at IS NULL
                       AND COALESCE(fact.shares, 0) > 0
                       AND COALESCE(fact.fill_price, 0) > 0
-               ) AS positive_execution_economics
+               ) AS positive_execution_economics,
+               {projection_gate_sql} AS positive_command_bound_position_projection
           FROM entry_exposure_obligations obligation
           JOIN venue_commands command
             ON command.command_id = obligation.command_id
@@ -6987,6 +7033,7 @@ def reconcile_terminal_entry_exposure_obligations(
             state == CommandState.FILLED.value
             and bool(row.get("fill_confirmed"))
             and positive_economics
+            and bool(row.get("positive_command_bound_position_projection"))
         )
         canonical_orders = canonical_orders_by_command.get(command_id, [])
         terminal_zero_orders = all(
@@ -18303,15 +18350,23 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "cancel_ack_terminal_no_fill_facts",
         )
         _db_pass(
+            "terminal_entry_exposure_obligations",
+            reconcile_terminal_entry_exposure_obligations,
+            "terminal_entry_exposure_obligations",
+        )
+        _db_pass(
+            "matched_cancel_review_required_entries",
+            reconcile_matched_cancel_review_required_entries,
+            "matched_cancel_review_required_entries",
+            fold_stayed=False,
+        )
+        # Capital releases consume durable facts and must outrun the expensive
+        # terminal-order sweep within the live-tick DB budget.
+        _db_pass(
             "terminal_order_facts",
             reconcile_terminal_order_facts,
             "terminal_order_facts",
             collect_continuations=True,
-        )
-        _db_pass(
-            "terminal_entry_exposure_obligations",
-            reconcile_terminal_entry_exposure_obligations,
-            "terminal_entry_exposure_obligations",
         )
         _db_pass(
             "closed_shift_bin_exit_leases",
@@ -18600,12 +18655,13 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
         )
-        _db_pass(
-            "matched_cancel_review_required_entries",
-            reconcile_matched_cancel_review_required_entries,
-            "matched_cancel_review_required_entries",
-            fold_stayed=False,
-        )
+        if scope != "live_tick":
+            _db_pass(
+                "matched_cancel_review_required_entries",
+                reconcile_matched_cancel_review_required_entries,
+                "matched_cancel_review_required_entries",
+                fold_stayed=False,
+            )
         _db_pass(
             "terminal_positive_entry_projection_repair",
             reconcile_terminal_positive_entry_projection_repairs,

@@ -3875,6 +3875,58 @@ def _release_entry_risk_reservation(conn: sqlite3.Connection, *, command_id: str
     return resolve_entry_exposure_obligation(conn, command_id=command_id)
 
 
+def _has_full_fill_position_projection(
+    conn: sqlite3.Connection, *, command_id: str
+) -> bool:
+    """Whether canonical trade projections prove this command's full fill.
+
+    ``ensure_live_entry_projection_for_command`` may legitimately report a
+    no-op when another recovery owner won the race, but its summary alone is
+    not authority to release the command's conservative exposure obligation.
+    """
+    row = conn.execute(
+        """
+        SELECT 1
+         FROM venue_commands cmd
+          JOIN position_current pc ON pc.position_id = cmd.position_id
+         WHERE cmd.command_id = ?
+           AND pc.phase IN ('active', 'day0_window')
+           AND pc.shares > 0.0
+           AND pc.shares < 1e308
+           AND pc.cost_basis_usd > 0.0
+           AND pc.cost_basis_usd < 1e308
+           AND pc.size_usd > 0.0
+           AND pc.size_usd < 1e308
+           AND pc.entry_price > 0.0
+           AND pc.entry_price < 1.0
+           AND EXISTS (
+                SELECT 1
+                  FROM position_events pe
+                 WHERE pe.position_id = pc.position_id
+                   AND pe.event_type = 'ENTRY_ORDER_FILLED'
+                   AND json_valid(pe.payload_json)
+                   AND CAST(json_extract(pe.payload_json, '$.shares') AS REAL) > 0.0
+                   AND CAST(json_extract(pe.payload_json, '$.shares') AS REAL) < 1e308
+                   AND CAST(json_extract(pe.payload_json, '$.size_usd') AS REAL) > 0.0
+                   AND CAST(json_extract(pe.payload_json, '$.size_usd') AS REAL) < 1e308
+                   AND CAST(json_extract(pe.payload_json, '$.entry_price') AS REAL) > 0.0
+                   AND CAST(json_extract(pe.payload_json, '$.entry_price') AS REAL) < 1.0
+                   AND (
+                        pe.command_id = cmd.command_id
+                        OR (
+                            TRIM(COALESCE(cmd.venue_order_id, '')) <> ''
+                            AND LOWER(COALESCE(pe.order_id, '')) =
+                                LOWER(cmd.venue_order_id)
+                        )
+                   )
+           )
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    return row is not None
+
+
 def _persist_pre_submit_envelope(
     conn: sqlite3.Connection,
     *,
@@ -8369,6 +8421,18 @@ def _live_order(
                 command_id=command_id,
                 client=client,
             )
+            if fill_event_type == "FILL_CONFIRMED":
+                if not _has_full_fill_position_projection(
+                    conn, command_id=command_id
+                ):
+                    raise RuntimeError(
+                        "full fill lacks canonical position projection proof: "
+                        f"command_id={command_id}"
+                    )
+                # A full fill's position projection now carries the exposure;
+                # resolve only its conservative pre-submit obligation here.
+                # Command terminalization remains the sole collateral owner.
+                _release_entry_risk_reservation(conn, command_id=command_id)
             conn.commit()
         except Exception as projection_exc:
             try:
