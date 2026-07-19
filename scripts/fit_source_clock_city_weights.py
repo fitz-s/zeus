@@ -95,6 +95,7 @@ from src.strategy.live_inference.source_clock_city_weights import (  # noqa: E40
     DEFAULT_CITY_ONE_SCHEME_PATH,
     fixed_weight_center_from_values,
 )
+from src.strategy.live_inference.source_clock_vnext import provider_family_for_source  # noqa: E402
 
 FCST_DEFAULT = ROOT / "state" / "zeus-forecasts.db"
 CITIES_DEFAULT = ROOT / "config" / "cities.json"
@@ -114,6 +115,7 @@ LIVE_SERVABLE_MODELS = frozenset(
 TIER1_MIN_N = 60      # city-specific greedy basket
 TIER2_MIN_N = 30      # region-pooled basket (below TIER1_MIN_N, at/above this)
 BASKET_CAP = 4
+MIN_ENTRY_PROVIDER_FAMILIES = 2
 CONUS_LAT = (24.0, 50.0)
 CONUS_LON = (-125.0, -66.0)
 
@@ -286,8 +288,9 @@ def greedy_basket(
     while len(basket) < cap:
         best_pick = None
         best_delta = 0.0
+        basket_families = {provider_family_for_source(model) for model in basket}
         for m in eligible:
-            if m in basket:
+            if m in basket or provider_family_for_source(m) in basket_families:
                 continue
             trial = tuple(basket) + (m,)
             new_errs = _basket_errors(trial, raw_m2_and_n, obs_by_key, settle_by_key)
@@ -311,7 +314,41 @@ def greedy_basket(
         if best_pick is None:
             break
         basket.append(best_pick)
+
+    # The current-evidence posterior requires independent current values from at
+    # least two provider families. A statistically dominant first model is not a
+    # reason to publish a one-family entry basket: retain it, then add the best
+    # remaining individually-scored servable/domain family deterministically.
+    if len({provider_family_for_source(model) for model in basket}) < MIN_ENTRY_PROVIDER_FAMILIES:
+        basket_families = {provider_family_for_source(model) for model in basket}
+        remaining = [
+            model
+            for model in eligible
+            if model not in basket
+            and model in singles
+            and provider_family_for_source(model) not in basket_families
+        ]
+        if remaining:
+            basket.append(min(remaining, key=lambda model: (singles[model], model)))
     return tuple(basket)
+
+
+def _require_entry_provider_count(
+    basket: Sequence[str],
+    *,
+    city: str,
+    metric: str,
+) -> tuple[str, ...]:
+    """Reject an artifact cell that cannot form a live current-evidence shape."""
+    sources = tuple(dict.fromkeys(str(model) for model in basket))
+    families = tuple(dict.fromkeys(provider_family_for_source(source) for source in sources))
+    if len(families) < MIN_ENTRY_PROVIDER_FAMILIES:
+        raise ValueError(
+            "entry-tradeable source-clock basket requires at least "
+            f"{MIN_ENTRY_PROVIDER_FAMILIES} distinct servable/domain provider families: "
+            f"city={city!r} metric={metric!r} sources={sources!r} families={families!r}"
+        )
+    return sources
 
 
 def city_metric_entry(
@@ -368,7 +405,11 @@ def city_metric_entry(
         }
         tier = "GLOBAL_CORE"
 
+    basket = _require_entry_provider_count(basket, city=city, metric=metric)
     weights = raw_second_moment_weights({m: basis.get(m, (None, 0)) for m in basket}, unit="C")
+    published_weights = {m: round(float(w), 6) for m, w in sorted(weights.items())}
+    published_weights = {m: w for m, w in published_weights.items() if w > 0.0}
+    _require_entry_provider_count(tuple(published_weights), city=city, metric=metric)
     city_errs = _basket_errors(basket, basis, obs_by_date, settle_by_date)
     mae_basket = (sum(city_errs.values()) / len(city_errs)) if city_errs else None
 
@@ -390,7 +431,7 @@ def city_metric_entry(
     )
 
     return {
-        "models": {m: round(float(w), 6) for m, w in sorted(weights.items())},
+        "models": published_weights,
         "basket_provenance": {
             "n_paired_dates": n_paired,
             "mae_basket": None if mae_basket is None else round(float(mae_basket), 4),

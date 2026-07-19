@@ -20,6 +20,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 import fit_source_clock_city_weights as fscw  # noqa: E402
@@ -213,6 +215,161 @@ def test_weights_keyed_by_exact_model_id_never_positional(tmp_path: Path) -> Non
     assert abs(sum(models.values()) - 1.0) < 1e-6
 
 
+def test_city_specific_greedy_keeps_second_provider_without_mae_gain(tmp_path: Path) -> None:
+    """A dominant first model cannot collapse an entry basket to one provider."""
+    rows = _rows_for_city(
+        "TwoProviderCity",
+        "high",
+        70,
+        models={"A": 0.01, "B": 4.0},
+    )
+    rows += _rows_for_city(
+        "TwoProviderCity",
+        "low",
+        70,
+        models={"A": 0.01, "B": 4.0},
+    )
+    conn = _make_db(rows)
+    cities_path = _cities_json(
+        tmp_path,
+        [{"name": "TwoProviderCity", "timezone": "Pacific/Fiji", "country_code": "FJ", "lat": -18.0, "lon": 178.0}],
+    )
+
+    artifact = fscw.build_artifact(
+        conn,
+        as_of="2026-12-31",
+        generated_at="FIXED",
+        cities_path=cities_path,
+        frozen_csv_path=tmp_path / "missing.csv",
+        git_sha="FIXED",
+        servable=frozenset({"A", "B"}),
+    )
+
+    models = artifact["cities"]["TwoProviderCity"]["high"]["models"]
+    assert set(models) == {"A", "B"}
+    assert all(weight > 0.0 for weight in models.values())
+
+
+def test_artifact_refuses_second_provider_rounded_out_of_publication(tmp_path: Path) -> None:
+    """The published positive-weight map, not the pre-rounding basket, is authority."""
+    rows = _rows_for_city(
+        "RoundedProviderCity",
+        "high",
+        70,
+        models={"A": 0.01, "B": 10_000.0},
+    )
+    rows += _rows_for_city(
+        "RoundedProviderCity",
+        "low",
+        70,
+        models={"A": 0.01, "B": 10_000.0},
+    )
+    conn = _make_db(rows)
+    cities_path = _cities_json(
+        tmp_path,
+        [{"name": "RoundedProviderCity", "timezone": "Pacific/Fiji", "country_code": "FJ", "lat": -18.0, "lon": 178.0}],
+    )
+
+    with pytest.raises(ValueError, match=r"sources=\('A',\).*families=\('a',\)"):
+        fscw.build_artifact(
+            conn,
+            as_of="2026-12-31",
+            generated_at="FIXED",
+            cities_path=cities_path,
+            frozen_csv_path=tmp_path / "missing.csv",
+            git_sha="FIXED",
+            servable=frozenset({"A", "B"}),
+        )
+
+
+def test_artifact_refuses_single_servable_domain_provider(tmp_path: Path) -> None:
+    """A one-provider candidate set must fail before any artifact can be published."""
+    rows = _rows_for_city("OneProviderCity", "high", 70, models={"A": 0.1})
+    conn = _make_db(rows)
+    cities_path = _cities_json(
+        tmp_path,
+        [{"name": "OneProviderCity", "timezone": "Pacific/Fiji", "country_code": "FJ", "lat": -18.0, "lon": 178.0}],
+    )
+
+    with pytest.raises(ValueError, match="at least 2 distinct servable/domain provider families"):
+        fscw.build_artifact(
+            conn,
+            as_of="2026-12-31",
+            generated_at="FIXED",
+            cities_path=cities_path,
+            frozen_csv_path=tmp_path / "missing.csv",
+            git_sha="FIXED",
+            servable=frozenset({"A"}),
+        )
+
+
+def test_greedy_uses_ecmwf_not_second_icon_alias_for_second_family(tmp_path: Path) -> None:
+    """Two DWD ICON aliases cannot satisfy the independent-provider requirement."""
+    rows = _rows_for_city(
+        "Munich",
+        "high",
+        70,
+        models={"icon_d2": 0.01, "icon_eu": 0.02, "ecmwf_ifs": 4.0},
+    )
+    rows += _rows_for_city(
+        "Munich",
+        "low",
+        70,
+        models={"icon_d2": 0.01, "icon_eu": 0.02, "ecmwf_ifs": 4.0},
+    )
+    conn = _make_db(rows)
+    cities_path = _cities_json(
+        tmp_path,
+        [{"name": "Munich", "timezone": "Europe/Berlin", "country_code": "DE", "lat": 48.1351, "lon": 11.5820}],
+    )
+
+    artifact = fscw.build_artifact(
+        conn,
+        as_of="2026-12-31",
+        generated_at="FIXED",
+        cities_path=cities_path,
+        frozen_csv_path=tmp_path / "missing.csv",
+        git_sha="FIXED",
+        servable=frozenset({"icon_d2", "icon_eu", "ecmwf_ifs"}),
+    )
+
+    sources = artifact["cities"]["Munich"]["high"]["models"]
+    assert set(sources) == {"icon_d2", "ecmwf_ifs"}
+    assert {fscw.provider_family_for_source(source) for source in sources} == {"dwd_icon", "ecmwf"}
+
+
+def test_artifact_refuses_two_models_from_one_provider_family(tmp_path: Path) -> None:
+    """Two source ids from the same DWD ICON family are still one provider."""
+    rows = _rows_for_city(
+        "Munich",
+        "high",
+        70,
+        models={"icon_d2": 0.01, "icon_eu": 0.02},
+    )
+    rows += _rows_for_city(
+        "Munich",
+        "low",
+        70,
+        models={"icon_d2": 0.01, "icon_eu": 0.02},
+    )
+    conn = _make_db(rows)
+    cities_path = _cities_json(
+        tmp_path,
+        [{"name": "Munich", "timezone": "Europe/Berlin", "country_code": "DE", "lat": 48.1351, "lon": 11.5820}],
+    )
+
+    with pytest.raises(ValueError, match=r"sources=\('icon_d2',\).*families=\('dwd_icon',\)"):
+        fscw.build_artifact(
+            conn,
+            as_of="2026-12-31",
+            generated_at="FIXED",
+            cities_path=cities_path,
+            frozen_csv_path=tmp_path / "missing.csv",
+            git_sha="FIXED",
+            servable=frozenset({"icon_d2", "icon_eu"}),
+        )
+
+
 def test_default_servable_filter_excludes_retired_archive_models(tmp_path: Path) -> None:
     """A retired archive-only model (e.g. gfs_global, dropped from the live fetch
     2026-06-17) must never enter a basket: a basket naming it would be permanently
@@ -247,13 +404,14 @@ def test_artifact_excludes_models_outside_each_city_domain(tmp_path: Path) -> No
         models={
             "meteofrance_arome_france_hd": 0.05,
             "ukmo_global_deterministic_10km": 0.8,
+            "ecmwf_ifs": 1.0,
         },
     )
     rows += _rows_for_city(
         "Lagos",
         "high",
         45,
-        models={"ncep_nbm_conus": 0.05, "ecmwf_ifs": 0.8},
+        models={"ncep_nbm_conus": 0.05, "ecmwf_ifs": 0.8, "icon_global": 1.0},
     )
     conn = _make_db(rows)
     cities_path = _cities_json(
@@ -286,8 +444,8 @@ def test_artifact_excludes_models_outside_each_city_domain(tmp_path: Path) -> No
 
     amsterdam = artifact["cities"]["Amsterdam"]["high"]
     assert amsterdam["basket_provenance"]["tier"] == "CITY_SPECIFIC"
-    assert amsterdam["models"] == {"ukmo_global_deterministic_10km": 1.0}
+    assert set(amsterdam["models"]) == {"ukmo_global_deterministic_10km", "ecmwf_ifs"}
 
     lagos = artifact["cities"]["Lagos"]["high"]
     assert lagos["basket_provenance"]["tier"] == "REGION_POOLED"
-    assert lagos["models"] == {"ecmwf_ifs": 1.0}
+    assert set(lagos["models"]) == {"ecmwf_ifs", "icon_global"}
