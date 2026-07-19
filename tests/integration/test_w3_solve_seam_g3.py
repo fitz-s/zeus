@@ -5916,6 +5916,197 @@ def test_global_book_epoch_scope_projects_broad_cached_cut():
         era._scope_global_book_epoch(epoch, ("family-c",))
 
 
+def test_exact_token_refresh_keeps_returned_and_cached_book_scope_aligned(
+    monkeypatch,
+):
+    from src.events.candidate_binding import weather_family_id
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="EDLI_REDECISION_PENDING",
+    )
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "redecision_origin": "market_price",
+            "price_changed_token_ids": ["yes-token-dallas"],
+        }
+    )
+    event = replace(event, payload_json=json.dumps(payload))
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+
+    dallas = weather_family_id(
+        city="Dallas",
+        target_date="2026-07-11",
+        metric="high",
+    )
+    miami = weather_family_id(
+        city="Miami",
+        target_date="2026-07-11",
+        metric="high",
+    )
+
+    def witness(family_key, suffix):
+        return SimpleNamespace(
+            family_key=family_key,
+            witness_identity=f"probability-{suffix}",
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{suffix}",
+                    condition_id=f"condition-{suffix}",
+                    yes_token_id=f"yes-token-{suffix}",
+                    no_token_id=f"no-token-{suffix}",
+                ),
+            ),
+        )
+
+    probabilities = {
+        dallas: witness(dallas, "dallas"),
+        miami: witness(miami, "miami"),
+    }
+    now = _dt.datetime.now(_dt.timezone.utc)
+    states = tuple(
+        (
+            family_key,
+            binding.bin_id,
+            binding.condition_id,
+            side,
+            token_id,
+            "EXECUTABLE",
+            f"hash-{token_id}",
+            f"event-{family_key}",
+            f"market-{family_key}",
+        )
+        for family_key, probability in probabilities.items()
+        for binding in probability.bindings
+        for side, token_id in (
+            ("YES", binding.yes_token_id),
+            ("NO", binding.no_token_id),
+        )
+    )
+    epoch = CurrentGlobalBookEpoch(
+        assets=(),
+        asset_states=states,
+        captured_at_utc=now,
+        max_age=_dt.timedelta(seconds=180),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=now,
+        ),
+    )
+    assert (
+        era._store_global_book_epoch(
+            trade,
+            probabilities,
+            epoch,
+            checked_at=now,
+        )
+        == "stored"
+    )
+
+    projected_tokens = []
+    refresh_calls = []
+
+    def fake_projected(_trade_conn, tokens, **_):
+        projected_tokens.append(tuple(sorted(tokens)))
+        return {
+            token: ({"asset_id": token}, now, f"snapshot-{token}")
+            for token in tokens
+        }
+
+    def fake_refresh(
+        _trade_conn,
+        *,
+        epoch,
+        required_tokens,
+        **_,
+    ):
+        refresh_calls.append(tuple(sorted(required_tokens)))
+        refreshed_states = tuple(
+            row[:6]
+            + (("hash-refreshed" if row[4] in required_tokens else row[6]),)
+            + row[7:]
+            for row in epoch.asset_states
+        )
+        return (
+            replace(
+                epoch,
+                asset_states=refreshed_states,
+                witness_identity=current_global_book_epoch_identity(
+                    asset_states=refreshed_states,
+                    captured_at_utc=epoch.captured_at_utc,
+                ),
+            ),
+            1,
+        )
+
+    monkeypatch.setattr(era, "_projected_global_book_rows", fake_projected)
+    monkeypatch.setattr(
+        universe,
+        "refresh_current_global_book_epoch_tokens",
+        fake_refresh,
+    )
+    returned_probabilities, returned_epoch = captured[
+        "current_book_epoch_provider"
+    ](
+        {dallas: probabilities[dallas]},
+        now + _dt.timedelta(seconds=1),
+    )
+
+    cache = era._GLOBAL_BOOK_EPOCH_CACHE
+    assert cache is not None
+    assert (
+        set(returned_probabilities)
+        == {row[0] for row in returned_epoch.asset_states}
+        == {dallas}
+    )
+    assert {family_key for family_key, _ in cache.bound_probabilities} == {
+        row[0] for row in cache.epoch.asset_states
+    } == {dallas, miami}
+    assert projected_tokens == [("no-token-dallas", "yes-token-dallas")]
+    assert refresh_calls == [("yes-token-dallas",)]
+    receipt = global_batch_runtime._book_native_side_receipt(
+        asset_states=returned_epoch.asset_states,
+        probability_keys=tuple(returned_probabilities),
+        buy_candidate_index=tuple(
+            ("BUY",) + row[:5] for row in returned_epoch.asset_states
+        ),
+        excluded_by_family={},
+    )
+    assert receipt["book_native_side_candidate_coverage_status"] == "COMPLETE"
+
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
 def test_global_book_epoch_cache_metadata_expires_with_epoch(monkeypatch):
     conn = sqlite3.connect(":memory:")
     monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
