@@ -158,7 +158,7 @@ def _ci_intervals_separated(
     return (hi_a < lo_b - _CI_SEP_EPS) or (hi_b < lo_a - _CI_SEP_EPS)
 
 
-def _held_side_ci_lcb(
+def _held_side_ci_ucb(
     ci: Optional[tuple],
     point: Optional[float],
 ) -> Optional[float]:
@@ -175,7 +175,10 @@ def _held_side_ci_lcb(
         return None
     if not (0.0 <= lower <= point_float <= upper <= 1.0):
         return None
-    return lower
+    # A SELL pays a fixed cash amount, whereas HOLD increases with the held
+    # claim's probability.  Its worst-case delta versus HOLD is therefore at
+    # the held-side UCB, not the LCB.
+    return upper
 
 
 def _entry_ci_contains_point(ci: Optional[tuple], point: Optional[float]) -> bool:
@@ -1019,7 +1022,7 @@ class Position:
             "hold_value_exit_costs_enabled",
             "hold_value_hours_unknown_time_cost_zero",
             "hold_value_correlation_crowding_applied",
-            "hold_value_probability_basis:current_q_lcb",
+            "hold_value_probability_basis:current_q_ucb",
             "exit_fee_applied_to_sell_value",
             "hold_terminal_value_excludes_exit_fee",
             "current_held_ci_invalid",
@@ -1173,24 +1176,24 @@ class Position:
                         )
                     applied.append("day0_zero_probability_hold_value_dominates")
 
-        current_hold_q_lcb = _held_side_ci_lcb(
+        current_hold_q_ucb = _held_side_ci_ucb(
             exit_context.current_ci,
             exit_context.fresh_prob,
         )
         current_ci_invalid = (
-            exit_context.current_ci is not None and current_hold_q_lcb is None
+            exit_context.current_ci is not None and current_hold_q_ucb is None
         )
 
         # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
         # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
         # confirmed-win NO at 99.9c was force-sold). Route the decision through the SAME EV(hold)
         # vs EV(sell) authority the rest of the exit path uses - HoldValue net of exit costs vs
-        # shares*bid. A valid current CI obeys strict net-value dominance; without one, retain the
-        # legacy confirmed-winner exception and otherwise exit. A physics REVERSAL the market has
-        # not priced (fresh belief low) OR a market overpaying our fresh belief both SELL ("sell
-        # before the market notices"); an unprovable EV (no executable bid / no shares -> None)
-        # keeps the conservative force-sell. Freshness of fresh_prob is already gated by the missing-
-        # authority check above, so a stale belief cannot drive this branch.
+        # shares*bid. A valid current CI obeys strict net-value dominance. Missing or malformed CI
+        # cannot prove SELL, so it holds with explicit evidence-unavailable authority. A physics
+        # REVERSAL the market has not priced (fresh belief low) OR a market overpaying our fresh
+        # belief can SELL only when the UCB-based comparison is positively proven. Freshness of
+        # fresh_prob is already gated by the missing-authority check above, so a stale belief cannot
+        # drive this branch.
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
             if current_ci_invalid:
                 applied.append("current_held_ci_invalid")
@@ -1198,40 +1201,25 @@ class Position:
                 applied.append("near_settlement_gate")
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
-                    True,
-                    "SETTLEMENT_IMMINENT",
-                    "immediate",
+                    False,
+                    "NEAR_SETTLEMENT_EVIDENCE_UNAVAILABLE_HOLD",
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
-                    trigger="SETTLEMENT_IMMINENT",
+                    trigger="EVIDENCE_UNAVAILABLE",
                 )
-            if current_hold_q_lcb is None:
-                legacy_hold_reason = self._near_settlement_hold_confirmation_reason(
-                    current_p_posterior=float(exit_context.fresh_prob),
-                    best_bid=exit_context.best_bid,
-                )
-                if legacy_hold_reason is not None:
-                    applied.append("near_settlement_confirmed_win_hold")
-                    if legacy_hold_reason != "near_settlement_confirmed_win_hold":
-                        applied.append(legacy_hold_reason)
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                    )
+            if current_hold_q_ucb is None:
+                applied.append("evidence_unavailable_third_state")
                 applied.append("near_settlement_gate")
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
-                    True,
-                    "SETTLEMENT_IMMINENT",
-                    "immediate",
+                    False,
+                    "NEAR_SETTLEMENT_EVIDENCE_UNAVAILABLE_HOLD",
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
-                    trigger="SETTLEMENT_IMMINENT",
+                    trigger="EVIDENCE_UNAVAILABLE",
                 )
-            hold_probability = current_hold_q_lcb
-            applied.append("hold_value_probability_basis:current_q_lcb")
+            hold_probability = current_hold_q_ucb
+            applied.append("hold_value_probability_basis:current_q_ucb")
             sell_beats_hold = self._sell_value_exceeds_hold_value(
                 current_p_posterior=hold_probability,
                 best_bid=exit_context.best_bid,
@@ -1240,9 +1228,8 @@ class Position:
                 portfolio_positions=exit_context.portfolio_positions,
                 bankroll=exit_context.bankroll,
             )
-            if sell_beats_hold is not False:
-                # sell-EV dominant (physics REVERSAL, or the market overpaying our fresh belief)
-                # OR unprovable (no executable bid / no shares -> None): conservative force-sell.
+            if sell_beats_hold is True:
+                # sell-EV dominant (physics REVERSAL, or the market overpaying our fresh belief).
                 applied.append("near_settlement_gate")
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
@@ -1250,6 +1237,18 @@ class Position:
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
                     trigger="SETTLEMENT_IMMINENT",
+                )
+            if sell_beats_hold is None:
+                applied.append("near_settlement_exit_context_incomplete_hold")
+                applied.append("evidence_unavailable_third_state")
+                applied.append("near_settlement_gate")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "NEAR_SETTLEMENT_EXIT_CONTEXT_INCOMPLETE_HOLD",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="EVIDENCE_UNAVAILABLE",
                 )
             near_settlement_hold_reason = self._near_settlement_hold_confirmation_reason(
                 current_p_posterior=hold_probability,
@@ -1383,7 +1382,7 @@ class Position:
         separated = _ci_intervals_separated(exit_context.entry_ci, exit_context.current_ci)
         if separated is not None and exit_context.entry_posterior is not None:
             applied.append("ci_separation_gate")
-            assert current_hold_q_lcb is not None
+            assert current_hold_q_ucb is not None
             current_held = float(exit_context.fresh_prob)
             below = current_held < float(exit_context.entry_posterior) - _CI_SEP_EPS
             if separated and below:
@@ -1401,9 +1400,9 @@ class Position:
                     if not exit_context.day0_zero_probability_exit_authority:
                         applied.append("day0_zero_probability_exit_authority_blocked")
                     else:
-                        applied.append("hold_value_probability_basis:current_q_lcb")
+                        applied.append("hold_value_probability_basis:current_q_ucb")
                         sell_value_dominates = self._sell_value_exceeds_hold_value(
-                            current_p_posterior=current_hold_q_lcb,
+                            current_p_posterior=current_hold_q_ucb,
                             best_bid=exit_context.best_bid,
                             hours_to_settlement=exit_context.hours_to_settlement,
                             applied=applied,
@@ -1441,9 +1440,9 @@ class Position:
                         applied_validations=list(self.applied_validations),
                         trigger=hold_reason,
                     )
-                applied.append("hold_value_probability_basis:current_q_lcb")
+                applied.append("hold_value_probability_basis:current_q_ucb")
                 sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=current_hold_q_lcb,
+                    current_p_posterior=current_hold_q_ucb,
                     best_bid=exit_context.best_bid,
                     hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,
@@ -1489,9 +1488,9 @@ class Position:
             # so the downstream maturity lock remains authoritative.
             if exit_context.day0_active:
                 applied.append("ci_overlap_nonterminal_day0")
-                applied.append("hold_value_probability_basis:current_q_lcb")
+                applied.append("hold_value_probability_basis:current_q_ucb")
                 sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=current_hold_q_lcb,
+                    current_p_posterior=current_hold_q_ucb,
                     best_bid=exit_context.best_bid,
                     hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,
@@ -1547,9 +1546,9 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger=reason,
                 )
-            applied.append("hold_value_probability_basis:current_q_lcb")
+            applied.append("hold_value_probability_basis:current_q_ucb")
             sell_value_dominates = self._sell_value_exceeds_hold_value(
-                current_p_posterior=current_hold_q_lcb,
+                current_p_posterior=current_hold_q_ucb,
                 best_bid=exit_context.best_bid,
                 hours_to_settlement=exit_context.hours_to_settlement,
                 applied=applied,

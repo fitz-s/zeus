@@ -4559,6 +4559,7 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
         ))
         position.last_monitor_prob = 0.62
         position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.22
         position.last_monitor_market_price = 0.40
         position.last_monitor_market_price_is_fresh = True
         position.last_monitor_best_bid = 0.40
@@ -7386,10 +7387,9 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
         strategy_key="center_bin_buy",
         env="live",
     )
-    # Live-shaped counterexample: q_point rounds to certainty while the
-    # side-correct current lower bound can still sit below the executable bid.
-    # The robust evaluator approved EXIT; the later point-only family summary
-    # must remain diagnostic.
+    # A separately proven single-leg exit reaches the family overlay. The
+    # overlay may remain diagnostic; it cannot replace that prior decision
+    # with a point-only family summary.
     for pos, prob, bid in (
         (pos_a, 0.999999997246481, 0.95),
         (pos_b, 0.9998, 0.96),
@@ -7409,7 +7409,7 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
     portfolio = _make_portfolio(pos_a, pos_b)
     single_leg_exit = ExitDecision(
         True,
-        reason="CI_SEPARATED_REVERSAL (q_lcb=0.9430, bid=0.9500)",
+        reason="CI_SEPARATED_REVERSAL",
         trigger="CI_SEPARATED_REVERSAL",
         selected_method="replacement_posterior",
         applied_validations=["replacement_posterior", "ci_separated_reversal"],
@@ -9179,13 +9179,12 @@ def test_live_exit_collateral_blocked_goes_to_retry():
     outcome = execute_exit(
         portfolio=portfolio,
         position=pos,
-            exit_context=ExitContext(
-                exit_reason="EDGE_REVERSAL",
-                current_market_price=0.45,
-                current_market_price_is_fresh=True,
-                best_bid=None,
-            ),
+        exit_context=_global_sell_exit_context(),
         clob=clob,
+        exit_intent=_global_sell_exit_intent(
+            pos,
+            certificate=_valid_global_sell_certificate(pos),
+        ),
     )
 
     assert "collateral_blocked" in outcome
@@ -10238,7 +10237,7 @@ def test_low_probability_position_holds_when_terminal_value_beats_sell_value():
 
 
 def test_wide_ci_position_holds_when_terminal_value_beats_sell_value():
-    """A wide current CI still holds when its q_lcb value beats the bid."""
+    """A wide current CI holds unless the bid beats its held-side UCB."""
 
     pos = _make_position(
         direction="buy_yes",
@@ -10275,26 +10274,26 @@ def test_wide_ci_position_holds_when_terminal_value_beats_sell_value():
 @pytest.mark.parametrize(
     ("hours_to_settlement", "day0_active", "expected_trigger"),
     [
-        (10.0, False, "CI_OVERLAP_SELL_VALUE_DOMINATES"),
-        (0.5, False, "SETTLEMENT_IMMINENT"),
-        (10.0, True, "DAY0_CONFIRMED_EXIT"),
+        (10.0, False, "CI_OVERLAP_HOLD_VALUE_DOMINATES"),
+        (0.5, False, "NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES"),
+        (10.0, True, "CI_OVERLAP_HOLD_VALUE_DOMINATES"),
     ],
 )
-def test_near_one_point_sells_when_current_q_lcb_value_is_below_bid(
+def test_near_one_point_holds_when_current_q_ucb_value_beats_bid(
     monkeypatch,
     direction,
     hours_to_settlement,
     day0_active,
     expected_trigger,
 ):
-    """YES and NO use the same held-side lower bound instead of fake certainty."""
+    """YES and NO use the same held-side UCB instead of fake certainty."""
 
     shares = 30.0
     q_point = 0.999999997246481
-    q_lcb = 0.942952047639557
+    q_ucb = 1.0
     best_bid = 0.95
     assert shares * q_point > shares * best_bid
-    assert shares * q_lcb < shares * best_bid
+    assert shares * q_ucb > shares * best_bid
 
     pos = _make_position(
         direction=direction,
@@ -10326,18 +10325,13 @@ def test_near_one_point_sells_when_current_q_lcb_value_is_below_bid(
             day0_active=day0_active,
             entry_posterior=0.97,
             entry_ci=(0.92, 1.02),
-            current_ci=(q_lcb, 1.0),
+            current_ci=(0.942952047639557, q_ucb),
         )
     )
 
-    assert decision.should_exit is True
-    if expected_trigger == "DAY0_CONFIRMED_EXIT":
-        assert decision.trigger == "EDGE_REVERSAL"
-        assert "day0_observation_gate" in decision.applied_validations
-        assert "consecutive_cycle_check" in decision.applied_validations
-    else:
-        assert decision.trigger == expected_trigger
-    assert "hold_value_probability_basis:current_q_lcb" in decision.applied_validations
+    assert decision.should_exit is False
+    assert decision.trigger == expected_trigger
+    assert "hold_value_probability_basis:current_q_ucb" in decision.applied_validations
     assert "hold_value_exit_costs_enabled" in decision.applied_validations
     assert "hold_value_correlation_crowding_applied" in decision.applied_validations
 
@@ -10382,7 +10376,7 @@ def test_day0_robust_confirmation_does_not_reuse_legacy_edge_count(
     )
 
     robust_context = ExitContext(
-        fresh_prob=0.999999997246481,
+        fresh_prob=0.94,
         fresh_prob_is_fresh=True,
         current_market_price=0.95,
         current_market_price_is_fresh=True,
@@ -10392,8 +10386,8 @@ def test_day0_robust_confirmation_does_not_reuse_legacy_edge_count(
         position_state="day0_window",
         day0_active=True,
         entry_posterior=0.97,
-        entry_ci=(0.92, 1.02),
-        current_ci=(0.942952047639557, 1.0),
+        entry_ci=(0.92, 1.0),
+        current_ci=(0.93, 0.945),
     )
     first_robust = pos.evaluate_exit(robust_context)
     assert first_robust.should_exit is False
@@ -10422,7 +10416,7 @@ def test_legacy_edge_confirmation_does_not_reuse_day0_robust_count(
     monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
 
     robust_context = ExitContext(
-        fresh_prob=0.999999997246481,
+        fresh_prob=0.94,
         fresh_prob_is_fresh=True,
         current_market_price=0.95,
         current_market_price_is_fresh=True,
@@ -10432,8 +10426,8 @@ def test_legacy_edge_confirmation_does_not_reuse_day0_robust_count(
         position_state="day0_window",
         day0_active=True,
         entry_posterior=0.97,
-        entry_ci=(0.92, 1.02),
-        current_ci=(0.942952047639557, 1.0),
+        entry_ci=(0.92, 1.0),
+        current_ci=(0.93, 0.945),
     )
     first_robust = pos.evaluate_exit(robust_context)
     assert first_robust.should_exit is False
@@ -10467,13 +10461,13 @@ def test_legacy_edge_confirmation_does_not_reuse_day0_robust_count(
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
 @pytest.mark.parametrize(
-    ("q_lcb", "should_exit"),
+    ("q_ucb", "should_exit"),
     [(0.9496, False), (0.9470, True)],
 )
 def test_exit_fee_is_charged_to_sell_not_terminal_hold(
     monkeypatch,
     direction,
-    q_lcb,
+    q_ucb,
     should_exit,
 ):
     shares = 100.0
@@ -10481,7 +10475,7 @@ def test_exit_fee_is_charged_to_sell_not_terminal_hold(
     fee_rate = 0.05
     fee_per_share = fee_rate * best_bid * (1.0 - best_bid)
     sell_net = shares * (best_bid - fee_per_share)
-    hold_terminal = shares * q_lcb
+    hold_terminal = shares * q_ucb
     assert (sell_net > hold_terminal) is should_exit
 
     pos = _make_position(
@@ -10502,7 +10496,7 @@ def test_exit_fee_is_charged_to_sell_not_terminal_hold(
 
     decision = pos.evaluate_exit(
         ExitContext(
-            fresh_prob=0.96,
+            fresh_prob=0.94,
             fresh_prob_is_fresh=True,
             current_market_price=best_bid,
             current_market_price_is_fresh=True,
@@ -10511,9 +10505,9 @@ def test_exit_fee_is_charged_to_sell_not_terminal_hold(
             hours_to_settlement=2.0,
             position_state="holding",
             day0_active=False,
-            entry_posterior=0.96,
-            entry_ci=(0.90, 1.0),
-            current_ci=(q_lcb, 0.98),
+            entry_posterior=0.94,
+            entry_ci=(0.90, 0.98),
+            current_ci=(0.90, q_ucb),
         )
     )
 
@@ -10523,7 +10517,7 @@ def test_exit_fee_is_charged_to_sell_not_terminal_hold(
 
 
 @pytest.mark.parametrize(
-    ("q_lcb", "best_bid", "should_exit", "trigger"),
+    ("q_ucb", "best_bid", "should_exit", "trigger"),
     [
         (0.949, 0.94, False, "NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES"),
         (0.950, 0.99, True, "SETTLEMENT_IMMINENT"),
@@ -10531,7 +10525,7 @@ def test_exit_fee_is_charged_to_sell_not_terminal_hold(
 )
 def test_near_settlement_obeys_robust_value_dominance(
     monkeypatch,
-    q_lcb,
+    q_ucb,
     best_bid,
     should_exit,
     trigger,
@@ -10546,7 +10540,7 @@ def test_near_settlement_obeys_robust_value_dominance(
 
     decision = pos.evaluate_exit(
         ExitContext(
-            fresh_prob=0.96,
+            fresh_prob=0.94,
             fresh_prob_is_fresh=True,
             current_market_price=best_bid,
             current_market_price_is_fresh=True,
@@ -10555,18 +10549,18 @@ def test_near_settlement_obeys_robust_value_dominance(
             hours_to_settlement=0.5,
             position_state="holding",
             day0_active=False,
-            entry_posterior=0.96,
-            entry_ci=(0.90, 1.0),
-            current_ci=(q_lcb, 0.98),
+            entry_posterior=0.94,
+            entry_ci=(0.90, 0.98),
+            current_ci=(0.90, q_ucb),
         )
     )
 
     assert decision.should_exit is should_exit
     assert decision.trigger == trigger
-    assert "hold_value_probability_basis:current_q_lcb" in decision.applied_validations
+    assert "hold_value_probability_basis:current_q_ucb" in decision.applied_validations
 
 
-def test_missing_current_ci_does_not_invent_hold_value_lower_bound(monkeypatch):
+def test_missing_current_ci_does_not_invent_hold_value_upper_bound(monkeypatch):
     pos = _make_position(
         direction="buy_yes",
         p_posterior=0.999999997246481,
@@ -10599,7 +10593,7 @@ def test_missing_current_ci_does_not_invent_hold_value_lower_bound(monkeypatch):
             current_ci=(0.942952047639557, 1.0),
         )
     )
-    assert "hold_value_probability_basis:current_q_lcb" in prior_decision.applied_validations
+    assert "hold_value_probability_basis:current_q_ucb" in prior_decision.applied_validations
     assert "hold_value_exit_costs_enabled" in prior_decision.applied_validations
     assert "hold_value_correlation_crowding_applied" in prior_decision.applied_validations
 
@@ -10623,9 +10617,96 @@ def test_missing_current_ci_does_not_invent_hold_value_lower_bound(monkeypatch):
     )
 
     assert decision.should_exit is False
-    assert "hold_value_probability_basis:current_q_lcb" not in decision.applied_validations
+    assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
     assert "hold_value_exit_costs_enabled" not in decision.applied_validations
     assert "hold_value_correlation_crowding_applied" not in decision.applied_validations
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("current_ci", [None, (0.70, 0.60)])
+def test_near_settlement_missing_or_invalid_ci_cannot_authorize_sell(
+    direction,
+    current_ci,
+):
+    """Time pressure cannot replace the current held-side robust bound."""
+
+    pos = _make_position(
+        direction=direction,
+        p_posterior=0.20,
+        entry_price=0.60,
+        entry_ci_width=0.10,
+        shares=30.0,
+        cost_basis_usd=18.0,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.20,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.40,
+            current_market_price_is_fresh=True,
+            best_bid=0.39,
+            best_ask=0.41,
+            hours_to_settlement=0.5,
+            position_state="holding",
+            day0_active=False,
+            entry_posterior=0.60,
+            entry_ci=(0.55, 0.65),
+            current_ci=current_ci,
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.trigger == "EVIDENCE_UNAVAILABLE"
+    assert "near_settlement_gate" in decision.applied_validations
+    assert "evidence_unavailable_third_state" in decision.applied_validations
+    assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("day0_active", [False, True])
+def test_near_settlement_unprovable_value_comparison_cannot_authorize_sell(
+    monkeypatch,
+    direction,
+    day0_active,
+):
+    """A valid CI is insufficient when executable SELL-vs-HOLD value is unprovable."""
+
+    pos = _make_position(
+        direction=direction,
+        p_posterior=0.50,
+        entry_price=0.40,
+        entry_ci_width=0.10,
+        shares=30.0,
+        cost_basis_usd=12.0,
+    )
+    monkeypatch.setattr(
+        Position,
+        "_sell_value_exceeds_hold_value",
+        lambda self, **kwargs: None,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.50,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.45,
+            current_market_price_is_fresh=True,
+            best_bid=0.44,
+            best_ask=0.46,
+            hours_to_settlement=0.5,
+            position_state="day0_window" if day0_active else "holding",
+            day0_active=day0_active,
+            entry_posterior=0.50,
+            entry_ci=(0.40, 0.60),
+            current_ci=(0.40, 0.60),
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.trigger == "EVIDENCE_UNAVAILABLE"
+    assert decision.reason == "NEAR_SETTLEMENT_EXIT_CONTEXT_INCOMPLETE_HOLD"
+    assert "near_settlement_exit_context_incomplete_hold" in decision.applied_validations
 
 
 @pytest.mark.parametrize(
@@ -10655,7 +10736,7 @@ def test_malformed_current_ci_fails_closed_without_point_substitution(current_ci
     assert decision.should_exit is False
     assert decision.trigger == "EVIDENCE_UNAVAILABLE"
     assert "current_held_ci_invalid" in decision.applied_validations
-    assert "hold_value_probability_basis:current_q_lcb" not in decision.applied_validations
+    assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
 
 
 def test_malformed_entry_ci_fails_closed_without_point_fallback():
@@ -10686,11 +10767,11 @@ def test_malformed_entry_ci_fails_closed_without_point_fallback():
 @pytest.mark.parametrize(
     ("hours_to_settlement", "whale_toxicity", "expected_exit", "expected_trigger"),
     [
-        (0.5, False, True, "SETTLEMENT_IMMINENT"),
+        (0.5, False, False, "EVIDENCE_UNAVAILABLE"),
         (10.0, True, False, "EVIDENCE_UNAVAILABLE"),
     ],
 )
-def test_malformed_current_ci_does_not_suppress_independent_exit_authority(
+def test_malformed_current_ci_cannot_authorize_local_sell(
     hours_to_settlement,
     whale_toxicity,
     expected_exit,
@@ -10754,6 +10835,55 @@ def test_low_probability_position_sells_when_executable_repricing_beats_hold_val
     assert "ci_overlap_sell_value_dominates" in decision.applied_validations
 
 
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize(
+    ("best_bid", "should_exit"),
+    [(0.55, False), (0.61, True)],
+)
+def test_sell_requires_bid_to_exceed_held_side_ucb_for_each_direction(
+    monkeypatch,
+    direction,
+    best_bid,
+    should_exit,
+):
+    """Fixed SELL cash must beat HOLD at the held-side UCB, for YES and NO."""
+
+    pos = _make_position(
+        direction=direction,
+        p_posterior=0.50,
+        entry_price=0.40,
+        entry_ci_width=0.10,
+        shares=100.0,
+        cost_basis_usd=40.0,
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.50,
+            fresh_prob_is_fresh=True,
+            current_market_price=best_bid,
+            current_market_price_is_fresh=True,
+            best_bid=best_bid,
+            best_ask=best_bid + 0.01,
+            hours_to_settlement=10.0,
+            position_state="holding",
+            day0_active=False,
+            entry_posterior=0.50,
+            entry_ci=(0.40, 0.60),
+            current_ci=(0.40, 0.60),
+        )
+    )
+
+    assert decision.should_exit is should_exit
+    assert "hold_value_probability_basis:current_q_ucb" in decision.applied_validations
+    assert decision.trigger == (
+        "CI_OVERLAP_SELL_VALUE_DOMINATES"
+        if should_exit
+        else "CI_OVERLAP_HOLD_VALUE_DOMINATES"
+    )
+
+
 def test_day0_buy_no_point_reversal_requires_stronger_evidence():
     pos = _make_position(direction="buy_no", size_usd=5.0, entry_price=0.60, entry_ci_width=0.02)
 
@@ -10777,8 +10907,8 @@ def test_day0_buy_no_point_reversal_requires_stronger_evidence():
     assert "consecutive_cycle_check" in decision.applied_validations
 
 
-def test_day0_observation_exits_when_settlement_imminent_without_current_ci():
-    """Missing current CI preserves the legacy near-settlement safety exit."""
+def test_day0_observation_holds_when_settlement_imminent_without_current_ci():
+    """Missing current CI cannot become SELL proof merely because time is short."""
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 
     decision = pos.evaluate_exit(
@@ -10796,10 +10926,11 @@ def test_day0_observation_exits_when_settlement_imminent_without_current_ci():
         )
     )
 
-    assert decision.should_exit is True
-    assert decision.trigger == "SETTLEMENT_IMMINENT"
+    assert decision.should_exit is False
+    assert decision.trigger == "EVIDENCE_UNAVAILABLE"
     assert "day0_observation_authority" in decision.applied_validations
     assert "near_settlement_gate" in decision.applied_validations
+    assert "evidence_unavailable_third_state" in decision.applied_validations
 
 
 def test_live_execute_exit_blocks_incomplete_context():
@@ -10844,6 +10975,177 @@ def test_live_execute_exit_blocks_stale_market_price_context():
     assert pos.exit_retry_count == 1
     assert pos.last_exit_error == "stale_current_market_price"
     assert pos in portfolio.positions
+
+
+def _global_sell_exit_intent(position, *, certificate=None):
+    from src.execution.exit_lifecycle import ExitIntent
+
+    return ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=position.token_id,
+        shares=position.effective_shares,
+        current_market_price=0.45,
+        best_bid=0.45,
+        exact_limit_price=0.45,
+        submit_order_type="FAK",
+        capital_certificate=certificate,
+    )
+
+
+def _valid_global_sell_certificate(position):
+    return {
+        "action": "SELL",
+        "candidate_id": "global-sell-candidate",
+        "actuation_identity": "global-actuation-identity",
+        "economic_identity": "global-economic-identity",
+        "probability_witness_identity": "global-probability-witness",
+        "robust_delta_log_wealth": "0.001",
+        "robust_ev_usd": "0.10",
+        "held_shares": str(position.effective_shares),
+        "selected_shares": str(position.effective_shares),
+        "exact_limit_price": "0.45",
+    }
+
+
+def _global_sell_exit_context():
+    return ExitContext(
+        exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        current_market_price=0.45,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+    )
+
+
+def test_local_exit_without_capital_certificate_cannot_reach_venue(monkeypatch):
+    """A local monitor intent is diagnostic-only; it cannot emit a live SELL."""
+
+    pos = _make_position(state="holding")
+    portfolio = _make_portfolio(pos)
+    called = False
+
+    def no_venue(**_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("local exit bypassed the global capital proof")
+
+    monkeypatch.setattr("src.execution.exit_lifecycle.place_sell_order", no_venue)
+    from src.execution.exit_lifecycle import ExitIntent
+
+    outcome = execute_exit(
+        portfolio,
+        pos,
+        ExitContext(
+            exit_reason="EDGE_REVERSAL",
+            current_market_price=0.45,
+            current_market_price_is_fresh=True,
+            best_bid=0.45,
+        ),
+        clob=object(),
+        exit_intent=ExitIntent(
+            trade_id=pos.trade_id,
+            reason="EDGE_REVERSAL",
+            token_id=pos.token_id,
+            shares=pos.effective_shares,
+            current_market_price=0.45,
+            best_bid=0.45,
+        ),
+    )
+
+    assert outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
+    assert called is False
+    assert pos.exit_state == ""
+
+
+@pytest.mark.parametrize(
+    "certificate_update",
+    [
+        {"action": "BUY"},
+        {"actuation_identity": ""},
+        {"robust_delta_log_wealth": "-0.001"},
+        {"robust_ev_usd": "0"},
+        {"held_shares": "1"},
+        {"selected_shares": "1"},
+        {"exact_limit_price": "0.44"},
+    ],
+)
+def test_invalid_global_sell_capital_certificate_cannot_reach_venue(
+    monkeypatch,
+    certificate_update,
+):
+    """Forged, non-positive, or mismatched global SELL proofs fail closed."""
+
+    pos = _make_position(state="holding")
+    portfolio = _make_portfolio(pos)
+    certificate = _valid_global_sell_certificate(pos)
+    certificate.update(certificate_update)
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.place_sell_order",
+        lambda **_kwargs: pytest.fail("invalid certificate reached venue"),
+    )
+
+    outcome = execute_exit(
+        portfolio,
+        pos,
+        _global_sell_exit_context(),
+        clob=object(),
+        exit_intent=_global_sell_exit_intent(pos, certificate=certificate),
+    )
+
+    assert outcome.startswith("exit_blocked: capital_certificate_")
+    assert pos.exit_state == ""
+
+
+def test_complete_global_sell_capital_certificate_can_reach_venue(monkeypatch):
+    """A positive, identity-complete global SELL certificate reaches the venue seam."""
+
+    from src.execution import exit_lifecycle
+
+    pos = _make_position(state="holding")
+    portfolio = _make_portfolio(pos)
+    submitted = []
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+
+    def place(**kwargs):
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=pos.trade_id,
+            status="pending",
+            order_id="global-sell-order",
+            external_order_id="global-sell-order",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", place)
+
+    class Clob:
+        @staticmethod
+        def get_order_status(_order_id):
+            return {"status": "OPEN"}
+
+    outcome = execute_exit(
+        portfolio,
+        pos,
+        _global_sell_exit_context(),
+        clob=Clob(),
+        exit_intent=_global_sell_exit_intent(
+            pos,
+            certificate=_valid_global_sell_certificate(pos),
+        ),
+    )
+
+    assert outcome == "sell_pending: order=global-sell-order, status=OPEN"
+    assert len(submitted) == 1
+    assert submitted[0]["shares"] == pos.effective_shares
+    assert submitted[0]["exact_limit_price"] == 0.45
 
 
 # ---- Autonomous Discovery Tests ----
