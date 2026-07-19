@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused/audited: 2026-07-19
 # Authority basis: Wall A fix — cert executable_snapshot payload must carry
 #   min_tick_size / min_order_size / neg_risk from the hydrated snapshot that the
 #   cert cites (proof.executable_snapshot_id), NOT from selected_snapshot_row
@@ -153,6 +153,12 @@ def _make_proof(snapshot_id: str = "snap-hydrated") -> SimpleNamespace:
         p_live_vector_hash="plivehash",
         c_cost_95pct=0.56,
         trade_score=0.14,
+        q_source=None,
+        probability_authority=None,
+        replacement_calibration_credential=None,
+        replacement_no_bound_certificate=None,
+        posterior_id=None,
+        qkernel_execution_economics=None,
     )
 
 
@@ -176,7 +182,6 @@ def _make_family_and_event():
     candidate = SimpleNamespace(
         bin=SimpleNamespace(label="HIGH", unit="°C"),
         condition_id="cond-001",
-        token_id="no-token-001",
     )
     family = SimpleNamespace(
         family_id="fam-001",
@@ -207,7 +212,13 @@ def _make_snapshot_rows(snapshot_id: str) -> list[dict]:
     return [{"snapshot_id": snapshot_id}]
 
 
-def _call_builder(monkeypatch, hydrated_snap, selected_row):
+def _call_builder(
+    monkeypatch,
+    hydrated_snap,
+    selected_row,
+    *,
+    q_source=None,
+):
     """Helper: call _build_no_submit_proof_bundle_from_adapter_evidence with minimal stubs."""
     _patch_dependencies(hydrated_snap, monkeypatch)
 
@@ -226,6 +237,10 @@ def _call_builder(monkeypatch, hydrated_snap, selected_row):
     snapshot_id = selected_row["snapshot_id"]
     raw_receipt = _make_raw_receipt(snapshot_id=hydrated_snap.snapshot_id)
     proof = _make_proof(snapshot_id=hydrated_snap.snapshot_id)
+    proof.candidate = family.candidates[0]
+    proof.q_source = q_source
+    if q_source == "day0_deterministic_bin_payoff":
+        proof.probability_authority = "day0_deterministic_bin_payoff_v1"
 
     bundle = _build_no_submit_proof_bundle_from_adapter_evidence(
         event=event,
@@ -379,6 +394,21 @@ class TestTickSizeProvenanceERACertPayload:
 
         assert exec_payload_true["neg_risk"] is True
         assert raw_receipt_true["neg_risk"] is True
+
+    def test_deterministic_builder_uses_selected_proof_token(self, monkeypatch):
+        hydrated = _make_minimal_snapshot(neg_risk=False)
+        selected_row = _make_selected_row(neg_risk=False)
+
+        bundle, _ = _call_builder(
+            monkeypatch,
+            hydrated,
+            selected_row,
+            q_source="day0_deterministic_bin_payoff",
+        )
+
+        assert bundle.candidate_evidence.payload["selected_token_id"] == (
+            "no-token-001"
+        )
 
 
 class TestTickSizeDivergenceAntibody:

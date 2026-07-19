@@ -55,6 +55,7 @@ in_scope:
 - architecture/money_path_objects.yaml
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/engine/test_cert_calibration_bridge.py
+- tests/engine/test_tick_size_provenance_cert_contract.py
 - tests/decision_kernel/test_k1_shared_authority_predicates.py
 - tests/test_finite_evidence_probability_symmetry.py
 - tests/test_replacement_fused_q_shape.py

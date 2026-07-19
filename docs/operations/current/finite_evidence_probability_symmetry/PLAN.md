@@ -790,3 +790,25 @@ PASS with no P0-P2; solver properties pass `138`, and the related W3 surface
 passes `222` with only the two unrelated pre-existing `epoch_superseded()`
 fixtures excluded.  This proof authorizes deployment and natural auction
 observation, not a forced order and not a claim of realized profit.
+
+## 2026-07-19 narrow-wake auction evidence continuity
+
+Targeted producer wakes were replacing the process-global book cache with only
+their narrow family scope.  A later disjoint wake therefore had to rebuild the
+same broad venue universe and could omit otherwise fresh families from the next
+bounded decision window.  The cache now atomically replaces the refreshed
+family while retaining other current families, but it never renews their
+freshness: the merged epoch expires at the earliest base or delta deadline, and
+an already-expired delta is rejected before merge.  Replaced family topology
+also removes its old Gamma metadata keys before current keys are installed.
+
+The deterministic Day0 proof bundle now binds candidate evidence to the
+selected native proof token rather than an optional family-candidate token.
+Unknown proof-builder exceptions remain batch-fatal before any venue side
+effect; they are not reclassified as family-local evidence and cannot authorize
+a runner-up.  Focused cache, token, neg-risk, and preflight tests pass `44`; the
+full W3 file passes `229` and retains only the two unrelated pre-existing
+`epoch_superseded()` fixture failures.  Compilation and diff whitespace checks
+pass.  Standard deployment and fresh natural auction/venue reconciliation are
+still required; this continuity repair neither changes operator entry posture
+nor authorizes a forced order.

@@ -1574,8 +1574,32 @@ def _merge_global_book_epoch_delta(
         for asset in tuple(getattr(base_epoch, "sell_assets", ()) or ())
         if str(getattr(asset, "family_key", "") or "") not in family_keys
     ) + tuple(getattr(delta_epoch, "sell_assets", ()) or ())
-    captured_at = getattr(base_epoch, "captured_at_utc", None)
-    max_age = getattr(base_epoch, "max_age", None)
+    base_captured_at = getattr(base_epoch, "captured_at_utc", None)
+    base_max_age = getattr(base_epoch, "max_age", None)
+    captured_at = base_captured_at
+    max_age = base_max_age
+    if delta_epoch is not None:
+        delta_captured_at = getattr(delta_epoch, "captured_at_utc", None)
+        delta_max_age = getattr(delta_epoch, "max_age", None)
+        if (
+            base_captured_at is None
+            or base_captured_at.tzinfo is None
+            or base_max_age is None
+            or base_max_age <= timedelta(0)
+            or delta_captured_at is None
+            or delta_captured_at.tzinfo is None
+            or delta_max_age is None
+            or delta_max_age <= timedelta(0)
+        ):
+            raise ValueError("GLOBAL_BOOK_DELTA_FRESHNESS_INVALID")
+        base_captured_at = base_captured_at.astimezone(UTC)
+        delta_captured_at = delta_captured_at.astimezone(UTC)
+        captured_at = min(base_captured_at, delta_captured_at)
+        earliest_deadline = min(
+            base_captured_at + base_max_age,
+            delta_captured_at + delta_max_age,
+        )
+        max_age = earliest_deadline - captured_at
     return CurrentGlobalBookEpoch(
         assets=assets,
         asset_states=states,
@@ -2497,6 +2521,106 @@ def _store_global_book_epoch(
             ),
         )
     return "stored"
+
+
+def _extend_global_book_epoch_cache(
+    trade_conn: sqlite3.Connection,
+    bound_probabilities: Mapping[str, object],
+    epoch: object,
+    *,
+    checked_at: datetime,
+    metadata_by_key: Mapping[
+        tuple[str, str], Mapping[str, object]
+    ] | None = None,
+) -> tuple[
+    dict[str, object],
+    object,
+    dict[tuple[str, str], Mapping[str, object]],
+    str,
+]:
+    """Retain other fresh families when a narrow producer wake replaces its scope."""
+
+    global _GLOBAL_BOOK_EPOCH_CACHE
+
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    current_metadata = {
+        (str(key[0]), str(key[1])): dict(value)
+        for key, value in (metadata_by_key or {}).items()
+        if value.get("_global_current_gamma") is True
+    }
+    if namespace is None:
+        return dict(bound_probabilities), epoch, current_metadata, "namespace_unavailable"
+    if checked_at.tzinfo is None:
+        return dict(bound_probabilities), epoch, current_metadata, "checked_at_naive"
+    checked_at = checked_at.astimezone(UTC)
+    with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        entry = _GLOBAL_BOOK_EPOCH_CACHE
+        if entry is None:
+            return dict(bound_probabilities), epoch, current_metadata, "cache_empty"
+        if entry.namespace != namespace:
+            return dict(bound_probabilities), epoch, current_metadata, "namespace_changed"
+        current_identity = getattr(entry.epoch, "current_identity", None)
+        delta_current_identity = getattr(epoch, "current_identity", None)
+        if not callable(current_identity) or not callable(delta_current_identity):
+            return (
+                dict(bound_probabilities),
+                epoch,
+                current_metadata,
+                "current_identity_missing",
+            )
+        try:
+            if current_identity(checked_at) is None:
+                return dict(bound_probabilities), epoch, current_metadata, "cache_expired"
+            if delta_current_identity(checked_at) is None:
+                return dict(bound_probabilities), epoch, current_metadata, "delta_expired"
+            family_keys = frozenset(str(key) for key in bound_probabilities)
+            merged_epoch = _merge_global_book_epoch_delta(
+                entry.epoch,
+                epoch,
+                family_keys,
+                allow_topology_change=True,
+            )
+            if merged_epoch.current_identity(checked_at) is None:
+                return dict(bound_probabilities), epoch, current_metadata, "merged_expired"
+        except (TypeError, ValueError) as exc:
+            return (
+                dict(bound_probabilities),
+                epoch,
+                current_metadata,
+                f"merge_invalid:{type(exc).__name__}",
+            )
+        merged_probabilities = dict(entry.bound_probabilities)
+        merged_probabilities.update(bound_probabilities)
+        replaced_metadata_keys = {
+            (str(row[2]), str(token_id))
+            for row in entry.topology
+            if str(row[0]) in family_keys
+            for token_id in row[3:5]
+        }
+        merged_metadata = {
+            (str(key[0]), str(key[1])): dict(value)
+            for key, value in entry.metadata_by_key
+            if (str(key[0]), str(key[1])) not in replaced_metadata_keys
+        }
+        merged_metadata.update(current_metadata)
+        topology = _global_book_topology_signature(merged_probabilities)
+        actionable_topology = _global_book_actionable_topology(merged_probabilities)
+        if topology is None or actionable_topology is None:
+            return (
+                dict(bound_probabilities),
+                epoch,
+                current_metadata,
+                "merged_topology_unavailable",
+            )
+        _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
+            namespace=namespace,
+            topology=topology,
+            actionable_topology=actionable_topology,
+            bound_probabilities=tuple(sorted(merged_probabilities.items())),
+            epoch=merged_epoch,
+            metadata_by_key=tuple(sorted(merged_metadata.items())),
+        )
+        return merged_probabilities, merged_epoch, merged_metadata, "extended"
 
 
 @dataclass(frozen=True)
@@ -8808,17 +8932,40 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if _urgent_book_preemption("after_full_capture"):
                 return probabilities, None
-            cache_store_status = _store_global_book_epoch(
+            (
+                cache_probabilities,
+                cache_epoch,
+                cache_metadata,
+                cache_extend_status,
+            ) = _extend_global_book_epoch_cache(
                 trade_conn,
                 bound_probabilities,
                 epoch,
                 checked_at=datetime.now(UTC),
                 metadata_by_key=book_metadata_by_key,
             )
+            cache_store_status = (
+                "stored"
+                if cache_extend_status == "extended"
+                else _store_global_book_epoch(
+                    trade_conn,
+                    cache_probabilities,
+                    cache_epoch,
+                    checked_at=datetime.now(UTC),
+                    metadata_by_key=cache_metadata,
+                )
+            )
             if cache_store_status != "stored":
                 logging.getLogger(__name__).warning(
                     "global book epoch cache store rejected: mode=full reason=%s",
                     cache_store_status,
+                )
+            elif cache_extend_status == "extended":
+                logging.getLogger(__name__).info(
+                    "global book epoch cache extended: captured_families=%d "
+                    "cached_families=%d",
+                    len(bound_probabilities),
+                    len(cache_probabilities),
                 )
             elif topology_bindings_reused_from_superset:
                 logging.getLogger(__name__).info(
@@ -19502,7 +19649,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             {
                 "condition_id": str(proof.candidate.condition_id or ""),
                 "candidate_bin_id": _candidate_bin_id(proof),
-                "token_id": str(proof.candidate.token_id or ""),
+                "token_id": str(proof.token_id or ""),
                 "direction": proof.direction,
                 "q_live": float(proof.q_posterior),
                 "q_lcb_5pct": float(proof.q_lcb_5pct),

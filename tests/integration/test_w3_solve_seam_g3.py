@@ -1199,6 +1199,17 @@ def test_global_actuation_does_not_blanket_block_existing_family_exposure():
     assert "Coupling-robust endowment bound" in metrics_source
 
 
+def test_global_proof_builder_unknown_fault_is_not_family_local():
+    core_source = inspect.getsource(
+        era._build_event_bound_no_submit_receipt_core
+    )
+
+    assert "GLOBAL_ACTUATION_PROOF_BUILD_FAILED" not in core_source
+    assert era._global_preflight_block_status(
+        "GLOBAL_ACTUATION_PROOF_BUILD_FAILED:AttributeError:shared fault"
+    ) == "BATCH_BLOCKED"
+
+
 def test_current_gamma_market_fetch_batches_concurrently_and_fails_closed():
     condition_ids = tuple(f"condition-{index}" for index in range(205))
     barrier = threading.Barrier(3)
@@ -6211,6 +6222,374 @@ def test_global_book_epoch_scope_projects_broad_cached_cut():
         match="GLOBAL_BOOK_SCOPED_EPOCH_FAMILY_MISSING:family-c",
     ):
         era._scope_global_book_epoch(epoch, ("family-c",))
+
+
+def test_global_book_epoch_cache_extends_across_disjoint_wake_scopes(
+    monkeypatch,
+):
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    def probability(family):
+        return SimpleNamespace(
+            family_key=family,
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family}",
+                    condition_id=f"condition-{family}",
+                    yes_token_id=f"yes-{family}",
+                    no_token_id=f"no-{family}",
+                ),
+            ),
+        )
+
+    def epoch(family, captured_at, marker):
+        states = tuple(
+            (
+                family,
+                f"bin-{family}",
+                f"condition-{family}",
+                side,
+                f"{side.lower()}-{family}",
+                "EXECUTABLE",
+                f"hash-{marker}-{side}",
+                f"event-{family}",
+                f"market-{family}",
+            )
+            for side in ("YES", "NO")
+        )
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=states,
+            captured_at_utc=captured_at,
+            max_age=_dt.timedelta(seconds=180),
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=captured_at,
+            ),
+        )
+
+    family_a = {"family-a": probability("family-a")}
+    epoch_a = epoch("family-a", at, "a1")
+    metadata_a = {
+        ("condition-family-a", "yes-family-a"): {
+            "_global_current_gamma": True,
+            "marker": "a",
+        }
+    }
+    assert era._store_global_book_epoch(
+        conn,
+        family_a,
+        epoch_a,
+        checked_at=at,
+        metadata_by_key=metadata_a,
+    ) == "stored"
+
+    family_b = {"family-b": probability("family-b")}
+    epoch_b = epoch("family-b", at + _dt.timedelta(seconds=1), "b1")
+    metadata_b = {
+        ("condition-family-b", "yes-family-b"): {
+            "_global_current_gamma": True,
+            "marker": "b",
+        }
+    }
+    missed_b, missed_reason = era._probe_global_book_epoch_cache(
+        conn,
+        family_b,
+        checked_at=at + _dt.timedelta(seconds=1),
+        allowed=True,
+    )
+    assert missed_b is None
+    assert missed_reason.startswith("topology_changed:")
+    probabilities, merged, metadata, status = era._extend_global_book_epoch_cache(
+        conn,
+        family_b,
+        epoch_b,
+        checked_at=at + _dt.timedelta(seconds=1),
+        metadata_by_key=metadata_b,
+    )
+
+    assert status == "extended"
+    assert set(probabilities) == {"family-a", "family-b"}
+    assert {row[0] for row in merged.asset_states} == {"family-a", "family-b"}
+    assert merged.captured_at_utc == at
+    assert set(metadata) == set(metadata_a) | set(metadata_b)
+    cached_a, reason_a = era._probe_global_book_epoch_cache(
+        conn,
+        family_a,
+        checked_at=at + _dt.timedelta(seconds=1),
+        allowed=True,
+    )
+    cached_b, reason_b = era._probe_global_book_epoch_cache(
+        conn,
+        family_b,
+        checked_at=at + _dt.timedelta(seconds=1),
+        allowed=True,
+    )
+    assert cached_a is merged and reason_a == "hit_subset"
+    assert cached_b is merged and reason_b == "hit_subset"
+
+    refreshed_a = epoch("family-a", at + _dt.timedelta(seconds=2), "a2")
+    probabilities, refreshed, _, status = era._extend_global_book_epoch_cache(
+        conn,
+        family_a,
+        refreshed_a,
+        checked_at=at + _dt.timedelta(seconds=2),
+        metadata_by_key=metadata_a,
+    )
+    assert status == "extended"
+    assert set(probabilities) == {"family-a", "family-b"}
+    assert {
+        row[0]: row[6]
+        for row in refreshed.asset_states
+        if row[3] == "YES"
+    } == {
+        "family-a": "hash-a2-YES",
+        "family-b": "hash-b1-YES",
+    }
+    assert refreshed.captured_at_utc == at
+    conn.close()
+
+
+def test_global_book_epoch_delta_preserves_earliest_expiry():
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    def epoch(family, captured_at, max_age):
+        states = (
+            (
+                family,
+                f"bin-{family}",
+                f"condition-{family}",
+                "YES",
+                f"yes-{family}",
+                "EXECUTABLE",
+                f"hash-{family}",
+                f"event-{family}",
+                f"market-{family}",
+            ),
+        )
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=states,
+            captured_at_utc=captured_at,
+            max_age=max_age,
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=captured_at,
+            ),
+        )
+
+    base = epoch("family-a", at, _dt.timedelta(seconds=180))
+    delta = epoch(
+        "family-b",
+        at + _dt.timedelta(seconds=1),
+        _dt.timedelta(seconds=30),
+    )
+    merged = era._merge_global_book_epoch_delta(
+        base,
+        delta,
+        frozenset(("family-b",)),
+        allow_topology_change=True,
+    )
+
+    assert merged.captured_at_utc == at
+    assert merged.max_age == _dt.timedelta(seconds=31)
+    assert merged.current_identity(at + _dt.timedelta(seconds=31)) is not None
+    assert merged.current_identity(
+        at + _dt.timedelta(seconds=31, microseconds=1)
+    ) is None
+
+
+def test_global_book_epoch_cache_rejects_expired_delta(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    def probability(family):
+        return SimpleNamespace(
+            family_key=family,
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family}",
+                    condition_id=f"condition-{family}",
+                    yes_token_id=f"yes-{family}",
+                    no_token_id=f"no-{family}",
+                ),
+            ),
+        )
+
+    def epoch(family, captured_at, max_age):
+        states = (
+            (
+                family,
+                f"bin-{family}",
+                f"condition-{family}",
+                "YES",
+                f"yes-{family}",
+                "EXECUTABLE",
+                f"hash-{family}",
+                f"event-{family}",
+                f"market-{family}",
+            ),
+        )
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=states,
+            captured_at_utc=captured_at,
+            max_age=max_age,
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=captured_at,
+            ),
+        )
+
+    family_a = {"family-a": probability("family-a")}
+    assert era._store_global_book_epoch(
+        conn,
+        family_a,
+        epoch("family-a", at, _dt.timedelta(seconds=180)),
+        checked_at=at,
+    ) == "stored"
+    probabilities, _, _, status = era._extend_global_book_epoch_cache(
+        conn,
+        {"family-b": probability("family-b")},
+        epoch(
+            "family-b",
+            at - _dt.timedelta(seconds=2),
+            _dt.timedelta(seconds=1),
+        ),
+        checked_at=at,
+    )
+
+    assert status == "delta_expired"
+    assert set(probabilities) == {"family-b"}
+    cached_a, reason = era._probe_global_book_epoch_cache(
+        conn,
+        family_a,
+        checked_at=at,
+        allowed=True,
+    )
+    assert cached_a is not None and reason == "hit"
+    conn.close()
+
+
+def test_global_book_epoch_cache_replaces_family_metadata_atomically(
+    monkeypatch,
+):
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    monkeypatch.setattr(
+        era,
+        "_global_book_epoch_cache_namespace",
+        lambda _conn: "test-namespace",
+    )
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    def probability(family, marker):
+        return SimpleNamespace(
+            family_key=family,
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{marker}",
+                    condition_id=f"condition-{marker}",
+                    yes_token_id=f"yes-{marker}",
+                    no_token_id=f"no-{marker}",
+                ),
+            ),
+        )
+
+    def epoch(family, marker, captured_at):
+        states = tuple(
+            (
+                family,
+                f"bin-{marker}",
+                f"condition-{marker}",
+                side,
+                f"{side.lower()}-{marker}",
+                "EXECUTABLE",
+                f"hash-{marker}-{side}",
+                "event-a",
+                "market-a",
+            )
+            for side in ("YES", "NO")
+        )
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=states,
+            captured_at_utc=captured_at,
+            max_age=_dt.timedelta(seconds=180),
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=captured_at,
+            ),
+        )
+
+    old_metadata = {
+        ("condition-old", "yes-old"): {
+            "_global_current_gamma": True,
+            "marker": "old",
+        }
+    }
+    assert era._store_global_book_epoch(
+        object(),
+        {"family-a": probability("family-a", "old")},
+        epoch("family-a", "old", at),
+        checked_at=at,
+        metadata_by_key=old_metadata,
+    ) == "stored"
+    new_metadata = {
+        ("condition-new", "yes-new"): {
+            "_global_current_gamma": True,
+            "marker": "new",
+        }
+    }
+    _, _, metadata, status = era._extend_global_book_epoch_cache(
+        object(),
+        {"family-a": probability("family-a", "new")},
+        epoch("family-a", "new", at + _dt.timedelta(seconds=1)),
+        checked_at=at + _dt.timedelta(seconds=1),
+        metadata_by_key=new_metadata,
+    )
+
+    assert status == "extended"
+    assert metadata == new_metadata
+    assert dict(era._GLOBAL_BOOK_EPOCH_CACHE.metadata_by_key) == new_metadata
+
+    start = threading.Barrier(3)
+    statuses = []
+
+    def extend(family):
+        start.wait()
+        statuses.append(
+            era._extend_global_book_epoch_cache(
+                object(),
+                {family: probability(family, family)},
+                epoch(
+                    family,
+                    family,
+                    at + _dt.timedelta(seconds=2),
+                ),
+                checked_at=at + _dt.timedelta(seconds=2),
+            )[3]
+        )
+
+    threads = tuple(
+        threading.Thread(target=extend, args=(family,))
+        for family in ("family-b", "family-c")
+    )
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert statuses == ["extended", "extended"]
+    assert set(dict(era._GLOBAL_BOOK_EPOCH_CACHE.bound_probabilities)) == {
+        "family-a",
+        "family-b",
+        "family-c",
+    }
 
 
 def test_exact_token_refresh_keeps_returned_and_cached_book_scope_aligned(
@@ -13756,7 +14135,7 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         ),
     ),
 )
-def test_global_batch_falls_through_candidate_local_preflight_block(
+def test_global_batch_falls_through_family_local_preflight_block(
     monkeypatch, blocked_reason
 ):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
