@@ -12979,6 +12979,98 @@ def _terminalize_submit_unknown_invalid_amount_400_if_proven(
     return payload
 
 
+def _terminalize_submit_unknown_geoblock_403_if_proven(
+    conn: sqlite3.Connection,
+    command: dict,
+    *,
+    occurred_at: str,
+) -> dict | None:
+    """Repair the old adapter-wrapped shape of a definitive geoblock reject."""
+
+    if not command:
+        return None
+    command_id = str(command.get("command_id") or "")
+    events = _command_events(conn, command_id)
+    latest_event_type, latest_payload = _latest_event_payload(events)
+    final_envelope_id = str(
+        latest_payload.get("final_submission_envelope_id") or ""
+    ).strip()
+    envelope = _command_envelope(conn, final_envelope_id)
+    exception_message = str(latest_payload.get("exception_message") or "")
+    from src.venue.polymarket_v2_adapter import _is_polymarket_geoblock_403_error
+
+    command_order_id = str(command.get("venue_order_id") or "").strip()
+    envelope_order_id = str(envelope.get("order_id") or "").strip()
+    position_counts = _count_position_rows_for_command(conn, command)
+    predicates = {
+        "latest_event_is_submit_timeout_unknown": (
+            latest_event_type == CommandEventType.SUBMIT_TIMEOUT_UNKNOWN.value
+        ),
+        "payload_reason_post_submit_exception": (
+            latest_payload.get("reason") == "post_submit_exception_possible_side_effect"
+        ),
+        "exception_type_is_submit_boundary": (
+            latest_payload.get("exception_type") == "AmbiguousSubmitError"
+        ),
+        "exception_message_geoblock_403": _is_polymarket_geoblock_403_error(
+            RuntimeError(exception_message)
+        ),
+        "final_envelope_command_matches": (
+            str(latest_payload.get("final_submission_envelope_command_id") or "")
+            == command_id
+        ),
+        "final_envelope_error_code_is_legacy_ambiguous": (
+            envelope.get("error_code") == "V2_POST_SUBMIT_AMBIGUOUS"
+        ),
+        "final_envelope_error_matches": _is_polymarket_geoblock_403_error(
+            RuntimeError(str(envelope.get("error_message") or ""))
+        ),
+        "deterministic_order_id_matches": bool(command_order_id)
+        and command_order_id.lower() == envelope_order_id.lower(),
+        "signed_order_hash_present": bool(
+            str(envelope.get("signed_order_hash") or "").strip()
+        ),
+        "no_raw_response": not str(envelope.get("raw_response_json") or "").strip(),
+        "no_order_facts": _count_facts(conn, "venue_order_facts", command_id) == 0,
+        "no_trade_facts": _count_facts(conn, "venue_trade_facts", command_id) == 0,
+        "no_position_events": position_counts["position_events"] == 0,
+        "no_position_current": position_counts["position_current"] == 0,
+    }
+    if any(not ok for ok in predicates.values()):
+        return None
+    payload = {
+        "schema_version": 1,
+        "reason": "venue_rejected_geoblock_403",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": command_order_id,
+        "proof_class": "deterministic_venue_geoblock_403",
+        "side_effect_boundary_crossed": True,
+        "terminal_no_fill": True,
+        "exposure_created": False,
+        "required_predicates": predicates,
+        "final_submission_envelope_id": final_envelope_id,
+        "idempotency_key": str(command.get("idempotency_key") or ""),
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.SUBMIT_REJECTED.value,
+        occurred_at=occurred_at,
+        payload=payload,
+    )
+    _reconcile_edli_pending_no_order_if_proven(
+        conn,
+        execution_command_id=str(command.get("decision_id") or ""),
+        occurred_at=occurred_at,
+        reason="venue_rejected_geoblock_403",
+        proof_class="deterministic_venue_geoblock_403",
+        command_id=command_id,
+        required_predicates=predicates,
+    )
+    return payload
+
+
 def _terminalize_submit_unknown_fok_killed_400_if_proven(
     conn: sqlite3.Connection,
     command: dict,
@@ -16344,6 +16436,18 @@ def _reconcile_row(
                     (cmd.command_id,),
                 ).fetchone()
             )
+            geoblock_payload = _terminalize_submit_unknown_geoblock_403_if_proven(
+                conn,
+                command,
+                occurred_at=now,
+            )
+            if geoblock_payload is not None:
+                logger.info(
+                    "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> "
+                    "SUBMIT_REJECTED (deterministic geoblock 403)",
+                    cmd.command_id,
+                )
+                return "advanced"
             fok_killed_payload = _terminalize_submit_unknown_fok_killed_400_if_proven(
                 conn,
                 command,

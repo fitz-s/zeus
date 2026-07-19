@@ -143,6 +143,16 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
         raise TimeoutError("post timed out")
 
 
+class FakeGeoblockClient(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        raise RuntimeError(
+            "PolyApiException[status_code=403, error_message={'error': 'Trading "
+            "restricted in your region, please refer to available regions - "
+            "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+        )
+
+
 class FakeFokKilledClient(FakeTwoStepClient):
     def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
         self.calls.append(("post_order", order, order_type, post_only, defer_exec))
@@ -1473,6 +1483,33 @@ def test_post_order_exception_carries_deterministic_order_identity(tmp_path, mon
     assert caught.value.envelope.order_id == "0xexpected-order-id"
     assert caught.value.envelope.signed_order == fake.signed_order
     assert caught.value.envelope.error_code == "V2_POST_SUBMIT_AMBIGUOUS"
+    assert any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_geoblock_403_is_definitive_rejection_without_venue_identity(
+    tmp_path, monkeypatch
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeGeoblockClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="FAK"
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xclient-derived-not-venue-identity",
+    )
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_rejected_geoblock_403"
+    assert result.envelope.order_id is None
+    assert result.envelope.signed_order == fake.signed_order
+    assert result.envelope.signed_order_hash
+    assert result.envelope.raw_response_json is None
     assert any(call[0] == "post_order" for call in fake.calls)
 
 

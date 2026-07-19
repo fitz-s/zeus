@@ -381,6 +381,9 @@ def _insert_unknown_side_effect(
     final_event_payload: dict | None = None,
     raw_response_json: str | None = None,
     signed_order_hash: str | None = None,
+    order_id: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> None:
     from src.state.venue_command_repo import append_event, insert_command, insert_submission_envelope
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
@@ -423,11 +426,11 @@ def _insert_unknown_side_effect(
             signed_order_hash=signed_order_hash,
             raw_request_hash="e" * 64,
             raw_response_json=raw_response_json,
-            order_id=None,
+            order_id=order_id,
             trade_ids=(),
             transaction_hashes=(),
-            error_code=None,
-            error_message=None,
+            error_code=error_code,
+            error_message=error_message,
             captured_at=created.isoformat(),
         ),
         envelope_id=envelope_id,
@@ -447,6 +450,7 @@ def _insert_unknown_side_effect(
         size=size,
         price=price,
         created_at=created.isoformat(),
+        q_version="test-q-version",
         snapshot_checked_at=created.isoformat(),
     )
     append_event(
@@ -1929,6 +1933,110 @@ def test_submit_unknown_geoblock_403_can_be_terminalized(conn):
         price=0.55,
         size=18.19,
     ) is None
+
+
+def test_adapter_wrapped_geoblock_403_auto_terminalizes_without_replay_wait(conn):
+    from src.execution.command_recovery import (
+        _terminalize_submit_unknown_geoblock_403_if_proven,
+    )
+
+    command_id = "cmd-m2-geoblock-wrapped"
+    order_id = "0xclient-derived-order-id"
+    final_envelope_id = f"env-{command_id}"
+    payload = _geoblock_403_payload()
+    payload.update(
+        {
+            "exception_type": "AmbiguousSubmitError",
+            "final_submission_envelope_id": final_envelope_id,
+            "final_submission_envelope_command_id": command_id,
+            "final_submission_envelope_stage": "post_sign_pre_ack_exception",
+            "venue_order_id": order_id,
+        }
+    )
+    _insert_unknown_side_effect(
+        conn,
+        command_id=command_id,
+        final_event_payload=payload,
+        signed_order_hash="f" * 64,
+        order_id=order_id,
+        error_code="V2_POST_SUBMIT_AMBIGUOUS",
+        error_message=payload["exception_message"],
+    )
+    conn.execute(
+        "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",
+        (order_id, command_id),
+    )
+    conn.commit()
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+    )
+
+    terminal = _terminalize_submit_unknown_geoblock_403_if_proven(
+        conn,
+        command,
+        occurred_at=NOW.isoformat(),
+    )
+
+    assert terminal is not None
+    assert terminal["reason"] == "venue_rejected_geoblock_403"
+    assert terminal["terminal_no_fill"] is True
+    assert terminal["exposure_created"] is False
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()["state"] == "SUBMIT_REJECTED"
+    assert _events(conn, command_id)[-1] == "SUBMIT_REJECTED"
+
+
+def test_adapter_wrapped_geoblock_repair_refuses_raw_venue_response(conn):
+    from src.execution.command_recovery import (
+        _terminalize_submit_unknown_geoblock_403_if_proven,
+    )
+
+    command_id = "cmd-m2-geoblock-wrapped-response"
+    order_id = "0xpossible-venue-order"
+    final_envelope_id = f"env-{command_id}"
+    payload = _geoblock_403_payload()
+    payload.update(
+        {
+            "exception_type": "AmbiguousSubmitError",
+            "final_submission_envelope_id": final_envelope_id,
+            "final_submission_envelope_command_id": command_id,
+            "final_submission_envelope_stage": "post_sign_pre_ack_exception",
+            "venue_order_id": order_id,
+        }
+    )
+    _insert_unknown_side_effect(
+        conn,
+        command_id=command_id,
+        final_event_payload=payload,
+        raw_response_json='{"orderID":"0xpossible-venue-order"}',
+        signed_order_hash="e" * 64,
+        order_id=order_id,
+        error_code="V2_POST_SUBMIT_AMBIGUOUS",
+        error_message=payload["exception_message"],
+    )
+    conn.execute(
+        "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",
+        (order_id, command_id),
+    )
+    conn.commit()
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+    )
+
+    assert _terminalize_submit_unknown_geoblock_403_if_proven(
+        conn,
+        command,
+        occurred_at=NOW.isoformat(),
+    ) is None
+    assert _events(conn, command_id)[-1] == "SUBMIT_TIMEOUT_UNKNOWN"
 
 
 @pytest.mark.parametrize(

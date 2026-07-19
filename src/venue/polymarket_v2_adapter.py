@@ -785,6 +785,14 @@ class PolymarketV2Adapter:
         try:
             raw_response = _submit_once(client)
         except Exception as exc:
+            if post_started and _is_polymarket_geoblock_403_error(exc):
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="venue_rejected_geoblock_403",
+                    error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                )
             if post_started and _is_polymarket_invalid_safe_signature_error(exc):
                 logger.error(
                     "VENUE_ORDER_SIGNATURE_REJECTED: deterministic invalid Safe "
@@ -2896,6 +2904,17 @@ def _is_l2_auth_error(exc: BaseException) -> bool:
 def _is_polymarket_invalid_safe_signature_error(exc: BaseException) -> bool:
     text = " ".join(f"{type(exc).__name__}:{exc}".split())
     return "status_code=400" in text and "invalid POLY_GNOSIS_SAFE signature" in text
+
+
+def _is_polymarket_geoblock_403_error(exc: BaseException) -> bool:
+    """Recognize the venue's synchronous, definitive geographic rejection."""
+
+    text = " ".join(f"{type(exc).__name__}:{exc}".split()).lower()
+    return (
+        "status_code=403" in text
+        and "trading restricted in your region" in text
+        and "geoblock" in text
+    )
 
 
 def _is_polymarket_fok_killed_error(exc: BaseException) -> bool:
