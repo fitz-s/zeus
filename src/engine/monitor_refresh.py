@@ -3787,6 +3787,19 @@ def _append_monitor_validation(position: Position, validation: str) -> None:
 _DAY0_ROBUST_SELL_CONFIRMATION = "day0_robust_sell_value_awaits_confirmation"
 
 
+def _clone_for_probability_refresh(position: Position) -> Position:
+    """Start one probability cut without inheriting prior-cut evidence."""
+
+    refreshed = copy.copy(position)
+    refreshed.applied_validations = (
+        [_DAY0_ROBUST_SELL_CONFIRMATION]
+        if _DAY0_ROBUST_SELL_CONFIRMATION
+        in (getattr(position, "applied_validations", []) or [])
+        else []
+    )
+    return refreshed
+
+
 def _replace_probability_validations_preserving_exit_confirmation(
     position: Position,
     refresh_position: Position,
@@ -4019,7 +4032,7 @@ def _day0_absorbing_hard_fact_overlay(
         )
         return None
 
-    hard_pos = replace(pos)
+    hard_pos = _clone_for_probability_refresh(pos)
     setattr(hard_pos, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
     _append_monitor_validation(hard_pos, SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
     _append_monitor_validation(
@@ -4241,7 +4254,7 @@ def _materialize_current_global_day0_probability(
         _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
     )
 
-    refreshed = replace(position)
+    refreshed = _clone_for_probability_refresh(position)
     refreshed.token_id = token_map[condition_id][0]
     refreshed.no_token_id = token_map[condition_id][1]
     is_final_daily = (
@@ -4555,9 +4568,8 @@ def _refresh_day0_monitor_probability(
         EntryMethod.QKERNEL_SPINE.value: _refresh_ens_member_counting,
         EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
     }
-    refresh_pos = pos
+    refresh_pos = _clone_for_probability_refresh(pos)
     if pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
-        refresh_pos = copy.copy(pos)
         refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
     setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
 
@@ -4717,7 +4729,7 @@ def monitor_probability_refresh(
                     family_cache=day0_family_cache,
                 )
             except Exception as exc:  # noqa: BLE001 - current authority fails closed
-                stale = replace(pos)
+                stale = _clone_for_probability_refresh(pos)
                 _set_monitor_probability_fresh(stale, False)
                 post_day_final_missing = (
                     "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in str(exc)
@@ -4778,7 +4790,7 @@ def monitor_probability_refresh(
             exc,
         )
     if belief is not None and belief.fresh:
-        fresh_pos = replace(pos)
+        fresh_pos = _clone_for_probability_refresh(pos)
         setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
         _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
         _append_monitor_validation(fresh_pos, belief.freshness_validation())
@@ -4828,7 +4840,7 @@ def monitor_probability_refresh(
         pos, city=city, target_d=target_d, metric=_metric_for_family
     )
     if readthrough_prob is not None:
-        fresh_pos = replace(pos)
+        fresh_pos = _clone_for_probability_refresh(pos)
         setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
         _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
         _append_monitor_validation(

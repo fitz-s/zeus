@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-07-18
+# Last reused/audited: 2026-07-19
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-07-18
+# Lifecycle: created=2026-05-20; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -160,6 +161,59 @@ def test_probability_refresh_preserves_only_pending_robust_exit_confirmation() -
     )
 
     assert position.applied_validations == ["current_probability_evidence", pending]
+
+
+def test_fresh_probability_refresh_drops_prior_cut_validations(monkeypatch) -> None:
+    """A real dataclass refresh clone cannot relabel stale evidence as fresh."""
+
+    from src.engine import position_belief
+
+    pending = "day0_robust_sell_value_awaits_confirmation"
+    prior = _make_position()
+    prior.applied_validations = [
+        "monitor_probability_stale",
+        "replacement_posterior_stale;age_h=12.50",
+        "replacement_posterior_missing",
+        pending,
+    ]
+    refresh_input = replace(prior)
+    belief = _replacement_belief()
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_would_use_day0_monitor_lane",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: belief,
+    )
+
+    probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
+        refresh_input,
+        conn=None,
+        city=SimpleNamespace(timezone="UTC"),
+        target_d=date(2026, 7, 20),
+    )
+
+    assert fresh is True
+    assert probability == pytest.approx(belief.held_side_prob)
+    assert refreshed.selected_method == "replacement_posterior"
+    assert getattr(
+        refreshed,
+        monitor_refresh_module._MONITOR_PROBABILITY_FRESH_ATTR,
+    ) is True
+    assert refreshed.applied_validations == [
+        pending,
+        "replacement_posterior",
+        belief.freshness_validation(),
+    ]
+    assert refresh_input.applied_validations == prior.applied_validations
 
 
 def test_day0_start_grace_is_bounded_to_target_local_day() -> None:
