@@ -435,6 +435,147 @@ def test_actionable_rejects_day0_observed_boundary_as_entry_qkernel_guard():
         verify_actionable_trade(action, parents)
 
 
+def _day0_reproof_action_payload(**overrides) -> dict:
+    """Base DAY0_EXTREME_UPDATED actionable payload for the M-13 re-proof tests.
+
+    Identical to the fixture ``test_actionable_accepts_day0_observation_authority_with_qkernel``
+    already proves passes every OTHER Day0 gate; these tests add only the
+    metric/city/bin_label fields the M-13 re-proof consumes.
+    """
+    payload = {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "raw_value": 20.0,
+        "rounded_value": 20,
+        "observation_time": "2026-05-25T11:30:00+00:00",
+        "observation_available_at": "2026-05-25T11:35:00+00:00",
+        "day0_probability_authority": _day0_probability_authority(),
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 3,
+        "_edli_day0_lcb_transform": _day0_lcb_transform(),
+        "qkernel_execution_economics": _day0_qkernel_economics(),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _day0_authority_parents(
+    *,
+    metric: str | None = "high",
+    city: str | None = None,
+    raw_value: float = 20.0,
+    rounded_value: float = 20,
+) -> dict[str, dict]:
+    day0_authority: dict = {
+        "event_id": "event-1",
+        "authority": "DAY0_LIVE_OBSERVATION_HARD_FACT",
+        "raw_value": raw_value,
+        "rounded_value": rounded_value,
+    }
+    if metric is not None:
+        day0_authority["metric"] = metric
+    if city is not None:
+        day0_authority["city"] = city
+    return {
+        claims.DAY0_AUTHORITY: day0_authority,
+        claims.ABSORBING_BOUNDARY: {"event_id": "event-1", "boundary": "day0_absorbing_hard_fact"},
+    }
+
+
+def test_actionable_day0_reproof_accepts_possible_bin():
+    """M-13: a bin the observed extreme does NOT rule out passes the re-proof untouched."""
+    parents, action = actionable_graph(
+        action_payload=_day0_reproof_action_payload(),
+        parent_overrides={claims.CANDIDATE_EVIDENCE: {"bin_label": "22°F"}},
+        extra_parent_payloads=_day0_authority_parents(metric="high"),
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_rejects_impossible_bin_nonzero_q():
+    """M-13 law 1: a bin the Day0 support transform makes impossible must carry q == 0."""
+    parents, action = actionable_graph(
+        action_payload=_day0_reproof_action_payload(),
+        parent_overrides={claims.CANDIDATE_EVIDENCE: {"bin_label": "18°F"}},
+        extra_parent_payloads=_day0_authority_parents(metric="high"),
+    )
+
+    with pytest.raises(CertificateVerificationError, match="DAY0_IMPOSSIBLE_BIN_NONZERO_Q"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_rejects_unrecognized_metric_orientation():
+    """M-13 law 2: an unrecognized metric cannot be assigned a floor/ceiling orientation."""
+    parents, action = actionable_graph(
+        action_payload=_day0_reproof_action_payload(),
+        parent_overrides={claims.CANDIDATE_EVIDENCE: {"bin_label": "18°F"}},
+        extra_parent_payloads=_day0_authority_parents(metric="sideways"),
+    )
+
+    with pytest.raises(CertificateVerificationError, match="DAY0_METRIC_ORIENTATION_INVALID"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_fails_open_without_bin_label():
+    """An unparseable/missing bin_label cannot be re-proven -- absence is not a failure."""
+    parents, action = actionable_graph(
+        action_payload=_day0_reproof_action_payload(),
+        extra_parent_payloads=_day0_authority_parents(metric="high"),
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_fails_open_without_metric():
+    """No metric persisted on DAY0_AUTHORITY -- not applicable, never a new failure."""
+    parents, action = actionable_graph(
+        action_payload=_day0_reproof_action_payload(),
+        parent_overrides={claims.CANDIDATE_EVIDENCE: {"bin_label": "18°F"}},
+        extra_parent_payloads=_day0_authority_parents(metric=None),
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_untouched_for_forecast_lane():
+    """Non-Day0 certificates are untouched even if a DAY0_AUTHORITY-shaped parent is present."""
+    parents, action = actionable_graph(
+        parent_overrides={claims.CANDIDATE_EVIDENCE: {"bin_label": "18°F"}},
+        extra_parent_payloads=_day0_authority_parents(metric="bogus"),
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_day0_reproof_hong_kong_oracle_truncate_preimage():
+    """M-13 HK case: oracle_truncate's asymmetric preimage keeps a bin possible that
+    the symmetric WMO half-up preimage would (wrongly, for HK) rule out.
+
+    obs=28.9 truncates (HKO convention) to 28, so bin "28C" is still reachable: the
+    settlement has not yet proven a value >= 29. Under the (wrong-for-HK) WMO half-up
+    preimage [27.5, 28.5) the SAME bin would be impossible (28.5 <= 28.9), so this
+    proves the re-proof dispatches on the Hong Kong rounding rule, not a hard-coded one.
+    """
+    parents, action = actionable_graph(
+        action_payload=_day0_reproof_action_payload(raw_value=28.9, rounded_value=28),
+        parent_overrides={claims.CANDIDATE_EVIDENCE: {"bin_label": "28°C"}},
+        extra_parent_payloads=_day0_authority_parents(
+            metric="high", city="Hong Kong", raw_value=28.9, rounded_value=28
+        ),
+    )
+
+    verify_actionable_trade(action, parents)
+
+
 def _day0_lcb_transform():
     return {
         "yes_lcb_by_condition": {"condition-1": 0.6},

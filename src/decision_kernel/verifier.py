@@ -5,8 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import math
+import re
 from typing import Iterable, Mapping
 
+from src.contracts.settlement_semantics import settlement_preimage_offsets
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
@@ -509,6 +511,153 @@ def _verify_day0_probability_payload_authority(
         ) from None
 
 
+# M-13 (day0_mechanism_first_principles_audit.md): the LIVE verifier otherwise only checks
+# certificate SELF-consistency (recorded q_lcb matches a persisted transform dict, clocks
+# ordered, enums MATCH) but never recomputes anything from (obs_extreme, bin preimage) -- a
+# metric/side swap or wrong-obs bug at the single upstream condition_day0 call site would
+# produce an internally-consistent-but-wrong q that passes every other gate. This block
+# re-derives the SAME impossible-bin predicate day0_conditioner.py uses, from fields already
+# persisted on the DAY0_AUTHORITY / CANDIDATE_EVIDENCE parents -- it adds no certificate
+# fields and no new happy-path gate: absence of any needed field is "not applicable" and
+# fails open, exactly like the rest of this Day0 verification cluster.
+_DAY0_BIN_LABEL_BELOW_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\s+or\s+(?:below|lower)", re.I)
+_DAY0_BIN_LABEL_ABOVE_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\s+or\s+(?:higher|above|more)", re.I)
+_DAY0_BIN_LABEL_POINT_RE = re.compile(r"(-?\d+\.?\d*)\s*°[FfCc]\b")
+DAY0_IMPOSSIBLE_BIN_Q_TOLERANCE = 1e-9
+
+
+def _day0_bin_label_native_bounds(label: object) -> tuple[float | None, float | None] | None:
+    """Parse a venue settlement-bin label into its integer label bounds (native unit).
+
+    Verbatim mirror of ``src.engine.position_belief._bin_label_native_bounds`` (the same
+    measure-preserving observed-floor law re-derived here as a certificate re-proof instead
+    of a belief-serving transform). Returns ``None`` for an unparseable label (fail-open:
+    an unparseable bin cannot be re-proven, not treated as impossible).
+    """
+    text = str(label or "")
+    m = _DAY0_BIN_LABEL_BELOW_RE.search(text)
+    if m:
+        return (None, float(m.group(1)))
+    m = _DAY0_BIN_LABEL_ABOVE_RE.search(text)
+    if m:
+        return (float(m.group(1)), None)
+    m = _DAY0_BIN_LABEL_POINT_RE.search(text)
+    if m:
+        value = float(m.group(1))
+        return (value, value)
+    return None
+
+
+def _day0_rounding_rule_for_city(city: object) -> str:
+    """Settlement rounding rule for the observed-extreme preimage.
+
+    Mirrors ``src.engine.position_belief._belief_rounding_rule``: Hong Kong settles by HKO
+    decimal truncation (``oracle_truncate``); every other current Zeus city uses the
+    symmetric WMO half-up rule. Keyed by city NAME because that is the only city identity
+    persisted on the DAY0_AUTHORITY certificate (no City object is available at verify time).
+    """
+    if str(city or "").strip() == "Hong Kong":
+        return "oracle_truncate"
+    return "wmo_half_up"
+
+
+def _day0_support_bound(metric: str, obs_extreme: float) -> tuple[float | None, float | None]:
+    """The Day0Conditioning support bound `metric` assigns to `obs_extreme`.
+
+    Verbatim orientation from ``src.forecast.day0_conditioner.Day0Conditioning``: a HIGH
+    metric's observed extreme is a FLOOR (``support_lower_native``) -- the settlement value
+    can never fall below it; a LOW metric's observed extreme is a CEILING
+    (``support_upper_native``) -- the settlement value can never rise above it. A metric
+    outside ``{"high", "low"}`` cannot be assigned either orientation, so this fails closed
+    with its own reason distinct from the impossible-bin check below (which requires a
+    VALID orientation to even evaluate).
+    """
+    if metric == "high":
+        return (obs_extreme, None)
+    if metric == "low":
+        return (None, obs_extreme)
+    raise CertificateVerificationError(
+        f"DAY0_METRIC_ORIENTATION_INVALID:unsupported day0 metric {metric!r}"
+    )
+
+
+def _day0_authority_obs_extreme(day0_payload: Mapping) -> float | None:
+    for key in ("raw_value", "rounded_value"):
+        value = day0_payload.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            return number
+    return None
+
+
+def _verify_day0_impossible_bin_reproof(
+    payload: dict,
+    parent: dict[str, DecisionCertificate],
+) -> None:
+    """Re-derive the Day0 impossible-bin q==0 law from primitives (M-13 defense-in-depth).
+
+    Fails open (returns without raising) for non-Day0 certificates and whenever any field
+    needed to re-derive the bound is absent -- absence is "not applicable", never a new
+    failure. When every needed field IS present, this independently recomputes whether the
+    candidate bin is settlement-impossible under the observed extreme and REJECTS a live
+    certificate that claims positive q on it, or that carries an unrecognized metric
+    orientation -- the two failure modes a metric/side swap or wrong-obs bug upstream would
+    otherwise smuggle through undetected.
+    """
+    if str(payload.get("event_type") or "").strip() != DAY0_ACTIONABLE_EVENT_TYPE:
+        return
+    day0_authority = parent.get(claims.DAY0_AUTHORITY)
+    candidate = parent.get(claims.CANDIDATE_EVIDENCE)
+    if day0_authority is None or candidate is None:
+        return
+    day0_payload = day0_authority.payload
+
+    metric_raw = day0_payload.get("metric")
+    if metric_raw in (None, ""):
+        return
+    metric = str(metric_raw).strip().lower()
+
+    obs_extreme = _day0_authority_obs_extreme(day0_payload)
+    if obs_extreme is None:
+        return
+
+    bounds = _day0_bin_label_native_bounds(candidate.payload.get("bin_label"))
+    if bounds is None:
+        return
+    bin_low, bin_high = bounds
+
+    q_live = payload.get("q_live")
+    if q_live is None:
+        return
+    try:
+        q_live_value = float(q_live)
+    except (TypeError, ValueError):
+        return
+
+    # Raises DAY0_METRIC_ORIENTATION_INVALID for a metric outside {"high", "low"}.
+    support_lower, support_upper = _day0_support_bound(metric, obs_extreme)
+
+    rounding_rule = _day0_rounding_rule_for_city(day0_payload.get("city"))
+    low_offset, high_offset = settlement_preimage_offsets(rounding_rule, half_step=0.5)
+    lo = -math.inf if bin_low is None else float(bin_low) + low_offset
+    hi = math.inf if bin_high is None else float(bin_high) + high_offset
+
+    impossible = (support_lower is not None and hi <= support_lower) or (
+        support_upper is not None and lo >= support_upper
+    )
+    if impossible and q_live_value > DAY0_IMPOSSIBLE_BIN_Q_TOLERANCE:
+        raise CertificateVerificationError(
+            "DAY0_IMPOSSIBLE_BIN_NONZERO_Q:"
+            f"metric={metric}:obs_extreme={obs_extreme!r}:bin=[{lo!r},{hi!r}):"
+            f"q_live={q_live_value!r}"
+        )
+
+
 def _verify_actionable_qkernel_economics(
     payload: dict,
     *,
@@ -641,6 +790,8 @@ def _verify_actionable_parent_consistency(
     kelly = _required_parent_payload(parent, claims.KELLY_DRY_RUN)
     risk = _required_parent_payload(parent, claims.RISK_LEVEL)
     live_cap = _required_parent_payload(parent, claims.LIVE_CAP)
+
+    _verify_day0_impossible_bin_reproof(payload, parent)
 
     if _current_state_solve_payload(payload):
         economics = payload["qkernel_execution_economics"]
