@@ -225,3 +225,18 @@ coworker edit — next session must diff their tip first, then implement the
 enqueue-on-event bridge as a small slice on top.
 API-ERROR RECOVERY: all four wave implementers were killed by a transient 400 at
 ~23:0x; all four resumed from transcript (worktrees intact) — awaiting completion.
+
+## WAVE LANDINGS (2026-07-19 early)
+- [x] sub-hourly remaining-window delta (knot+interpolated-boundary exact form)  a23ee5c2f
+- [x] M-3 final-localday 30-min no-entry computed; quiet-window DELETED (argued:
+      covered by 7eb03a29a strict ordering + ceb55a796 H-2 recheck); M-7 HK
+      wu_station=None root cause fixed, OK_FAST_ONLY reachable  4c7e65cb3
+- [x] M-13 verifier re-proof: DAY0_IMPOSSIBLE_BIN_NONZERO_Q + metric orientation,
+      HK oracle_truncate case; gap disclosed (syntactically-valid wrong metric
+      caught only via law-1 nonzero-q)  348e89d93
+- [x] EVENT-DRIVEN DAY0 RECOMPUTE (the measured 40-min-cadence bottleneck): both
+      DAY0_EXTREME_UPDATED emission paths (ingest_main METAR fast lane + reactor
+      catch-up) now seed immediate rematerialization via the existing
+      cycle_advance_enqueues monotone guard; all admitted families, held
+      auto-detected via 2b5ae40a3 helper; fail-soft  4dcba55e2
+STILL IN FLIGHT: coverage agent (fable, M-2/H-3 GAP_SUSPECT + M-1 stale margin).
