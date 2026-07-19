@@ -725,6 +725,7 @@ def test_source_clock_scoped_capture_batches_city_dates_into_priority_request(
     import src.data.openmeteo_model_updates as updates
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
 
     class _Report:
         updated_sources = ("ecmwf_ifs",)
@@ -769,6 +770,12 @@ def test_source_clock_scoped_capture_batches_city_dates_into_priority_request(
         lambda _path: keys,
     )
     monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: _Report.affected_cities,
+    )
+
     def _download(**kwargs):
         nonlocal active, max_active
         group = tuple((target.city, target.metric) for target in kwargs["targets"])

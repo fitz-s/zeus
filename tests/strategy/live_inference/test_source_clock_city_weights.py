@@ -8,6 +8,7 @@ from pathlib import Path
 from src.strategy.live_inference.source_clock_city_weights import (
     DEFAULT_CITY_ONE_SCHEME_PATH,
     affected_cities_for_source_updates,
+    all_configured_source_ids,
     fixed_weight_center_from_values,
     load_city_one_schemes,
     scheme_for_city,
@@ -214,6 +215,36 @@ def test_scheme_for_city_prefers_artifact_over_frozen_csv(tmp_path, monkeypatch)
     assert scheme.scheme_status == "SOURCE_CLOCK_ARTIFACT"
     assert scheme.one_scheme_status == "GRID_CAP10_LIVE_READY"
     assert scheme.weights == {"jma_seamless": 1.0}
+
+
+def test_source_update_routing_uses_active_artifact_across_tracks(
+    tmp_path, monkeypatch
+) -> None:
+    import src.strategy.live_inference.source_clock_city_weights as m
+
+    csv_path = _write_frozen_csv(tmp_path, city="Seoul")
+    artifact_dir = _write_artifact(
+        tmp_path,
+        city="Seoul",
+        weights={"jma_seamless": 1.0},
+        low_weights={"ukmo_global_deterministic_10km": 1.0},
+    )
+    monkeypatch.setattr(m, "DEFAULT_CITY_ONE_SCHEME_PATH", csv_path)
+    monkeypatch.setattr(m, "DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR", artifact_dir)
+    m._load_active_artifact.cache_clear()
+    m.load_city_one_schemes.cache_clear()
+    monkeypatch.delenv(m.ENV_CITY_ONE_SCHEME_PATH, raising=False)
+    monkeypatch.delenv(m.ENV_SOURCE_CLOCK_ARTIFACT_DIR, raising=False)
+
+    assert set(all_configured_source_ids()) == {
+        "jma_seamless",
+        "ukmo_global_deterministic_10km",
+    }
+    assert affected_cities_for_source_updates(["jma_seamless"]) == ("Seoul",)
+    assert affected_cities_for_source_updates(
+        ["ukmo_global_deterministic_10km"]
+    ) == ("Seoul",)
+    assert affected_cities_for_source_updates(["ecmwf_ifs"]) == ()
 
 
 def test_scheme_for_city_metric_selects_low_bucket(tmp_path, monkeypatch) -> None:

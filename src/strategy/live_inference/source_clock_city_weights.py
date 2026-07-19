@@ -275,12 +275,33 @@ def scheme_for_city(
 
 
 def all_configured_source_ids(*, path: str | Path | None = None) -> tuple[str, ...]:
-    schemes = load_city_one_schemes(None if path is None else str(path))
+    schemes = _configured_live_track_schemes(path=path)
     sources: dict[str, None] = {}
-    for scheme in schemes.values():
+    for scheme in schemes:
         for source in scheme.final_sources:
             sources[source] = None
     return tuple(sources)
+
+
+def _configured_live_track_schemes(
+    *, path: str | Path | None = None
+) -> tuple[CityOneScheme, ...]:
+    csv_schemes = load_city_one_schemes(None if path is None else str(path))
+    if path is not None or os.environ.get(ENV_CITY_ONE_SCHEME_PATH):
+        return tuple(csv_schemes[city] for city in sorted(csv_schemes))
+
+    artifact = _load_active_artifact(str(_source_clock_artifact_dir()))
+    if not artifact:
+        return tuple(csv_schemes[city] for city in sorted(csv_schemes))
+    artifact_cities = artifact.get("cities") or {}
+    cities = sorted(set(csv_schemes) | set(artifact_cities))
+    schemes: list[CityOneScheme] = []
+    for city in cities:
+        for metric in ("high", "low"):
+            scheme = _artifact_scheme_for_city(city, metric) or csv_schemes.get(city)
+            if scheme is not None:
+                schemes.append(scheme)
+    return tuple(schemes)
 
 
 def affected_cities_for_source_updates(
@@ -289,12 +310,14 @@ def affected_cities_for_source_updates(
     updated = {str(source).strip() for source in updated_sources if str(source).strip()}
     if not updated:
         return ()
-    schemes = load_city_one_schemes(None if path is None else str(path))
+    schemes = _configured_live_track_schemes(path=path)
     return tuple(
         sorted(
-            city
-            for city, scheme in schemes.items()
-            if any(source in updated for source in scheme.final_sources)
+            {
+                scheme.city
+                for scheme in schemes
+                if any(source in updated for source in scheme.final_sources)
+            }
         )
     )
 
