@@ -3590,6 +3590,21 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
         "posterior_served_model_count": 2,
     }
 
+    active_artifact = json.loads(json.dumps(source_clock))
+    active_artifact["bayes_precision_fusion"]["source_clock_one_scheme"][
+        "one_scheme_status"
+    ] = "SOURCE_CLOCK_ARTIFACT_ACTIVE"
+    assert era._source_clock_model_count_certificate(active_artifact) == (
+        True,
+        certificate,
+    )
+
+    unknown_status = json.loads(json.dumps(source_clock))
+    unknown_status["bayes_precision_fusion"]["source_clock_one_scheme"][
+        "one_scheme_status"
+    ] = "UNKNOWN"
+    assert era._source_clock_model_count_certificate(unknown_status) == (True, None)
+
     legacy_two = json.loads(json.dumps(source_clock))
     legacy_two["bayes_precision_fusion"].pop("source_clock_one_scheme")
     assert era._posterior_bound_multimodel_members(

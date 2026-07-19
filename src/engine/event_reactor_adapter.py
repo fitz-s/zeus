@@ -238,6 +238,10 @@ from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
     current_evidence_shape_semantics_mismatch,
 )
+from src.strategy.live_inference.source_clock_city_weights import (
+    ONE_SCHEME_READY_STATUS,
+    SOURCE_CLOCK_ARTIFACT_ACTIVE_STATUS,
+)
 from src.state.snapshot_repo import (
     executable_snapshot_from_row,
     get_snapshot,
@@ -19438,7 +19442,10 @@ _POSTERIOR_APPLIED_VALIDATIONS: tuple[str, ...] = (
     "available_at_not_future",
 )
 _SOURCE_CLOCK_MODEL_COUNT_BASIS = "source_clock_configured_sources"
-_SOURCE_CLOCK_READY_STATUS = "GRID_CAP10_LIVE_READY"
+_SOURCE_CLOCK_READY_STATUS = ONE_SCHEME_READY_STATUS
+_SOURCE_CLOCK_READ_READY_STATUSES = frozenset(
+    (_SOURCE_CLOCK_READY_STATUS, SOURCE_CLOCK_ARTIFACT_ACTIVE_STATUS)
+)
 _SOURCE_CLOCK_CONFIGURED_COMPLETENESS_VALIDATION = (
     "source_clock_configured_source_completeness"
 )
@@ -20020,7 +20027,7 @@ def _source_clock_model_count_certificate(
         or set(served) != set(configured)
         or set(weighted) != set(configured)
         or missing
-        or scheme.get("one_scheme_status") != _SOURCE_CLOCK_READY_STATUS
+        or scheme.get("one_scheme_status") not in _SOURCE_CLOCK_READ_READY_STATUSES
         or scheme.get("walkforward_pass") is not True
         or fusion.get("decorrelated_providers_complete") is not True
         or expected != len(configured)

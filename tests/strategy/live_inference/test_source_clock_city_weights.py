@@ -212,6 +212,7 @@ def test_scheme_for_city_prefers_artifact_over_frozen_csv(tmp_path, monkeypatch)
 
     assert scheme is not None
     assert scheme.scheme_status == "SOURCE_CLOCK_ARTIFACT"
+    assert scheme.one_scheme_status == "GRID_CAP10_LIVE_READY"
     assert scheme.weights == {"jma_seamless": 1.0}
 
 

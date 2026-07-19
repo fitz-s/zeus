@@ -56,6 +56,8 @@ PRESENT_WEIGHT_FLOOR = 0.25
 DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR = PROJECT_ROOT / "state" / "source_clock_weights"
 ENV_SOURCE_CLOCK_ARTIFACT_DIR = "ZEUS_SOURCE_CLOCK_WEIGHTS_ARTIFACT_DIR"
 ACTIVE_POINTER_NAME = "ACTIVE.json"
+ONE_SCHEME_READY_STATUS = "GRID_CAP10_LIVE_READY"
+SOURCE_CLOCK_ARTIFACT_ACTIVE_STATUS = "SOURCE_CLOCK_ARTIFACT_ACTIVE"
 # Live call sites (materializer + live queue) thread the track metric since 2026-07-17,
 # so HIGH and LOW read their own artifact buckets. "high" remains the documented default
 # for metric-less callers (legacy CSV was metric-agnostic) -- a named assumption.
@@ -163,7 +165,7 @@ def _row_int(row: Mapping[str, object], *keys: str) -> int:
 def _walkforward_or_grid_pass(row: Mapping[str, object]) -> bool:
     if row.get("walkforward_pass") is not None:
         return _truthy(row.get("walkforward_pass"))
-    return str(row.get("selection_status") or "").strip() == "GRID_CAP10_LIVE_READY"
+    return str(row.get("selection_status") or "").strip() == ONE_SCHEME_READY_STATUS
 
 
 @lru_cache(maxsize=8)
@@ -247,7 +249,7 @@ def _artifact_scheme_for_city(city: str, metric: str) -> CityOneScheme | None:
         weights=weights,
         sample_n=int(prov.get("n_paired_dates", 0) or 0),
         walkforward_pass=True,
-        one_scheme_status="SOURCE_CLOCK_ARTIFACT_ACTIVE",
+        one_scheme_status=ONE_SCHEME_READY_STATUS,
     )
 
 
