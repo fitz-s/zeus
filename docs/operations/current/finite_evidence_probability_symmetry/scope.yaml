@@ -45,6 +45,7 @@ in_scope:
 - src/events/price_channel_redecision_router.py
 - src/engine/global_auction_universe.py
 - src/engine/global_batch_runtime.py
+- src/engine/global_single_order_auction.py
 - src/engine/qkernel_spine_bridge.py
 - src/solve/solver.py
 - src/solve/menu_adapter.py

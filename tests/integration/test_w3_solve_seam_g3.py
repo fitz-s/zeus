@@ -83,7 +83,7 @@ from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
     DeterministicBinPayoffWitness,
     ExecutableSellCurve,
-    GlobalBuySizingRejection,
+    GlobalBuyMinimumMarketableRepair,
     GlobalSingleOrderCandidate,
     GlobalSingleOrderCandidateEvaluation,
     GlobalSingleOrderDecision,
@@ -133,33 +133,73 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         )
         """
     )
+    at = _dt.datetime(2026, 7, 14, 1, 0, tzinfo=_dt.timezone.utc)
+    buy_candidate = _global_test_buy_candidate(
+        family_key="family-buy",
+        probability_witness_identity="q-buy",
+        book_identity="buy",
+        price="0.49",
+        captured_at=at,
+        candidate_id="buy-repaired",
+        bin_id="20C",
+        condition_id="condition-buy",
+        token_id="token-buy",
+        min_order_size="12",
+    )
+    repair = GlobalBuyMinimumMarketableRepair(
+        current_token_shares=Decimal("0"),
+        full_kelly_target_shares=Decimal("40"),
+        fractional_kelly_target_shares=Decimal("10"),
+        minimum_marketable_increment_shares=Decimal("12"),
+        minimum_fractional_kelly_multiplier=Decimal("0.3"),
+        continuous_full_kelly_target_shares=Decimal("32"),
+        continuous_fractional_kelly_target_shares=Decimal("8"),
+        continuous_full_robust_delta_log_wealth=0.001,
+        continuous_full_robust_ev_usd=0.1,
+        minimum_marketable_cost_usd=Decimal("5.88"),
+        minimum_marketable_robust_delta_log_wealth=0.0008,
+        minimum_marketable_robust_ev_usd=0.08,
+        minimum_marketable_capital_efficiency=0.00017,
+        minimum_marketable_positive=True,
+    )
+    terminal = BinaryTerminalWealthCertificate(
+        win_probability_lcb=0.49666666666666665,
+        loss_probability_ucb=0.5033333333333334,
+        loss_payoff_usd=Decimal("-5.88"),
+        win_payoff_usd=Decimal("6.12"),
+        median_payoff_usd=Decimal("-5.88"),
+        wealth_after_loss_usd=Decimal("94.12"),
+        wealth_after_win_usd=Decimal("106.12"),
+        expected_value_diagnostic_usd=0.08,
+    )
     evaluations = (
         GlobalSingleOrderCandidateEvaluation(
-            candidate_id="buy-paused",
+            candidate_id="buy-repaired",
             family_key="family-buy",
             bin_id="20C",
             condition_id="condition-buy",
             side="YES",
             token_id="token-buy",
             action="BUY",
-            status="REJECTED",
-            rejection_reason="FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM",
-            buy_sizing_rejection=GlobalBuySizingRejection(
-                current_token_shares=Decimal("0"),
-                full_kelly_target_shares=Decimal("40"),
-                fractional_kelly_target_shares=Decimal("10"),
-                minimum_marketable_increment_shares=Decimal("12"),
-                minimum_fractional_kelly_multiplier=Decimal("0.3"),
-                continuous_full_kelly_target_shares=Decimal("32"),
-                continuous_fractional_kelly_target_shares=Decimal("8"),
-                continuous_full_robust_delta_log_wealth=0.001,
-                continuous_full_robust_ev_usd=0.1,
-                minimum_marketable_cost_usd=Decimal("5.88"),
-                minimum_marketable_robust_delta_log_wealth=0.0008,
-                minimum_marketable_robust_ev_usd=0.08,
-                minimum_marketable_capital_efficiency=0.00017,
-                minimum_marketable_positive=True,
-            ),
+            status="SELECTED",
+            shares=Decimal("12"),
+            cost_usd=Decimal("5.88"),
+            robust_delta_log_wealth=0.0008,
+            robust_ev_usd=0.08,
+            capital_efficiency=0.00017,
+            capital_action_mode="SETTLEMENT_LOCKED_BUY",
+            buy_sizing_mode="MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+            resolution_at_utc=at + _dt.timedelta(days=1),
+            capital_lock_hours=24.0,
+            robust_log_growth_per_hour=0.0008 / 24.0,
+            limit_price=Decimal("0.49"),
+            expected_fill_price_before_fee=Decimal("0.49"),
+            max_spend_usd=Decimal("5.88"),
+            current_token_shares=Decimal("0"),
+            full_kelly_target_shares=Decimal("40"),
+            fractional_kelly_target_shares=Decimal("10"),
+            terminal_wealth=terminal,
+            buy_minimum_marketable_repair=repair,
         ),
         GlobalSingleOrderCandidateEvaluation(
             candidate_id="sell-negative",
@@ -195,22 +235,84 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         ),
     )
     decision = GlobalSingleOrderDecision(
-        candidate=None,
-        shares=Decimal("0"),
-        cost_usd=Decimal("0"),
-        robust_delta_log_wealth=0.0,
-        robust_ev_usd=0.0,
-        capital_efficiency=0.0,
-        no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        candidate=buy_candidate,
+        shares=Decimal("12"),
+        cost_usd=Decimal("5.88"),
+        robust_delta_log_wealth=0.0008,
+        robust_ev_usd=0.08,
+        capital_efficiency=0.00017,
+        no_trade_reason=None,
+        capital_action_mode="SETTLEMENT_LOCKED_BUY",
+        buy_sizing_mode="MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+        resolution_at_utc=at + _dt.timedelta(days=1),
+        capital_lock_hours=24.0,
+        robust_log_growth_per_hour=0.0008 / 24.0,
+        limit_price=Decimal("0.49"),
+        expected_fill_price_before_fee=Decimal("0.49"),
+        max_spend_usd=Decimal("5.88"),
+        current_token_shares=Decimal("0"),
+        full_kelly_target_shares=Decimal("40"),
+        fractional_kelly_target_shares=Decimal("10"),
+        terminal_wealth=terminal,
+        buy_minimum_marketable_repair=repair,
         rejection_reasons={
             evaluation.candidate_id: str(evaluation.rejection_reason)
             for evaluation in evaluations
+            if evaluation.rejection_reason is not None
         },
         candidate_evaluations=evaluations,
         candidate_input_count=2,
     )
     selected = SimpleNamespace(decision=decision)
-    at = _dt.datetime(2026, 7, 14, 1, 0, tzinfo=_dt.timezone.utc)
+    identity_witness = SimpleNamespace(
+        family_key="family-buy",
+        family_binding_identity="family-binding-buy",
+        sample_matrix_identity="sample-matrix-buy",
+        q_version="q-buy",
+        band_alpha=0.05,
+        band_basis="lower-tail",
+    )
+    identity_decision = replace(
+        decision,
+        rejection_reasons={},
+        candidate_evaluations=(),
+        candidate_input_count=None,
+    )
+    changed_repair = replace(
+        repair,
+        continuous_full_kelly_target_shares=Decimal("33"),
+        continuous_fractional_kelly_target_shares=Decimal("8.25"),
+    )
+    changed_decision = replace(
+        identity_decision,
+        buy_minimum_marketable_repair=changed_repair,
+    )
+    assert global_single_order_economic_identity(
+        decision=identity_decision,
+        probability_witness=identity_witness,
+        wealth_economic_identity="wealth-buy",
+    ) != global_single_order_economic_identity(
+        decision=changed_decision,
+        probability_witness=identity_witness,
+        wealth_economic_identity="wealth-buy",
+    )
+    assert global_single_order_actuation_identity(
+        decision=identity_decision,
+        winner_event_id="event-buy",
+        universe_witness_identity="universe-buy",
+        wealth_witness_identity="wealth-buy",
+        selection_epoch_identity="epoch-buy",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+    ) != global_single_order_actuation_identity(
+        decision=changed_decision,
+        winner_event_id="event-buy",
+        universe_witness_identity="universe-buy",
+        wealth_witness_identity="wealth-buy",
+        selection_epoch_identity="epoch-buy",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+    )
     book_asset_states = (
         (
             "family-buy",
@@ -305,7 +407,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 14
+    assert summary["schema_version"] == 15
     assert summary["book_capture_freshness_complete"] is True
     assert summary["book_captured_at_utc"] == "2026-07-14T01:00:00.250000+00:00"
     assert summary["book_deadline_at_utc"] == "2026-07-14T01:00:30.250000+00:00"
@@ -375,7 +477,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             probability_keys=("family-buy", "family-sell"),
             buy_candidate_index=(
                 (
-                    "buy-paused",
+                    "buy-repaired",
                     "family-buy",
                     "20C",
                     "condition-buy",
@@ -398,24 +500,24 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["buy_candidate_index_count"] == 1
     assert summary["candidate_evaluation_count"] == 2
     assert summary["candidate_input_count"] == 2
-    assert summary["candidate_detailed_count"] == 1
-    assert summary["candidate_rejection_group_count"] == 1
-    assert summary["buy_sizing_rejection_count"] == 1
-    assert summary["buy_sizing_rejection_complete"] is True
-    assert summary["buy_sizing_rejection_encoding"] == (
-        "zlib+base64+indexed-canonical-json-v3"
+    assert summary["candidate_detailed_count"] == 2
+    assert summary["candidate_rejection_group_count"] == 0
+    assert summary["buy_minimum_marketable_repair_count"] == 1
+    assert summary["buy_minimum_marketable_repair_complete"] is True
+    assert summary["buy_minimum_marketable_repair_encoding"] == (
+        "zlib+base64+indexed-canonical-json-v1"
     )
-    assert summary["buy_sizing_rejection_index_source"] == (
+    assert summary["buy_minimum_marketable_repair_index_source"] == (
         "candidate_evaluations.buy_candidate_index"
     )
-    sizing_rejection_json = zlib.decompress(
-        base64.b64decode(summary["buy_sizing_rejections_zlib_b64"])
+    minimum_repair_json = zlib.decompress(
+        base64.b64decode(summary["buy_minimum_marketable_repairs_zlib_b64"])
     )
-    assert hashlib.sha256(sizing_rejection_json).hexdigest() == (
-        summary["buy_sizing_rejections_sha256"]
+    assert hashlib.sha256(minimum_repair_json).hexdigest() == (
+        summary["buy_minimum_marketable_repairs_sha256"]
     )
-    sizing_rejections = json.loads(sizing_rejection_json)
-    assert sizing_rejections == {
+    minimum_repairs = json.loads(minimum_repair_json)
+    assert minimum_repairs == {
         "fields": [
             "buy_candidate_index",
             "current_token_shares",
@@ -456,7 +558,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["hold_cash"] == {
         "robust_delta_log_wealth": "0",
         "robust_ev_usd": "0",
-        "selected": True,
+        "selected": False,
     }
     evaluation_json = zlib.decompress(
         base64.b64decode(summary["candidate_evaluations_zlib_b64"])
@@ -465,35 +567,28 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v7"
+        "zlib+base64+canonical-json-v8"
     )
     candidate_evaluations = json.loads(evaluation_json)
-    sizing_row = dict(
+    repair_row = dict(
         zip(
-            sizing_rejections["fields"],
-            sizing_rejections["rows"][0],
+            minimum_repairs["fields"],
+            minimum_repairs["rows"][0],
             strict=True,
         )
     )
-    sizing_identity = candidate_evaluations["buy_candidate_index"][
-        sizing_row["buy_candidate_index"]
+    repair_identity = candidate_evaluations["buy_candidate_index"][
+        repair_row["buy_candidate_index"]
     ]
-    assert sizing_identity == [
-        "buy-paused",
+    assert repair_identity == [
+        "buy-repaired",
         "family-buy",
         "20C",
         "condition-buy",
         "YES",
         "token-buy",
     ]
-    assert candidate_evaluations["rejected_groups"] == [
-        {
-            "action": "BUY",
-            "side": "YES",
-            "reason": "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM",
-            "candidate_ids": ["buy-paused"],
-        }
-    ]
+    assert candidate_evaluations["rejected_groups"] == []
     assert candidate_evaluations["buy_condition_side_masks"] == [
         ["condition-buy", 1]
     ]
@@ -507,7 +602,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     ]
     assert candidate_evaluations["buy_candidate_index"] == [
         [
-            "buy-paused",
+            "buy-repaired",
             "family-buy",
             "20C",
             "condition-buy",
@@ -527,6 +622,13 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         for evaluation in candidate_evaluations["detailed"]
     ] == [
         (
+            "BUY",
+            "SELECTED",
+            None,
+            None,
+            "0",
+        ),
+        (
             "SELL",
             "REJECTED",
             "NON_POSITIVE_ROBUST_OBJECTIVE",
@@ -534,7 +636,10 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "12.34",
         )
     ]
-    sell_evaluation = candidate_evaluations["detailed"][0]
+    assert candidate_evaluations["detailed"][0]["buy_sizing_mode"] == (
+        "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
+    )
+    sell_evaluation = candidate_evaluations["detailed"][1]
     assert sell_evaluation["shares"] == "12.34"
     assert sell_evaluation["cash_proceeds_usd"] == "10"
     assert sell_evaluation["limit_price"] == "0.80"
@@ -796,7 +901,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     delta_summary = json.loads(delta_row["artifact_json"])["summary"]
     assert delta_row["mode"] == "global_single_order_auction_duplicate"
     assert delta_summary["payload_reference_fields"] == [
-        "buy_sizing_rejections_zlib_b64",
+        "buy_minimum_marketable_repairs_zlib_b64",
         "candidate_evaluations_zlib_b64",
     ]
     assert delta_summary["book_native_side_base_decision_log_id"] == full_row_id
@@ -12275,6 +12380,8 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         robust_ev_usd=2.0,
         capital_efficiency=0.25,
         no_trade_reason=None,
+        buy_sizing_mode="FRACTIONAL_TARGET",
+        buy_minimum_marketable_repair=None,
         terminal_wealth=SimpleNamespace(
             win_probability_lcb=0.60,
             loss_probability_ucb=0.40,
@@ -13122,6 +13229,7 @@ def _global_test_buy_candidate(
     condition_id: str = "condition",
     side: str = "YES",
     token_id: str = "token",
+    min_order_size: str = "1",
 ) -> GlobalSingleOrderCandidate:
     curve = ExecutableCostCurve(
         token_id=token_id,
@@ -13131,7 +13239,7 @@ def _global_test_buy_candidate(
         levels=(BookLevel(price=Decimal(price), size=Decimal("100")),),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.001"),
-        min_order_size=Decimal("1"),
+        min_order_size=Decimal(min_order_size),
         quote_ttl=_dt.timedelta(seconds=30),
     )
     return GlobalSingleOrderCandidate(

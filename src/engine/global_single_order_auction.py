@@ -79,6 +79,19 @@ def global_single_order_actuation_identity(
         if action == "SELL"
         else ()
     )
+    repair = decision.buy_minimum_marketable_repair
+    buy_sizing_identity = (
+        (decision.buy_sizing_mode,)
+        if repair is None
+        else (
+            decision.buy_sizing_mode,
+            repair.minimum_fractional_kelly_multiplier,
+            repair.continuous_full_kelly_target_shares,
+            repair.continuous_fractional_kelly_target_shares,
+            repr(repair.continuous_full_robust_delta_log_wealth),
+            repr(repair.continuous_full_robust_ev_usd),
+        )
+    )
     digest = hashlib.sha256()
     for value in (
         winner_event_id,
@@ -105,6 +118,7 @@ def global_single_order_actuation_identity(
         decision.current_token_shares,
         decision.full_kelly_target_shares,
         decision.fractional_kelly_target_shares,
+        *buy_sizing_identity,
         repr(decision.robust_delta_log_wealth),
         repr(decision.robust_ev_usd),
         repr(decision.capital_efficiency),
@@ -151,6 +165,19 @@ def global_single_order_economic_identity(
         if action == "SELL"
         else ()
     )
+    repair = decision.buy_minimum_marketable_repair
+    buy_sizing_identity = (
+        (decision.buy_sizing_mode,)
+        if repair is None
+        else (
+            decision.buy_sizing_mode,
+            repair.minimum_fractional_kelly_multiplier,
+            repair.continuous_full_kelly_target_shares,
+            repair.continuous_fractional_kelly_target_shares,
+            repr(repair.continuous_full_robust_delta_log_wealth),
+            repr(repair.continuous_full_robust_ev_usd),
+        )
+    )
     digest = hashlib.sha256()
     for value in (
         candidate.family_key,
@@ -179,6 +206,7 @@ def global_single_order_economic_identity(
         decision.current_token_shares,
         decision.full_kelly_target_shares,
         decision.fractional_kelly_target_shares,
+        *buy_sizing_identity,
         repr(decision.robust_delta_log_wealth),
         repr(decision.robust_ev_usd),
         repr(decision.capital_efficiency),

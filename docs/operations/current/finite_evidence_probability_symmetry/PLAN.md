@@ -756,3 +756,37 @@ test, joint-witness JIT continuity, hard-fact conflict rejection, standard live
 restart, and new receipts proving each affected position is represented as a
 SELL evaluation or an explicit typed exclusion.  A positive SELL may execute
 only through the ordinary robust objective and reduce-only pre-submit path.
+
+## 2026-07-19 discrete minimum-marketable Kelly repair
+
+Fresh complete-auction receipts exposed a discrete-feasible-set false negative.
+Seoul July 21 25C YES, Atlanta July 20 88-89F YES, and Guangzhou July 21 32C NO
+all had a positive venue-minimum robust delta-log-wealth and EV, while the fixed
+`0.03125` cumulative Fractional Kelly target was smaller than the venue minimum.
+The prior solver computed that positive minimum and then rejected it solely as
+`FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM`, choosing CASH even though one legal
+lot strictly dominated CASH/HOLD on the certified objective.
+
+The executable choice set is discrete.  When and only when the remaining
+Fractional Kelly target is positive but smaller than the exact current
+venue-legal minimum, the solver may admit exactly that minimum as a normal
+global-auction candidate if the resulting final holding does not exceed the
+full-Kelly target and the order independently has positive robust log wealth,
+positive robust EV, positive capital efficiency, and fits both cash and
+candidate cap.  The original configured multiplier and fractional target remain
+visible; the typed mode is `MINIMUM_MARKETABLE_DISCRETE_REPAIR`.  A repaired
+fill is included in the next ledger-bound endowment, so later cycles stop at
+`FRACTIONAL_KELLY_TARGET_REACHED` rather than repeatedly filling toward full
+Kelly.  JIT book/probability/wealth revalidation, worst-fee FAK-prefix proof,
+RiskGuard, operator policy, one-winner auction ranking, and venue reconciliation
+remain cumulative requirements.
+
+The actuation/economic identities bind the sizing mode and continuous repair
+certificate.  Receipt schema 15 persists the complete repair proof and uses
+candidate encoding v8.  Dataclass invariants independently recompute the legal
+minimum from the candidate curve, reject a synchronized non-minimum forgery,
+and prohibit repair semantics on rejected rows.  Focused anti-forgery review is
+PASS with no P0-P2; solver properties pass `138`, and the related W3 surface
+passes `222` with only the two unrelated pre-existing `epoch_superseded()`
+fixtures excluded.  This proof authorizes deployment and natural auction
+observation, not a forced order and not a claim of realized profit.

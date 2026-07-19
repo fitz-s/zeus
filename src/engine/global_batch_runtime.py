@@ -51,7 +51,7 @@ _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK = threading.Lock()
 _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS = frozenset(
     {
         "book_native_side_states_zlib_b64",
-        "buy_sizing_rejections_zlib_b64",
+        "buy_minimum_marketable_repairs_zlib_b64",
         "candidate_evaluations_zlib_b64",
     }
 )
@@ -458,9 +458,9 @@ def _global_auction_payload_identity(receipt: Mapping[str, object]) -> str:
             receipt.get("candidate_evaluation_encoding"),
             receipt.get("candidate_evaluations_sha256"),
         ),
-        "buy_sizing_rejections": (
-            receipt.get("buy_sizing_rejection_encoding"),
-            receipt.get("buy_sizing_rejections_sha256"),
+        "buy_minimum_marketable_repairs": (
+            receipt.get("buy_minimum_marketable_repair_encoding"),
+            receipt.get("buy_minimum_marketable_repairs_sha256"),
         ),
     }
     encoded = json.dumps(
@@ -480,9 +480,9 @@ def _global_auction_decision_payload_identity(
             receipt.get("candidate_evaluation_encoding"),
             receipt.get("candidate_evaluations_sha256"),
         ),
-        "buy_sizing_rejections": (
-            receipt.get("buy_sizing_rejection_encoding"),
-            receipt.get("buy_sizing_rejections_sha256"),
+        "buy_minimum_marketable_repairs": (
+            receipt.get("buy_minimum_marketable_repair_encoding"),
+            receipt.get("buy_minimum_marketable_repairs_sha256"),
         ),
     }
     encoded = json.dumps(
@@ -588,26 +588,26 @@ def _store_global_auction_receipt(
     if decision is None:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
     evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
-    buy_sizing_rejections = {
-        str(evaluation.candidate_id): evaluation.buy_sizing_rejection
+    buy_minimum_repairs = {
+        str(evaluation.candidate_id): evaluation.buy_minimum_marketable_repair
         for evaluation in evaluations
-        if evaluation.buy_sizing_rejection is not None
+        if evaluation.buy_minimum_marketable_repair is not None
     }
     evaluation_rows = tuple(
         {
             key: value
             for key, value in asdict(evaluation).items()
-            if key != "buy_sizing_rejection"
+            if key != "buy_minimum_marketable_repair"
         }
         for evaluation in evaluations
     )
-    below_minimum_ids = {
+    minimum_repair_ids = {
         str(row["candidate_id"])
         for row in evaluation_rows
         if row.get("action") == "BUY"
-        and row.get("status") == "REJECTED"
-        and row.get("rejection_reason")
-        == "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+        and row.get("status") in {"SCORED", "SELECTED"}
+        and row.get("buy_sizing_mode")
+        == "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
     }
     rejection_groups: dict[tuple[str, str, str], list[str]] = {}
     detailed_rows: list[dict] = []
@@ -653,7 +653,7 @@ def _store_global_auction_receipt(
     buy_candidate_positions = {
         row[0]: index for index, row in enumerate(buy_candidate_index)
     }
-    sizing_rejection_fields = (
+    minimum_repair_fields = (
         "buy_candidate_index",
         "current_token_shares",
         "full_kelly_target_shares",
@@ -670,18 +670,18 @@ def _store_global_auction_receipt(
         "minimum_marketable_capital_efficiency",
         "minimum_marketable_positive",
     )
-    buy_sizing_rejection_complete = (
-        set(buy_sizing_rejections) == below_minimum_ids
+    buy_minimum_repair_complete = (
+        set(buy_minimum_repairs) == minimum_repair_ids
         and all(
             candidate_id in buy_candidate_positions
-            for candidate_id in buy_sizing_rejections
+            for candidate_id in buy_minimum_repairs
         )
     )
-    if not buy_sizing_rejection_complete:
+    if not buy_minimum_repair_complete:
         raise ValueError(
-            "GLOBAL_AUCTION_RECEIPT_BUY_SIZING_REJECTION_INCOMPLETE"
+            "GLOBAL_AUCTION_RECEIPT_BUY_MINIMUM_REPAIR_INCOMPLETE"
         )
-    buy_sizing_rejection_rows = tuple(
+    buy_minimum_repair_rows = tuple(
         [
             buy_candidate_positions[candidate_id],
             str(certificate.current_token_shares),
@@ -700,19 +700,19 @@ def _store_global_auction_receipt(
             certificate.minimum_marketable_positive,
         ]
         for candidate_id, certificate in sorted(
-            buy_sizing_rejections.items(),
+            buy_minimum_repairs.items(),
             key=lambda item: buy_candidate_positions[item[0]],
         )
     )
-    sizing_rejection_json = json.dumps(
+    minimum_repair_json = json.dumps(
         {
-            "fields": sizing_rejection_fields,
-            "rows": buy_sizing_rejection_rows,
+            "fields": minimum_repair_fields,
+            "rows": buy_minimum_repair_rows,
         },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    sizing_rejection_zlib = zlib.compress(sizing_rejection_json, level=9)
+    minimum_repair_zlib = zlib.compress(minimum_repair_json, level=9)
     book_native_side_receipt = _book_native_side_receipt(
         asset_states=book_asset_states,
         probability_keys=probability_keys,
@@ -781,7 +781,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 14,
+        "schema_version": 15,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -844,24 +844,26 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v7",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v8",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),
         "candidate_evaluations_zlib_b64": base64.b64encode(
             evaluation_zlib
         ).decode("ascii"),
-        "buy_sizing_rejection_count": len(buy_sizing_rejection_rows),
-        "buy_sizing_rejection_complete": buy_sizing_rejection_complete,
-        "buy_sizing_rejection_encoding": "zlib+base64+indexed-canonical-json-v3",
-        "buy_sizing_rejection_index_source": (
+        "buy_minimum_marketable_repair_count": len(buy_minimum_repair_rows),
+        "buy_minimum_marketable_repair_complete": buy_minimum_repair_complete,
+        "buy_minimum_marketable_repair_encoding": (
+            "zlib+base64+indexed-canonical-json-v1"
+        ),
+        "buy_minimum_marketable_repair_index_source": (
             "candidate_evaluations.buy_candidate_index"
         ),
-        "buy_sizing_rejections_sha256": hashlib.sha256(
-            sizing_rejection_json
+        "buy_minimum_marketable_repairs_sha256": hashlib.sha256(
+            minimum_repair_json
         ).hexdigest(),
-        "buy_sizing_rejections_zlib_b64": base64.b64encode(
-            sizing_rejection_zlib
+        "buy_minimum_marketable_repairs_zlib_b64": base64.b64encode(
+            minimum_repair_zlib
         ).decode("ascii"),
     }
     encoded = json.dumps(
@@ -907,7 +909,7 @@ def _store_global_auction_receipt(
                 if key not in _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
             }
             reference_fields = [
-                "buy_sizing_rejections_zlib_b64",
+                "buy_minimum_marketable_repairs_zlib_b64",
                 "candidate_evaluations_zlib_b64",
             ]
             book_delta_bytes = 0

@@ -192,7 +192,6 @@ GlobalEligibilityReason = Literal[
     "DEPTH_INFEASIBLE",
     "ROBUST_MAJORITY_LOSS",
     "FRACTIONAL_KELLY_TARGET_REACHED",
-    "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
 ]
 
@@ -1411,8 +1410,8 @@ class BinaryTerminalWealthCertificate:
 
 
 @dataclass(frozen=True)
-class GlobalBuySizingRejection:
-    """Continuous optimum and venue-minimum proof for a subminimum BUY."""
+class GlobalBuyMinimumMarketableRepair:
+    """Proof that one venue-minimum BUY is the safe discrete Kelly repair."""
 
     current_token_shares: Decimal
     full_kelly_target_shares: Decimal
@@ -1489,7 +1488,7 @@ class GlobalBuySizingRejection:
             or not self.minimum_marketable_positive
             or self.minimum_marketable_positive != minimum_positive
         ):
-            raise ValueError("global BUY sizing rejection is incoherent")
+            raise ValueError("global BUY minimum-marketable repair is incoherent")
 
 
 @dataclass(frozen=True)
@@ -1518,6 +1517,11 @@ class GlobalSingleOrderCandidateEvaluation:
         "SETTLEMENT_LOCKED_BUY",
         "IMMEDIATE_REDUCE_ONLY_SELL",
     ] = "UNSCORED"
+    buy_sizing_mode: Literal[
+        "NOT_APPLICABLE",
+        "FRACTIONAL_TARGET",
+        "MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+    ] = "NOT_APPLICABLE"
     resolution_at_utc: datetime | None = None
     capital_lock_hours: float | None = None
     robust_log_growth_per_hour: float | None = None
@@ -1528,7 +1532,7 @@ class GlobalSingleOrderCandidateEvaluation:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
-    buy_sizing_rejection: GlobalBuySizingRejection | None = None
+    buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1575,16 +1579,12 @@ class GlobalSingleOrderCandidateEvaluation:
             )
             if not reason:
                 raise ValueError("rejected candidate evaluation cannot carry economics")
+            if (
+                self.buy_sizing_mode != "NOT_APPLICABLE"
+                or self.buy_minimum_marketable_repair is not None
+            ):
+                raise ValueError("rejected candidate evaluation cannot carry BUY sizing")
             if not carries_economics:
-                if self.buy_sizing_rejection is not None:
-                    if (
-                        self.action != "BUY"
-                        or reason
-                        != "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
-                    ):
-                        raise ValueError(
-                            "BUY sizing rejection is bound to the wrong rejection"
-                        )
                 if (
                     self.robust_delta_log_wealth != 0.0
                     or self.robust_ev_usd != 0.0
@@ -1621,7 +1621,7 @@ class GlobalSingleOrderCandidateEvaluation:
                 or self.full_kelly_target_shares != 0
                 or self.fractional_kelly_target_shares != 0
                 or terminal is None
-                or self.buy_sizing_rejection is not None
+                or self.buy_minimum_marketable_repair is not None
                 or terminal.loss_payoff_usd != -self.cost_usd
                 or terminal.win_payoff_usd != self.cash_proceeds_usd
                 or not math.isclose(
@@ -1684,24 +1684,56 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.limit_price <= 0
             or self.expected_fill_price_before_fee <= 0
             or self.terminal_wealth is None
-            or self.buy_sizing_rejection is not None
         ):
             raise ValueError("scored candidate evaluation lacks positive economics")
-        if self.action == "BUY" and (
-            self.current_token_shares < 0
-            or self.full_kelly_target_shares <= 0
-            or self.fractional_kelly_target_shares <= self.current_token_shares
-            or self.fractional_kelly_target_shares
-            > self.full_kelly_target_shares
-            or self.shares
-            > self.fractional_kelly_target_shares - self.current_token_shares
-        ):
-            raise ValueError("BUY evaluation is not cumulative fractional-Kelly coherent")
+        if self.action == "BUY":
+            repair = self.buy_minimum_marketable_repair
+            common_invalid = (
+                self.current_token_shares < 0
+                or self.full_kelly_target_shares <= 0
+                or self.fractional_kelly_target_shares
+                <= self.current_token_shares
+                or self.fractional_kelly_target_shares
+                > self.full_kelly_target_shares
+            )
+            if repair is None:
+                sizing_invalid = self.shares > (
+                    self.fractional_kelly_target_shares
+                    - self.current_token_shares
+                ) or self.buy_sizing_mode != "FRACTIONAL_TARGET"
+            else:
+                sizing_invalid = (
+                    self.buy_sizing_mode
+                    != "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
+                    or repair.current_token_shares != self.current_token_shares
+                    or repair.full_kelly_target_shares
+                    != self.full_kelly_target_shares
+                    or repair.fractional_kelly_target_shares
+                    != self.fractional_kelly_target_shares
+                    or repair.minimum_marketable_increment_shares != self.shares
+                    or repair.minimum_marketable_cost_usd != self.cost_usd
+                    or repair.minimum_marketable_robust_delta_log_wealth
+                    != self.robust_delta_log_wealth
+                    or repair.minimum_marketable_robust_ev_usd
+                    != self.robust_ev_usd
+                    or repair.minimum_marketable_capital_efficiency
+                    != self.capital_efficiency
+                    or self.current_token_shares + self.shares
+                    <= self.fractional_kelly_target_shares
+                    or self.current_token_shares + self.shares
+                    > self.full_kelly_target_shares
+                )
+            if common_invalid or sizing_invalid:
+                raise ValueError(
+                    "BUY evaluation is not cumulative Kelly/discrete-repair coherent"
+                )
         if self.action == "SELL" and (
             self.current_token_shares != 0
             or self.full_kelly_target_shares != 0
             or self.fractional_kelly_target_shares != 0
             or self.shares > self.held_shares
+            or self.buy_minimum_marketable_repair is not None
+            or self.buy_sizing_mode != "NOT_APPLICABLE"
         ):
             raise ValueError(
                 "SELL evaluation must reduce no more than its bound holding"
@@ -1724,6 +1756,11 @@ class GlobalSingleOrderDecision:
         "SETTLEMENT_LOCKED_BUY",
         "IMMEDIATE_REDUCE_ONLY_SELL",
     ] = "UNSCORED"
+    buy_sizing_mode: Literal[
+        "NOT_APPLICABLE",
+        "FRACTIONAL_TARGET",
+        "MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+    ] = "NOT_APPLICABLE"
     resolution_at_utc: datetime | None = None
     capital_lock_hours: float | None = None
     robust_log_growth_per_hour: float | None = None
@@ -1735,7 +1772,7 @@ class GlobalSingleOrderDecision:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
-    buy_sizing_rejection: GlobalBuySizingRejection | None = None
+    buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
     candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
     candidate_input_count: int | None = None
@@ -1789,19 +1826,18 @@ class GlobalSingleOrderDecision:
                     != self.full_kelly_target_shares
                     or winner.fractional_kelly_target_shares
                     != self.fractional_kelly_target_shares
+                    or winner.buy_minimum_marketable_repair
+                    != self.buy_minimum_marketable_repair
+                    or winner.buy_sizing_mode != self.buy_sizing_mode
                 ):
                     raise ValueError("selected candidate evaluation disagrees with decision")
         if self.candidate is None:
             if self.no_trade_reason is None:
                 raise ValueError("global no-trade decision requires a reason")
-            if self.buy_sizing_rejection is not None and (
-                not internal_score
-                or self.no_trade_reason
-                != "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
-            ):
-                raise ValueError(
-                    "global BUY sizing rejection belongs only to an internal below-minimum score"
-                )
+            if self.buy_minimum_marketable_repair is not None:
+                raise ValueError("global no-trade decision cannot carry a BUY repair")
+            if self.buy_sizing_mode != "NOT_APPLICABLE":
+                raise ValueError("global no-trade decision cannot carry BUY sizing")
             if self.shares != 0 or self.cost_usd != 0:
                 raise ValueError("global no-trade decision cannot allocate capital")
             if (
@@ -1820,8 +1856,6 @@ class GlobalSingleOrderDecision:
             ):
                 raise ValueError("global no-trade decision cannot carry an execution boundary")
             return
-        if self.buy_sizing_rejection is not None:
-            raise ValueError("global executable decision cannot carry a sizing rejection")
         if getattr(self.candidate, "action", "BUY") == "SELL":
             if (
                 self.no_trade_reason is not None
@@ -1836,6 +1870,8 @@ class GlobalSingleOrderDecision:
                 or self.current_token_shares != 0
                 or self.full_kelly_target_shares != 0
                 or self.fractional_kelly_target_shares != 0
+                or self.buy_minimum_marketable_repair is not None
+                or self.buy_sizing_mode != "NOT_APPLICABLE"
                 or self.terminal_wealth is None
                 or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
                 or self.terminal_wealth.win_payoff_usd != self.cash_proceeds_usd
@@ -1858,6 +1894,52 @@ class GlobalSingleOrderDecision:
             ):
                 raise ValueError("global sell decision is not held-position coherent")
             return
+        repair = self.buy_minimum_marketable_repair
+        if repair is None:
+            sizing_invalid = self.shares > (
+                self.fractional_kelly_target_shares
+                - self.current_token_shares
+            ) or self.buy_sizing_mode != "FRACTIONAL_TARGET"
+        else:
+            raw_min = _single_order_min_marketable_shares(
+                self.candidate.executable_cost_curve
+            )
+            legal_min = (
+                _single_order_venue_legal_neighbor(
+                    self.candidate,
+                    raw_min,
+                    at_most=False,
+                )
+                if raw_min is not None
+                else None
+            )
+            if legal_min is None:
+                legal_min = raw_min
+            sizing_invalid = (
+                self.buy_sizing_mode
+                != "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
+                or legal_min is None
+                or self.shares != legal_min
+                or repair.current_token_shares != self.current_token_shares
+                or repair.full_kelly_target_shares
+                != self.full_kelly_target_shares
+                or repair.fractional_kelly_target_shares
+                != self.fractional_kelly_target_shares
+                or repair.minimum_marketable_increment_shares != self.shares
+                or repair.minimum_marketable_cost_usd != self.cost_usd
+                or repair.minimum_marketable_robust_delta_log_wealth
+                != self.robust_delta_log_wealth
+                or repair.minimum_marketable_robust_ev_usd
+                != self.robust_ev_usd
+                or repair.minimum_marketable_capital_efficiency
+                != self.capital_efficiency
+                or self.current_token_shares + self.shares
+                <= self.fractional_kelly_target_shares
+                or self.current_token_shares + self.shares
+                > self.full_kelly_target_shares
+            )
+        if sizing_invalid:
+            raise ValueError("global BUY sizing is not Kelly/discrete-repair coherent")
         if (
             self.no_trade_reason is not None
             or self.shares <= 0
@@ -1872,8 +1954,6 @@ class GlobalSingleOrderDecision:
             or self.fractional_kelly_target_shares <= self.current_token_shares
             or self.fractional_kelly_target_shares
             > self.full_kelly_target_shares
-            or self.shares
-            > self.fractional_kelly_target_shares - self.current_token_shares
             or self.terminal_wealth is None
             or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
             or self.terminal_wealth.win_payoff_usd != self.shares - self.cost_usd
@@ -1914,13 +1994,11 @@ def _global_candidate_evaluations(
     *,
     rejections: Mapping[str, str],
     scores: Sequence[GlobalSingleOrderDecision] = (),
-    buy_sizing_rejections: Mapping[str, GlobalBuySizingRejection] | None = None,
     winner_id: str | None = None,
     default_rejection: str | None = None,
 ) -> tuple[GlobalSingleOrderCandidateEvaluation, ...]:
     """Retain every candidate's eligibility/economic result for one epoch."""
 
-    sizing_rejections = buy_sizing_rejections or {}
     scored_by_id = {
         score.candidate.candidate_id: score
         for score in scores
@@ -1952,9 +2030,6 @@ def _global_candidate_evaluations(
                     position_id=position_id,
                     held_shares=held_shares,
                     rejection_reason=reason,
-                    buy_sizing_rejection=sizing_rejections.get(
-                        candidate.candidate_id
-                    ),
                 )
             )
             continue
@@ -2001,6 +2076,10 @@ def _global_candidate_evaluations(
                     score.fractional_kelly_target_shares
                 ),
                 terminal_wealth=score.terminal_wealth,
+                buy_sizing_mode=score.buy_sizing_mode,
+                buy_minimum_marketable_repair=(
+                    score.buy_minimum_marketable_repair
+                ),
             )
         )
     return tuple(evaluations)
@@ -2566,9 +2645,10 @@ def _score_global_single_order(
     The current book and terminal-wealth objective identify the additional shares
     that reach the full-Kelly final holding from the reconciled current holding.
     The operator-owned multiplier applies to that FINAL holding, not independently
-    to every auction epoch.  Only the remaining shares below the cumulative target
-    are executable; a venue minimum may not promote a smaller target into a trade.
-    Cash and allocator capacity remain independent hard outer bounds.
+    to every auction epoch.  The continuous target is repaired onto the venue grid:
+    when it is positive but subminimum, exactly one minimum marketable increment may
+    be promoted only if that discrete order remains below full Kelly and independently
+    proves positive robust log wealth, EV, affordability, and allocator capacity.
     """
 
     multiplier = Decimal(fractional_kelly_multiplier)
@@ -2742,7 +2822,6 @@ def _score_global_single_order(
         at_most=True,
     )
     if fractional_legal_max is None or fractional_legal_max < legal_min_shares:
-        reason = "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
         continuous_best = _single_order_continuous_optimum(
             candidate,
             q_samples=q_samples,
@@ -2770,6 +2849,11 @@ def _score_global_single_order(
             alpha=band_alpha,
             robust_q=robust_q,
         )
+        (
+            minimum_limit_price,
+            minimum_expected_fill_price,
+            minimum_max_spend,
+        ) = _single_order_execution_boundary(candidate, legal_min_shares)
         if not (
             continuous_best[0] > 0.0
             and minimum_robust_du > 0.0
@@ -2788,8 +2872,23 @@ def _score_global_single_order(
                     candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
                 },
             )
+        if (
+            legal_min_shares > capacity_max_shares
+            or minimum_max_spend > spend_limit
+        ):
+            reason = "CAPITAL_CAPACITY_EXHAUSTED"
+            return GlobalSingleOrderDecision(
+                candidate=None,
+                shares=Decimal("0"),
+                cost_usd=Decimal("0"),
+                robust_delta_log_wealth=0.0,
+                robust_ev_usd=0.0,
+                capital_efficiency=0.0,
+                no_trade_reason=reason,
+                rejection_reasons={candidate.candidate_id: reason},
+            )
         continuous_full_target = held_shares + continuous_best[4]
-        sizing_rejection = GlobalBuySizingRejection(
+        repair = GlobalBuyMinimumMarketableRepair(
             current_token_shares=held_shares,
             full_kelly_target_shares=full_kelly_target_shares,
             fractional_kelly_target_shares=fractional_kelly_target_shares,
@@ -2813,15 +2912,28 @@ def _score_global_single_order(
             ),
         )
         return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason=reason,
-            buy_sizing_rejection=sizing_rejection,
-            rejection_reasons={candidate.candidate_id: reason},
+            candidate=candidate,
+            shares=legal_min_shares,
+            cost_usd=minimum_cost,
+            robust_delta_log_wealth=minimum_robust_du,
+            robust_ev_usd=minimum_robust_ev,
+            capital_efficiency=minimum_efficiency,
+            no_trade_reason=None,
+            limit_price=minimum_limit_price,
+            expected_fill_price_before_fee=minimum_expected_fill_price,
+            max_spend_usd=minimum_max_spend,
+            current_token_shares=held_shares,
+            full_kelly_target_shares=full_kelly_target_shares,
+            fractional_kelly_target_shares=fractional_kelly_target_shares,
+            buy_sizing_mode="MINIMUM_MARKETABLE_DISCRETE_REPAIR",
+            terminal_wealth=_binary_terminal_wealth_certificate(
+                robust_q=robust_q,
+                shares=legal_min_shares,
+                cost_usd=minimum_cost,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+            ),
+            buy_minimum_marketable_repair=repair,
         )
     fractional_max_shares = min(
         capacity_max_shares,
@@ -2919,6 +3031,7 @@ def _score_global_single_order(
         current_token_shares=held_shares,
         full_kelly_target_shares=full_kelly_target_shares,
         fractional_kelly_target_shares=fractional_kelly_target_shares,
+        buy_sizing_mode="FRACTIONAL_TARGET",
         terminal_wealth=_binary_terminal_wealth_certificate(
             robust_q=robust_q,
             shares=shares,
@@ -3482,7 +3595,6 @@ def select_global_single_order(
 
     rejections: dict[str, str] = {}
     scored: list[GlobalSingleOrderDecision] = []
-    buy_sizing_rejections: dict[str, GlobalBuySizingRejection] = {}
 
     def selection_cancelled() -> bool:
         if cancelled is None:
@@ -3729,7 +3841,6 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
-                        buy_sizing_rejections=buy_sizing_rejections,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3760,10 +3871,6 @@ def select_global_single_order(
             current_token_shares=candidate_endowment.current_token_shares,
         )
         if score.candidate is None:
-            if score.buy_sizing_rejection is not None:
-                buy_sizing_rejections[candidate.candidate_id] = (
-                    score.buy_sizing_rejection
-                )
             rejections.update(score.rejection_reasons)
         else:
             resolution_at = universe_witness.resolution_at_by_family.get(
@@ -3788,7 +3895,6 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
-                        buy_sizing_rejections=buy_sizing_rejections,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3815,7 +3921,6 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
-                        buy_sizing_rejections=buy_sizing_rejections,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3859,7 +3964,6 @@ def select_global_single_order(
                 candidates,
                 rejections=rejections,
                 scores=scored,
-                buy_sizing_rejections=buy_sizing_rejections,
             ),
             candidate_input_count=len(candidates),
         )
@@ -3912,13 +4016,16 @@ def select_global_single_order(
         fractional_kelly_target_shares=(
             winner.fractional_kelly_target_shares
         ),
+        buy_sizing_mode=winner.buy_sizing_mode,
         terminal_wealth=winner.terminal_wealth,
+        buy_minimum_marketable_repair=(
+            winner.buy_minimum_marketable_repair
+        ),
         rejection_reasons=rejections,
         candidate_evaluations=_global_candidate_evaluations(
             candidates,
             rejections=rejections,
             scores=scored,
-            buy_sizing_rejections=buy_sizing_rejections,
             winner_id=winner_id,
         ),
         candidate_input_count=len(candidates),
