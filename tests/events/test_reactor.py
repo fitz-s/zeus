@@ -71,6 +71,19 @@ def test_global_family_ineligible_is_explicitly_transient(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
+def test_selected_family_forecast_authority_loss_is_transient(caplog):
+    reason = (
+        "LIVE_INFERENCE_INPUTS_MISSING:"
+        "FORECAST_AUTHORITY_MISSING:replacement_posterior"
+    )
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert "FORECAST_AUTHORITY_MISSING" in TRANSIENT_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(reason) is True
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
 def test_day0_catchup_emitter_returns_exact_event_ids(monkeypatch):
     from src.events import reactor as reactor_module
 

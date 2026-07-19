@@ -10528,6 +10528,7 @@ def _global_preflight_block_status(reason: str) -> str:
             "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:",
             "FILL_UP_NO_SUBMIT:",
             "SHIFT_BIN_NO_SUBMIT:",
+            "LIVE_INFERENCE_INPUTS_MISSING:FORECAST_AUTHORITY_MISSING:",
             "EVENT_BOUND_MARKET_PHASE_CLOSED:",
             "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
             (
@@ -10553,6 +10554,27 @@ def _global_preflight_block_status(reason: str) -> str:
     # prove the runner-up globally optimal. Unknown reasons therefore stop this
     # cut; the next cycle rebuilds the complete universe from current truth.
     return "BATCH_BLOCKED"
+
+
+def _live_inference_authority_missing_reason(exc: ValueError) -> str | None:
+    reason = str(exc)
+    for evidence_prefix, missing_prefix in (
+        (
+            "FORECAST_AUTHORITY_EVIDENCE_MISSING:",
+            "FORECAST_AUTHORITY_MISSING:",
+        ),
+        (
+            "CALIBRATION_AUTHORITY_EVIDENCE_MISSING:",
+            "CALIBRATION_AUTHORITY_MISSING:",
+        ),
+    ):
+        if reason.startswith(evidence_prefix):
+            return "LIVE_INFERENCE_INPUTS_MISSING:" + reason.replace(
+                evidence_prefix,
+                missing_prefix,
+                1,
+            )
+    return None
 
 
 def _global_preflight_entry_authority_receipt(
@@ -14176,19 +14198,14 @@ def _build_event_bound_no_submit_receipt_core(
             kelly_multiplier=kelly_multiplier,
         )
     except ValueError as exc:
-        missing_reason = str(exc)
-        if not missing_reason.startswith("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:"):
+        missing_reason = _live_inference_authority_missing_reason(exc)
+        if missing_reason is None:
             raise
-        missing_reason = missing_reason.replace(
-            "CALIBRATION_AUTHORITY_EVIDENCE_MISSING:",
-            "CALIBRATION_AUTHORITY_MISSING:",
-            1,
-        )
         return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason=f"LIVE_INFERENCE_INPUTS_MISSING:{missing_reason}",
+            reason=missing_reason,
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,

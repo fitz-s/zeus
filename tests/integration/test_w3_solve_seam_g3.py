@@ -6239,6 +6239,11 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ),
         ("FILL_UP_NO_SUBMIT:NO_RESIDUAL_AT_OR_OVER_TARGET", "BLOCKED"),
         ("SHIFT_BIN_NO_SUBMIT:OLD_LEG_STILL_STRONG", "BLOCKED"),
+        (
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "FORECAST_AUTHORITY_MISSING:replacement_posterior",
+            "BLOCKED",
+        ),
         ("EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day", "BLOCKED"),
         (
             "GLOBAL_FAMILY_INELIGIBLE:"
@@ -6265,6 +6270,31 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
 )
 def test_global_preflight_block_scope_is_explicit(reason, status):
     assert era._global_preflight_block_status(reason) == status
+
+
+@pytest.mark.parametrize(
+    ("evidence_reason", "receipt_reason"),
+    (
+        (
+            "FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior",
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "FORECAST_AUTHORITY_MISSING:replacement_posterior",
+        ),
+        (
+            "CALIBRATION_AUTHORITY_EVIDENCE_MISSING:clock",
+            "LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING:clock",
+        ),
+    ),
+)
+def test_live_inference_authority_loss_becomes_family_receipt(
+    evidence_reason, receipt_reason
+):
+    assert era._live_inference_authority_missing_reason(
+        ValueError(evidence_reason)
+    ) == receipt_reason
+    assert era._live_inference_authority_missing_reason(
+        ValueError("UNRELATED_PROOF_ERROR")
+    ) is None
 
 
 def test_global_preflight_runs_final_entry_authority_before_stable(monkeypatch):
@@ -13073,6 +13103,10 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
             "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:spine_members_unavailable"
         ),
         "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
+        (
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "FORECAST_AUTHORITY_MISSING:replacement_posterior"
+        ),
     ),
 )
 def test_global_batch_falls_through_candidate_local_preflight_block(
