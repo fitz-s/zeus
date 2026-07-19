@@ -3432,6 +3432,79 @@ def test_review_required_entry_with_positive_trade_fact_is_boot_recoverable(
     )
 
 
+def test_settled_fak_entry_remainder_is_not_classified_as_resting(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_resting_command_trade_db(
+        trade_db,
+        phase="settled",
+        intent_kind="ENTRY",
+    )
+    conn = sqlite3.connect(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("ALTER TABLE venue_commands ADD COLUMN envelope_id TEXT")
+    conn.execute(
+        "UPDATE venue_commands SET state = 'REVIEW_REQUIRED', envelope_id = 'env-1'"
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            order_type TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES ('env-1', 'FAK')"
+    )
+    conn.execute(
+        """
+        UPDATE venue_order_facts
+           SET state = 'PARTIALLY_MATCHED',
+               matched_size = '5.05',
+               remaining_size = '0.01'
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-1', '0xabc', 'CONFIRMED', '5.05', '0.60', ?
+        )
+        """,
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._resting_venue_command_lifecycle_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["covered_count"] == 1
+    assert result.evidence["settled_fak_non_resting_count"] == 1
+
+
 def test_resting_exit_order_allows_pending_exit(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
@@ -3805,6 +3878,88 @@ def test_venue_point_order_truth_alignment_boot_recovers_unknown_status_with_pos
     assert recoverable["repair_action"] == (
         "terminalize_review_required_entry_from_positive_trade_fact"
     )
+
+
+def test_venue_point_order_shape_error_does_not_revive_settled_fak_remainder(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(
+        trade_db,
+        command_state="REVIEW_REQUIRED",
+        fact_state="PARTIALLY_MATCHED",
+        matched_size="5.05",
+    )
+    conn = sqlite3.connect(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("ALTER TABLE venue_commands ADD COLUMN envelope_id TEXT")
+    conn.execute("UPDATE venue_commands SET envelope_id = 'env-1'")
+    conn.execute(
+        """
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            order_type TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES ('env-1', 'FAK')"
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            cost_basis_usd REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'pos-venue-audit', 'settled', 5.05, 3.03, 5.05
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-venue-audit', 'venue-order-1', 'CONFIRMED', '5.05', '0.60', ?
+        )
+        """,
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    fake_adapter = _FakeVenuePointAdapter({}, point_errors={"venue-order-1"})
+    monkeypatch.setattr(
+        preflight,
+        "_preflight_venue_adapter",
+        lambda: (_FakeVenueClient(), fake_adapter),
+    )
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["covered_count"] == 1
+    assert result.evidence["settled_fak_non_resting_count"] == 1
 
 
 def test_venue_point_order_truth_alignment_accepts_projected_partial_match(

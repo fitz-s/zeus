@@ -1852,6 +1852,20 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
         if not _table_exists(conn, "main", "venue_commands"):
             return []
         terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
+        command_columns = _table_columns(conn, "main", "venue_commands")
+        envelope_join = ""
+        envelope_select = "NULL AS order_type"
+        if (
+            "envelope_id" in command_columns
+            and _table_exists(conn, "main", "venue_submission_envelopes")
+            and {"envelope_id", "order_type"}
+            <= _table_columns(conn, "main", "venue_submission_envelopes")
+        ):
+            envelope_select = "vse.order_type AS order_type"
+            envelope_join = """
+              LEFT JOIN venue_submission_envelopes vse
+                ON vse.envelope_id = cmd.envelope_id
+            """
         fact_join = ""
         fact_select = (
             "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
@@ -1944,13 +1958,16 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
                 """
         rows = conn.execute(
             f"""
-            SELECT cmd.command_id, cmd.position_id, cmd.decision_id, cmd.token_id,
+            SELECT cmd.command_id, cmd.intent_kind, cmd.position_id,
+                   cmd.decision_id, cmd.token_id,
                    cmd.state, cmd.venue_order_id, cmd.size, cmd.price,
                    cmd.created_at, cmd.updated_at,
+                   {envelope_select},
                    {position_select},
                    {fact_select},
                    {trade_select}
               FROM venue_commands cmd
+              {envelope_join}
               {position_join}
               {fact_join}
               {trade_join}
@@ -2166,6 +2183,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             command_id = str(command.get("command_id") or "").strip()
             base_item = {
                 "command_id": command_id,
+                "intent_kind": command.get("intent_kind"),
                 "position_id": command.get("position_id"),
                 "command_state": command.get("state"),
                 "venue_order_id": venue_order_id,
@@ -2177,6 +2195,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                 "positive_trade_filled_size": command.get("positive_trade_filled_size"),
                 "positive_trade_fill_price": command.get("positive_trade_fill_price"),
                 "positive_trade_observed_at": command.get("positive_trade_observed_at"),
+                "order_type": command.get("order_type"),
             }
             try:
                 payload = _venue_payload(adapter.get_order(venue_order_id))
@@ -2214,6 +2233,14 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                         "point_error": repr(exc),
                         "open_orders_fallback_match": False,
                     }
+                    if _terminal_fak_entry_has_no_resting_remainder(risk_item):
+                        covered.append(
+                            {
+                                **risk_item,
+                                "coverage": "settled_fak_remainder_canceled",
+                            }
+                        )
+                        continue
                     recoverable = _venue_point_order_boot_recoverable(risk_item)
                     if recoverable is not None:
                         boot_recoverable.append(recoverable)
@@ -2228,7 +2255,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                         }
                     )
                     continue
-            if _venue_status(payload) in {"", "UNKNOWN"}:
+            if _venue_status(payload) in {"", "UNKNOWN", "NOT_FOUND"}:
                 try:
                     fallback_payload = _find_open_order_payload(adapter, venue_order_id)
                 except Exception as open_exc:  # noqa: BLE001
@@ -2258,7 +2285,16 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                 "local_fact_observed_at": command.get("latest_fact_observed_at"),
                 "venue_order": _venue_order_summary(payload),
             }
-            if payload is None:
+            if (
+                payload is None or status in {"", "UNKNOWN", "NOT_FOUND"}
+            ) and _terminal_fak_entry_has_no_resting_remainder(item):
+                covered.append(
+                    {
+                        **item,
+                        "coverage": "settled_fak_remainder_canceled",
+                    }
+                )
+            elif payload is None:
                 risky.append({**item, "risk": "venue_point_order_not_found"})
             elif status in {"", "UNKNOWN"}:
                 risk_item = {**item, "risk": "venue_point_order_status_unknown"}
@@ -2299,12 +2335,19 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             close()
 
     evidence["covered_count"] = len(covered)
+    settled_fak_count = sum(
+        item.get("coverage") == "settled_fak_remainder_canceled"
+        for item in covered
+    )
+    evidence["settled_fak_non_resting_count"] = settled_fak_count
     evidence["boot_recoverable"] = boot_recoverable
     evidence["risky"] = risky
     return CheckResult(
         "venue_point_order_truth_alignment",
         not risky,
-        "authenticated venue point-order truth matches local restart-relevant order facts"
+        "canonical settled FAK semantics prove no resting remainder"
+        if not risky and settled_fak_count
+        else "authenticated venue point-order truth matches local restart-relevant order facts"
         if not risky and not boot_recoverable
         else "authenticated venue point-order drift is boot-recoverable before live order submission"
         if not risky
@@ -2906,6 +2949,19 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                 evidence,
             )
         command_columns = _table_columns(conn, "main", "venue_commands")
+        envelope_join = ""
+        envelope_select = "NULL AS order_type"
+        if (
+            "envelope_id" in command_columns
+            and _table_exists(conn, "main", "venue_submission_envelopes")
+            and {"envelope_id", "order_type"}
+            <= _table_columns(conn, "main", "venue_submission_envelopes")
+        ):
+            envelope_select = "vse.order_type AS order_type"
+            envelope_join = """
+              LEFT JOIN venue_submission_envelopes vse
+                ON vse.envelope_id = cmd.envelope_id
+            """
         price_select = "cmd.price" if "price" in command_columns else "NULL"
         created_at_select = "cmd.created_at" if "created_at" in command_columns else "NULL"
         fact_join = ""
@@ -3008,6 +3064,7 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                 cmd.size,
                 {created_at_select} AS created_at,
                 cmd.updated_at,
+                {envelope_select},
                 pc.phase AS position_phase,
                 pc.city,
                 pc.target_date,
@@ -3019,6 +3076,7 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
               FROM venue_commands cmd
               LEFT JOIN position_current pc
                 ON pc.position_id = cmd.position_id
+              {envelope_join}
               {fact_join}
               {trade_join}
              WHERE UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
@@ -3036,6 +3094,14 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
     boot_recoverable: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
+        if _terminal_fak_entry_has_no_resting_remainder(item):
+            covered.append(
+                {
+                    **item,
+                    "coverage": "settled_fak_remainder_canceled",
+                }
+            )
+            continue
         intent_kind = str(row["intent_kind"] or "").upper()
         phase = str(row["position_phase"] or "")
         fact_state = str(row["latest_fact_state"] or "").upper()
@@ -3071,11 +3137,18 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
     evidence["risky"] = risky
     evidence["boot_recoverable"] = boot_recoverable
     evidence["covered_count"] = len(covered)
+    settled_fak_count = sum(
+        item.get("coverage") == "settled_fak_remainder_canceled"
+        for item in covered
+    )
+    evidence["settled_fak_non_resting_count"] = settled_fak_count
     return CheckResult(
         "resting_venue_command_lifecycle_alignment",
         not risky,
         (
-            "resting venue commands are aligned with position lifecycle"
+            "canonical settled FAK semantics prove no resting command"
+            if settled_fak_count
+            else "resting venue commands are aligned with position lifecycle"
             if not boot_recoverable
             else "resting venue command conflicts are boot-recoverable"
         )
@@ -3093,6 +3166,29 @@ def _positive_float(value: object) -> float | None:
     if parsed > 0.0:
         return parsed
     return None
+
+
+def _terminal_fak_entry_has_no_resting_remainder(item: dict[str, Any]) -> bool:
+    """Recognize settled FAK projection debt without inventing venue exposure."""
+
+    fact_state = str(
+        item.get("latest_fact_state") or item.get("local_fact_state") or ""
+    ).upper()
+    matched_size = item.get("latest_fact_matched_size")
+    if matched_size in (None, ""):
+        matched_size = item.get("local_fact_matched_size")
+    return (
+        str(item.get("intent_kind") or "").upper() == "ENTRY"
+        and str(item.get("command_state") or item.get("state") or "").upper()
+        == "REVIEW_REQUIRED"
+        and str(item.get("position_phase") or "") == "settled"
+        and str(item.get("order_type") or "").upper() == "FAK"
+        and str(item.get("positive_trade_fact_state") or "").upper()
+        == "CONFIRMED"
+        and _positive_float(item.get("positive_trade_filled_size")) is not None
+        and fact_state in {"MATCHED", "FILLED", "PARTIAL", "PARTIALLY_MATCHED"}
+        and _positive_float(matched_size) is not None
+    )
 
 
 def _payload_has_exit_fill_economics(raw: object, fallback_price: object) -> bool:
