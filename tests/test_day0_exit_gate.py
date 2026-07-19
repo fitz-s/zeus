@@ -1,5 +1,8 @@
 # Created: 2026-04-07
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-19
+# Lifecycle: created=2026-04-07; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Purpose: Lock current Day0 observation and robust held-value exit authority.
+# Reuse: Run when Day0 exit probability, CI, bid, or monitor authority changes.
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """Day0 exit authority tests.
 
@@ -41,13 +44,20 @@ def _make_day0_exit_context(
     current_market_price: float,
     best_bid: float | None,
     hours_to_settlement: float = 3.0,
+    current_ci: tuple[float, float] | None = None,
 ) -> ExitContext:
+    if current_ci is None:
+        current_ci = (
+            max(0.0, fresh_prob - 0.01),
+            min(1.0, fresh_prob + 0.01),
+        )
     return ExitContext(
         fresh_prob=fresh_prob,
         fresh_prob_is_fresh=fresh_prob_is_fresh,
         current_market_price=current_market_price,
         current_market_price_is_fresh=True,
         best_bid=best_bid,
+        current_ci=current_ci,
         hours_to_settlement=hours_to_settlement,
         position_state="day0_window",
         day0_active=True,
@@ -250,6 +260,7 @@ class TestDay0ExitGateStaleProbability:
             current_market_price=0.999,
             best_bid=0.999,
             hours_to_settlement=0.5,
+            current_ci=(0.80, 1.0),
         )
 
         decision = pos.evaluate_exit(ctx)
@@ -257,7 +268,7 @@ class TestDay0ExitGateStaleProbability:
         assert not decision.should_exit
         assert decision.trigger != "SETTLEMENT_IMMINENT"
         assert "near_settlement_confirmed_win_hold" in decision.applied_validations
-        assert "near_settlement_terminal_bid_hold" in decision.applied_validations
+        assert "near_settlement_terminal_bid_hold" not in decision.applied_validations
 
     def test_settlement_imminent_terminal_bid_still_sells_real_low_belief(self):
         pos = _make_position(

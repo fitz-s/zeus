@@ -247,8 +247,7 @@ class ExitContext:
     #   current_ci      : (lo, hi) CURRENT belief CI (fresh bootstrap from this cycle).
     #   belief_available: False when current belief math is degraded (day0 absorbing-mask /
     #                     obs gap) — the EVIDENCE_UNAVAILABLE third state (distinct from
-    #                     belief-reversed). When any of these is None, the gate is inert and
-    #                     the legacy flat 2-confirm path runs unchanged (full back-compat).
+    #                     belief-reversed). Missing current_ci cannot authorize a local SELL.
     entry_posterior: Optional[float] = None
     entry_ci: Optional[tuple] = None
     current_ci: Optional[tuple] = None
@@ -1118,19 +1117,50 @@ class Position:
         )
         applied.append("forward_edge_compute")
 
+        if not ExitContext._is_finite(exit_context.best_bid):
+            applied.append("best_bid_unavailable")
+            applied.append("exit_context_incomplete")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
+
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
             applied.append("day0_standard_exit_optimizer")
-            if not ExitContext._is_finite(exit_context.best_bid):
-                applied.append("best_bid_unavailable")
-                applied.append("exit_context_incomplete")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                )
+
+        current_hold_q_ucb = _held_side_ci_ucb(
+            exit_context.current_ci,
+            exit_context.fresh_prob,
+        )
+        current_ci_invalid = (
+            exit_context.current_ci is not None and current_hold_q_ucb is None
+        )
+        if current_hold_q_ucb is None:
+            applied.append(
+                "current_held_ci_invalid"
+                if current_ci_invalid
+                else "current_held_ci_unavailable"
+            )
+            applied.append("evidence_unavailable_third_state")
+            if (
+                exit_context.hours_to_settlement is not None
+                and exit_context.hours_to_settlement < 1.0
+            ):
+                applied.append("near_settlement_gate")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "EVIDENCE_UNAVAILABLE",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="EVIDENCE_UNAVAILABLE",
+            )
+
+        if exit_context.day0_active:
             if float(exit_context.fresh_prob) <= 1e-9:
                 applied.append("day0_zero_probability_exit_authority_gate")
                 if not exit_context.day0_zero_probability_exit_authority:
@@ -1175,14 +1205,6 @@ class Position:
                             trigger="DAY0_ZERO_PROBABILITY_EXIT_CONTEXT_INCOMPLETE_HOLD",
                         )
                     applied.append("day0_zero_probability_hold_value_dominates")
-
-        current_hold_q_ucb = _held_side_ci_ucb(
-            exit_context.current_ci,
-            exit_context.fresh_prob,
-        )
-        current_ci_invalid = (
-            exit_context.current_ci is not None and current_hold_q_ucb is None
-        )
 
         # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
         # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
@@ -1377,8 +1399,7 @@ class Position:
         # LIVE path. It performs ZERO DB I/O — the CI bounds arrive pre-computed via ExitContext
         # (current_ci = this cycle's fresh bootstrap CI; entry_ci = entry-time snapshot) — so the
         # 2026-05-31 "second world connection inside the SAVEPOINT" deadlock is structurally
-        # impossible here. When CI inputs are absent the gate is inert and the legacy flat
-        # 2-confirm path below runs unchanged.
+        # impossible here. Missing current CI has already failed closed above.
         separated = _ci_intervals_separated(exit_context.entry_ci, exit_context.current_ci)
         if separated is not None and exit_context.entry_posterior is not None:
             applied.append("ci_separation_gate")

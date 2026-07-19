@@ -96,6 +96,7 @@ in_scope:
 - tests/test_p3_price_channel_ingest_lift.py
 - tests/test_executor_command_split.py
 - tests/test_exit_safety.py
+- tests/engine/test_shift_bin_old_leg_exit.py
 - tests/test_gate_runtime.py
 - tests/test_lifecycle.py
 - tests/test_day0_exit_gate.py

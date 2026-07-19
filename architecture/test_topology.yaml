@@ -31,6 +31,7 @@ test_trust_policy:
     tests/state/test_chain_mirror_settlement_preserves_booked_close_economics.py: {created: "2026-07-19", last_used: "2026-07-19", note: "Chain-mirror settlement preserves real EXIT fill economics for already economically_closed positions and refuses to invent missing booked PnL or exit price."}
     tests/engine/test_day0_coverage_gate.py: {created: "2026-05-24", last_used: "2026-07-19", note: "Day0 executable coverage fails closed on incomplete start or a metric-attributed interior gap, including the WU HTTP fallback."}
     tests/engine/test_day0_monitor_gap_and_stale_margin.py: {created: "2026-07-18", last_used: "2026-07-19", note: "Day0 monitor gap attribution and stale one-sided extreme-bound uncertainty antibodies; incomplete evidence cannot become exit authority."}
+    tests/engine/test_shift_bin_old_leg_exit.py: {created: "2026-06-22", last_used: "2026-07-19", note: "Shift-bin reduce-only old-leg exits reuse the normal proof-bound exit lifecycle and never synthesize a counter-entry or bypass live SELL evidence."}
     tests/test_bayes_precision_fusion_download.py: {created: "2026-06-08", last_used: "2026-07-17", note: "BPF raw capture batching, injected pre-request quota authority, exact committed-family reporting, deadline-bound persistence, LIVE writer priority, and chunk durability."}
     tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-07-19", note: "BPF source-clock capture coverage, typed HTTP terminal/conditional outcomes, reserved quota priority, per-commit family notification, fixpoint, quota cooldown, and held-family-first target ordering."}
     tests/data/test_fusion_upgrade_trigger.py: {created: "2026-06-11", last_used: "2026-07-17", note: "Fusion upgrade detects both provider-family growth and exact persisted source-row revision changes without repeated no-op materialization."}
@@ -390,7 +391,7 @@ test_trust_policy:
     tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}
-    tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-07-19"}
     tests/test_day0_admission.py: {created: "2026-06-17", last_used: "2026-07-19", note: "Day0 live admission contracts, including strict quote-after-observation ordering, current source-health classification, final-localday no-entry geometry, one-bin stress, and maker-only routing."}
     tests/test_day0_extreme_updated_materialization_bridge.py: {created: "2026-07-19", last_used: "2026-07-19", note: "Event-driven Day0 posterior rematerialization bridge: one seed per current observation, monotone newer-observation advance, held-family priority, and fail-soft event emission."}
     tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
@@ -532,7 +533,7 @@ test_trust_policy:
     tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-07-16", note: "Runtime submit gate retry semantics, pending-exit freshness guards, confirmed EXIT tx-alias dedup, and exact partial-FAK reduction projection without manufacturing full closure."}
+    tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-07-19", note: "Runtime submit gate retry semantics, pending-exit freshness guards, confirmed EXIT tx-alias dedup, exact partial-FAK reduction, and normal live SELL proof binding without manufacturing full closure."}
     tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-19", note: "SCH-W1.2-ORDER-STATE, fill aggregation, partial EXIT defense, and typed external-drift suppression that excludes automatic exact-match resolution."}
     tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-07-03", note: "SCH-W1.2-ORDER-STATE: full truth table for is_stale_pending_cancel (incl. both INDETERMINATE branches, fail-closed), is_delayed, rest_deadline_exceeded (incl. NULL-q leak-closure case). First wired to the cancel path by W4.2 (tests/execution/test_staleness_cancel.py)."}

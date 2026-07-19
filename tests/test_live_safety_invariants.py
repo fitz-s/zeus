@@ -10579,6 +10579,7 @@ def test_exit_ev_gate_uses_fill_authority_shares_for_hold_value(monkeypatch):
             current_market_price=0.50,
             current_market_price_is_fresh=True,
             best_bid=0.49,
+            current_ci=(0.10, 0.10),
             hours_to_settlement=4.0,
             position_state="holding",
             day0_active=False,
@@ -10654,6 +10655,7 @@ def test_micro_position_uses_fill_authority_but_does_not_block_negative_edge_exi
             current_market_price=0.50,
             current_market_price_is_fresh=True,
             best_bid=0.49,
+            current_ci=(0.10, 0.10),
             hours_to_settlement=4.0,
             position_state="holding",
             day0_active=False,
@@ -11063,6 +11065,7 @@ def test_live_exit_path_uses_fill_authority_shares(monkeypatch):
         current_market_price=0.50,
         current_market_price_is_fresh=True,
         best_bid=0.49,  # below p_posterior=0.10 → EV gate blocks
+        current_ci=(0.10, 0.10),
         hours_to_settlement=72.0,
         position_state="active",
         market_velocity_1h=0.0,
@@ -11116,6 +11119,7 @@ def test_day0_buy_yes_point_reversal_requires_stronger_evidence():
             current_market_price=0.55,
             current_market_price_is_fresh=True,
             best_bid=0.54,
+            current_ci=(0.25, 0.25),
             hours_to_settlement=4.0,
             position_state="day0_window",
             day0_active=True,
@@ -11264,7 +11268,7 @@ def test_near_one_point_holds_when_current_q_ucb_value_beats_bid(
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_day0_robust_confirmation_does_not_reuse_legacy_edge_count(
+def test_missing_current_ci_holds_without_reusing_legacy_edge_count(
     monkeypatch,
     direction,
 ):
@@ -11279,7 +11283,7 @@ def test_day0_robust_confirmation_does_not_reuse_legacy_edge_count(
     monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 2)
     monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
 
-    legacy_decision = pos.evaluate_exit(
+    unavailable_decision = pos.evaluate_exit(
         ExitContext(
             fresh_prob=0.10,
             fresh_prob_is_fresh=True,
@@ -11295,12 +11299,9 @@ def test_day0_robust_confirmation_does_not_reuse_legacy_edge_count(
             current_ci=None,
         )
     )
-    assert legacy_decision.should_exit is False
-    assert pos.neg_edge_count == 1
-    assert (
-        "day0_robust_sell_value_awaits_confirmation"
-        not in legacy_decision.applied_validations
-    )
+    assert unavailable_decision.should_exit is False
+    assert unavailable_decision.trigger == "EVIDENCE_UNAVAILABLE"
+    assert pos.neg_edge_count == 0
 
     robust_context = ExitContext(
         fresh_prob=0.94,
@@ -11327,7 +11328,7 @@ def test_day0_robust_confirmation_does_not_reuse_legacy_edge_count(
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_legacy_edge_confirmation_does_not_reuse_day0_robust_count(
+def test_missing_current_ci_cannot_reuse_day0_robust_count(
     monkeypatch,
     direction,
 ):
@@ -11361,7 +11362,7 @@ def test_legacy_edge_confirmation_does_not_reuse_day0_robust_count(
     assert first_robust.trigger == "DAY0_ROBUST_SELL_VALUE_AWAITS_CONFIRMATION"
     assert pos.neg_edge_count == 1
 
-    legacy_context = ExitContext(
+    unavailable_context = ExitContext(
         fresh_prob=0.10,
         fresh_prob_is_fresh=True,
         current_market_price=0.90,
@@ -11375,15 +11376,15 @@ def test_legacy_edge_confirmation_does_not_reuse_day0_robust_count(
         entry_ci=(0.05, 0.15),
         current_ci=None,
     )
-    first_legacy = pos.evaluate_exit(legacy_context)
-    assert first_legacy.should_exit is False
-    assert pos.neg_edge_count == 1
+    first_unavailable = pos.evaluate_exit(unavailable_context)
+    assert first_unavailable.should_exit is False
+    assert first_unavailable.trigger == "EVIDENCE_UNAVAILABLE"
+    assert pos.neg_edge_count == 0
 
-    second_legacy = pos.evaluate_exit(legacy_context)
-    assert second_legacy.should_exit is True
-    assert second_legacy.trigger == (
-        "BUY_NO_EDGE_EXIT" if direction == "buy_no" else "EDGE_REVERSAL"
-    )
+    second_unavailable = pos.evaluate_exit(unavailable_context)
+    assert second_unavailable.should_exit is False
+    assert second_unavailable.trigger == "EVIDENCE_UNAVAILABLE"
+    assert pos.neg_edge_count == 0
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
@@ -11544,6 +11545,7 @@ def test_missing_current_ci_does_not_invent_hold_value_upper_bound(monkeypatch):
     )
 
     assert decision.should_exit is False
+    assert decision.trigger == "EVIDENCE_UNAVAILABLE"
     assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
     assert "hold_value_exit_costs_enabled" not in decision.applied_validations
     assert "hold_value_correlation_crowding_applied" not in decision.applied_validations
@@ -11821,6 +11823,7 @@ def test_day0_buy_no_point_reversal_requires_stronger_evidence():
             current_market_price=0.70,
             current_market_price_is_fresh=True,
             best_bid=0.69,
+            current_ci=(0.20, 0.20),
             hours_to_settlement=4.0,
             position_state="day0_window",
             day0_active=True,

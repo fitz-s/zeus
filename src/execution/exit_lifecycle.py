@@ -751,8 +751,16 @@ def place_sell_order(
     executable_snapshot_orderbook_top_bid: object | None = None,
     executable_snapshot_orderbook_top_ask: object | None = None,
     decision_id: str = "",
+    execution_proof_verified: bool = False,
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
+
+    if not execution_proof_verified:
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason="exit_execution_proof_required",
+        )
 
     intent = create_exit_order_intent(
         trade_id=trade_id,
@@ -1970,6 +1978,59 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
         raise ValueError("exit_intent capital_certificate must be a mapping")
 
 
+def _global_sell_capital_certificate_error(
+    position: Position,
+    exit_intent: ExitIntent,
+) -> str | None:
+    """Return the missing global-auction proof for a live non-emergency SELL."""
+
+    if str(exit_intent.reason or "").strip() != "GLOBAL_CAPITAL_OPTIMAL_SELL":
+        return "global_capital_optimal_sell_intent_required"
+    certificate = exit_intent.capital_certificate
+    if not isinstance(certificate, Mapping):
+        return "capital_certificate_required"
+    if str(certificate.get("action") or "").strip().upper() != "SELL":
+        return "capital_certificate_action_not_sell"
+    for field in (
+        "candidate_id",
+        "actuation_identity",
+        "economic_identity",
+        "probability_witness_identity",
+    ):
+        if not str(certificate.get(field) or "").strip():
+            return f"capital_certificate_{field}_missing"
+
+    def positive_finite(field: str) -> bool:
+        try:
+            value = Decimal(str(certificate.get(field)))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        return value.is_finite() and value > 0
+
+    if not positive_finite("robust_delta_log_wealth"):
+        return "capital_certificate_robust_delta_log_wealth_not_positive"
+    if not positive_finite("robust_ev_usd"):
+        return "capital_certificate_robust_ev_usd_not_positive"
+
+    def matches_decimal(field: str, expected: object) -> bool:
+        try:
+            certified = Decimal(str(certificate.get(field)))
+            actual = Decimal(str(expected))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        return certified.is_finite() and actual.is_finite() and certified == actual
+
+    if not matches_decimal("held_shares", position.effective_shares):
+        return "capital_certificate_held_shares_mismatch"
+    if not matches_decimal("selected_shares", exit_intent.shares):
+        return "capital_certificate_selected_shares_mismatch"
+    if exit_intent.exact_limit_price is None:
+        return "capital_certificate_limit_price_missing"
+    if not matches_decimal("exact_limit_price", exit_intent.exact_limit_price):
+        return "capital_certificate_limit_price_mismatch"
+    return None
+
+
 def is_exit_cooldown_active(position: Position) -> bool:
     """Check if position is in retry cooldown period."""
     if position.exit_state != "retry_pending":
@@ -3116,6 +3177,7 @@ def execute_exit(
         clob,
         conn=conn,
         execution_evidence=execution_evidence,
+        is_red_force_exit=is_red_force_exit,
     )
 
 
@@ -3128,6 +3190,7 @@ def _execute_live_exit(
     *,
     conn: sqlite3.Connection | None,
     execution_evidence: ExitExecutionEvidence | None,
+    is_red_force_exit: bool,
 ) -> str:
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
@@ -3147,8 +3210,6 @@ def _execute_live_exit(
             position.trade_id,
         )
         return f"sell_blocked_dust: existing_canonical_dust_hold: {dust_error or dust_reason}"
-
-    _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
     token_id = exit_intent.token_id
     if not token_id:
@@ -3179,6 +3240,21 @@ def _execute_live_exit(
                 conn=conn,
                 reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
             )
+
+    if (
+        not is_red_force_exit
+        and str(getattr(position, "env", "live") or "live").lower() == "live"
+    ):
+        certificate_error = _global_sell_capital_certificate_error(position, exit_intent)
+        if certificate_error is not None:
+            logger.warning(
+                "EXIT_SUBMIT_BLOCKED_GLOBAL_CAPITAL_PROOF trade_id=%s reason=%s",
+                position.trade_id,
+                certificate_error,
+            )
+            return f"exit_blocked: {certificate_error}"
+
+    _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
     try:
         snapshot_context = _latest_or_capture_exit_snapshot_context(
@@ -3509,6 +3585,7 @@ def _execute_live_exit(
             exact_limit_price=exit_intent.exact_limit_price,
             submit_order_type=exit_intent.submit_order_type,
             decision_id=f"exit:{position.trade_id}",
+            execution_proof_verified=True,
             **snapshot_context,
         )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)

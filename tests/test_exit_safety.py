@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-16
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Last reused/audited: 2026-07-19
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -3664,6 +3664,7 @@ def test_exit_lifecycle_resolves_latest_fresh_snapshot_for_executor(conn, monkey
         shares=5.0,
         current_price=0.50,
         best_bid=0.49,
+        execution_proof_verified=True,
         **exit_lifecycle._latest_exit_snapshot_context(conn, YES_TOKEN, now=_NOW),
     )
 
@@ -3675,6 +3676,29 @@ def test_exit_lifecycle_resolves_latest_fresh_snapshot_for_executor(conn, monkey
         "min_order": "0.01",
         "neg_risk": False,
     }
+
+
+def test_direct_sell_adapter_requires_verified_execution_proof(monkeypatch):
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unverified direct adapter call must not reach the executor")
+        ),
+    )
+
+    result = exit_lifecycle.place_sell_order(
+        trade_id="pos-unverified-direct-sell",
+        token_id=YES_TOKEN,
+        shares=5.0,
+        current_price=0.50,
+        best_bid=0.49,
+    )
+
+    assert result.status == "rejected"
+    assert result.reason == "exit_execution_proof_required"
 
 
 def test_exit_lifecycle_requires_snapshot_selected_token_for_native_side(conn):
@@ -5558,6 +5582,28 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
         "execute_exit_order",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dust must not submit")),
     )
+    exit_intent = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=NO_TOKEN,
+        shares=position.effective_shares,
+        current_market_price=0.0,
+        best_bid=0.0,
+        exact_limit_price=0.001,
+        submit_order_type="FAK",
+        capital_certificate={
+            "action": "SELL",
+            "candidate_id": "global-dust-candidate",
+            "actuation_identity": "global-dust-actuation",
+            "economic_identity": "global-dust-economic",
+            "probability_witness_identity": "global-dust-witness",
+            "robust_delta_log_wealth": "0.001",
+            "robust_ev_usd": "0.01",
+            "held_shares": str(position.effective_shares),
+            "selected_shares": str(position.effective_shares),
+            "exact_limit_price": "0.001",
+        },
+    )
 
     outcome = exit_lifecycle.execute_exit(
         PortfolioState(positions=[position]),
@@ -5565,6 +5611,7 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
         exit_context,
         clob=None,
         conn=conn,
+        exit_intent=exit_intent,
     )
 
     error = "executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5"
@@ -7051,6 +7098,28 @@ def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn
             AssertionError("cancel-for-reprice returns to retry before a replacement submit")
         ),
     )
+    exit_intent = exit_lifecycle.ExitIntent(
+        trade_id=pos.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=pos.effective_shares,
+        current_market_price=0.02,
+        best_bid=0.01,
+        exact_limit_price=0.02,
+        submit_order_type="FAK",
+        capital_certificate={
+            "action": "SELL",
+            "candidate_id": "global-reprice-candidate",
+            "actuation_identity": "global-reprice-actuation",
+            "economic_identity": "global-reprice-economic",
+            "probability_witness_identity": "global-reprice-witness",
+            "robust_delta_log_wealth": "0.001",
+            "robust_ev_usd": "0.01",
+            "held_shares": str(pos.effective_shares),
+            "selected_shares": str(pos.effective_shares),
+            "exact_limit_price": "0.02",
+        },
+    )
 
     result = execute_exit(
         PortfolioState(positions=[pos]),
@@ -7064,6 +7133,7 @@ def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn
         ),
         clob=FakeClob(),
         conn=conn,
+        exit_intent=exit_intent,
     )
 
     assert result == "exit_retry: adopted_order_cancelled"

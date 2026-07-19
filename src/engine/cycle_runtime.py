@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-19
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -4892,13 +4892,10 @@ def _build_exit_context(
     # entry_ci_width (an edge-CI WIDTH, which is shift-invariant ⇒ already a belief-CI width). All
     # three are therefore consistent belief-space quantities. belief_available is False when the
     # current bootstrap CI is non-finite (degraded day0/obs math) → EVIDENCE_UNAVAILABLE third
-    # state. Inert (None) unless we have both a finite current CI and the held-side price.
-    # belief_available stays TRUE here: a missing CI is NOT proof of degraded belief math — it is
-    # almost always a missing-authority case that the existing INCOMPLETE_EXIT_CONTEXT path must
-    # own. We populate entry_ci / current_ci ONLY when a finite current belief CI is in hand; when
-    # it is not, the CI-separation gate is simply inert and the legacy authority + flat path run
-    # unchanged. The EVIDENCE_UNAVAILABLE third state is reserved for callers that POSITIVELY know
-    # the belief math degraded (day0 absorbing-mask) and pass belief_available=False explicitly.
+    # state. We populate entry_ci / current_ci only from a finite current held-side
+    # belief band. A missing current CI is an authority gap: Position.evaluate_exit
+    # returns EVIDENCE_UNAVAILABLE and cannot fall back to the legacy point estimate
+    # to authorize a live SELL.
     _entry_posterior = None
     _entry_ci = None
     _current_ci = None
