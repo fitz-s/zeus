@@ -736,7 +736,7 @@ def test_price_change_updates_full_depth_even_when_touch_is_unchanged():
     ).fetchone()[0] == 0
 
 
-def test_price_change_packet_expands_every_asset_delta():
+def test_price_change_packet_groups_each_tokens_deltas():
     from src.events.triggers.market_channel_ingestor import _parse_channel_messages
 
     messages = _parse_channel_messages(
@@ -753,6 +753,12 @@ def test_price_change_packet_expands_every_asset_delta():
                         "side": "BUY",
                     },
                     {
+                        "asset_id": "token-yes",
+                        "price": "0.49",
+                        "size": "10",
+                        "side": "BUY",
+                    },
+                    {
                         "asset_id": "token-no",
                         "price": "0.50",
                         "size": "20",
@@ -764,8 +770,61 @@ def test_price_change_packet_expands_every_asset_delta():
     )
 
     assert [message["asset_id"] for message in messages] == ["token-yes", "token-no"]
-    assert all(len(message["price_changes"]) == 1 for message in messages)
+    assert [len(message["price_changes"]) for message in messages] == [2, 1]
+    assert messages[0]["price"] == "0.49"
     assert all(message["timestamp"] == "2026-05-24T10:00:00+00:00" for message in messages)
+
+
+def test_price_change_packet_applies_one_tokens_deltas_in_order():
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+    ingestor.seed_from_rest(
+        lambda _token: {},
+        received_at="2026-05-24T10:00:00+00:00",
+        pre_cached={
+            "token-1": {
+                "asset_id": "token-1",
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+            }
+        },
+    )
+
+    ingestor.handle_message(
+        {
+            "event_type": "price_change",
+            "market": "0xcondition",
+            "timestamp": "2026-05-24T10:00:01+00:00",
+            "price_changes": [
+                {
+                    "asset_id": "token-1",
+                    "price": "0.48",
+                    "size": "0",
+                    "side": "BUY",
+                },
+                {
+                    "asset_id": "token-1",
+                    "price": "0.47",
+                    "size": "12",
+                    "side": "BUY",
+                    "best_bid": "0.47",
+                    "best_ask": "0.52",
+                },
+            ],
+        },
+        received_at="2026-05-24T10:00:01.001000+00:00",
+    )
+
+    assert json.loads(cache.get("token-1").depth_json)["bids"] == [
+        {"price": "0.47", "size": "12"}
+    ]
 
 
 def test_seed_from_rest_can_seed_priority_subset_before_full_universe():

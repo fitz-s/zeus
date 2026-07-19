@@ -431,13 +431,23 @@ class MarketChannelIngestor:
             token_id = str(message["price_changes"][0].get("asset_id") or "")
         if token_id not in self.active_token_ids_open_at(token_ids=(token_id,)):
             return None
-        change = message.get("price_changes", [{}])[0] if message.get("price_changes") else message
+        changes = [
+            change
+            for change in message.get("price_changes") or []
+            if isinstance(change, dict)
+        ]
+        if not changes:
+            changes = [message]
+        change = changes[-1]
         metadata = self._metadata_for_message({**message, **change}, token_id=token_id)
         if metadata is None:
             return None
         previous = self.quote_cache.get(token_id)
         depth_json = (
-            _apply_price_change_depth(previous.depth_json if previous is not None else None, change)
+            _apply_price_changes_depth(
+                previous.depth_json if previous is not None else None,
+                changes,
+            )
             if source_event_type == "price_change"
             else None
         )
@@ -2643,26 +2653,25 @@ def _best_price(levels: object, *, best: str) -> float | None:
     return max(parsed) if best == "bid" else min(parsed)
 
 
-def _apply_price_change_depth(depth_json: str | None, change: dict[str, Any]) -> str | None:
+def _apply_price_changes_depth(
+    depth_json: str | None,
+    changes: Iterable[dict[str, Any]],
+) -> str | None:
     if not depth_json:
         return None
     try:
         depth = json.loads(depth_json)
-        side = str(change.get("side") or "").upper()
-        price = Decimal(str(change.get("price")))
-        size = Decimal(str(change.get("size")))
-    except (InvalidOperation, TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, json.JSONDecodeError):
         return None
     if (
         not isinstance(depth, dict)
         or not isinstance(depth.get("bids"), list)
         or not isinstance(depth.get("asks"), list)
-        or side not in {"BUY", "SELL"}
-        or not Decimal("0") < price <= Decimal("1")
-        or size < Decimal("0")
     ):
         return None
 
+    zero = Decimal("0")
+    one = Decimal("1")
     levels_by_side: dict[str, dict[Decimal, dict[str, str]]] = {}
     for key in ("bids", "asks"):
         levels: dict[Decimal, dict[str, str]] = {}
@@ -2675,8 +2684,8 @@ def _apply_price_change_depth(depth_json: str | None, change: dict[str, Any]) ->
             except (InvalidOperation, TypeError, ValueError):
                 return None
             if (
-                not Decimal("0") < level_price <= Decimal("1")
-                or level_size <= Decimal("0")
+                not zero < level_price <= one
+                or level_size <= zero
             ):
                 return None
             levels[level_price] = {
@@ -2685,14 +2694,23 @@ def _apply_price_change_depth(depth_json: str | None, change: dict[str, Any]) ->
             }
         levels_by_side[key] = levels
 
-    key = "bids" if side == "BUY" else "asks"
-    if size == 0:
-        levels_by_side[key].pop(price, None)
-    else:
-        levels_by_side[key][price] = {
-            "price": str(change.get("price")),
-            "size": str(change.get("size")),
-        }
+    for change in changes:
+        try:
+            side = str(change.get("side") or "").upper()
+            price = Decimal(str(change.get("price")))
+            size = Decimal(str(change.get("size")))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if side not in {"BUY", "SELL"} or not zero < price <= one or size < zero:
+            return None
+        key = "bids" if side == "BUY" else "asks"
+        if size == zero:
+            levels_by_side[key].pop(price, None)
+        else:
+            levels_by_side[key][price] = {
+                "price": str(change.get("price")),
+                "size": str(change.get("size")),
+            }
     projected = {
         "bids": [
             levels_by_side["bids"][level_price]
@@ -2743,10 +2761,16 @@ def _parse_channel_messages(raw_message: object) -> list[dict[str, Any]]:
             changes = parsed.get("price_changes")
             if isinstance(changes, list) and changes:
                 outer = {key: value for key, value in parsed.items() if key != "price_changes"}
+                grouped: dict[str, list[dict[str, Any]]] = {}
+                for change in changes:
+                    if not isinstance(change, dict):
+                        continue
+                    grouped.setdefault(
+                        str(change.get("asset_id") or ""), []
+                    ).append(change)
                 return [
-                    {**outer, **change, "price_changes": [change]}
-                    for change in changes
-                    if isinstance(change, dict)
+                    {**outer, **token_changes[-1], "price_changes": token_changes}
+                    for token_changes in grouped.values()
                 ]
         return [parsed]
     if isinstance(parsed, list):
