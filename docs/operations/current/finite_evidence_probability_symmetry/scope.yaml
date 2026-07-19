@@ -22,6 +22,10 @@ in_scope:
 - src/data/day0_fast_obs.py
 - src/data/day0_source_health.py
 - src/data/observation_client.py
+- src/data/openmeteo_client.py
+- src/data/openmeteo_quota.py
+- src/data/bayes_precision_fusion_download.py
+- src/data/replacement_forecast_production.py
 - src/main.py
 - src/engine/position_belief.py
 - src/execution/venue_sync_contract.py
@@ -72,6 +76,8 @@ in_scope:
 - tests/execution/test_venue_sync_contract.py
 - tests/test_monitor_refresh_nowcast_wiring.py
 - tests/test_runtime_guards.py
+- tests/test_replacement_forecast_extras_coverage_gate.py
+- tests/test_openmeteo_call_budget.py
 - tests/test_forecast_live_daemon.py
 - tests/test_command_recovery.py
 - tests/test_exchange_reconcile.py

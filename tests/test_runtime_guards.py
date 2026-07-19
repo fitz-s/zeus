@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-17; last_reused=2026-07-18
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-19
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -11754,6 +11754,133 @@ def test_openmeteo_429_persists_cooldown_without_sleeping(monkeypatch, tmp_path)
 
     assert slept == []
     assert tracker.cooldown_remaining_seconds() > 0
+
+
+def test_openmeteo_generic_400_is_terminal_and_persisted_across_polls(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    calls = {"count": 0}
+
+    class _Generic400Client:
+        def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            request = httpx.Request("GET", "https://api.open-meteo.com/v1/forecast")
+            return httpx.Response(
+                400,
+                json={"error": "bad request", "secret": "must-not-persist"},
+                request=request,
+            )
+
+    kwargs = {
+        "max_retries": 2,
+        "quota": tracker,
+        "client": _Generic400Client(),
+    }
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError) as raised:
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1, "run": "2026-07-19T00:00"},
+            **kwargs,
+        )
+    assert raised.value.outcome.status_code == 400
+    assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.TERMINAL
+    assert raised.value.outcome.reason == "http_400"
+    assert raised.value.outcome.body_sha256
+
+    with pytest.raises(openmeteo_client.OpenMeteoRequestSuppressed) as suppressed:
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"longitude": 1, "run": "2026-07-19T00:00", "latitude": 2},
+            **kwargs,
+        )
+    assert suppressed.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.TERMINAL
+    assert calls["count"] == 1
+    persisted = (tmp_path / "openmeteo_quota.json").read_text(encoding="utf-8")
+    assert "must-not-persist" not in persisted
+    assert "https://api.open-meteo.com" not in persisted
+
+
+def test_openmeteo_not_published_400_is_conditional_retry(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(openmeteo_quota.random, "uniform", lambda _low, _high: 0.0)
+    monkeypatch.setattr(openmeteo_client.time, "sleep", lambda _seconds: threading.Event().wait(0.002))
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    calls = {"count": 0}
+
+    class _NotPublishedClient:
+        def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            request = httpx.Request("GET", "https://api.open-meteo.com/v1/forecast")
+            return httpx.Response(
+                400,
+                json={"reason": "run_not_published"},
+                request=request,
+            )
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError) as raised:
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1, "run": "2026-07-19T06:00"},
+            max_retries=2,
+            backoff_sec=0,
+            quota=tracker,
+            client=_NotPublishedClient(),
+        )
+    assert calls["count"] == 2
+    assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.CONDITIONAL
+
+
+def test_openmeteo_5xx_retries_with_a_bounded_attempt_count(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(openmeteo_quota.random, "uniform", lambda _low, _high: 0.0)
+    monkeypatch.setattr(openmeteo_client.time, "sleep", lambda _seconds: threading.Event().wait(0.002))
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    calls = {"count": 0}
+
+    class _UnavailableClient:
+        def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            request = httpx.Request("GET", "https://api.open-meteo.com/v1/forecast")
+            return httpx.Response(503, json={"error": "upstream"}, request=request)
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError) as raised:
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1},
+            max_retries=2,
+            backoff_sec=0,
+            quota=tracker,
+            client=_UnavailableClient(),
+        )
+    assert calls["count"] == 2
+    assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.RETRYABLE
+
+
+def test_openmeteo_429_honors_retry_after_in_typed_route_embargo(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _RateLimitedClient:
+        def get(self, *_args, **_kwargs):
+            request = httpx.Request("GET", "https://api.open-meteo.com/v1/forecast")
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "30"},
+                request=request,
+            )
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError) as raised:
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1},
+            quota=tracker,
+            client=_RateLimitedClient(),
+        )
+    assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.RATE_LIMITED
+    assert raised.value.outcome.retry_after_seconds == 30.0
+    assert tracker.cooldown_remaining_seconds() >= 59
 
 
 def test_openmeteo_request_state_is_bounded_and_migrates_v1(monkeypatch, tmp_path):

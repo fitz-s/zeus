@@ -32,7 +32,7 @@ import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Event, Lock
 from typing import Callable, Mapping, Sequence
@@ -50,7 +50,9 @@ _SOURCE_CLOCK_DOWNLOAD_INFLIGHT: dict[tuple[object, ...], object] = {}
 # appears or a quota window reopens, one round trip should advance many market
 # families instead of an arbitrary alphabetical city.
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
-_NONRETRYABLE_SOURCE_HTTP_STATUS_CODES = frozenset({400, 401, 403, 405, 410, 422})
+_NONRETRYABLE_SOURCE_HTTP_STATUS_CODES = frozenset(
+    {400, 401, 403, 404, 405, 410, 422}
+)
 _SOURCE_HTTP_STATUS_PATTERNS = (
     re.compile(r"status_code\s*[=:]\s*(\d{3})", re.IGNORECASE),
     re.compile(r"(?:client|server) error\s+['\"](\d{3})\b", re.IGNORECASE),
@@ -74,8 +76,6 @@ _SOURCE_RETRYABLE_TRANSPORT_MARKERS = (
     "rate limit",
     "quota",
     "too many requests",
-    "not available",
-    "not yet available",
     "try again",
 )
 _SOURCE_PERMANENT_400_MARKERS = (
@@ -90,15 +90,19 @@ _SOURCE_PERMANENT_400_MARKERS = (
 
 def _source_transport_error_is_nonretryable(
     error: object,
-    *,
-    generic_400_is_terminal: bool = False,
 ) -> bool:
-    """Whether one source-run delivery error is a deterministic client failure.
+    """Whether one source-run delivery error is terminal for its exact request.
 
-    A terminal result advances only this source-run cursor; the next published run
-    remains independently eligible. Ambiguous/network failures, 404 propagation
-    gaps, timeout-style 408/425, rate-limit 429, and all 5xx remain retryable.
+    Typed Open-Meteo outcomes are authoritative. The text fallback exists only for
+    legacy reports; a raw 400 is terminal rather than a scheduler-wide transport retry.
     """
+
+    outcome = getattr(error, "outcome", None)
+    if outcome is not None:
+        retry_class = getattr(outcome, "retry_class", None)
+        return getattr(retry_class, "value", retry_class) == "terminal"
+    if isinstance(error, Mapping) and "retry_class" in error:
+        return str(error.get("retry_class")) == "terminal"
 
     text = str(error or "")
     lowered = text.lower()
@@ -112,9 +116,7 @@ def _source_transport_error_is_nonretryable(
     if not codes or not codes.issubset(_NONRETRYABLE_SOURCE_HTTP_STATUS_CODES):
         return False
     if codes == {400}:
-        return generic_400_is_terminal or any(
-            marker in lowered for marker in _SOURCE_PERMANENT_400_MARKERS
-        )
+        return True
     return True
 
 
@@ -635,7 +637,6 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         now = datetime.now(timezone.utc)
         source_cycles: dict[str, datetime] = {}
         source_availabilities: dict[str, datetime] = {}
-        source_generic_400_terminal: dict[str, bool] = {}
         frozen_runs = payload.get("source_runs")
         if isinstance(frozen_runs, Mapping):
             for source in updated_sources:
@@ -662,10 +663,6 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     continue
                 source_cycles[source] = initialisation
                 source_availabilities[source] = availability
-                source_generic_400_terminal[source] = (
-                    interval > 0
-                    and now >= availability + timedelta(seconds=interval)
-                )
         else:
             # Legacy diagnostic callers do not carry a cursor token and therefore
             # cannot advance one from this mutable metadata fallback. Live probes
@@ -683,13 +680,6 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                         )
                         source_availabilities[source] = (
                             update.last_run_availability_time.astimezone(timezone.utc)
-                        )
-                        interval = int(update.update_interval_seconds or 0)
-                        source_generic_400_terminal[source] = (
-                            interval > 0
-                            and now
-                            >= update.last_run_availability_time.astimezone(timezone.utc)
-                            + timedelta(seconds=interval)
                         )
             except Exception:
                 source_cycles = {}
@@ -1182,16 +1172,21 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 for item in source_reports
                 for value in (item.get("transport_errors") or ())
             )
+            source_transport_outcomes = tuple(
+                value
+                for item in source_reports
+                for value in (item.get("transport_outcomes") or ())
+                if isinstance(value, Mapping)
+            )
             source_permanent_errors = tuple(
                 error
                 for error in source_transport_errors
-                if _source_transport_error_is_nonretryable(
-                    error,
-                    generic_400_is_terminal=source_generic_400_terminal.get(
-                        source,
-                        False,
-                    ),
-                )
+                if _source_transport_error_is_nonretryable(error)
+            )
+            source_permanent_outcomes = tuple(
+                outcome
+                for outcome in source_transport_outcomes
+                if _source_transport_error_is_nonretryable(outcome)
             )
             source_incomplete = any(
                 item.get("global_models_dropped_scoped")
@@ -1225,7 +1220,11 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             elif (
                 "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses
                 and source_transport_errors
-                and len(source_permanent_errors) == len(source_transport_errors)
+                and (
+                    len(source_permanent_outcomes) == len(source_transport_outcomes)
+                    if source_transport_outcomes
+                    else len(source_permanent_errors) == len(source_transport_errors)
+                )
             ):
                 status = "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
             elif (
@@ -1257,7 +1256,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     for item in source_reports
                 ),
                 "transport_errors": source_transport_errors,
+                "transport_outcomes": source_transport_outcomes,
                 "permanent_errors": source_permanent_errors,
+                "permanent_outcomes": source_permanent_outcomes,
                 "fanout_errors": source_errors,
             }
 

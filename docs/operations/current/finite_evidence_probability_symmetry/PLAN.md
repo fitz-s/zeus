@@ -855,3 +855,25 @@ and incomplete HKO cases, fresh/stale bound monotonicity, booked-close
 preservation plus missing-field counterexamples, test-topology registration,
 the full W3 seam, independent review, standard deployment, and fresh natural
 auction/venue evidence. No forced order is authorized.
+
+## 2026-07-19 typed HTTP retry and persistent negative cache
+
+Current ingest evidence showed deterministic Open-Meteo HTTP 400 responses
+being flattened into retryable transport failures, leaving the source cursor
+deferred and repeating the same physical request on every scheduler poll. The
+client now classifies the actual HTTP response before retry: an explicit
+`run_not_published`/availability 400 remains conditional, ordinary 400 and
+deterministic client statuses are terminal for the exact request identity,
+408/425/5xx remain bounded retries, and 429 follows its `Retry-After` embargo.
+Only redacted status, retry class, reason, body hash, and retry time persist in
+the existing shared quota state; URL/query/body content is never stored.
+
+BPF carries that typed result through its fail-soft report and the source-clock
+cursor consumes the type instead of reparsing a generic transport string. An
+exact terminal request is therefore suppressed across scheduler polls, while a
+new source-run identity remains independently eligible. Acceptance requires
+generic/conditional 400, 429, 5xx, cross-poll suppression, quota budget, source
+health, compilation, lint, planning-lock, standard deployment, and new live
+request receipts showing the repeated-400 amplification is gone. The direct
+Open-Meteo metadata probe remains a separately named unification gap; this
+slice does not invent a new canonical DB schema or switch provider semantics.

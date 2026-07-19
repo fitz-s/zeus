@@ -491,6 +491,18 @@ _BATCH_TRANSPORT_ERROR_KEY = "__BAYES_PRECISION_FUSION_BATCH_TRANSPORT_ERROR__"
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
 
 
+def _typed_transport_outcome(error: object) -> dict[str, object] | None:
+    """Preserve a redacted HTTP outcome through BPF's fail-soft report boundary."""
+
+    from src.data.openmeteo_client import http_outcome_payload  # noqa: PLC0415
+
+    return http_outcome_payload(error)
+
+
+def _batch_transport_error(error: object) -> tuple[str, dict[str, object] | None]:
+    return str(error), _typed_transport_outcome(error)
+
+
 def _is_quota_transport_error(message: object) -> bool:
     text = str(message or "").lower()
     return (
@@ -638,6 +650,7 @@ def _default_live_fetch_batched(
     failure falls back to one request per model so one unsupported batched combination cannot
     suppress the whole live current-cycle capture.
     """
+    batched_outcome: dict[str, object] | None = None
     try:
         from src.data.openmeteo_client import fetch  # noqa: PLC0415
         from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
@@ -671,20 +684,21 @@ def _default_live_fetch_batched(
         return _parse_batched_single_runs_payload(payload, models, target_local_date, timezone_name)
     except Exception as exc:
         batched_error_text = str(exc)
+        batched_outcome = _typed_transport_outcome(exc)
         if _is_quota_transport_error(batched_error_text):
             _LOG.warning(
                 "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
                 "(no per-model retry): %s",
                 exc,
             )
-            return {_BATCH_TRANSPORT_ERROR_KEY: (batched_error_text, None)}
+            return {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
         if not allow_per_model_fallback:
             _LOG.warning(
                 "BAYES_PRECISION_FUSION batched single_runs fetch failed; "
                 "source-clock fast path records drop without per-model retry: %s",
                 exc,
             )
-            return {_BATCH_TRANSPORT_ERROR_KEY: (batched_error_text, None)}
+            return {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
 
         _LOG.warning(
             "BAYES_PRECISION_FUSION batched single_runs fetch failed; retrying per-model "
@@ -753,7 +767,7 @@ def _default_live_fetch_batched(
             "batched_failed="
             + batched_error_text
             + ("; fallback_errors=" + ",".join(fallback_errors[:8]) if fallback_errors else ""),
-            None,
+            batched_outcome,
         )
         return fallback
     return {
@@ -761,7 +775,7 @@ def _default_live_fetch_batched(
             "batched_failed="
             + batched_error_text
             + ("; fallback_errors=" + ",".join(fallback_errors[:8]) if fallback_errors else ""),
-            None,
+            batched_outcome,
         )
     }
 
@@ -827,7 +841,7 @@ def _default_live_fetch_locations_batched(
             )
         ]
     except Exception as exc:
-        error = {_BATCH_TRANSPORT_ERROR_KEY: (str(exc), None)}
+        error = {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
         return [
             {target_local_date: dict(error) for target_local_date in target_local_dates}
             for _, _, _, target_local_dates in locations
@@ -929,7 +943,7 @@ def _default_previous_runs_fetch_batched(
         return _parse_batched_previous_runs_payload(payload, models, hourly_var)
     except Exception as exc:
         _LOG.warning("BAYES_PRECISION_FUSION batched previous_runs fetch failed (fail-soft): %s", exc)
-        return {_BATCH_TRANSPORT_ERROR_KEY: (str(exc), None)}
+        return {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
 
 
 def _parse_batched_previous_runs_payload(
@@ -1310,7 +1324,6 @@ def download_bayes_precision_fusion_extra_raw_inputs(
 
     cycle_utc = cycle.astimezone(UTC)
     cycle_iso = cycle_utc.isoformat()
-    cycle_hour = cycle_utc.hour
     captured_at = datetime.now(tz=UTC)
     captured_iso = max(captured_at, cycle_utc).isoformat()
     # HONEST AVAILABILITY (U5 step 2a, freshness investigation 2026-06-12 §Q2A/§(d)): the prior
@@ -1349,6 +1362,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     dropped: list[str] = []
     domain_excluded: list[str] = []
     transport_errors: list[str] = []
+    transport_outcomes: list[dict[str, object]] = []
     abort_transport = False
     started_monotonic = time.monotonic()
     wall_clock_deadline = (
@@ -1789,6 +1803,16 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     transport_errors.append(
                         f"single_runs:{city}:{target_date}:{single_error_text}"
                     )
+                    outcome = single_transport_error[1]
+                    if isinstance(outcome, dict):
+                        transport_outcomes.append(
+                            {
+                                **outcome,
+                                "endpoint": "single_runs",
+                                "city": city,
+                                "target_date": target_date,
+                            }
+                        )
                     if not allow_single_runs_fallback:
                         for model in single_models:
                             single_fast_transport_failed.add((model, city, single_run.isoformat()))
@@ -1866,6 +1890,16 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     transport_errors.append(
                         f"previous_runs:{city}:{target_date}:{previous_error_text}"
                     )
+                    outcome = previous_transport_error[1]
+                    if isinstance(outcome, dict):
+                        transport_outcomes.append(
+                            {
+                                **outcome,
+                                "endpoint": "previous_runs",
+                                "city": city,
+                                "target_date": target_date,
+                            }
+                        )
                     if _is_quota_transport_error(previous_error_text):
                         abort_transport = True
                 for model in prev_models:
@@ -1995,6 +2029,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "dropped": tuple(dropped),
         "domain_excluded": tuple(sorted(set(domain_excluded))),
         "transport_errors": tuple(transport_errors),
+        "transport_outcomes": tuple(transport_outcomes),
         "transport_aborted_remaining_targets": abort_transport,
         "timeboxed_incomplete": timeboxed,
         "timebox_unattempted_target_groups": timebox_unattempted_target_groups,

@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-07-17
-# Lifecycle: created=2026-06-16; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Last reused or audited: 2026-07-19
+# Lifecycle: created=2026-06-16; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -1711,6 +1711,15 @@ def test_source_clock_scoped_capture_terminalizes_deterministic_client_error(
             "transport_errors": (
                 "single_runs:London:Client error '400 Bad Request' for url 'https://example.invalid'",
             ),
+            "transport_outcomes": (
+                {
+                    "status_code": 400,
+                    "retry_class": "terminal",
+                    "retry_after_seconds": None,
+                    "reason": "http_400",
+                    "body_sha256": "deadbeef",
+                },
+            ),
             "global_models_unavailable": ["ukmo_uk_deterministic_2km"],
             "single_runs_request_cycles": {
                 "ukmo_uk_deterministic_2km": _CYCLE.isoformat()
@@ -1734,23 +1743,22 @@ def test_source_clock_scoped_capture_terminalizes_deterministic_client_error(
     assert result["status"] == "SOURCE_CLOCK_SOURCE_PERMANENT_FAILURE"
     assert result["cycle"] == _CYCLE.isoformat()
     assert result["permanent_errors"] == result["transport_errors"]
+    assert result["permanent_outcomes"] == result["transport_outcomes"]
 
 
 def test_source_transport_error_terminalization_excludes_ambiguous_statuses() -> None:
-    assert not prod._source_transport_error_is_nonretryable("Client error '400 Bad Request'")
+    assert prod._source_transport_error_is_nonretryable("Client error '400 Bad Request'")
     assert prod._source_transport_error_is_nonretryable(
-        "Client error '400 Bad Request'",
-        generic_400_is_terminal=True,
+        {"status_code": 400, "retry_class": "terminal"},
     )
     assert not prod._source_transport_error_is_nonretryable(
-        "Client error '400 Bad Request': The requested model run is not available",
-        generic_400_is_terminal=True,
+        {"status_code": 400, "retry_class": "conditional"},
     )
     assert prod._source_transport_error_is_nonretryable(
         "Client error '400 Bad Request': invalid parameter models"
     )
     assert prod._source_transport_error_is_nonretryable("status_code=422 invalid request")
-    assert not prod._source_transport_error_is_nonretryable("Client error '404 Not Found'")
+    assert prod._source_transport_error_is_nonretryable("Client error '404 Not Found'")
     assert not prod._source_transport_error_is_nonretryable("HTTP 408")
     assert not prod._source_transport_error_is_nonretryable("HTTP 429")
     assert not prod._source_transport_error_is_nonretryable("HTTP 503")

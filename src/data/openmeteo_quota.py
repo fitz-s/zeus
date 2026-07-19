@@ -12,7 +12,7 @@ import secrets
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Callable, Mapping, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +319,7 @@ class OpenMeteoQuotaTracker:
         next_retry_at: datetime | None = None,
         lease_id: str | None = None,
         in_flight_until: datetime | None = None,
+        http_outcome: Mapping[str, object] | None = None,
     ) -> None:
         entries = cls._request_entries(state)
         old = entries.get(request_id)
@@ -343,6 +344,18 @@ class OpenMeteoQuotaTracker:
             "quota_cost": 1,
             "updated_at": now.isoformat(),
         }
+        if http_outcome is not None:
+            entry["http_outcome"] = {
+                key: http_outcome[key]
+                for key in (
+                    "status_code",
+                    "retry_class",
+                    "retry_after_seconds",
+                    "reason",
+                    "body_sha256",
+                )
+                if key in http_outcome
+            }
         entries[request_id] = entry
         cls._prune_request_states(state, now)
 
@@ -596,6 +609,20 @@ class OpenMeteoQuotaTracker:
         def acquire(
             state: dict[str, object], now: datetime
         ) -> tuple[tuple[bool, str | None, str | None, int], bool]:
+            existing = self._request_entries(state).get(request_id)
+            if isinstance(existing, dict) and existing.get("outcome") == "terminal_http":
+                outcome = existing.get("http_outcome")
+                status = (
+                    int(outcome.get("status_code") or 0)
+                    if isinstance(outcome, dict)
+                    else 0
+                )
+                return (
+                    False,
+                    f"request_terminal=status={status or 'unknown'}",
+                    None,
+                    int(state.get("day_count") or 0),
+                ), False
             retry_after, retry_at = self._request_retry_after(state, request_id, now)
             if retry_after:
                 return (
@@ -660,12 +687,21 @@ class OpenMeteoQuotaTracker:
                 now = datetime.now(timezone.utc)
                 local_state: dict[str, object] = {"requests": self._request_states}
                 self._prune_request_states(local_state, now)
-                retry_after, retry_at = self._request_retry_after(
-                    local_state, request_id, now
-                )
-                if retry_after:
+                existing = self._request_entries(local_state).get(request_id)
+                if isinstance(existing, dict) and existing.get("outcome") == "terminal_http":
+                    outcome = existing.get("http_outcome")
+                    status = (
+                        int(outcome.get("status_code") or 0)
+                        if isinstance(outcome, dict)
+                        else 0
+                    )
                     allowed = False
-                    reason = f"request_retry_until={retry_at}"
+                    reason = f"request_terminal=status={status or 'unknown'}"
+                elif (retry_after_and_at := self._request_retry_after(
+                    local_state, request_id, now
+                ))[0]:
+                    allowed = False
+                    reason = f"request_retry_until={retry_after_and_at[1]}"
                 elif (
                     in_flight_until := self._request_in_flight_until(
                         local_state, request_id, now
@@ -793,6 +829,7 @@ class OpenMeteoQuotaTracker:
         job: str = "",
         retry_after_seconds: float | None = None,
         lease_id: str | None = None,
+        http_outcome: Mapping[str, object] | None = None,
     ) -> int:
         """Persist a bounded full-jitter embargo after a failed request."""
 
@@ -824,6 +861,7 @@ class OpenMeteoQuotaTracker:
                 outcome="rate_limited" if retry_after_seconds is not None else "transport_error",
                 failure_count=failures,
                 next_retry_at=retry_at,
+                http_outcome=http_outcome,
             )
             return max(1, int(delay) + 1), True
 
@@ -831,6 +869,59 @@ class OpenMeteoQuotaTracker:
             return self._shared(record)
         with self._lock:
             return record({"requests": self._request_states}, datetime.now(timezone.utc))[0]
+
+    def record_request_terminal(
+        self,
+        request_id: str,
+        *,
+        endpoint: str = "",
+        job: str = "",
+        lease_id: str | None = None,
+        http_outcome: Mapping[str, object],
+    ) -> bool:
+        """Persist a deterministic HTTP failure for this exact request identity.
+
+        Only classification metadata is stored; URLs, query values, and response bodies
+        never enter the shared state file.
+        """
+
+        priority = self._request_priority(self._is_priority(), self._is_critical())
+
+        def record(state: dict[str, object], now: datetime) -> tuple[bool, bool]:
+            if not self._lease_matches(state, request_id, lease_id, now):
+                return False, False
+            if not self._request_state_has_capacity(state, request_id, now):
+                return False, False
+            self._record_request(
+                state,
+                now,
+                request_id=request_id,
+                endpoint=endpoint,
+                job=job,
+                priority=priority,
+                outcome="terminal_http",
+                failure_count=0,
+                http_outcome=http_outcome,
+            )
+            return True, True
+
+        if self._shared_enabled():
+            return self._shared(record)
+        with self._lock:
+            return record({"requests": self._request_states}, datetime.now(timezone.utc))[0]
+
+    def request_terminal_outcome(self, request_id: str) -> dict[str, object] | None:
+        """Return the redacted terminal outcome persisted for one exact request."""
+
+        def read(state: dict[str, object], _now: datetime) -> tuple[dict[str, object] | None, bool]:
+            entry = self._request_entries(state).get(request_id)
+            outcome = entry.get("http_outcome") if isinstance(entry, dict) else None
+            return (dict(outcome) if isinstance(outcome, dict) else None), False
+
+        if self._shared_enabled():
+            return self._shared(read)
+        with self._lock:
+            return read({"requests": self._request_states}, datetime.now(timezone.utc))[0]
 
     @classmethod
     def _retry_after_for_counts(
