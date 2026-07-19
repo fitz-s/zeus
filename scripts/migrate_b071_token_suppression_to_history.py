@@ -40,7 +40,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_world_connection  # noqa: E402
+from src.state.db import get_trade_connection  # noqa: E402
+from src.state.ledger import ensure_token_suppression_reason_schema  # noqa: E402
 
 
 def _object_exists(conn: sqlite3.Connection, name: str, kind: str) -> bool:
@@ -63,6 +64,7 @@ CREATE TABLE IF NOT EXISTS token_suppression_history (
     suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
         'operator_quarantine_clear',
         'chain_only_quarantined',
+        'chain_only_auto_resolved_match',
         'settled_position'
     )),
     source_module TEXT NOT NULL,
@@ -137,10 +139,6 @@ def migrate(conn: sqlite3.Connection, apply: bool, drop_legacy: bool) -> dict:
         print("[B071] Neither token_suppression table nor history exists — nothing to migrate.")
         return summary
 
-    if not legacy_is_table and history_exists:
-        print("[B071] token_suppression is already migrated (history table present, legacy table absent). No-op.")
-        return summary
-
     legacy_count = _count(conn, "token_suppression") if legacy_is_table else 0
     history_count = _count(conn, "token_suppression_history") if history_exists else 0
     print(f"[B071] Legacy token_suppression rows: {legacy_count}")
@@ -148,8 +146,8 @@ def migrate(conn: sqlite3.Connection, apply: bool, drop_legacy: bool) -> dict:
 
     if not apply:
         print(
-            f"[B071] DRY RUN: would create token_suppression_history, copy {legacy_count} rows "
-            f"with operation='migrated'."
+            f"[B071] DRY RUN: would upgrade reason checks, create token_suppression_history, "
+            f"and copy {legacy_count} rows with operation='migrated'."
         )
         if drop_legacy:
             if os.environ.get("ZEUS_DESTRUCTIVE_CONFIRMED") != "1":
@@ -158,38 +156,39 @@ def migrate(conn: sqlite3.Connection, apply: bool, drop_legacy: bool) -> dict:
                 print("[B071] DRY RUN: would DROP TABLE token_suppression and CREATE VIEW token_suppression.")
         return summary
 
-    # Apply mode
+    # Apply mode. The savepoint keeps history-table rebuild, row migration, and
+    # optional alias cutover as one rollback-safe unit even under an outer txn.
     now = datetime.now(timezone.utc).isoformat()
-
-    # Step 1: create history table if not exists
-    with conn:
+    conn.execute("SAVEPOINT b071_token_suppression_migration")
+    try:
+        # Step 1: create history table if not exists, then upgrade legacy B071
+        # checks while preserving IDs, operations, timestamps, triggers, indexes,
+        # and both projections.
         conn.execute(HISTORY_DDL)
         conn.execute(HISTORY_INDEX)
         conn.execute(HISTORY_TRIGGER_NO_UPDATE)
         conn.execute(HISTORY_TRIGGER_NO_DELETE)
         conn.execute(CURRENT_VIEW_DDL)
+        ensure_token_suppression_reason_schema(conn)
 
-    # Step 2: copy legacy rows into history
-    if legacy_is_table and legacy_count > 0:
-        rows = conn.execute(
-            """
-            SELECT token_id, condition_id, suppression_reason, source_module,
-                   created_at, updated_at, evidence_json
-            FROM token_suppression
-            ORDER BY created_at ASC, token_id ASC
-            """
-        ).fetchall()
-        already_migrated = set()
-        if history_exists and history_count > 0:
+        # Step 2: copy legacy rows into history.
+        if legacy_is_table and legacy_count > 0:
+            rows = conn.execute(
+                """
+                SELECT token_id, condition_id, suppression_reason, source_module,
+                       created_at, updated_at, evidence_json
+                FROM token_suppression
+                ORDER BY created_at ASC, token_id ASC
+                """
+            ).fetchall()
             already_migrated = {
                 str(r[0])
                 for r in conn.execute(
                     "SELECT DISTINCT token_id FROM token_suppression_history WHERE operation = 'migrated'"
                 ).fetchall()
             }
-        to_insert = [r for r in rows if str(r[0]) not in already_migrated]
-        if to_insert:
-            with conn:
+            to_insert = [r for r in rows if str(r[0]) not in already_migrated]
+            if to_insert:
                 conn.executemany(
                     """
                     INSERT INTO token_suppression_history (
@@ -211,25 +210,29 @@ def migrate(conn: sqlite3.Connection, apply: bool, drop_legacy: bool) -> dict:
                         for r in to_insert
                     ],
                 )
-            summary["rows_migrated"] = len(to_insert)
-            print(f"[B071] Migrated {len(to_insert)} rows into token_suppression_history.")
-        else:
-            print("[B071] All legacy rows already present in history — skipping INSERT.")
+                summary["rows_migrated"] = len(to_insert)
+                print(f"[B071] Migrated {len(to_insert)} rows into token_suppression_history.")
+            else:
+                print("[B071] All legacy rows already present in history — skipping INSERT.")
 
-    # Step 3: drop legacy table and create alias VIEW (destructive — requires env var)
-    if drop_legacy:
-        if os.environ.get("ZEUS_DESTRUCTIVE_CONFIRMED") != "1":
-            print(
-                "[B071] --drop-legacy requested but ZEUS_DESTRUCTIVE_CONFIRMED=1 not set. "
-                "Set the env var to enable the DROP + VIEW creation."
-            )
-        else:
-            with conn:
+        # Step 3: drop legacy table and create alias VIEW (destructive — requires env var)
+        if drop_legacy:
+            if os.environ.get("ZEUS_DESTRUCTIVE_CONFIRMED") != "1":
+                print(
+                    "[B071] --drop-legacy requested but ZEUS_DESTRUCTIVE_CONFIRMED=1 not set. "
+                    "Set the env var to enable the DROP + VIEW creation."
+                )
+            elif legacy_is_table:
                 conn.execute("DROP TABLE token_suppression")
                 conn.execute(LEGACY_ALIAS_VIEW_DDL)
-            summary["drop_performed"] = True
-            summary["alias_view_created"] = True
-            print("[B071] Dropped legacy token_suppression TABLE, created token_suppression VIEW alias.")
+                summary["drop_performed"] = True
+                summary["alias_view_created"] = True
+                print("[B071] Dropped legacy token_suppression TABLE, created token_suppression VIEW alias.")
+        conn.execute("RELEASE SAVEPOINT b071_token_suppression_migration")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT b071_token_suppression_migration")
+        conn.execute("RELEASE SAVEPOINT b071_token_suppression_migration")
+        raise
 
     return summary
 
@@ -244,7 +247,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    conn = get_world_connection(write_class="bulk")
+    conn = get_trade_connection(write_class="bulk")
     try:
         result = migrate(conn, apply=args.apply, drop_legacy=args.drop_legacy)
         print(f"[B071] Result: {result}")

@@ -25,11 +25,13 @@ Live mode: MANDATORY every cycle before any trading.
 
 import json
 import logging
+import secrets
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from src.contracts.position_truth import (
+    CHAIN_ONLY_AUTO_RESOLVED_MATCH,
     CHAIN_ONLY_REVIEW_WINDOW_HOURS,
     ChainOnlyFact,
     has_current_money_risk_chain_state,
@@ -1726,6 +1728,181 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             and (p.token_id if p.direction == "buy_yes" else p.no_token_id)
         )
 
+    def _auto_resolve_chain_only_exact_match(
+        positions: list[Position],
+        *,
+        token_id: str,
+        chain: ChainPosition,
+    ) -> bool:
+        """Atomically close review debt disproved by one exact token aggregate."""
+
+        if conn is None or chain_state != ChainSnapshotCompleteness.CHAIN_SYNCED:
+            return False
+        if str(getattr(chain, "token_id", "") or "") != token_id:
+            return False
+
+        ordered_positions = sorted(
+            positions,
+            key=lambda position: str(getattr(position, "trade_id", "") or ""),
+        )
+        if not ordered_positions or any(
+            _held_token_id(position) != token_id for position in ordered_positions
+        ):
+            return False
+
+        chain_condition_id = str(getattr(chain, "condition_id", "") or "")
+        local_condition_ids = [
+            str(getattr(position, "condition_id", "") or "")
+            for position in ordered_positions
+        ]
+        if not chain_condition_id or any(
+            condition_id != chain_condition_id
+            for condition_id in local_condition_ids
+        ):
+            return False
+
+        try:
+            chain_size = Decimal(str(chain.size))
+            local_sizes = []
+            for position in ordered_positions:
+                canonical_shares = _canonical_current_shares(position.trade_id)
+                value = (
+                    canonical_shares
+                    if canonical_shares is not None
+                    else position.effective_shares
+                )
+                parsed = Decimal(str(value))
+                if not parsed.is_finite() or parsed <= 0:
+                    return False
+                local_sizes.append(parsed)
+            local_size = sum(local_sizes, Decimal("0"))
+        except (InvalidOperation, ValueError):
+            return False
+        if (
+            not chain_size.is_finite()
+            or not local_size.is_finite()
+            or chain_size <= 0
+            or chain_size != local_size
+        ):
+            return False
+
+        savepoint = f"sp_chain_only_auto_resolve_{secrets.token_hex(6)}"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            row = conn.execute(
+                """
+                SELECT suppression_reason, condition_id
+                  FROM token_suppression
+                 WHERE token_id = ?
+                """,
+                (token_id,),
+            ).fetchone()
+            current_reason = (
+                str(row["suppression_reason"] or "")
+                if row is not None and hasattr(row, "keys")
+                else str(row[0] or "") if row is not None else ""
+            )
+            suppressed_condition_id = (
+                str(row["condition_id"] or "")
+                if row is not None and hasattr(row, "keys")
+                else str(row[1] or "") if row is not None else ""
+            )
+            proved_condition_id = chain_condition_id
+            if (
+                current_reason != "chain_only_quarantined"
+                or suppressed_condition_id != proved_condition_id
+            ):
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return False
+
+            from src.state.db import record_token_suppression
+            from src.state.review_work_items import resolve_work_item
+
+            evidence = {
+                "held_token_id": token_id,
+                "local_position_ids": [
+                    str(getattr(position, "trade_id", "") or "")
+                    for position in ordered_positions
+                ],
+                "local_position_count": len(ordered_positions),
+                "aggregate_local_shares": float(local_size),
+                "local_shares": float(local_size),
+                "chain_shares": float(chain_size),
+                "chain_condition_id": chain_condition_id,
+                "chain_snapshot_completeness": chain_state.value,
+                "chain_observed_at": now,
+            }
+            if len(ordered_positions) == 1:
+                evidence["position_id"] = str(
+                    getattr(ordered_positions[0], "trade_id", "") or ""
+                )
+            result = record_token_suppression(
+                conn,
+                token_id=token_id,
+                condition_id=proved_condition_id,
+                suppression_reason=CHAIN_ONLY_AUTO_RESOLVED_MATCH,
+                source_module="src.state.chain_reconciliation",
+                evidence=evidence,
+            )
+            if result.get("status") != "written":
+                raise RuntimeError(f"automatic suppression resolution failed: {result}")
+
+            work_rows = conn.execute(
+                """
+                SELECT work_id, authority_revision
+                  FROM review_work_items
+                 WHERE owner_domain = 'trade'
+                   AND owner_table = 'token_suppression'
+                   AND subject_id = ?
+                   AND reason_code = ?
+                   AND status = 'OPEN'
+                 ORDER BY authority_revision ASC, work_id ASC
+                """,
+                (token_id, ReviewReasonCode.CHAIN_ONLY_UNKNOWN_ASSET.value),
+            ).fetchall()
+            for work_row in work_rows:
+                work_id = (
+                    str(work_row["work_id"])
+                    if hasattr(work_row, "keys")
+                    else str(work_row[0])
+                )
+                authority_revision = (
+                    int(work_row["authority_revision"])
+                    if hasattr(work_row, "keys")
+                    else int(work_row[1])
+                )
+                if not resolve_work_item(
+                    conn,
+                    work_id=work_id,
+                    authority_revision=authority_revision,
+                    resolver_identity="chain_reconciliation:fresh_local_chain_match",
+                    resolution_evidence=CHAIN_ONLY_AUTO_RESOLVED_MATCH,
+                    resolved_at=now,
+                ):
+                    raise RuntimeError(
+                        f"chain-only review CAS resolve failed for {work_id}"
+                    )
+
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            logger.error(
+                "CHAIN_ONLY_AUTO_RESOLVE_FAILED: token=%s positions=%s: %s",
+                token_id,
+                [getattr(position, "trade_id", "?") for position in ordered_positions],
+                exc,
+            )
+            return False
+
+        stats["chain_only_auto_resolved_match"] = (
+            stats.get("chain_only_auto_resolved_match", 0) + 1
+        )
+        stats["chain_only_review_items_auto_resolved"] = (
+            stats.get("chain_only_review_items_auto_resolved", 0) + len(work_rows)
+        )
+        return True
+
     # ── Pass-1: aggregate reconciliation per token (Bug #3, PR-S1) ──────────
     # Group active positions by token_id, allocate chain backing LIFO.
     # Skipped when chain state is UNKNOWN (suspect API response).
@@ -1766,6 +1943,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         for _tid, _positions in _token_to_positions.items():
             _chain_cp = chain_by_token.get(_tid)
             _chain_bal = _chain_cp.size if _chain_cp is not None else 0.0
+            if _chain_cp is not None:
+                _auto_resolve_chain_only_exact_match(
+                    _positions,
+                    token_id=_tid,
+                    chain=_chain_cp,
+                )
             if _chain_bal > 0.0 and len(_positions) > 1 and any(
                 (float(getattr(_p, "chain_shares", 0.0) or 0.0) >= _chain_bal - 0.01)
                 and bool(getattr(_p, "chain_verified_at", "") or "")

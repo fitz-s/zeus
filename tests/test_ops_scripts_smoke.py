@@ -2030,11 +2030,165 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "restart recovery passed" in detail
     assert calls
     assert "_ensure_restart_world_schemas(world_conn)" in calls[0][2]
-    assert "init_schema_trade_only" in calls[0][2]
+    assert "_ensure_restart_trade_schemas(trade_conn)" in calls[0][2]
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
     assert "get_trade_connection_with_world_required(write_class='live')" not in calls[0][2]
     assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
+
+
+def test_deploy_restart_trade_schema_installs_auto_resolution_on_legacy_db(tmp_path):
+    dl = _load("deploy_live_restart_trade_schema", "deploy_live.py")
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE token_suppression (
+            token_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear',
+                'chain_only_quarantined',
+                'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES ('legacy-token', 'legacy-condition', 'chain_only_quarantined',
+                  'test', '2026-07-19T00:00:00Z', '2026-07-19T00:00:00Z', '{}')
+        """
+    )
+    conn.commit()
+
+    dl._ensure_restart_trade_schemas(conn)
+
+    create_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression'"
+    ).fetchone()[0]
+    assert "chain_only_auto_resolved_match" in create_sql
+    assert conn.execute(
+        "SELECT suppression_reason FROM token_suppression WHERE token_id = 'legacy-token'"
+    ).fetchone()[0] == "chain_only_quarantined"
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES ('auto-token', 'auto-condition', 'chain_only_auto_resolved_match',
+                  'test', '2026-07-19T00:00:00Z', '2026-07-19T00:00:00Z', '{}')
+        """
+    )
+    conn.rollback()
+    conn.close()
+
+
+def test_deploy_restart_trade_schema_upgrades_b071_alias_without_losing_history(tmp_path):
+    dl = _load("deploy_live_restart_trade_schema_b071", "deploy_live.py")
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE token_suppression_history (
+            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_id TEXT NOT NULL,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear', 'chain_only_quarantined', 'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_token_suppression_history_id_time
+            ON token_suppression_history(token_id, history_id DESC);
+        CREATE TRIGGER token_suppression_history_no_update
+        BEFORE UPDATE ON token_suppression_history
+        BEGIN SELECT RAISE(ABORT, 'token_suppression_history is append-only'); END;
+        CREATE TRIGGER token_suppression_history_no_delete
+        BEFORE DELETE ON token_suppression_history
+        BEGIN SELECT RAISE(ABORT, 'token_suppression_history is append-only'); END;
+        CREATE VIEW token_suppression_current AS
+        SELECT token_id, condition_id, suppression_reason, source_module,
+               created_at, updated_at, evidence_json
+        FROM token_suppression_history h1
+        WHERE history_id = (
+            SELECT MAX(history_id) FROM token_suppression_history h2
+            WHERE h2.token_id = h1.token_id
+        );
+        CREATE VIEW token_suppression AS
+        SELECT token_id, condition_id, suppression_reason, source_module,
+               created_at, updated_at, evidence_json
+        FROM token_suppression_current;
+        INSERT INTO token_suppression_history (
+            history_id, token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json, operation, recorded_at
+        ) VALUES (17, 'b071-token', 'b071-condition', 'chain_only_quarantined',
+                  'legacy', '2026-07-18T00:00:00Z', '2026-07-18T01:00:00Z',
+                  '{"proof": true}', 'migrated', '2026-07-18T02:00:00Z');
+        """
+    )
+    conn.commit()
+
+    dl._ensure_restart_trade_schemas(conn)
+
+    history_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression_history'"
+    ).fetchone()[0]
+    row = conn.execute(
+        """
+        SELECT history_id, token_id, condition_id, suppression_reason,
+               source_module, created_at, updated_at, evidence_json,
+               operation, recorded_at
+          FROM token_suppression_history
+         WHERE token_id = 'b071-token'
+        """
+    ).fetchone()
+    assert "chain_only_auto_resolved_match" in history_sql
+    assert tuple(row) == (
+        17,
+        "b071-token",
+        "b071-condition",
+        "chain_only_quarantined",
+        "legacy",
+        "2026-07-18T00:00:00Z",
+        "2026-07-18T01:00:00Z",
+        '{"proof": true}',
+        "migrated",
+        "2026-07-18T02:00:00Z",
+    )
+    assert {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'view' AND name LIKE 'token_suppression%'"
+        )
+    } == {"token_suppression", "token_suppression_current"}
+    assert {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'token_suppression_history_%'"
+        )
+    } == {"token_suppression_history_no_update", "token_suppression_history_no_delete"}
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_token_suppression_history_id_time'"
+    ).fetchone() is not None
+    assert conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = 'token_suppression'"
+    ).fetchone()[0] == "view"
+    conn.close()
 
 
 def test_deploy_live_restart_world_schemas_are_atomic_and_idempotent(tmp_path):

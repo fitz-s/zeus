@@ -5,7 +5,7 @@
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-19
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -952,6 +952,35 @@ def _ensure_restart_world_schemas(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_restart_trade_schemas(conn: sqlite3.Connection) -> None:
+    """Install trade bootstrap plus guarded schema expansions while all daemons are stopped."""
+
+    from src.state.db import init_schema_trade_only
+    from src.state.ledger import ensure_token_suppression_reason_schema
+
+    # B071 may already expose token_suppression as a VIEW. Upgrade its history
+    # CHECK before the general initializer sees that alias shape.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        ensure_token_suppression_reason_schema(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
+
+    init_schema_trade_only(conn)
+
+    # Fresh DBs create the new shape during bootstrap; legacy DBs arrive here
+    # already upgraded. Keep the postcondition explicit and fail before start.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        ensure_token_suppression_reason_schema(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
 def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     """Run bounded restart recovery before the read-only live-trading preflight."""
 
@@ -965,12 +994,14 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         """
         import json
         from scripts.migrations import apply_migrations
-        from scripts.deploy_live import _ensure_restart_world_schemas
+        from scripts.deploy_live import (
+            _ensure_restart_trade_schemas,
+            _ensure_restart_world_schemas,
+        )
         from src.state.db import (
             get_trade_connection,
             get_world_connection,
             get_world_connection_with_trades_required,
-            init_schema_trade_only,
         )
         applied = {}
 
@@ -988,13 +1019,13 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
 
         trade_conn = get_trade_connection(write_class='live')
         try:
-            init_schema_trade_only(trade_conn)
+            _ensure_restart_trade_schemas(trade_conn)
             applied['trade'] = apply_migrations(
                 trade_conn,
                 target='202607_cas_reservation_ledger',
                 db_identity='trade',
             )
-            init_schema_trade_only(trade_conn)
+            _ensure_restart_trade_schemas(trade_conn)
             trade_conn.commit()
         finally:
             trade_conn.close()

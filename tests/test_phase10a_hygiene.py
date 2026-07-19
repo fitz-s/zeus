@@ -222,7 +222,10 @@ import sqlite3
 import types
 from datetime import datetime, timedelta, timezone
 
+from src.contracts.position_truth import CHAIN_ONLY_REVIEW_RESOLVED_REASONS
 from src.state.db import (
+    EXTERNAL_DRIFT_SUPPRESSION_REASONS,
+    NON_RESURRECTABLE_SUPPRESSION_REASONS,
     chain_only_entry_block_scope,
     log_selection_family_fact,
     query_chain_only_quarantine_rows,
@@ -425,6 +428,40 @@ class TestRCJTokenSuppressionHistoryView:
         ).fetchall()
         assert len(cur) == 2
         assert {r["suppression_reason"] for r in cur} == {"settled_position", "chain_only_quarantined"}
+
+    def test_auto_resolved_match_is_review_resolved_not_runtime_suppression(self):
+        """A confirmed automatic match remains in B071 history/current state,
+        but must neither become a permanent ignored token nor a chain-only
+        external-drift quarantine.
+        """
+        conn = _make_ts_conn()
+        token = "auto-resolved-match-token"
+        _suppress(conn, token, "chain_only_auto_resolved_match")
+
+        current = conn.execute(
+            "SELECT suppression_reason FROM token_suppression_current WHERE token_id = ?",
+            (token,),
+        ).fetchone()
+        assert current is not None
+        assert current["suppression_reason"] == "chain_only_auto_resolved_match"
+        assert set(CHAIN_ONLY_REVIEW_RESOLVED_REASONS) == {
+            "operator_quarantine_clear",
+            "chain_only_auto_resolved_match",
+            "settled_position",
+        }
+        assert set(NON_RESURRECTABLE_SUPPRESSION_REASONS) == {
+            "operator_quarantine_clear",
+            "settled_position",
+        }
+        assert set(EXTERNAL_DRIFT_SUPPRESSION_REASONS) == {
+            "chain_only_quarantined",
+            "operator_quarantine_clear",
+            "settled_position",
+        }
+        assert "chain_only_auto_resolved_match" not in NON_RESURRECTABLE_SUPPRESSION_REASONS
+        assert "chain_only_auto_resolved_match" not in EXTERNAL_DRIFT_SUPPRESSION_REASONS
+        assert token not in query_token_suppression_tokens(conn)
+        assert all(row["token_id"] != token for row in query_chain_only_quarantine_rows(conn))
 
     def test_chain_only_non_weather_fact_is_position_only_and_ignored(self):
         conn = _make_ts_conn()

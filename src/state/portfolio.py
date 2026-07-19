@@ -43,6 +43,7 @@ from src.contracts import (
 )
 from src.contracts.position_truth import (
     CHAIN_ONLY_REVIEW_WINDOW_HOURS,
+    CHAIN_ONLY_REVIEW_RESOLVED_REASONS,
     ChainOnlyFact,
     ChainOnlyReviewState,
     CURRENT_MONEY_RISK_CHAIN_STATES,
@@ -2661,9 +2662,11 @@ def _derive_chain_only_review_state(
 
     Existing token_suppression schema already encodes the operator-side
     transitions via `suppression_reason`:
-      `chain_only_quarantined`     → unresolved (or expired after 48h)
-      `operator_quarantine_clear`  → resolved (operator cleared)
-      `settled_position`           → resolved (token settled, no longer chain-only)
+      `chain_only_quarantined`          → unresolved (or expired after 48h)
+      `operator_quarantine_clear`       → resolved (operator cleared)
+      `settled_position`                → resolved (token settled)
+      `chain_only_auto_resolved_match`  → resolved for this exact match only;
+                                          future chain-only drift is not ignored
 
     The 48h review window is a SOFT escalation marker — it does NOT clear
     the fact, it flips UNRESOLVED → EXPIRED so ops dashboards can surface
@@ -2671,7 +2674,7 @@ def _derive_chain_only_review_state(
     debt does not freeze unrelated new entries; only operator action
     (suppression_reason flip) actually resolves the fact.
     """
-    if suppression_reason in ("operator_quarantine_clear", "settled_position"):
+    if suppression_reason in CHAIN_ONLY_REVIEW_RESOLVED_REASONS:
         return ChainOnlyReviewState.RESOLVED
     if suppression_reason != "chain_only_quarantined":
         # Defensive: any future / unknown reason is treated as unresolved so the

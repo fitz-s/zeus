@@ -580,3 +580,100 @@ current remaining-day witness; source, observation, topology, and submit checks
 are unchanged. Acceptance requires the selected dead-bin witness to avoid the
 remaining-day reader, a still-live sibling to keep using it, symmetric HIGH/LOW
 hard-fact tests, the full W3 seam, compilation, and `git diff --check`.
+
+## 2026-07-19 typed chain-only automatic resolution
+
+Packet class: schema/truth-contract slice.  This remains inside the active
+capital-gains packet because a stale family-scoped `CHAIN_ONLY_UNKNOWN_ASSET`
+review debt still blocks an otherwise current held family after fresh chain
+reconciliation proves the exact local token and size match.  The money path is
+`fresh chain snapshot -> canonical reconciliation -> review/suppression state ->
+portfolio and exchange drift consumers -> global redecision`.
+
+Objective: represent the fresh exact-match transition as append-only canonical
+truth without granting a permanent token ignore or hiding a future chain/local
+drift.  This changes the `token_suppression` reason CHECK vocabulary and its
+consumer classifications; it does not add a lifecycle phase, venue command,
+probability rule, capital gate, or operator override.
+
+Why not the smaller alternatives:
+
+- query-time hiding cannot prove fresh chain truth and leaves the OPEN review
+  item as an independent family block;
+- resolving only the review item leaves the latest suppression row classified
+  as external and causes exchange reconciliation to swallow future drift;
+- `operator_quarantine_clear` would forge human provenance and permanently
+  suppress future chain-only rediscovery.
+
+Truth layer: `token_suppression_history` plus typed `ReviewWorkItem` state in
+the canonical trade DB.  Control layer: only a complete/fresh `CHAIN_SYNCED`
+exact held-token match may atomically append
+`chain_only_auto_resolved_match`, resolve only OPEN
+`CHAIN_ONLY_UNKNOWN_ASSET` debt for that token. The savepoint mutates canonical
+DB state only. The current cycle conservatively retains its old in-memory
+`ChainOnlyFact`/ignore projection; only a later canonical reload after the outer
+transaction commits may remove it. Evidence layer: schema parity plus counterexamples
+where the local position later disappears or drifts and therefore must be
+reported again.
+
+Zones and invariants: K0 schema/truth vocabulary and K2 reconciliation;
+INV-03 append-first authority, INV-08 one transaction boundary, INV-09 missing
+chain truth as a first-class fact, and INV-37 single-DB transaction discipline.
+Required reads are root/scoped AGENTS, the K0 zero-context authority spine,
+`docs/authority/zeus_current_architecture.md`,
+`docs/authority/zeus_current_delivery.md`,
+`docs/authority/zeus_change_control_constitution.md`, and the state/contracts/
+execution module books.
+
+Allowed implementation surfaces are the exact state, contract, execution,
+migration, kernel-schema, registry, packet, and focused test files enumerated in
+this packet's `scope.yaml`.  Direct/manual writes, copies, or backups of any
+canonical DB are forbidden.  No probability, Kelly, sizing, submit, risk,
+control, lifecycle phase, or venue-order surface may change.
+
+Schema contract:
+
+- accepted reason vocabulary adds `chain_only_auto_resolved_match`;
+- review-resolved, non-resurrectable-ignore, and external-drift-suppression
+  reason sets are distinct; the automatic reason belongs only to the first;
+- fresh-kernel, legacy mutable-table, and B071 history/view schemas migrate
+  transactionally and idempotently while preserving history ids, operations,
+  timestamps, views, triggers, and indexes;
+- exact proof requires non-empty and equal chain, local-position, and suppression
+  condition identities in addition to exact aggregate shares;
+- repeated exact matches do not append duplicate history; any failure or caller
+  rollback restores both DB facts, while in-memory state remains conservatively
+  unchanged until a committed canonical reload.
+
+Acceptance requires focused migration/reconciliation/exchange tests, full
+affected test files, `py_compile`, `git diff --check`, planning-lock evidence,
+and independent adversarial review.  Parity is schema-row and consumer-behavior
+parity rather than market replay because probability and execution economics do
+not change. A deployment is the human-gated migration cutover: only the standard
+`scripts/deploy_live.py restart all --allow-unpushed` path may apply it. That
+path unloads live trading and every prerequisite before starting any new
+live-money process. Its stopped-process restart recovery calls the typed trade
+schema helper, which first runs `init_schema_trade_only` and then widens the
+backward-compatible CHECK inside a dedicated transaction before any daemon is
+restarted. A failed migration aborts recovery and leaves live trading stopped.
+Only after that does deploy verify prerequisite code identity and start the trade
+daemon, so the new reason cannot be emitted against the old three-value CHECK.
+The deploy path must then prove loaded SHA, first queue/monitor progress and only
+then restore its own temporary restart guard. No out-of-band migration command
+or canonical DB write is allowed. Post-start evidence must include canonical
+schema/row, chain, review-gate, auction, monitor, venue, and capital facts.
+Rollback is the entire slice together;
+if an automatic-match row already exists, rollback must first map it
+fail-closed to `chain_only_quarantined` rather than loading it under an older
+three-value schema.
+
+Pre-deploy verification: reconciliation/review/exchange suites passed 169
+tests; fresh/legacy/B071 schema tests passed 13; the full ops-script smoke file
+passed 78; money-path semantic CI passed 10. Mutable-table and B071 alias-view
+trade DB fixtures both pass the stopped deploy recovery helper, including
+history identity/metadata and view/trigger/index preservation. Schema
+fingerprint, source-rationale delta, planning lock, YAML load, compilation, and
+diff whitespace checks pass. Independent adversarial re-review is PASS. The
+broader architecture/hygiene baseline retains two unrelated failures: a
+wall-clock-aged reconciliation fixture and the existing TIGGE AST metric-stamp
+fixture; neither intersects this slice.

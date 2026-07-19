@@ -312,6 +312,7 @@ CREATE TABLE IF NOT EXISTS token_suppression_history (
     suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
         'operator_quarantine_clear',
         'chain_only_quarantined',
+        'chain_only_auto_resolved_match',
         'settled_position'
     )),
     source_module TEXT NOT NULL,
@@ -360,6 +361,7 @@ CREATE TABLE IF NOT EXISTS token_suppression (
     suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
         'operator_quarantine_clear',
         'chain_only_quarantined',
+        'chain_only_auto_resolved_match',
         'settled_position'
     )),
     source_module TEXT NOT NULL,

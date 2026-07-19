@@ -1661,14 +1661,206 @@ def test_kernel_schema_migrates_existing_token_suppression_reason_check():
             "{}",
         ),
     )
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "auto-resolved-token",
+            "cond-auto-resolved",
+            "chain_only_auto_resolved_match",
+            "test",
+            "2026-04-04T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+            "{}",
+        ),
+    )
     rows = conn.execute(
         "SELECT token_id, suppression_reason FROM token_suppression ORDER BY token_id"
     ).fetchall()
 
     assert [dict(row) for row in rows] == [
+        {
+            "token_id": "auto-resolved-token",
+            "suppression_reason": "chain_only_auto_resolved_match",
+        },
         {"token_id": "chain-only-token", "suppression_reason": "chain_only_quarantined"},
         {"token_id": "resolved-token", "suppression_reason": "operator_quarantine_clear"},
     ]
+    conn.close()
+
+
+def test_b071_migration_upgrades_history_alias_without_losing_audit_metadata():
+    from scripts.migrate_b071_token_suppression_to_history import migrate
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE token_suppression_history (
+            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_id TEXT NOT NULL,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear', 'chain_only_quarantined', 'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_token_suppression_history_id_time
+            ON token_suppression_history(token_id, history_id DESC);
+        CREATE TRIGGER token_suppression_history_no_update
+        BEFORE UPDATE ON token_suppression_history
+        BEGIN SELECT RAISE(ABORT, 'token_suppression_history is append-only'); END;
+        CREATE TRIGGER token_suppression_history_no_delete
+        BEFORE DELETE ON token_suppression_history
+        BEGIN SELECT RAISE(ABORT, 'token_suppression_history is append-only'); END;
+        CREATE VIEW token_suppression_current AS
+        SELECT token_id, condition_id, suppression_reason, source_module,
+               created_at, updated_at, evidence_json
+        FROM token_suppression_history h1
+        WHERE history_id = (
+            SELECT MAX(history_id) FROM token_suppression_history h2
+            WHERE h2.token_id = h1.token_id
+        );
+        CREATE VIEW token_suppression AS
+        SELECT token_id, condition_id, suppression_reason, source_module,
+               created_at, updated_at, evidence_json
+        FROM token_suppression_current;
+        """
+    )
+    preserved = [
+        (7, "tok-a", "cond-a", "chain_only_quarantined", "old", "2026-04-01", "2026-04-02", "{\"a\": 1}", "migrated", "2026-04-03"),
+        (11, "tok-a", "cond-a", "operator_quarantine_clear", "new", "2026-04-04", "2026-04-05", "{\"a\": 2}", "record", "2026-04-06"),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO token_suppression_history (
+            history_id, token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json, operation, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        preserved,
+    )
+    conn.commit()
+
+    # B071 must compose with a caller-owned transaction: a later failure can
+    # roll its schema rebuild back without losing the original audit surface.
+    conn.execute("BEGIN")
+    assert migrate(conn, apply=True, drop_legacy=False)["rows_migrated"] == 0
+    conn.rollback()
+    assert "chain_only_auto_resolved_match" not in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression_history'"
+    ).fetchone()[0]
+    assert [tuple(row) for row in conn.execute(
+        "SELECT history_id, token_id, condition_id, suppression_reason, source_module, "
+        "created_at, updated_at, evidence_json, operation, recorded_at "
+        "FROM token_suppression_history ORDER BY history_id"
+    )] == preserved
+    assert {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'view'")
+    } == {"token_suppression", "token_suppression_current"}
+
+    assert migrate(conn, apply=True, drop_legacy=False)["rows_migrated"] == 0
+    rows = conn.execute(
+        """
+        SELECT history_id, token_id, condition_id, suppression_reason, source_module,
+               created_at, updated_at, evidence_json, operation, recorded_at
+        FROM token_suppression_history ORDER BY history_id
+        """
+    ).fetchall()
+    assert [tuple(row) for row in rows] == preserved
+    assert "chain_only_auto_resolved_match" in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression_history'"
+    ).fetchone()[0]
+    assert {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+    } == {"token_suppression_history_no_update", "token_suppression_history_no_delete"}
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_token_suppression_history_id_time'"
+    ).fetchone() is not None
+    assert {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'view'")
+    } == {"token_suppression", "token_suppression_current"}
+    assert conn.execute(
+        "SELECT suppression_reason FROM token_suppression WHERE token_id = 'tok-a'"
+    ).fetchone()["suppression_reason"] == "operator_quarantine_clear"
+    conn.execute(
+        """
+        INSERT INTO token_suppression_history (
+            token_id, condition_id, suppression_reason, source_module,
+            created_at, updated_at, evidence_json, operation, recorded_at
+        ) VALUES ('tok-auto', '', 'chain_only_auto_resolved_match', 'test',
+                  '2026-04-07', '2026-04-07', '{}', 'record', '2026-04-07')
+        """
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("UPDATE token_suppression_history SET source_module = 'mutated'")
+
+    assert migrate(conn, apply=True, drop_legacy=False)["rows_migrated"] == 0
+    assert [row["history_id"] for row in conn.execute(
+        "SELECT history_id FROM token_suppression_history ORDER BY history_id"
+    )] == [7, 11, 12]
+    conn.close()
+
+
+def test_b071_migration_upgrades_legacy_table_then_cuts_over_to_alias_view(monkeypatch):
+    from scripts.migrate_b071_token_suppression_to_history import migrate
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE token_suppression (
+            token_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear', 'chain_only_quarantined', 'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+        );
+        INSERT INTO token_suppression VALUES (
+            'legacy-token', 'legacy-condition', 'chain_only_quarantined', 'legacy',
+            '2026-04-01', '2026-04-02', '{}'
+        );
+        """
+    )
+
+    first = migrate(conn, apply=True, drop_legacy=False)
+    assert first["rows_migrated"] == 1
+    assert conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = 'token_suppression'"
+    ).fetchone()["type"] == "table"
+    assert conn.execute(
+        "SELECT operation, recorded_at FROM token_suppression_history WHERE token_id = 'legacy-token'"
+    ).fetchone()["operation"] == "migrated"
+    assert "chain_only_auto_resolved_match" in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression'"
+    ).fetchone()["sql"]
+
+    monkeypatch.setenv("ZEUS_DESTRUCTIVE_CONFIRMED", "1")
+    second = migrate(conn, apply=True, drop_legacy=True)
+    assert second["rows_migrated"] == 0
+    assert second["drop_performed"] is True
+    assert conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = 'token_suppression'"
+    ).fetchone()["type"] == "view"
+    assert conn.execute(
+        "SELECT token_id FROM token_suppression WHERE token_id = 'legacy-token'"
+    ).fetchone()["token_id"] == "legacy-token"
     conn.close()
 
 

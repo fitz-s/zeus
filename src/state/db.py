@@ -1651,9 +1651,15 @@ DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
 TOKEN_SUPPRESSION_REASONS = frozenset({
     "operator_quarantine_clear",
     "chain_only_quarantined",
+    "chain_only_auto_resolved_match",
     "settled_position",
 })
-RESOLVED_TOKEN_SUPPRESSION_REASONS = (
+NON_RESURRECTABLE_SUPPRESSION_REASONS = (
+    "operator_quarantine_clear",
+    "settled_position",
+)
+EXTERNAL_DRIFT_SUPPRESSION_REASONS = (
+    "chain_only_quarantined",
     "operator_quarantine_clear",
     "settled_position",
 )
@@ -6158,6 +6164,7 @@ CREATE TABLE IF NOT EXISTS token_suppression (
     suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
         'operator_quarantine_clear',
         'chain_only_quarantined',
+        'chain_only_auto_resolved_match',
         'settled_position'
     )),
     source_module TEXT NOT NULL,
@@ -6165,8 +6172,6 @@ CREATE TABLE IF NOT EXISTS token_suppression (
     updated_at TEXT NOT NULL,
     evidence_json TEXT NOT NULL DEFAULT '{}'
 );
-CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
-    ON token_suppression(suppression_reason, updated_at);
 CREATE TABLE IF NOT EXISTS token_suppression_history (
     history_id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id TEXT NOT NULL,
@@ -6174,6 +6179,7 @@ CREATE TABLE IF NOT EXISTS token_suppression_history (
     suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
         'operator_quarantine_clear',
         'chain_only_quarantined',
+        'chain_only_auto_resolved_match',
         'settled_position'
     )),
     source_module TEXT NOT NULL,
@@ -6252,6 +6258,19 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
     # Create the trade runtime tables (IF NOT EXISTS — idempotent).
     conn.executescript(_TRADE_CLASS_DDL)
+    # B071 may expose token_suppression as the current-state alias VIEW over
+    # append-only history. SQLite rejects indexes on views, so keep the legacy
+    # table index only when the object is physically a table.
+    _token_suppression_type = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = 'token_suppression'"
+    ).fetchone()
+    if _token_suppression_type and str(_token_suppression_type[0]) == "table":
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
+                ON token_suppression(suppression_reason, updated_at)
+            """
+        )
     # Repoint 1 (fix/prearm-fill-exit-readiness, 2026-06-03): position_current
     # is trade_class (zeus_trades.db). _ensure_position_current_authority_columns
     # runs ALTER TABLE ADD COLUMN for every additive column (fill_authority,
@@ -6390,7 +6409,19 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    _missing = _TRADE_CLASS_TABLES - _actual_tables
+    _missing = set(_TRADE_CLASS_TABLES - _actual_tables)
+    if (
+        "token_suppression" in _missing
+        and "token_suppression_history" in _actual_tables
+        and conn.execute(
+            "SELECT COALESCE((SELECT type FROM sqlite_master "
+            "WHERE name = 'token_suppression'), '')"
+        ).fetchone()[0]
+        == "view"
+    ):
+        # B071's sanctioned compatibility shape is a current-state VIEW over
+        # the owned append-only history table, not a missing trade authority.
+        _missing.remove("token_suppression")
     if _missing:
         raise RuntimeError(
             f"init_schema_trade_only: DDL did not create expected trade-class tables: {sorted(_missing)}"
@@ -12158,10 +12189,10 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
         f"""
         SELECT token_id
         FROM token_suppression
-        WHERE suppression_reason IN ({", ".join(["?"] * len(RESOLVED_TOKEN_SUPPRESSION_REASONS))})
+        WHERE suppression_reason IN ({", ".join(["?"] * len(NON_RESURRECTABLE_SUPPRESSION_REASONS))})
         ORDER BY created_at ASC, token_id ASC
         """,
-        RESOLVED_TOKEN_SUPPRESSION_REASONS,
+        NON_RESURRECTABLE_SUPPRESSION_REASONS,
     ).fetchall()
     chain_terminal: list = []
     if _table_exists(conn, "position_current"):

@@ -249,6 +249,14 @@ class ChainOnlyReviewState(str, Enum):
 
 
 CHAIN_ONLY_REVIEW_WINDOW_HOURS: float = 48.0
+CHAIN_ONLY_AUTO_RESOLVED_MATCH = "chain_only_auto_resolved_match"
+CHAIN_ONLY_REVIEW_RESOLVED_REASONS = frozenset(
+    {
+        "operator_quarantine_clear",
+        "settled_position",
+        CHAIN_ONLY_AUTO_RESOLVED_MATCH,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -268,6 +276,9 @@ class ChainOnlyFact:
     (entry-blocking) from resolved/expired (informational) facts.
     `review_state` is derived from the underlying `suppression_reason` +
     `first_seen_at` age by `src.state.portfolio._chain_only_fact_from_row`.
+    ``chain_only_auto_resolved_match`` means one fresh, complete reconciliation
+    cut proved an exact held-token local/chain match. It resolves current review
+    debt but is not a permanent ignore: later chain-only drift must reopen it.
     """
 
     token_id: str

@@ -675,6 +675,13 @@ files:
     - src/contracts/execution_intent.py
     - src/state/decision_chain.py
     - src/state/portfolio.py
+  src/contracts/position_truth.py:
+    zone: K0_frozen_kernel
+    authority_role: position_truth_contract
+    why: Typed position/chain truth contracts, including ChainOnlyFact review states and the automatic exact-match resolution that clears current review debt without suppressing future absence or drift.
+    downstream:
+    - src/state/portfolio.py
+    - src/state/chain_reconciliation.py
   src/contracts/settlement_semantics.py:
     zone: K0_frozen_kernel
     authority_role: settlement_rounding_law
@@ -1980,7 +1987,7 @@ files:
   src/execution/exchange_reconcile.py:
     zone: K2_runtime
     authority_role: exchange_reconciliation_sweep
-    why: R3 M5 read-only venue-vs-journal reconciliation sweep; writes exchange_reconcile_findings and linkable missing trade facts without inserting venue_commands or performing live venue side effects.
+    why: R3 M5 venue-vs-journal reconciliation sweep; writes findings and linkable missing trade facts without venue commands or live venue side effects. External-drift suppression is reason-typed so an automatic local/chain match cannot hide a later real drift.
     hazards:
     - VENUS_CONTROL_ONLY
     write_routes:
@@ -2551,6 +2558,9 @@ files:
       - resolve_position_metric(position) -> (metric, authority, source) — peer for non-rescue reads
       - LEARNING_AUTHORITY_REQUIRED = "VERIFIED" — anchor for downstream
         learning consumers that filter rescue_events reads.
+      A fresh complete exact token/aggregate match atomically appends an
+      automatic token-suppression resolution and closes only matching
+      CHAIN_ONLY_UNKNOWN_ASSET review debt; later absence may reopen it.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/cycle_runtime.py
@@ -2669,7 +2679,7 @@ files:
   src/state/db.py:
     zone: K2_runtime
     authority_role: db_connection_schema_runtime
-    why: SQLite connections, schema setup, canonical DB queries, and R3 U2 raw provenance projection schema initialization.
+    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics.
     write_routes:
     - canonical_position_write
     - settlement_write
@@ -2859,7 +2869,7 @@ files:
   src/state/ledger.py:
     zone: K0_frozen_kernel
     authority_role: canonical_event_ledger
-    why: Authoritative position event append and current projection transaction boundary.
+    why: Authoritative position event append/current projection transaction boundary; also performs the idempotent append-only token-suppression CHECK migration while preserving history metadata, views, triggers, and indexes.
     write_routes:
     - canonical_position_write
     downstream:
@@ -2890,7 +2900,7 @@ files:
   src/state/portfolio.py:
     zone: K2_runtime
     authority_role: runtime_portfolio_model
-    why: Runtime position model/read surface; transitional, not canonical event law.
+    why: Runtime position model/read surface; derives typed ChainOnlyFact review state from canonical suppression reasons, including non-permanent automatic exact-match resolution. Transitional, not canonical event law.
     hazards:
     - TRANSITIONAL_DO_NOT_DEEPEN
     # Phase 2 T5 (2026-05-20): added Position.market_slug Optional[str] = None.

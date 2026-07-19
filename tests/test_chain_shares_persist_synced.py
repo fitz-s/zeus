@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-31; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-05-31; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Relationship test — chain economics (chain_shares, chain_seen_at) persist
 #   to position_current for SYNCED positions and survive a fresh DB read (task #56).
 # Reuse: inspect chain_reconciliation.reconcile() else-branch + _append_canonical_chain_observation_if_available
@@ -38,6 +38,11 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src.contracts.position_truth import (
+    CHAIN_ONLY_AUTO_RESOLVED_MATCH,
+    ChainOnlyFact,
+)
+from src.contracts.review_work_item import ReviewReasonCode
 from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import Position, PortfolioState
 
@@ -274,6 +279,62 @@ def _read_persisted_monitor_state(db_path: str, trade_id: str) -> tuple[float | 
     )
 
 
+def _seed_chain_only_review_debt(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    condition_id: str,
+    size: float,
+    include_unrelated: bool = False,
+) -> tuple[str, str | None]:
+    from src.state.db import record_token_suppression
+    from src.state.review_work_items import open_work_item
+    from src.state.schema.review_work_items_schema import ensure_table
+
+    result = record_token_suppression(
+        conn,
+        token_id=token_id,
+        condition_id=condition_id,
+        suppression_reason="chain_only_quarantined",
+        source_module="test",
+        evidence={"size": size, "first_seen_at": _DUMMY_TS},
+    )
+    assert result["status"] == "written"
+    ensure_table(conn)
+    chain_only = open_work_item(
+        conn,
+        owner_domain="trade",
+        owner_table="token_suppression",
+        subject_id=token_id,
+        reason_code=ReviewReasonCode.CHAIN_ONLY_UNKNOWN_ASSET,
+        exposure_bound_usd=size,
+    )
+    unrelated = None
+    if include_unrelated:
+        unrelated = open_work_item(
+            conn,
+            owner_domain="trade",
+            owner_table="token_suppression",
+            subject_id=token_id,
+            reason_code=ReviewReasonCode.LOCAL_WRITE_FAILURE,
+            exposure_bound_usd=size,
+        ).work_id
+    conn.commit()
+    return chain_only.work_id, unrelated
+
+
+def _chain_only_fact(*, token_id: str, condition_id: str, size: float) -> ChainOnlyFact:
+    return ChainOnlyFact(
+        token_id=token_id,
+        condition_id=condition_id,
+        size=size,
+        avg_price=0.5,
+        cost_basis=size * 0.5,
+        first_seen_at=_DUMMY_TS,
+        last_seen_at=_DUMMY_TS,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. SYNCED + NULL chain_shares → persisted to position_current  [RED→GREEN]
 # ---------------------------------------------------------------------------
@@ -327,6 +388,634 @@ def test_synced_null_chain_shares_persisted_across_fresh_read() -> None:
     assert persisted == pytest.approx(chain_size), (
         f"persisted chain_shares={persisted!r} must equal chain.size={chain_size}"
     )
+
+
+def test_exact_synced_match_resolves_chain_only_debt_without_hiding_future_drift() -> None:
+    token_id = "tok-chain-only-auto-resolve"
+    condition_id = "cond-chain-only-auto-resolve"
+    chain_size = 20.0
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        pos = _make_position(
+            trade_id="local-chain-only-auto-resolve",
+            token_id=token_id,
+            shares=chain_size,
+        )
+        pos.condition_id = condition_id
+        _seed_position_current(conn, pos, chain_shares=chain_size)
+        chain_work_id, unrelated_work_id = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id=condition_id,
+            size=chain_size,
+            include_unrelated=True,
+        )
+        portfolio = PortfolioState(
+            positions=[pos],
+            chain_only_facts=[
+                _chain_only_fact(
+                    token_id=token_id,
+                    condition_id=condition_id,
+                    size=chain_size,
+                )
+            ],
+            ignored_tokens=[token_id],
+        )
+        chain = ChainPosition(
+            token_id=token_id,
+            size=chain_size,
+            avg_price=0.5,
+            cost=chain_size * 0.5,
+            condition_id=condition_id,
+        )
+
+        first = reconcile(portfolio, [chain], conn=conn)
+        current = conn.execute(
+            """
+            SELECT suppression_reason, source_module, evidence_json
+              FROM token_suppression
+             WHERE token_id = ?
+            """,
+            (token_id,),
+        ).fetchone()
+        chain_work = conn.execute(
+            """
+            SELECT status, resolver_identity, resolution_evidence
+              FROM review_work_items
+             WHERE work_id = ?
+            """,
+            (chain_work_id,),
+        ).fetchone()
+        unrelated_work = conn.execute(
+            "SELECT status FROM review_work_items WHERE work_id = ?",
+            (unrelated_work_id,),
+        ).fetchone()
+        history_after_first = conn.execute(
+            """
+            SELECT suppression_reason
+              FROM token_suppression_history
+             WHERE token_id = ?
+             ORDER BY history_id
+            """,
+            (token_id,),
+        ).fetchall()
+
+        assert first["chain_only_auto_resolved_match"] == 1
+        assert first["chain_only_review_items_auto_resolved"] == 1
+        assert current["suppression_reason"] == CHAIN_ONLY_AUTO_RESOLVED_MATCH
+        assert current["source_module"] == "src.state.chain_reconciliation"
+        evidence = json.loads(current["evidence_json"])
+        assert evidence["position_id"] == pos.trade_id
+        assert evidence["held_token_id"] == token_id
+        assert evidence["local_position_ids"] == [pos.trade_id]
+        assert evidence["local_position_count"] == 1
+        assert evidence["aggregate_local_shares"] == pytest.approx(chain_size)
+        assert evidence["local_shares"] == pytest.approx(chain_size)
+        assert evidence["chain_shares"] == pytest.approx(chain_size)
+        assert evidence["chain_snapshot_completeness"] == "chain_synced"
+        assert chain_work["status"] == "RESOLVED"
+        assert chain_work["resolver_identity"] == (
+            "chain_reconciliation:fresh_local_chain_match"
+        )
+        assert "operator" not in chain_work["resolver_identity"]
+        assert chain_work["resolution_evidence"] == CHAIN_ONLY_AUTO_RESOLVED_MATCH
+        assert unrelated_work["status"] == "OPEN"
+        # In-memory projections are not cleared before the caller commits the
+        # outer transaction.  The next canonical reload consumes the new row.
+        assert [fact.token_id for fact in portfolio.chain_only_facts] == [token_id]
+        assert token_id in portfolio.ignored_tokens
+        from src.state.db import query_chain_only_quarantine_rows
+
+        assert query_chain_only_quarantine_rows(conn) == []
+        assert [row["suppression_reason"] for row in history_after_first] == [
+            "chain_only_quarantined",
+            CHAIN_ONLY_AUTO_RESOLVED_MATCH,
+        ]
+
+        conn.commit()
+        portfolio.chain_only_facts.clear()
+        portfolio.ignored_tokens.clear()
+        second = reconcile(portfolio, [chain], conn=conn)
+        history_after_second = conn.execute(
+            "SELECT COUNT(*) FROM token_suppression_history WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()[0]
+        assert second.get("chain_only_auto_resolved_match", 0) == 0
+        assert history_after_second == len(history_after_first)
+
+        portfolio.positions.clear()
+        third = reconcile(portfolio, [chain], conn=conn)
+        reopened = conn.execute(
+            """
+            SELECT work_id, status, resolver_identity
+              FROM review_work_items
+             WHERE owner_table = 'token_suppression'
+               AND subject_id = ?
+               AND reason_code = ?
+             ORDER BY created_at, work_id
+            """,
+            (token_id, ReviewReasonCode.CHAIN_ONLY_UNKNOWN_ASSET.value),
+        ).fetchall()
+        current_reason = conn.execute(
+            "SELECT suppression_reason FROM token_suppression WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()[0]
+        history_after_drift = conn.execute(
+            """
+            SELECT suppression_reason
+              FROM token_suppression_history
+             WHERE token_id = ?
+             ORDER BY history_id
+            """,
+            (token_id,),
+        ).fetchall()
+        conn.rollback()
+        conn.close()
+
+    assert third["chain_only_unresolved"] == 1
+    assert current_reason == "chain_only_quarantined"
+    reopened_by_id = {row["work_id"]: row for row in reopened}
+    assert reopened_by_id[chain_work_id]["status"] == "RESOLVED"
+    new_work = [row for row in reopened if row["work_id"] != chain_work_id]
+    assert len(new_work) == 1
+    assert new_work[0]["status"] == "OPEN"
+    assert new_work[0]["resolver_identity"] == ""
+    assert [row["suppression_reason"] for row in history_after_drift] == [
+        "chain_only_quarantined",
+        CHAIN_ONLY_AUTO_RESOLVED_MATCH,
+        "chain_only_quarantined",
+    ]
+    assert [fact.token_id for fact in portfolio.chain_only_facts] == [token_id]
+
+
+def test_exact_multilot_aggregate_resolves_chain_only_debt_once() -> None:
+    token_id = "tok-chain-only-multilot-exact"
+    condition_id = "cond-chain-only-multilot-exact"
+    positions = [
+        _make_position(
+            trade_id="local-chain-only-multilot-a",
+            token_id=token_id,
+            shares=12.0,
+        ),
+        _make_position(
+            trade_id="local-chain-only-multilot-b",
+            token_id=token_id,
+            shares=8.0,
+        ),
+    ]
+    for pos in positions:
+        pos.condition_id = condition_id
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        for pos in positions:
+            _seed_position_current(conn, pos, chain_shares=None)
+        work_id, _ = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id=condition_id,
+            size=20.0,
+        )
+        portfolio = PortfolioState(
+            positions=positions,
+            chain_only_facts=[
+                _chain_only_fact(
+                    token_id=token_id,
+                    condition_id=condition_id,
+                    size=20.0,
+                )
+            ],
+            ignored_tokens=[token_id],
+        )
+        chain = ChainPosition(
+            token_id=token_id,
+            size=20.0,
+            avg_price=0.5,
+            cost=10.0,
+            condition_id=condition_id,
+        )
+
+        first = reconcile(portfolio, [chain], conn=conn)
+        current = conn.execute(
+            """
+            SELECT suppression_reason, evidence_json
+              FROM token_suppression
+             WHERE token_id = ?
+            """,
+            (token_id,),
+        ).fetchone()
+        work = conn.execute(
+            "SELECT status FROM review_work_items WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()
+        first_history_count = conn.execute(
+            "SELECT COUNT(*) FROM token_suppression_history WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()[0]
+        second = reconcile(portfolio, [chain], conn=conn)
+        second_history_count = conn.execute(
+            "SELECT COUNT(*) FROM token_suppression_history WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()[0]
+        conn.rollback()
+        conn.close()
+
+    evidence = json.loads(current["evidence_json"])
+    assert first["chain_only_auto_resolved_match"] == 1
+    assert first["chain_only_review_items_auto_resolved"] == 1
+    assert current["suppression_reason"] == CHAIN_ONLY_AUTO_RESOLVED_MATCH
+    assert evidence["local_position_ids"] == sorted(
+        position.trade_id for position in positions
+    )
+    assert evidence["local_position_count"] == 2
+    assert evidence["aggregate_local_shares"] == pytest.approx(20.0)
+    assert "position_id" not in evidence
+    assert work["status"] == "RESOLVED"
+    assert [fact.token_id for fact in portfolio.chain_only_facts] == [token_id]
+    assert token_id in portfolio.ignored_tokens
+    assert second.get("chain_only_auto_resolved_match", 0) == 0
+    assert second_history_count == first_history_count
+
+
+def test_partial_multilot_backing_keeps_chain_only_review_open() -> None:
+    token_id = "tok-chain-only-multilot-partial"
+    positions = [
+        _make_position(
+            trade_id="local-chain-only-multilot-backed",
+            token_id=token_id,
+            shares=12.0,
+        ),
+        _make_position(
+            trade_id="local-chain-only-multilot-phantom",
+            token_id=token_id,
+            shares=8.0,
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        for pos in positions:
+            _seed_position_current(conn, pos, chain_shares=None)
+        work_id, _ = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id=positions[0].condition_id,
+            size=12.0,
+        )
+        fact = _chain_only_fact(
+            token_id=token_id,
+            condition_id=positions[0].condition_id,
+            size=12.0,
+        )
+        portfolio = PortfolioState(positions=positions, chain_only_facts=[fact])
+
+        stats = reconcile(
+            portfolio,
+            [
+                ChainPosition(
+                    token_id=token_id,
+                    size=12.0,
+                    avg_price=0.5,
+                    cost=6.0,
+                    condition_id=positions[0].condition_id,
+                )
+            ],
+            conn=conn,
+        )
+        row = conn.execute(
+            """
+            SELECT ts.suppression_reason, rwi.status
+              FROM token_suppression ts
+              JOIN review_work_items rwi ON rwi.work_id = ?
+             WHERE ts.token_id = ?
+            """,
+            (work_id, token_id),
+        ).fetchone()
+        conn.rollback()
+        conn.close()
+
+    assert stats.get("chain_only_auto_resolved_match", 0) == 0
+    assert stats["aggregate_phantom_voided"] == 1
+    assert dict(row) == {
+        "suppression_reason": "chain_only_quarantined",
+        "status": "OPEN",
+    }
+    assert portfolio.chain_only_facts == [fact]
+
+
+def test_exact_shares_with_condition_mismatch_keeps_chain_only_review_open() -> None:
+    token_id = "tok-chain-only-condition-mismatch"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        pos = _make_position(
+            trade_id="local-chain-only-condition-mismatch",
+            token_id=token_id,
+            shares=5.0,
+        )
+        pos.condition_id = "cond-local"
+        _seed_position_current(conn, pos, chain_shares=5.0)
+        work_id, _ = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id="cond-local",
+            size=5.0,
+        )
+        fact = _chain_only_fact(
+            token_id=token_id,
+            condition_id="cond-local",
+            size=5.0,
+        )
+        portfolio = PortfolioState(positions=[pos], chain_only_facts=[fact])
+
+        stats = reconcile(
+            portfolio,
+            [
+                ChainPosition(
+                    token_id=token_id,
+                    size=5.0,
+                    avg_price=0.5,
+                    cost=2.5,
+                    condition_id="cond-chain-other",
+                )
+            ],
+            conn=conn,
+        )
+        row = conn.execute(
+            """
+            SELECT ts.suppression_reason, rwi.status
+              FROM token_suppression ts
+              JOIN review_work_items rwi ON rwi.work_id = ?
+             WHERE ts.token_id = ?
+            """,
+            (work_id, token_id),
+        ).fetchone()
+        conn.rollback()
+        conn.close()
+
+    assert stats.get("chain_only_auto_resolved_match", 0) == 0
+    assert dict(row) == {
+        "suppression_reason": "chain_only_quarantined",
+        "status": "OPEN",
+    }
+    assert portfolio.chain_only_facts == [fact]
+
+
+@pytest.mark.parametrize(
+    ("case", "local_condition", "chain_condition", "suppression_condition"),
+    [
+        ("missing-local", "", "cond-proof", "cond-proof"),
+        ("missing-chain", "cond-proof", "", "cond-proof"),
+        ("missing-suppression", "cond-proof", "cond-proof", ""),
+        ("suppression-mismatch", "cond-proof", "cond-proof", "cond-other"),
+    ],
+)
+def test_chain_only_auto_resolution_requires_complete_condition_identity(
+    case: str,
+    local_condition: str,
+    chain_condition: str,
+    suppression_condition: str,
+) -> None:
+    token_id = f"tok-chain-only-condition-{case}"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        pos = _make_position(
+            trade_id=f"local-chain-only-condition-{case}",
+            token_id=token_id,
+            shares=5.0,
+        )
+        pos.condition_id = local_condition
+        _seed_position_current(conn, pos, chain_shares=5.0)
+        work_id, _ = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id=suppression_condition,
+            size=5.0,
+        )
+        fact = _chain_only_fact(
+            token_id=token_id,
+            condition_id=suppression_condition,
+            size=5.0,
+        )
+        portfolio = PortfolioState(positions=[pos], chain_only_facts=[fact])
+
+        stats = reconcile(
+            portfolio,
+            [
+                ChainPosition(
+                    token_id=token_id,
+                    size=5.0,
+                    avg_price=0.5,
+                    cost=2.5,
+                    condition_id=chain_condition,
+                )
+            ],
+            conn=conn,
+        )
+        row = conn.execute(
+            """
+            SELECT ts.suppression_reason, rwi.status
+              FROM token_suppression ts
+              JOIN review_work_items rwi ON rwi.work_id = ?
+             WHERE ts.token_id = ?
+            """,
+            (work_id, token_id),
+        ).fetchone()
+        conn.rollback()
+        conn.close()
+
+    assert stats.get("chain_only_auto_resolved_match", 0) == 0
+    assert dict(row) == {
+        "suppression_reason": "chain_only_quarantined",
+        "status": "OPEN",
+    }
+    assert portfolio.chain_only_facts == [fact]
+
+
+def test_chain_only_auto_resolution_rollback_restores_all_three_surfaces(
+    monkeypatch,
+) -> None:
+    from src.state import review_work_items
+
+    token_id = "tok-chain-only-auto-rollback"
+    chain_size = 8.0
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        pos = _make_position(
+            trade_id="local-chain-only-auto-rollback",
+            token_id=token_id,
+            shares=chain_size,
+        )
+        _seed_position_current(conn, pos, chain_shares=chain_size)
+        work_id, _ = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id=pos.condition_id,
+            size=chain_size,
+        )
+        fact = _chain_only_fact(
+            token_id=token_id,
+            condition_id=pos.condition_id,
+            size=chain_size,
+        )
+        portfolio = PortfolioState(
+            positions=[pos],
+            chain_only_facts=[fact],
+            ignored_tokens=[token_id],
+        )
+        monkeypatch.setattr(review_work_items, "resolve_work_item", lambda *a, **k: False)
+
+        stats = reconcile(
+            portfolio,
+            [
+                ChainPosition(
+                    token_id=token_id,
+                    size=chain_size,
+                    avg_price=0.5,
+                    cost=chain_size * 0.5,
+                    condition_id=pos.condition_id,
+                )
+            ],
+            conn=conn,
+        )
+        current_reason = conn.execute(
+            "SELECT suppression_reason FROM token_suppression WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()[0]
+        history_count = conn.execute(
+            "SELECT COUNT(*) FROM token_suppression_history WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()[0]
+        work_status = conn.execute(
+            "SELECT status FROM review_work_items WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()[0]
+        conn.rollback()
+        conn.close()
+
+    assert stats.get("chain_only_auto_resolved_match", 0) == 0
+    assert current_reason == "chain_only_quarantined"
+    assert history_count == 1
+    assert work_status == "OPEN"
+    assert portfolio.chain_only_facts == [fact]
+    assert portfolio.ignored_tokens == [token_id]
+
+
+def test_outer_rollback_keeps_db_and_in_memory_chain_only_debt_aligned() -> None:
+    token_id = "tok-chain-only-outer-rollback"
+    condition_id = "cond-chain-only-outer-rollback"
+    chain_size = 9.0
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        pos = _make_position(
+            trade_id="local-chain-only-outer-rollback",
+            token_id=token_id,
+            shares=chain_size,
+        )
+        pos.condition_id = condition_id
+        _seed_position_current(conn, pos, chain_shares=chain_size)
+        work_id, _ = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id=condition_id,
+            size=chain_size,
+        )
+        fact = _chain_only_fact(
+            token_id=token_id,
+            condition_id=condition_id,
+            size=chain_size,
+        )
+        portfolio = PortfolioState(
+            positions=[pos],
+            chain_only_facts=[fact],
+            ignored_tokens=[token_id],
+        )
+
+        conn.execute("BEGIN")
+        stats = reconcile(
+            portfolio,
+            [
+                ChainPosition(
+                    token_id=token_id,
+                    size=chain_size,
+                    avg_price=0.5,
+                    cost=chain_size * 0.5,
+                    condition_id=condition_id,
+                )
+            ],
+            conn=conn,
+        )
+        assert stats["chain_only_auto_resolved_match"] == 1
+        conn.rollback()
+        current_reason = conn.execute(
+            "SELECT suppression_reason FROM token_suppression WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()[0]
+        work_status = conn.execute(
+            "SELECT status FROM review_work_items WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()[0]
+        conn.close()
+
+    assert current_reason == "chain_only_quarantined"
+    assert work_status == "OPEN"
+    assert portfolio.chain_only_facts == [fact]
+    assert portfolio.ignored_tokens == [token_id]
+
+
+def test_within_dust_but_not_exact_match_keeps_chain_only_review_open() -> None:
+    token_id = "tok-chain-only-not-exact"
+    local_size = 20.0
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        pos = _make_position(
+            trade_id="local-chain-only-not-exact",
+            token_id=token_id,
+            shares=local_size,
+        )
+        _seed_position_current(conn, pos, chain_shares=local_size)
+        work_id, _ = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id=pos.condition_id,
+            size=local_size,
+        )
+        fact = _chain_only_fact(
+            token_id=token_id,
+            condition_id=pos.condition_id,
+            size=local_size,
+        )
+        portfolio = PortfolioState(positions=[pos], chain_only_facts=[fact])
+
+        stats = reconcile(
+            portfolio,
+            [
+                ChainPosition(
+                    token_id=token_id,
+                    size=20.005,
+                    avg_price=0.5,
+                    cost=10.0025,
+                    condition_id=pos.condition_id,
+                )
+            ],
+            conn=conn,
+        )
+        row = conn.execute(
+            """
+            SELECT ts.suppression_reason, rwi.status
+              FROM token_suppression ts
+              JOIN review_work_items rwi ON rwi.work_id = ?
+             WHERE ts.token_id = ?
+            """,
+            (work_id, token_id),
+        ).fetchone()
+        conn.rollback()
+        conn.close()
+
+    assert stats.get("chain_only_auto_resolved_match", 0) == 0
+    assert dict(row) == {
+        "suppression_reason": "chain_only_quarantined",
+        "status": "OPEN",
+    }
+    assert portfolio.chain_only_facts == [fact]
 
 
 def test_synced_chain_shares_observation_emits_canonical_event() -> None:

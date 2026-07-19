@@ -1,5 +1,5 @@
 # Created: 2026-05 (R3 M5)
-# Last reused or audited: 2026-06-10
+# Last reused/audited: 2026-07-19
 # Authority basis (operator external-close incident chain 2026-06-10): the operator
 #   manually SOLD Zeus's position on the SHARED proxy wallet. When the order FILLED the
 #   void-misbooking double-counted the same 66.25 economic claim (journal buy-claim +
@@ -60,7 +60,10 @@ from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
-from src.state.db import assert_no_world_mutex_held_for_io
+from src.state.db import (
+    EXTERNAL_DRIFT_SUPPRESSION_REASONS,
+    assert_no_world_mutex_held_for_io,
+)
 from src.state.fill_dedup import (
     canonical_trade_fact_cte as _canonical_trade_fact_cte,
     economic_trade_fact_cte as _economic_trade_fact_cte,
@@ -2747,8 +2750,8 @@ def _record_position_drift_findings(
     )
     findings: list[ReconcileFinding] = []
     for token in tokens:
-        # ONE-TRUTH (rule 4): a token already in the suppression registry (chain-only / settled)
-        # is not a system open-position drift. Resolve any open finding and never gate the latch.
+        # ONE-TRUTH (rule 4): a token whose typed reason suppresses external drift
+        # is not a system open-position concern. Resolve any open finding and never gate the latch.
         if _token_is_suppressed_external(conn, token):
             _resolve_open_position_drift_findings(
                 conn,
@@ -3379,8 +3382,8 @@ def _resolve_position_drift_tokens_from_current_truth(
     chain_confirmed_active_holdings = _chain_confirmed_active_holdings_by_token(conn)
     open_sell_locked = _live_open_sell_locked_tokens_by_token(conn, open_orders=open_orders)
     for token in sorted(str(item) for item in token_ids):
-        # ONE-TRUTH (rule 4): honor the suppression registry — a chain-only / settled token is
-        # not a system drift; resolve its finding so the latch can clear.
+        # ONE-TRUTH (rule 4): honor only typed external-drift suppression reasons;
+        # resolve those findings so the latch can clear.
         if _token_is_suppressed_external(conn, token):
             _resolve_open_position_drift_findings(
                 conn,
@@ -5984,21 +5987,24 @@ def _has_recent_filled_suppression(
 
 
 def _token_is_suppressed_external(conn: sqlite3.Connection, token_id: str) -> bool:
-    """True iff the token is in the token_suppression registry (chain-only / settled holding).
+    """Whether the token's current suppression reason excludes external drift.
 
     ONE-TRUTH (rule 4 — stop multi-system infighting): token_suppression is the single registry
-    of tokens the system does NOT own as an open trading concern. chain_reconciliation quarantines
-    chain-only / operator-manual holdings there ('chain_only_quarantined'); the harvester suppresses
-    settled winners after redeem ('settled_position'). A suppressed token is provably not a system
-    open-position drift, so it MUST NOT be re-flagged as position_drift and gate the submit latch —
-    exactly the conflict that halted live trading on the operator's manual chain positions. Such a
-    token resolves naturally on settlement (win -> redeem); the reconciler just stops fighting it."""
+    of token classifications. Only reasons typed by the state contract as external-drift
+    suppressions prove that the token is not a system open-position concern. An automatic
+    local/chain match resolves the current chain-only review but does not waive future drift.
+    """
     if not _table_exists(conn, "token_suppression"):
+        return False
+    reasons = tuple(sorted(EXTERNAL_DRIFT_SUPPRESSION_REASONS))
+    if not reasons:
         return False
     return (
         conn.execute(
-            "SELECT 1 FROM token_suppression WHERE token_id = ? LIMIT 1",
-            (str(token_id),),
+            "SELECT 1 FROM token_suppression "
+            f"WHERE token_id = ? AND suppression_reason IN ({', '.join('?' for _ in reasons)}) "
+            "LIMIT 1",
+            (str(token_id), *reasons),
         ).fetchone()
         is not None
     )

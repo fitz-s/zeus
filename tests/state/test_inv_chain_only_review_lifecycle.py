@@ -1,5 +1,5 @@
 # Created: 2026-05-27
-# Last reused or audited: 2026-05-27
+# Last reused or audited: 2026-07-19
 # Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-refactor-part2-findings.md (Finding D1)
 """Antibody invariants: `ChainOnlyFact` carries a typed review lifecycle.
 
@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.contracts.position_truth import (
+    CHAIN_ONLY_AUTO_RESOLVED_MATCH,
     CHAIN_ONLY_REVIEW_WINDOW_HOURS,
     ChainOnlyFact,
     ChainOnlyReviewState,
@@ -92,6 +93,15 @@ def test_derive_resolved_for_settled() -> None:
         first_seen_at="2026-05-01T00:00:00Z",
     )
     assert state == ChainOnlyReviewState.RESOLVED
+
+
+def test_derive_resolved_for_automatic_exact_match() -> None:
+    state = _derive_chain_only_review_state(
+        suppression_reason=CHAIN_ONLY_AUTO_RESOLVED_MATCH,
+        first_seen_at="2026-07-19T12:00:00Z",
+    )
+    assert state == ChainOnlyReviewState.RESOLVED
+    assert "operator" not in CHAIN_ONLY_AUTO_RESOLVED_MATCH
 
 
 def test_derive_unresolved_for_unknown_reason() -> None:

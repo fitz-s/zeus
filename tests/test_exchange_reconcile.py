@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-14
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Last reused/audited: 2026-07-19
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Authority basis: first-principles same-position incremental fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -4772,26 +4772,31 @@ def test_position_drift_finding_distinguishes_legitimate_from_real(conn):
     assert "exchange_size" in position_findings[0].evidence_json
 
 
-def test_position_drift_honors_token_suppression_registry(conn):
-    """ONE-TRUTH (rule 4): a token already in token_suppression (chain-only / settled holding,
-    e.g. the operator's manual chain position) must NOT be re-flagged as a blocking position_drift.
+@pytest.mark.parametrize(
+    "suppression_reason",
+    ("chain_only_quarantined", "operator_quarantine_clear", "settled_position"),
+)
+def test_position_drift_honors_token_suppression_registry(
+    conn,
+    suppression_reason,
+):
+    """Typed external reasons must not be re-flagged as blocking position drift.
 
     chain_reconciliation quarantines chain-only / operator-manual holdings into token_suppression
-    ('chain_only_quarantined'); the harvester suppresses settled winners there ('settled_position').
-    If exchange_reconcile ignores that registry and re-flags those tokens as position_drift, the M5
-    submit latch stays CLOSED on positions the system never owned and live trading halts -- the
-    multi-system-infighting zero-trade fault. A genuinely unsuppressed drift must still be flagged.
+    ('chain_only_quarantined'); operator and settlement resolution use their own typed reasons.
+    Re-flagging those tokens keeps the M5 submit latch closed on positions the system does not own.
+    A genuinely unsuppressed drift must still be flagged.
     """
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
-    suppressed = "operator-manual-chain-token"
+    suppressed = f"external-suppressed-token-{suppression_reason}"
     real_drift = "genuine-unsuppressed-drift-token"
     conn.execute(
         """
         INSERT INTO token_suppression (token_id, condition_id, suppression_reason, source_module, created_at, updated_at)
-        VALUES (?, '0xcond', 'chain_only_quarantined', 'src.state.chain_reconciliation', ?, ?)
+        VALUES (?, '0xcond', ?, 'src.state.chain_reconciliation', ?, ?)
         """,
-        (suppressed, NOW.isoformat(), NOW.isoformat()),
+        (suppressed, suppression_reason, NOW.isoformat(), NOW.isoformat()),
     )
 
     # Both are chain positions with no system trade facts -> both would normally be position_drift.
@@ -4805,6 +4810,33 @@ def test_position_drift_honors_token_suppression_registry(conn):
     drift_subjects = [finding.subject_id for finding in result if finding.kind == "position_drift"]
     assert suppressed not in drift_subjects, "a suppressed (chain-only/manual) token must not gate the submit latch"
     assert real_drift in drift_subjects, "a genuinely unsuppressed drift must still be flagged"
+
+
+def test_position_drift_reports_auto_resolved_match_token(conn):
+    """An automatic local/chain match resolves review debt, not future drift."""
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token_id = "auto-resolved-match-future-drift"
+    conn.execute(
+        """
+        INSERT INTO token_suppression (
+            token_id, condition_id, suppression_reason, source_module, created_at, updated_at
+        )
+        VALUES (?, '0xcond', 'chain_only_auto_resolved_match',
+                'src.state.chain_reconciliation', ?, ?)
+        """,
+        (token_id, NOW.isoformat(), NOW.isoformat()),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token_id, size="15")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    drift_subjects = [finding.subject_id for finding in result if finding.kind == "position_drift"]
+    assert token_id in drift_subjects
 
 
 def test_position_drift_compares_exchange_to_confirmed_not_optimistic(conn):

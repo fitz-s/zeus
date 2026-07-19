@@ -217,7 +217,9 @@ test_trust_policy:
     tests/events/test_edge_zone_admission_102.py: {created: "2026-06-04", last_used: "2026-06-05", note: "RT (#102): book-wide EV-per-dollar edge-zone admission — positive after-cost EV admitted / negative rejected regardless of arrival order; flag-gated last money-path step"}
     tests/engine/test_market_disagreement_buy_no_guard.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody: cheap-NO buy_no with non-overwhelming NO-space q_lcb is unconstructable (settlement-grounded 0/12 loser); escape only on high NO-space q_lcb (DIRECTION LAW / Fitz #4)"}
     tests/test_reactor_family_keying_antibody.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody (Fitz #4): NULL/empty condition_id sibling at the reactor family seam fails LOUD (FamilyKeyingError), never silently shrinks the MECE family"}
-    tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-07-19", note: "Fresh exact local/chain token aggregate match resolves only chain-only review debt atomically; repeat is idempotent and later absence reopens."}
+    tests/state/test_inv_chain_only_review_lifecycle.py: {created: "2026-05-27", last_used: "2026-07-19", note: "Typed ChainOnlyFact review lifecycle, including automatic exact-match resolution without operator provenance."}
+    tests/test_phase10a_hygiene.py: {created: "2026-04-02", last_used: "2026-07-19", note: "B071 token-suppression history/view migration preserves append-only audit metadata and upgrades reason CHECK idempotently."}
     tests/test_position_current_trade_schema_migration.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/engine/test_substrate_illiquid_bin_capture.py: {created: "2026-05-30", last_used: "2026-05-30"}
     tests/engine/test_trade_score_direction_semantics.py: {created: "2026-05-30", last_used: "2026-05-30"}
@@ -372,7 +374,7 @@ test_trust_policy:
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-07-09"}
+    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-07-19"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -526,7 +528,7 @@ test_trust_policy:
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-07-16", note: "Runtime submit gate retry semantics, pending-exit freshness guards, confirmed EXIT tx-alias dedup, and exact partial-FAK reduction projection without manufacturing full closure."}
-    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-14", note: "SCH-W1.2-ORDER-STATE plus same-position FOK increment aggregation and partial EXIT fill terminalization defense."}
+    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-19", note: "SCH-W1.2-ORDER-STATE, fill aggregation, partial EXIT defense, and typed external-drift suppression that excludes automatic exact-match resolution."}
     tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-07-03", note: "SCH-W1.2-ORDER-STATE: full truth table for is_stale_pending_cancel (incl. both INDETERMINATE branches, fail-closed), is_delayed, rest_deadline_exceeded (incl. NULL-q leak-closure case). First wired to the cancel path by W4.2 (tests/execution/test_staleness_cancel.py)."}
     tests/test_ddl_copies_normalized_identical.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE critic ruling 1: normalized (not byte-equal) DDL lockstep guard over venue_order_facts and collateral pairs, closing the _TRADE_CLASS_DDL fingerprint blind spot."}
@@ -850,7 +852,7 @@ test_trust_policy:
     # same commit) also deleted.
     # PR #400 compliance additions — operator-directed TDD tests (2026-06-08)
     tests/test_no_internal_version_suffixes.py: {created: "2026-06-11", last_used: "2026-06-12", note: "PR#405 rename ban-test: no internal _v[0-9] suffixes (allowlist external SDK names; grandfather shrinks only); u0r=0 occurrences pin"}
-    tests/test_ops_scripts_smoke.py: {created: "2026-06-12", last_used: "2026-07-11", note: "Ops scripts smoke: deploy recovery writes canonical EDLI events through world-main with trades attached; zeus_status fixtures use current read-only surfaces and retain probability/YES selection audit coverage."}
+    tests/test_ops_scripts_smoke.py: {created: "2026-06-12", last_used: "2026-07-19", note: "Ops scripts smoke: stopped deploy recovery installs backward-compatible trade schema expansions before daemon start, writes canonical EDLI events through world-main with trades attached, and retains current zeus_status/probability/YES audit coverage."}
     tests/test_fee_authority.py: {created: "2026-06-12", last_used: "2026-06-12", note: "fee schedule-vs-realized data-semantics antibody: realized-fill evidence governs EV fee fraction; schedule CAP only as thin/stale fallback"}
     tests/test_cotenant_staging_guard.py: {created: "2026-06-12", last_used: "2026-06-12", note: "BLOCKING cotenant hook antibody: broad-add forms block, inline/env bypass honored, git -C worktree exemption (external review 2026-06-12)"}
     tests/test_fill_bridge_dispositions_migration.py: {created: "2026-06-13", last_used: "2026-06-13", note: "fill-bridge retry-storm pair antibody: ensure_table rebuilds legacy NOT NULL disposition (CREATE IF NOT EXISTS cannot relax constraints — quarantine was unreachable live 2026-06-12); orphan bridge excludes terminal-RECONCILED aggregates + poison row never aborts batch"}

@@ -388,27 +388,44 @@ state_machines:
       - tests/state/test_inv_rescue_authority_split.py
   chain_only_review_state:
     # PR D1 (Finding D1, Part-2 audit, 2026-05-27): typed review lifecycle
-    # for chain-only venue inventory (ChainOnlyFact). Derived from the
-    # existing token_suppression suppression_reason transitions +
-    # first_seen_at age — no DB schema migration. The type lives in
+    # for chain-only venue inventory (ChainOnlyFact). Derived from append-only
+    # token_suppression reason transitions plus first_seen_at age. The
+    # 2026-07-19 schema expansion adds an automatic exact-match resolution
+    # reason without making the token permanently ignored. The type lives in
     # src/contracts/position_truth.py.ChainOnlyReviewState.
     owner: src/contracts/position_truth.py
     description: >
       Lifecycle status for a chain-only review-queue entry. UNRESOLVED /
       EXPIRED / ACKNOWLEDGED all block new entries; only RESOLVED clears
       the entry gate. EXPIRED is a 48h escalation marker, not auto-
-      resolution. CHAIN_ONLY_REVIEW_WINDOW_HOURS is the module-level
-      window constant (48.0h) registered here so the classify-change
-      semantic-diff gate (which flags ALL-CAPS module assignments as
-      state candidates) recognises it as declared.
+      resolution. CHAIN_ONLY_AUTO_RESOLVED_MATCH records a fresh complete
+      local/chain exact match; later absence or drift reopens review.
+      The review window is a module-level duration constant, not a lifecycle
+      state.
     states:
       - UNRESOLVED
       - EXPIRED
       - ACKNOWLEDGED
       - RESOLVED
-      - CHAIN_ONLY_REVIEW_WINDOW_HOURS
     invariant_tests:
       - tests/state/test_inv_chain_only_review_lifecycle.py
+      - tests/test_chain_shares_persist_synced.py
+      - tests/test_exchange_reconcile.py
+  token_suppression_reason:
+    owner: src/state/db.py
+    description: >
+      Current append-only token classification. Automatic exact-match
+      resolution closes the proved review cut but is not a permanent ignore or
+      an external-drift suppression.
+    states:
+      - OPERATOR_QUARANTINE_CLEAR
+      - CHAIN_ONLY_QUARANTINED
+      - CHAIN_ONLY_AUTO_RESOLVED_MATCH
+      - SETTLED_POSITION
+    invariant_tests:
+      - tests/test_phase10a_hygiene.py
+      - tests/test_chain_shares_persist_synced.py
+      - tests/test_exchange_reconcile.py
   redeem_review_error_code:
     owner: src/execution/settlement_commands.py
     description: >

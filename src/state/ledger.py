@@ -53,6 +53,127 @@ TOKEN_SUPPRESSION_COLUMNS = (
     "evidence_json",
 )
 
+_TOKEN_SUPPRESSION_REASON = "chain_only_auto_resolved_match"
+_TOKEN_SUPPRESSION_HISTORY_COLUMNS = (
+    "history_id",
+    *TOKEN_SUPPRESSION_COLUMNS,
+    "operation",
+    "recorded_at",
+)
+
+
+def _sqlite_object_type(conn: sqlite3.Connection, name: str) -> str | None:
+    row = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = ?", (name,)
+    ).fetchone()
+    return str(row[0] if row else "") or None
+
+
+def _sqlite_create_sql(conn: sqlite3.Connection, name: str, kind: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?", (kind, name)
+    ).fetchone()
+    return str(row[0] if row and row[0] else "")
+
+
+def _create_token_suppression_table(conn: sqlite3.Connection, name: str) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE {name} (
+            token_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear',
+                'chain_only_quarantined',
+                'chain_only_auto_resolved_match',
+                'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{{}}'
+        )
+        """
+    )
+
+
+def _create_token_suppression_history_table(conn: sqlite3.Connection, name: str) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE {name} (
+            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_id TEXT NOT NULL,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear',
+                'chain_only_quarantined',
+                'chain_only_auto_resolved_match',
+                'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{{}}',
+            operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _create_token_suppression_history_projection(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_token_suppression_history_id_time
+            ON token_suppression_history(token_id, history_id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS token_suppression_history_no_update
+        BEFORE UPDATE ON token_suppression_history
+        BEGIN
+            SELECT RAISE(ABORT, 'token_suppression_history is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS token_suppression_history_no_delete
+        BEFORE DELETE ON token_suppression_history
+        BEGIN
+            SELECT RAISE(ABORT, 'token_suppression_history is append-only');
+        END
+        """
+    )
+
+
+def _create_token_suppression_views(
+    conn: sqlite3.Connection, *, include_legacy_alias: bool
+) -> None:
+    conn.execute(
+        """
+        CREATE VIEW token_suppression_current AS
+        SELECT token_id, condition_id, suppression_reason, source_module,
+               created_at, updated_at, evidence_json
+        FROM token_suppression_history h1
+        WHERE history_id = (
+            SELECT MAX(history_id)
+            FROM token_suppression_history h2
+            WHERE h2.token_id = h1.token_id
+        )
+        """
+    )
+    if include_legacy_alias:
+        conn.execute(
+            """
+            CREATE VIEW token_suppression AS
+            SELECT token_id, condition_id, suppression_reason, source_module,
+                   created_at, updated_at, evidence_json
+            FROM token_suppression_current
+            """
+        )
+
 
 def load_architecture_kernel_sql() -> str:
     return ARCHITECTURE_KERNEL_SQL_PATH.read_text()
@@ -85,50 +206,81 @@ def assert_canonical_transaction_schema(
         raise RuntimeError("canonical position_current schema not installed")
 
 
-def _ensure_token_suppression_reason_schema(conn: sqlite3.Connection) -> None:
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression'"
-    ).fetchone()
-    create_sql = str(row[0] if row and row[0] else "")
-    if not create_sql or "chain_only_quarantined" in create_sql:
+def ensure_token_suppression_reason_schema(conn: sqlite3.Connection) -> None:
+    """Atomically widen B071 reason checks at trade-daemon schema bootstrap.
+
+    The change is backward-compatible for old readers/writers: existing reason
+    values and projection columns are preserved, and the new reason is not
+    emitted until the new reconciliation code is running.  Deployment stops all
+    old Zeus processes before ``init_schema_trade_only`` reaches this function.
+    """
+    current_sql = _sqlite_create_sql(conn, "token_suppression", "table")
+    history_sql = _sqlite_create_sql(conn, "token_suppression_history", "table")
+    if _TOKEN_SUPPRESSION_REASON in current_sql and _TOKEN_SUPPRESSION_REASON in history_sql:
         return
 
-    with conn:
-        conn.execute("ALTER TABLE token_suppression RENAME TO token_suppression_old")
-        conn.execute(
-            """
-            CREATE TABLE token_suppression (
-                token_id TEXT PRIMARY KEY,
-                condition_id TEXT,
-                suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
-                    'operator_quarantine_clear',
-                    'chain_only_quarantined',
-                    'settled_position'
-                )),
-                source_module TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                evidence_json TEXT NOT NULL DEFAULT '{}'
-            )
-            """
-        )
-        old_columns = table_columns(conn, "token_suppression_old")
-        shared_columns = [column for column in TOKEN_SUPPRESSION_COLUMNS if column in old_columns]
-        if shared_columns:
+    conn.execute("SAVEPOINT token_suppression_reason_schema")
+    try:
+        if current_sql and _TOKEN_SUPPRESSION_REASON not in current_sql:
+            _create_token_suppression_table(conn, "token_suppression_reason_upgrade")
+            old_columns = table_columns(conn, "token_suppression")
+            shared_columns = [column for column in TOKEN_SUPPRESSION_COLUMNS if column in old_columns]
+            if shared_columns:
+                conn.execute(
+                    f"""
+                    INSERT INTO token_suppression_reason_upgrade ({", ".join(shared_columns)})
+                    SELECT {", ".join(shared_columns)} FROM token_suppression
+                    """
+                )
+            conn.execute("DROP TABLE token_suppression")
             conn.execute(
-                f"""
-                INSERT INTO token_suppression ({", ".join(shared_columns)})
-                SELECT {", ".join(shared_columns)}
-                FROM token_suppression_old
+                "ALTER TABLE token_suppression_reason_upgrade RENAME TO token_suppression"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
+                    ON token_suppression(suppression_reason, updated_at)
                 """
             )
-        conn.execute("DROP TABLE token_suppression_old")
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
-                ON token_suppression(suppression_reason, updated_at)
-            """
-        )
+
+        if history_sql and _TOKEN_SUPPRESSION_REASON not in history_sql:
+            current_view_exists = _sqlite_object_type(conn, "token_suppression_current") == "view"
+            alias_view_exists = _sqlite_object_type(conn, "token_suppression") == "view"
+            if alias_view_exists:
+                conn.execute("DROP VIEW token_suppression")
+            if current_view_exists:
+                conn.execute("DROP VIEW token_suppression_current")
+            _create_token_suppression_history_table(
+                conn, "token_suppression_history_reason_upgrade"
+            )
+            old_columns = table_columns(conn, "token_suppression_history")
+            missing_columns = set(_TOKEN_SUPPRESSION_HISTORY_COLUMNS) - old_columns
+            if missing_columns:
+                raise RuntimeError(
+                    "B071 history schema missing required columns: "
+                    + ", ".join(sorted(missing_columns))
+                )
+            columns = ", ".join(_TOKEN_SUPPRESSION_HISTORY_COLUMNS)
+            conn.execute(
+                f"""
+                INSERT INTO token_suppression_history_reason_upgrade ({columns})
+                SELECT {columns} FROM token_suppression_history ORDER BY history_id ASC
+                """
+            )
+            conn.execute("DROP TABLE token_suppression_history")
+            conn.execute(
+                "ALTER TABLE token_suppression_history_reason_upgrade "
+                "RENAME TO token_suppression_history"
+            )
+            _create_token_suppression_history_projection(conn)
+            _create_token_suppression_views(
+                conn, include_legacy_alias=alias_view_exists
+            )
+        conn.execute("RELEASE SAVEPOINT token_suppression_reason_schema")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT token_suppression_reason_schema")
+        conn.execute("RELEASE SAVEPOINT token_suppression_reason_schema")
+        raise
 
 
 def _ensure_day0_window_entered_event_type(conn: sqlite3.Connection) -> None:
@@ -439,7 +591,7 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
         )
 
     conn.executescript(load_architecture_kernel_sql())
-    _ensure_token_suppression_reason_schema(conn)
+    ensure_token_suppression_reason_schema(conn)
     _ensure_day0_window_entered_event_type(conn)
     _ensure_venue_position_observed_event_type(conn)
     _ensure_review_required_event_type(conn)
