@@ -909,54 +909,86 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         scheduled_tasks = (priority_task, *tasks)
         executor_worker_count = min(max_workers, len(scheduled_tasks))
         callback_futures = {}
-        with (
-            ThreadPoolExecutor(
-                max_workers=executor_worker_count,
-                thread_name_prefix="source-clock-commit",
-            ) as callback_executor,
-            ThreadPoolExecutor(
+        callback_executor = ThreadPoolExecutor(
+            max_workers=executor_worker_count,
+            thread_name_prefix="source-clock-commit",
+        )
+        try:
+            with ThreadPoolExecutor(
                 max_workers=executor_worker_count,
                 thread_name_prefix="source-clock-bpf",
-            ) as executor,
-        ):
-            futures = {
-                executor.submit(_download_task, *task): (task[0], index == 0)
-                for index, task in enumerate(scheduled_tasks)
-            }
-            for future in as_completed(futures):
-                source, is_priority = futures[future]
-                try:
-                    result_source, task_report = future.result()
-                except Exception as exc:  # noqa: BLE001 - preserve successful sources
-                    fanout_errors.append(
-                        f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
-                    )
-                    continue
-                reports_by_source[result_source].append(task_report)
-                if is_priority:
-                    priority_report = task_report
-                if (
-                    on_source_commit is not None
-                    and int(task_report.get("written_row_count") or 0) > 0
-                ):
-                    callback_futures[
-                        callback_executor.submit(
-                            on_source_commit,
-                            result_source,
-                            task_report,
+            ) as executor:
+                futures = {
+                    executor.submit(_download_task, *task): (task[0], index == 0)
+                    for index, task in enumerate(scheduled_tasks)
+                }
+                for future in as_completed(futures):
+                    source, is_priority = futures[future]
+                    try:
+                        result_source, task_report = future.result()
+                    except Exception as exc:  # noqa: BLE001 - preserve successful sources
+                        fanout_errors.append(
+                            f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
                         )
-                    ] = result_source
+                        continue
+                    reports_by_source[result_source].append(task_report)
+                    if is_priority:
+                        priority_report = task_report
+                    if (
+                        on_source_commit is not None
+                        and int(task_report.get("written_row_count") or 0) > 0
+                    ):
+                        callback_futures[
+                            callback_executor.submit(
+                                on_source_commit,
+                                result_source,
+                                task_report,
+                            )
+                        ] = result_source
 
-            for future in as_completed(callback_futures):
+            callback_timeout = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            completed_callbacks = set()
+            try:
+                for future in as_completed(
+                    callback_futures,
+                    timeout=callback_timeout,
+                ):
+                    completed_callbacks.add(future)
+                    source = callback_futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:  # noqa: BLE001 - final catch-up remains authoritative
+                        source_commit_notification_errors.append(
+                            f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
+                        )
+                    else:
+                        source_commit_notifications += 1
+            except TimeoutError:
+                pass
+
+            def _log_late_callback_result(future) -> None:
                 source = callback_futures[future]
                 try:
                     future.result()
-                except Exception as exc:  # noqa: BLE001 - final catch-up remains authoritative
-                    source_commit_notification_errors.append(
-                        f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
+                except Exception as exc:  # noqa: BLE001 - periodic catch-up remains authoritative
+                    logger.warning(
+                        "source-clock deferred commit callback failed for %s: %s",
+                        source,
+                        exc,
                     )
-                else:
-                    source_commit_notifications += 1
+
+            for future in set(callback_futures) - completed_callbacks:
+                future.add_done_callback(_log_late_callback_result)
+        finally:
+            callback_executor.shutdown(wait=False, cancel_futures=False)
+        source_commit_notifications_pending = (
+            len(callback_futures) - source_commit_notifications
+            - len(source_commit_notification_errors)
+        )
 
         source_results: dict[str, dict[str, object]] = {}
         for source in updated_sources:
@@ -1130,6 +1162,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             "fanout_workers": worker_count,
             "fanout_errors": tuple(fanout_errors),
             "source_commit_notifications": source_commit_notifications,
+            "source_commit_notifications_pending": source_commit_notifications_pending,
             "source_commit_notification_errors": tuple(
                 source_commit_notification_errors
             ),

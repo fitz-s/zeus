@@ -2338,9 +2338,18 @@ def _replacement_availability_poll_tick():
         notification_errors = tuple(
             report.get("source_commit_notification_errors") or ()
         )
-        if (scoped_reseed_completed or anchor_reseed_published) and not notification_errors:
+        pending_notifications = int(
+            report.get("source_commit_notifications_pending") or 0
+        )
+        if (
+            scoped_reseed_completed
+            or anchor_reseed_published
+            or pending_notifications > 0
+        ) and not notification_errors:
             report["reseed_maintenance_status"] = (
-                "SOURCE_COMMIT_RESEEDS_PUBLISHED"
+                "SOURCE_COMMIT_RESEEDS_DEFERRED"
+                if pending_notifications > 0
+                else "SOURCE_COMMIT_RESEEDS_PUBLISHED"
                 if scoped_reseed_completed
                 else "SOURCE_ANCHOR_RESEEDS_PUBLISHED"
             )
