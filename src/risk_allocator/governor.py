@@ -111,6 +111,12 @@ class GovernorState:
     reconcile_finding_count: int
     kill_switch_armed: bool = False
     ws_gap_seconds: int = 0
+    # Independent WS-recovery latch (src.control.ws_gap_guard): true from the
+    # moment a user-channel gap/persistence-failure is recorded until an M5
+    # reconcile sweep proves no fills were missed. This is a proof-based state,
+    # not a duration — it is NOT part of the graded ws_gap_seconds threshold
+    # below and must trip reduce-only unconditionally (see reduce_only_mode_active).
+    m5_reconcile_required: bool = False
     risk_level: RiskLevel = RiskLevel.GREEN
     unknown_side_effect_markets: tuple[str, ...] = ()
     # Scope lattice (additive): count of unknown side effects classified SYSTEMIC
@@ -126,6 +132,7 @@ class GovernorState:
             "heartbeat_health": self.heartbeat_health.value,
             "ws_gap_active": self.ws_gap_active,
             "ws_gap_seconds": self.ws_gap_seconds,
+            "m5_reconcile_required": self.m5_reconcile_required,
             "unknown_side_effect_count": self.unknown_side_effect_count,
             "reconcile_finding_count": self.reconcile_finding_count,
             "systemic_unknown_side_effect_count": self.systemic_unknown_side_effect_count,
@@ -394,7 +401,20 @@ class RiskAllocator:
     def reduce_only_mode_active(self, governor_state: GovernorState) -> bool:
         if governor_state.kill_switch_armed:
             return True
-        if governor_state.ws_gap_active:
+        # M5 reconcile-required (src.control.ws_gap_guard) is an independent
+        # WS-recovery latch: proof that no fills were missed during a user-
+        # channel gap. It is a binary "has this been swept yet" state, not a
+        # duration, so it trips unconditionally -- grading it against
+        # ws_gap_seconds would silently disarm it, since ws_gap_seconds is
+        # never populated with a real duration by any live caller today (see
+        # 2026-07-19 capital-utilization evidence + this commit message).
+        if governor_state.m5_reconcile_required:
+            return True
+        # A sub-threshold transient ws gap alone is not a reduce-only event:
+        # grade it with the same threshold the kill-switch already uses
+        # (kill_switch_reason, below) instead of tripping unconditionally on
+        # any ws_gap_active flag.
+        if governor_state.ws_gap_active and governor_state.ws_gap_seconds > self.cap_policy.ws_gap_seconds_limit:
             return True
         # Reconcile findings are always systemic (common-path accounting failure).
         if governor_state.reconcile_finding_count > 0:
@@ -473,7 +493,8 @@ class PortfolioGovernor:
         finding_count: int,
     ) -> GovernorState:
         health = _coerce_heartbeat_health(heartbeat)
-        ws_gap_active = bool(_mapping_get(ws_status, "m5_reconcile_required", False) or _mapping_get(ws_status, "ws_gap_active", False))
+        m5_reconcile_required = bool(_mapping_get(ws_status, "m5_reconcile_required", False))
+        ws_gap_active = bool(m5_reconcile_required or _mapping_get(ws_status, "ws_gap_active", False))
         ws_gap_seconds = int(_mapping_get(ws_status, "gap_seconds", 0) or _mapping_get(ws_status, "ws_gap_seconds", 0) or 0)
         drawdown = float(getattr(ledger, "current_drawdown_pct", _mapping_get(ledger, "current_drawdown_pct", 0.0)) or 0.0)
         risk_level = _coerce_risk_level(getattr(ledger, "risk_level", _mapping_get(ledger, "risk_level", RiskLevel.GREEN)))
@@ -490,6 +511,7 @@ class PortfolioGovernor:
             heartbeat_health=health,
             ws_gap_active=ws_gap_active,
             ws_gap_seconds=ws_gap_seconds,
+            m5_reconcile_required=m5_reconcile_required,
             unknown_side_effect_count=int(unknown_count),
             reconcile_finding_count=int(finding_count),
             kill_switch_armed=kill_reason is not None,

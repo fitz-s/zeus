@@ -495,6 +495,63 @@ def test_heartbeat_lost_isolated_to_resting_order_types():
     assert allocator.kill_switch_reason(state) is None
 
 
+def test_reduce_only_not_tripped_by_subthreshold_ws_gap_alone():
+    """A zero-second ws_gap_active flag (no m5 latch, no other trip) must not
+
+    block new entries -- only a genuine transient ws gap past the same
+    threshold the kill-switch uses should. Regression for governor.py:397
+    tripping unconditionally on ws_gap_active with ws_gap_seconds=0 (2026-07-19
+    capital-utilization evidence: ~21% of exit-monitor cycles, 55% at
+    risk_level=GREEN with ws_gap_seconds=0).
+    """
+
+    allocator = RiskAllocator(CapPolicy(ws_gap_seconds_limit=15))
+    state = _state(ws_gap_active=True, ws_gap_seconds=0, m5_reconcile_required=False)
+
+    assert not allocator.reduce_only_mode_active(state)
+    assert allocator.can_allocate(_intent(size=1), state).allowed
+    assert allocator.kill_switch_reason(state) is None
+
+
+def test_reduce_only_tripped_by_ws_gap_above_threshold():
+    """A ws gap that persists past ws_gap_seconds_limit still trips reduce-only,
+
+    graded the same way the kill-switch already grades it.
+    """
+
+    allocator = RiskAllocator(CapPolicy(ws_gap_seconds_limit=15))
+    state = _state(ws_gap_active=True, ws_gap_seconds=16, m5_reconcile_required=False)
+
+    assert allocator.reduce_only_mode_active(state)
+    decision = allocator.can_allocate(_intent(size=1), state)
+    assert not decision.allowed
+    # Below the kill-switch's own threshold check this also becomes a hard
+    # kill-switch reason (ws_gap_threshold takes priority in entry_capacity),
+    # which is unchanged existing behavior -- reduce_only alone is asserted
+    # directly above via reduce_only_mode_active.
+
+
+def test_reduce_only_tripped_unconditionally_by_m5_reconcile_required():
+    """m5_reconcile_required is an independent WS-recovery latch (proof no
+
+    fills were missed during a gap), not a duration -- it must keep tripping
+    reduce-only regardless of ws_gap_seconds, unlike the graded ws_gap_active
+    branch above. This is the reconcile-integrity path that must NOT weaken.
+    """
+
+    allocator = RiskAllocator(CapPolicy(ws_gap_seconds_limit=15))
+    state = _state(ws_gap_active=False, ws_gap_seconds=0, m5_reconcile_required=True)
+
+    assert allocator.reduce_only_mode_active(state)
+    decision = allocator.can_allocate(_intent(size=1), state)
+    assert not decision.allowed
+    assert decision.reason == "reduce_only_mode_active"
+    # And the m5 latch alone (sub-threshold seconds) does not escalate to the
+    # harder kill-switch -- only reduce-only, preserving the existing
+    # kill-switch/reduce-only severity split.
+    assert allocator.kill_switch_reason(state) is None
+
+
 def test_book_depth_json_can_select_maker_when_healthy_and_deep():
     allocator = RiskAllocator(CapPolicy(taker_min_depth_micro=50_000_000))
     snapshot = SimpleNamespace(orderbook_depth_jsonb='{"bids":[["0.49","100"]],"asks":[["0.51","100"]]}')
@@ -536,6 +593,34 @@ def test_kill_switch_blocks_all_submits():
 
     assert excinfo.value.decision.reason == "operator_manual_halt"
     clear_global_allocator()
+
+
+def test_update_state_threads_m5_reconcile_required_independently_of_ws_gap_seconds():
+    """PortfolioGovernor.update_state must publish m5_reconcile_required as its
+
+    own GovernorState field (not only folded into ws_gap_active), since the
+    live ws_status source (src.control.ws_gap_guard.summary()) never carries a
+    real gap-seconds duration -- ws_gap_seconds always reads 0 in production.
+    """
+
+    governor = PortfolioGovernor()
+    state = governor.update_state(
+        {},
+        HeartbeatStatus(HeartbeatHealth.HEALTHY, None, 0, "h", 5),
+        {"m5_reconcile_required": True},
+        0,
+        0,
+    )
+
+    assert state.m5_reconcile_required is True
+    assert state.ws_gap_active is True
+    assert state.ws_gap_seconds == 0
+    # The graded kill-switch threshold never fires at ws_gap_seconds=0 --
+    # unaffected by this change -- but reduce-only still trips via the
+    # independent m5 latch.
+    allocator = RiskAllocator()
+    assert allocator.kill_switch_reason(state) is None
+    assert allocator.reduce_only_mode_active(state) is True
 
 
 def test_global_allocator_defaults_fail_closed_until_cycle_refresh():
