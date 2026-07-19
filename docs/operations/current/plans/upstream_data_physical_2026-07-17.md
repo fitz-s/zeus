@@ -257,4 +257,67 @@ Landed (this wave):
 
 Event bridge first fire confirmed live: DAY0_METAR_MATERIALIZATION_BRIDGE 118 log hits since 05:40 restart (mesh restart by coworker session at 2ffbd2d84).
 
-Open levers (next wave): p_fill_lcb recalibration (49% of decisions claim ≥0.999, realize 25.5%); dead-bin exit speed (6/7 dead-bin exits missed the bid — event-driven exit trigger); high-q 0.80–0.95 overconfidence (realized 53–65% vs stated 85–93%); m5_reconcile latch persistence (21% of cycles reduce-only at GREEN).
+Open levers (next wave): p_fill_lcb recalibration (49% of decisions claim ≥0.999, realize 25.5%); high-q 0.80–0.95 overconfidence (realized 53–65% vs stated 85–93%); m5_reconcile latch persistence (21% of cycles reduce-only at GREEN).
+
+CORRECTION (2026-07-19, dead-bin exit speed task): the "event-driven exit
+trigger" line above was STALE — the mechanism already exists at HEAD, built by
+a parallel workstream BEFORE this list was written, and closes exactly the
+gap exit_quality.md Q2/Q5 measured. Re-verified, not rebuilt (no shadow /
+no duplicate machinery):
+- Gap: periodic `exit_monitor` scheduler job runs every 2 min
+  (`src/main.py:6804` `scheduler.add_job(..., minutes=2, id="exit_monitor")`,
+  documented at `src/main.py:6216-6217`) — that cadence was the seconds-to-
+  minutes hop the 6/7 executions in exit_quality.md Q2 fell into.
+- Fix (already landed 2026-07-16→07-18, commits 4275355c1, 06fca99c7,
+  cfc78fc05, 3effe37c8, 0a9fecba7, a4b77dad3, c5db90d2e, e03bf642c,
+  b13cb2ab4): `ingest_main.py:504-517` calls `publish_reactor_wake(reason=
+  "day0_extreme_event_committed", forecast_families=...)` right after the
+  METAR commit+mutex-release (fail-soft, no ingest-latency cost); an always-on
+  listener thread (`src/main.py:4427-4470 _run_edli_reactor_wake_listener`,
+  started at boot, unix-socket-notified — sub-second, 1s fallback poll) reads
+  the wake, and for a `day0_extreme_event_committed` reason with a HELD
+  position or resting entry in the affected family
+  (`src/main.py:3733-3787 _day0_wake_requires_exit_monitor`), dispatches
+  `_exit_monitor_cycle(target_families=<family>, urgent_day0=True)` on its own
+  thread (`src/main.py:3969-4014 _dispatch_day0_exit_monitor`) —
+  bypassing the 2-min cadence entirely. The targeted call narrows the
+  portfolio to just that family (`src/execution/exit_lifecycle.py:80-99
+  _portfolio_for_target_families`) and runs the SAME verdict machinery as the
+  periodic cycle — `evaluate_hard_fact_exit` inside
+  `src/engine/cycle_runtime.py:5178 execute_monitoring_phase` (no
+  reimplementation, no bypass of GAP_SUSPECT/coverage semantics from
+  845be2a49, same `real_order_submit_enabled` submit gate).
+- Evidence the historical 6/7 failures predate the fix: DB query on
+  `state/zeus_trades.db position_events` for the 7 named positions in
+  exit_quality.md Q2 shows the last one's activity ends 2026-07-13T16:58Z;
+  the fix's first commits (4275355c1/06fca99c7) land 2026-07-16T21:2x — i.e.
+  every historical failure sample occurred BEFORE the mechanism existed.
+  Zero `DAY0_HARD_FACT_BIN_DEAD` exit attempts recorded since (nothing to
+  fail or succeed on yet).
+- Live deploy status: `src.main` (the daemon that owns this dispatch) is
+  currently running a process started 2026-07-19T16:41:45 EDT — after every
+  fix commit above — so the code is not just landed but loaded in the running
+  daemon (contrast with the sibling posterior-recompute bridge in this same
+  doc, which WAS found dormant behind a stale process at the time of that
+  check).
+- Test coverage already exists for every scenario a rebuild would need to
+  prove: family-scoped dispatch and idempotent wake-id dedup
+  (`tests/test_forecast_live_daemon.py::test_day0_reactor_wake_dispatches_exit_monitor_before_reactor`,
+  `::test_day0_wake_exit_work_probe_is_fail_closed`,
+  `::test_day0_wake_family_scope_is_canonical_and_fails_full_on_partial`),
+  portfolio narrowing to the affected family only
+  (`tests/test_run_mode_failure_surfaces.py::test_targeted_exit_monitor_filters_positions_without_mutating_full_portfolio`,
+  `::test_targeted_exit_monitor_pushes_family_scope_into_portfolio_loader`),
+  and the hard-fact verdict itself firing in one call
+  (`tests/test_day0_hard_fact_exit.py::TestLaneEndToEnd::test_boundary_death_exits_in_one_evaluation`).
+  No new production code needed; do not re-dispatch this lever.
+- Unrelated pre-existing test failure noticed while re-verifying (NOT
+  fixed, out of this task's scope — different code path, not a money leak):
+  `tests/test_run_mode_failure_surfaces.py::test_entry_reactor_monitor_defer_contract_is_effective`
+  fails standalone because commit e03bf642c (2026-07-17, "keep event wakes
+  live during exit monitoring") removed `"edli_event_reactor"` from
+  `_HELD_POSITION_MONITOR_DEFER_JOBS` (`src/main.py:98-103`) without updating
+  this test — `reactor.py:5619`'s `_defer_for_held_position_monitor(
+  "edli_event_reactor")` call is now permanently a no-op (short-circuits
+  False before checking monitor state). Flagged for whoever owns entry-
+  reactor/held-monitor scheduling next.
