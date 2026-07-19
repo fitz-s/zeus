@@ -1233,6 +1233,27 @@ def _transfer_logit_sigma_from_evidence(
     return _compute_sigma(brier_diff, sigma_scale)
 
 
+def _day0_gap_suspect_applies_to_metric(
+    observation: "Day0ObservationContext",
+    temperature_metric: MetricIdentity,
+) -> bool:
+    """Whether a GAP_SUSPECT coverage verdict is attributed to THIS metric.
+
+    M-2/H-3: the reader attributes the >=120min hole to the metric(s) whose
+    likely extreme window it overlaps (gap_suspect_metrics). A midnight hole
+    must not degrade a HIGH market. Missing/unreadable attribution fails
+    closed (suspect for every metric).
+    """
+    metrics = _day0_observation_field(observation, "gap_suspect_metrics", None)
+    if metrics is None:
+        return True
+    metric_key = "low" if temperature_metric.is_low() else "high"
+    try:
+        return metric_key in {str(m).strip().lower() for m in metrics}
+    except TypeError:
+        return True
+
+
 def _day0_observation_quality_rejection_reason(
     city: City,
     observation: "Day0ObservationContext",
@@ -1256,6 +1277,22 @@ def _day0_observation_quality_rejection_reason(
             f"Day0 observation coverage window is incomplete: city={city.name} "
             "first_sample_time is outside the local-day-start grace window; "
             "high_so_far/low_so_far cannot be trusted as local-day extrema"
+        )
+    # M-2/H-3: a >=120min qualifying-row hole overlapping this metric's likely
+    # extreme window means the running extreme may be silently understated.
+    # Entry fails closed; the held-position monitor (allow_incomplete_window_bound)
+    # keeps it as a one-sided bound only — same law as WINDOW_INCOMPLETE.
+    if (
+        obs_coverage == "GAP_SUSPECT"
+        and _day0_gap_suspect_applies_to_metric(observation, temperature_metric)
+        and not allow_incomplete_window_bound
+    ):
+        max_gap = _day0_observation_field(observation, "max_gap_minutes", None)
+        return (
+            f"Day0 observation coverage is gap-suspect: city={city.name} "
+            f"metric={'low' if temperature_metric.is_low() else 'high'} "
+            f"max_gap_minutes={max_gap} overlaps the metric's likely extreme window; "
+            "the running extreme may be silently understated"
         )
 
     observation_source = str(

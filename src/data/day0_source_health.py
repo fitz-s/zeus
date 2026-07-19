@@ -29,7 +29,7 @@ from src.data.day0_coverage_proof import Day0CoverageProof
 METAR_NATIVE_SOURCE_TYPES = frozenset({"wu_icao"})
 
 # Coverage statuses that are NOT full-through-decision.
-_INCOMPLETE_COVERAGE = frozenset({"WINDOW_INCOMPLETE", "LOW_COVERAGE", "GAP_INCOMPLETE"})
+_INCOMPLETE_COVERAGE = frozenset({"WINDOW_INCOMPLETE", "LOW_COVERAGE", "GAP_INCOMPLETE", "GAP_SUSPECT"})
 
 # Default stage-admissible state set (initial live = the strongest states only).
 DEFAULT_LIVE_ADMISSIBLE_STATES = frozenset({"OK_FAST_AND_WU", "OK_FAST_ONLY"})

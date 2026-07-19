@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.data.day0_observation_reader import (
+    COVERAGE_GAP_SUSPECT,
     COVERAGE_LOW,
     COVERAGE_NONE,
     COVERAGE_OK,
@@ -194,12 +195,14 @@ def test_reader_accepts_hko_runtime_monitoring_rows_without_training():
         provenance_json=_HKO_OFFICIAL_PROVENANCE,
     )
 
+    # Decision 00:00Z (08:00 HKT): trailing hole after the 07:00-local row is
+    # 60min < the 120min gap threshold, so row-count LOW_COVERAGE holds.
     out = read_day0_observed_extrema(
         conn,
         city="Hong Kong",
         target_date="2026-06-26",
         timezone_name="Asia/Hong_Kong",
-        decision_time_utc=datetime(2026, 6, 26, 1, 0, tzinfo=timezone.utc),
+        decision_time_utc=datetime(2026, 6, 26, 0, 0, tzinfo=timezone.utc),
         source_priority=("hko_hourly_accumulator",),
     )
 
@@ -518,7 +521,10 @@ class TestHighSoFarMaxAggregation:
         assert result.low_so_far == 13.0
 
     def test_coverage_status_low_with_two_rows(self, amsterdam_conn: sqlite3.Connection) -> None:
-        """2 rows < 6 threshold → LOW_COVERAGE."""
+        """2 rows < 6 threshold → sub-threshold count; M-2 upgrade: this sparse
+        fixture (rows only at 13:00Z/21:00Z) has real multi-hour holes over both
+        extreme windows, so the overall status is GAP_SUSPECT and the row-count
+        verdict survives underneath in coverage_status_for_metric semantics."""
         result = read_day0_observed_extrema(
             amsterdam_conn,
             city="Amsterdam",
@@ -527,7 +533,8 @@ class TestHighSoFarMaxAggregation:
             decision_time_utc=datetime(2026, 5, 22, 22, 0, tzinfo=timezone.utc),
             source_priority=("wu_icao_history",),
         )
-        assert result.coverage_status == COVERAGE_LOW
+        assert result.coverage_status == COVERAGE_GAP_SUSPECT
+        assert set(result.gap_suspect_metrics) == {"high", "low"}
         assert result.row_count == 2
 
 
@@ -700,12 +707,14 @@ class TestCoverageStates:
                 running_max=20.0 + hour,
                 authority="VERIFIED",
             )
+        # Decision just after the last row: coverage contiguous through decision
+        # (M-2: a 22:00Z decision would leave a 17h trailing hole -> GAP_SUSPECT).
         result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
             timezone_name="Europe/Amsterdam",
-            decision_time_utc=datetime(2026, 5, 22, 22, 0, tzinfo=timezone.utc),
+            decision_time_utc=datetime(2026, 5, 22, 5, 30, tzinfo=timezone.utc),
             source_priority=("wu_icao_history",),
         )
         assert result.coverage_status == COVERAGE_OK
@@ -755,3 +764,227 @@ class TestInputValidation:
                 decision_time_utc=naive_dt,
                 source_priority=("wu_icao_history",),
             )
+
+
+# ---------------------------------------------------------------------------
+# M-2/H-3: mid-day gap detector (GAP_SUSPECT)
+# ---------------------------------------------------------------------------
+#
+# Amsterdam 2026-05-22 is CEST (UTC+2): local midnight == 2026-05-21T22:00Z,
+# HIGH window local 11:00-17:00 == 09:00Z-15:00Z, LOW window local 02:00-08:00
+# == 00:00Z-06:00Z.
+
+
+def _insert_hourly(conn, utc_hours, *, day="2026-05-22", prev_day="2026-05-21",
+                   running_max=20.0, running_min=12.0):
+    """Insert one qualifying row per (day_offset, hour) pair."""
+    for is_prev, hour in utc_hours:
+        d = prev_day if is_prev else day
+        _insert(
+            conn,
+            utc_timestamp=f"{d}T{hour:02d}:00:00+00:00",
+            running_max=running_max,
+            running_min=running_min,
+            authority="VERIFIED",
+        )
+
+
+_FULL_MORNING_UTC = [(True, 22), (True, 23)] + [(False, h) for h in range(0, 9)]
+
+
+class TestGapSuspect:
+    """M-2/H-3: a >=120min hole overlapping the metric's likely extreme window
+    must degrade coverage to GAP_SUSPECT for THAT metric only."""
+
+    DECISION = datetime(2026, 5, 22, 14, 30, tzinfo=timezone.utc)  # 16:30 local
+
+    def _read(self, conn):
+        return read_day0_observed_extrema(
+            conn,
+            city="Amsterdam",
+            target_date="2026-05-22",
+            timezone_name="Europe/Amsterdam",
+            decision_time_utc=self.DECISION,
+            source_priority=("wu_icao_history",),
+        )
+
+    def test_afternoon_stall_is_gap_suspect_for_high_only(self) -> None:
+        """Rows before+after a 12:00-16:00-local stall: >=6 rows (count says OK)
+        but the hole spans the HIGH peak window -> GAP_SUSPECT attributed to
+        'high'; 'low' keeps the row-count status (its window was covered)."""
+        conn = _make_conn()
+        # Hourly through 10:00 local (08:00Z), then resumption at 16:00 local (14:00Z).
+        _insert_hourly(conn, _FULL_MORNING_UTC + [(False, 14)])
+        result = self._read(conn)
+        assert result.coverage_status == COVERAGE_GAP_SUSPECT
+        assert result.gap_suspect_metrics == ("high",)
+        assert result.max_gap_minutes == pytest.approx(360.0)  # 08:00Z -> 14:00Z
+        assert result.coverage_status_for_metric("high") == COVERAGE_GAP_SUSPECT
+        assert result.coverage_status_for_metric("low") == COVERAGE_OK
+        # Extrema still served (bound-only downstream): never None on GAP_SUSPECT.
+        assert result.high_so_far == 20.0
+        assert result.low_so_far == 12.0
+
+    def test_overnight_hole_is_gap_suspect_for_low_only(self) -> None:
+        """A hole spanning local 02:00-08:00 (00:00Z-06:00Z) suspects LOW, not HIGH."""
+        conn = _make_conn()
+        hours = [(True, 22), (True, 23)] + [(False, h) for h in range(6, 15)]
+        _insert_hourly(conn, hours)
+        result = self._read(conn)
+        assert result.gap_suspect_metrics == ("low",)
+        assert result.coverage_status_for_metric("low") == COVERAGE_GAP_SUSPECT
+        assert result.coverage_status_for_metric("high") == COVERAGE_OK
+
+    def test_contiguous_hourly_coverage_stays_ok(self) -> None:
+        conn = _make_conn()
+        _insert_hourly(conn, _FULL_MORNING_UTC + [(False, h) for h in range(9, 15)])
+        result = self._read(conn)
+        assert result.coverage_status == COVERAGE_OK
+        assert result.gap_suspect_metrics == ()
+        assert result.max_gap_minutes == pytest.approx(60.0)
+
+    def test_sub_threshold_gap_in_window_stays_ok(self) -> None:
+        """A 119-minute hole inside the HIGH window must NOT flag (threshold 120)."""
+        conn = _make_conn()
+        _insert_hourly(conn, _FULL_MORNING_UTC)
+        # 09:00Z then 10:59Z: 119min hole inside the HIGH window, then hourly on.
+        _insert(conn, utc_timestamp="2026-05-22T09:00:00+00:00",
+                running_max=20.0, running_min=12.0, authority="VERIFIED")
+        _insert(conn, utc_timestamp="2026-05-22T10:59:00+00:00",
+                running_max=20.0, running_min=12.0, authority="VERIFIED")
+        for h in (12, 13, 14):
+            _insert(conn, utc_timestamp=f"2026-05-22T{h:02d}:00:00+00:00",
+                    running_max=20.0, running_min=12.0, authority="VERIFIED")
+        result = self._read(conn)
+        assert result.coverage_status == COVERAGE_OK
+        assert result.gap_suspect_metrics == ()
+
+    def test_trailing_stall_through_decision_time_is_a_hole(self) -> None:
+        """Ingest stalled at 10:59 local and never resumed: the window
+        [last_row, decision_time] overlaps the HIGH window -> GAP_SUSPECT.
+        (The pure row-count check would say OK; the latest-row staleness gate
+        is a separate consumer — the reader itself must carry the verdict.)"""
+        conn = _make_conn()
+        _insert_hourly(conn, _FULL_MORNING_UTC)  # last row 08:00Z (10:00 local)
+        result = self._read(conn)  # decision 14:30Z (16:30 local)
+        assert result.coverage_status == COVERAGE_GAP_SUSPECT
+        assert "high" in result.gap_suspect_metrics
+
+    def test_leading_hole_before_first_row_counts(self) -> None:
+        """No rows until 12:00 local (10:00Z): the [local-midnight, first-row]
+        hole spans the LOW trough window -> LOW suspect."""
+        conn = _make_conn()
+        _insert_hourly(conn, [(False, h) for h in range(10, 15)])
+        result = self._read(conn)
+        assert "low" in result.gap_suspect_metrics
+        assert result.coverage_status_for_metric("low") == COVERAGE_GAP_SUSPECT
+
+    def test_gap_entirely_outside_both_windows_keeps_count_status(self) -> None:
+        """A hole local 20:00-23:00 (18:00Z-21:00Z, evening) suspects nothing."""
+        conn = _make_conn()
+        evening_decision = datetime(2026, 5, 22, 21, 30, tzinfo=timezone.utc)
+        _insert_hourly(
+            conn,
+            _FULL_MORNING_UTC + [(False, h) for h in range(9, 19)] + [(False, 21)],
+        )
+        result = read_day0_observed_extrema(
+            conn,
+            city="Amsterdam",
+            target_date="2026-05-22",
+            timezone_name="Europe/Amsterdam",
+            decision_time_utc=evening_decision,
+            source_priority=("wu_icao_history",),
+        )
+        assert result.coverage_status == COVERAGE_OK
+        assert result.gap_suspect_metrics == ()
+
+    def test_unusable_timezone_degrades_to_count_status(self) -> None:
+        """Bad timezone: metric attribution impossible -> row-count status wins
+        (no false GAP_SUSPECT), max_gap still measured over the row sequence."""
+        conn = _make_conn()
+        _insert_hourly(conn, _FULL_MORNING_UTC + [(False, 14)])
+        result = read_day0_observed_extrema(
+            conn,
+            city="Amsterdam",
+            target_date="2026-05-22",
+            timezone_name="Not/AZone",
+            decision_time_utc=self.DECISION,
+            source_priority=("wu_icao_history",),
+        )
+        assert result.coverage_status == COVERAGE_OK
+        assert result.gap_suspect_metrics == ()
+        assert result.max_gap_minutes == pytest.approx(360.0)
+
+    def test_provenance_carries_gap_fields(self) -> None:
+        conn = _make_conn()
+        _insert_hourly(conn, _FULL_MORNING_UTC + [(False, 14)])
+        result = self._read(conn)
+        assert result.provenance["max_gap_minutes"] == pytest.approx(360.0)
+        assert result.provenance["gap_suspect_metrics"] == ["high"]
+        assert result.provenance["gap_suspect_min_gap_minutes"] == 120.0
+
+    def test_context_reader_threads_gap_fields(self) -> None:
+        """read_day0_observation_context_from_instants must carry the verdict."""
+        conn = _make_conn()
+        for is_prev, hour in _FULL_MORNING_UTC + [(False, 14)]:
+            d = "2026-05-21" if is_prev else "2026-05-22"
+            _insert(
+                conn,
+                city="Amsterdam",
+                utc_timestamp=f"{d}T{hour:02d}:00:00+00:00",
+                running_max=20.0,
+                running_min=12.0,
+                authority="VERIFIED",
+            )
+
+        class CityLike:
+            name = "Amsterdam"
+            timezone = "Europe/Amsterdam"
+            settlement_unit = "C"
+            settlement_source_type = "wu_icao"
+            wu_station = "EHAM"
+
+        obs = read_day0_observation_context_from_instants(
+            conn,
+            city=CityLike(),
+            target_date="2026-05-22",
+            decision_time_utc=self.DECISION,
+        )
+        assert obs is not None
+        assert obs.coverage_status == COVERAGE_GAP_SUSPECT
+        assert obs.gap_suspect_metrics == ("high",)
+        assert obs.max_gap_minutes == pytest.approx(360.0)
+
+    def test_hko_cumulative_rows_ignore_interior_holes(self) -> None:
+        """HKO rows are since-midnight extrema: an interior hole loses nothing;
+        only a trailing stall can hide an extreme."""
+        conn = _make_conn()
+        common = {
+            "city": "Hong Kong",
+            "target_date": "2026-07-13",
+            "source": "hko_hourly_accumulator",
+            "timezone_name": "Asia/Hong_Kong",
+            "authority": "ICAO_STATION_NATIVE",
+            "training_allowed": 0,
+            "causality_status": "OK",
+            "source_role": "runtime_monitoring",
+            "station_id": "HKO",
+            "provenance_json": _HKO_OFFICIAL_PROVENANCE,
+        }
+        # HK local = UTC+8. Rows at local 01:00 (17:00Z prev) and local 16:00
+        # (08:00Z): a 15h interior hole spanning both windows — but the 16:00
+        # row already absorbs the whole day so far.
+        _insert(conn, **common, utc_timestamp="2026-07-12T17:00:00+00:00",
+                temp_current=28.0, running_max=28.0, running_min=27.0)
+        _insert(conn, **common, utc_timestamp="2026-07-13T08:00:00+00:00",
+                temp_current=33.0, running_max=33.0, running_min=27.0)
+        result = read_day0_observed_extrema(
+            conn,
+            city="Hong Kong",
+            target_date="2026-07-13",
+            timezone_name="Asia/Hong_Kong",
+            decision_time_utc=datetime(2026, 7, 13, 8, 30, tzinfo=timezone.utc),
+            source_priority=("hko_hourly_accumulator",),
+        )
+        assert result.gap_suspect_metrics == ()
+        assert result.coverage_status == COVERAGE_LOW  # 2 rows < 6

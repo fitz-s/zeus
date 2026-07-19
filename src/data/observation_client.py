@@ -64,6 +64,11 @@ class Day0ObservationContext:
     source_authority: str = ""
     data_version: str = ""
     training_allowed: Optional[bool] = None
+    # M-2/H-3 gap detector attribution (day0_observation_reader). None means the
+    # producing path did not run the detector; consumers treating a GAP_SUSPECT
+    # status must then fail closed for every metric.
+    max_gap_minutes: Optional[float] = None
+    gap_suspect_metrics: Optional[tuple[str, ...]] = None
 
     def __post_init__(self) -> None:
         if self.low_so_far is None:

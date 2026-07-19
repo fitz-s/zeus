@@ -48,7 +48,7 @@ def test_divergence_pause_dominates() -> None:
 
 
 def test_incomplete_coverage_blocks() -> None:
-    for s in ("WINDOW_INCOMPLETE", "LOW_COVERAGE", "GAP_INCOMPLETE"):
+    for s in ("WINDOW_INCOMPLETE", "LOW_COVERAGE", "GAP_INCOMPLETE", "GAP_SUSPECT"):
         assert day0_source_health(_facts(coverage_proof=_proof(s))) == "WINDOW_INCOMPLETE"
 
 

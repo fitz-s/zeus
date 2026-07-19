@@ -6927,7 +6927,7 @@ def _normalize_observation_coverage_status(raw: str) -> str:
         return "STALE"
     if value in {"NON_SETTLEMENT_SOURCE"}:
         return "NON_SETTLEMENT_SOURCE"
-    if value in {"LOW", "LOW_COVERAGE", "WINDOW_INCOMPLETE"}:
+    if value in {"LOW", "LOW_COVERAGE", "WINDOW_INCOMPLETE", "GAP_SUSPECT"}:
         return "LOW"
     if value in {"DATA_UNAVAILABLE", "CHAIN_UNAVAILABLE", "MISSING", "", "UNKNOWN"}:
         return "MISSING"

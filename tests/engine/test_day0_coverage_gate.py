@@ -229,3 +229,90 @@ class TestComputeDay0CoverageStatusBoundary:
         assert status == "LOW_COVERAGE", (
             f"Expected LOW_COVERAGE for {self._MIN - 1} samples, got {status!r}"
         )
+
+
+def _make_gap_obs(
+    *,
+    gap_suspect_metrics=("high",),
+    max_gap_minutes: float = 240.0,
+    **overrides,
+) -> Day0ObservationContext:
+    base = dict(
+        coverage_status="GAP_SUSPECT",
+        high_so_far=65.0,
+        low_so_far=55.0,
+        current_temp=63.0,
+        observation_time="2026-05-24T14:00:00+00:00",
+        sample_count=8,
+    )
+    base.update(overrides)
+    obs = _make_obs(**base)
+    # dataclass is frozen+slots: rebuild with the gap fields.
+    return Day0ObservationContext(
+        high_so_far=obs.high_so_far,
+        low_so_far=obs.low_so_far,
+        current_temp=obs.current_temp,
+        source=obs.source,
+        observation_time=obs.observation_time,
+        unit=obs.unit,
+        station_id=obs.station_id,
+        sample_count=obs.sample_count,
+        first_sample_time=obs.first_sample_time,
+        last_sample_time=obs.last_sample_time,
+        coverage_status=obs.coverage_status,
+        observation_available_at=obs.observation_available_at,
+        max_gap_minutes=max_gap_minutes,
+        gap_suspect_metrics=tuple(gap_suspect_metrics) if gap_suspect_metrics is not None else None,
+    )
+
+
+class TestGapSuspectEntryGate:
+    """M-2/H-3: GAP_SUSPECT fails the ENTRY quality gate closed for the
+    attributed metric only; the monitor bound-only escape hatch still serves."""
+
+    def test_gap_suspect_high_blocks_high_entry(self) -> None:
+        obs = _make_gap_obs(gap_suspect_metrics=("high",))
+        reason = _day0_observation_quality_rejection_reason(
+            _NYC, obs, HIGH_LOCALDAY_MAX, decision_time=_DECISION_TIME
+        )
+        assert reason is not None
+        assert "gap-suspect" in reason
+
+    def test_gap_suspect_high_does_not_block_low_entry(self) -> None:
+        """Metric attribution: an afternoon hole must not block a LOW market."""
+        obs = _make_gap_obs(gap_suspect_metrics=("high",))
+        reason = _day0_observation_quality_rejection_reason(
+            _NYC, obs, LOW_LOCALDAY_MIN, decision_time=_DECISION_TIME
+        )
+        if reason is not None:
+            assert "gap-suspect" not in reason
+
+    def test_gap_suspect_low_blocks_low_entry(self) -> None:
+        obs = _make_gap_obs(gap_suspect_metrics=("low",))
+        reason = _day0_observation_quality_rejection_reason(
+            _NYC, obs, LOW_LOCALDAY_MIN, decision_time=_DECISION_TIME
+        )
+        assert reason is not None
+        assert "gap-suspect" in reason
+
+    def test_gap_suspect_without_attribution_fails_closed_for_all_metrics(self) -> None:
+        """A GAP_SUSPECT status whose producer did not attribute metrics
+        (gap_suspect_metrics=None) must block every metric."""
+        obs = _make_gap_obs(gap_suspect_metrics=None)
+        for metric in (HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN):
+            reason = _day0_observation_quality_rejection_reason(
+                _NYC, obs, metric, decision_time=_DECISION_TIME
+            )
+            assert reason is not None and "gap-suspect" in reason
+
+    def test_gap_suspect_passes_as_explicit_monitor_bound(self) -> None:
+        """Monitor path (allow_incomplete_window_bound=True): serve bound-only."""
+        obs = _make_gap_obs(gap_suspect_metrics=("high",))
+        reason = _day0_observation_quality_rejection_reason(
+            _NYC,
+            obs,
+            HIGH_LOCALDAY_MAX,
+            decision_time=_DECISION_TIME,
+            allow_incomplete_window_bound=True,
+        )
+        assert reason is None

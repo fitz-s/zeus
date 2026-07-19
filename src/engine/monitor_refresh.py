@@ -62,6 +62,7 @@ from src.data.observation_client import (
 from src.data.polymarket_client import PolymarketClient
 from src.engine.evaluator import (
     DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE,
+    _day0_gap_suspect_applies_to_metric,
     _day0_observation_field,
     _day0_observation_quality_rejection_reason,
     _day0_observation_source_rejection_reason,
@@ -2909,6 +2910,15 @@ def _refresh_day0_observation(
     obs_coverage_status = str(_day0_observation_field(obs, "coverage_status", "") or "").strip().upper()
     if obs_coverage_status == "WINDOW_INCOMPLETE":
         coverage_validations.append("day0_observation_bound_only:coverage_window_incomplete")
+    elif obs_coverage_status == "GAP_SUSPECT" and _day0_gap_suspect_applies_to_metric(
+        obs, temperature_metric
+    ):
+        # M-2/H-3: a >=120min qualifying-row hole overlaps this metric's likely
+        # extreme window — the running extreme is still a valid ONE-SIDED bound
+        # (a max over sparse samples is a true lower bound for HIGH) but must
+        # not be treated as the complete local-day extreme. Same law as
+        # WINDOW_INCOMPLETE: monitor serves bound-only; entry rejects.
+        coverage_validations.append("day0_observation_bound_only:coverage_gap_suspect")
 
     temporal_context = None
     decision_time = datetime.now(timezone.utc)
@@ -3100,6 +3110,62 @@ def _refresh_day0_observation(
             observed_high_so_far = _apply_absorbing_floor_to_observed_extreme(
                 observed_high_so_far, _belief_canonical_extreme[0], metric_is_low=False
             )
+    # M-1 (day0 first-principles audit 2026-07-17): the monitor/exit belief must
+    # not condition on a stale observed extreme as exact. Same margin machinery
+    # as the entry lane (stale_extreme_uncertainty_margin: inert 0.0 within the
+    # city's staleness budget, fail-closed max when the age is unknown), same
+    # bound convention as the hard-fact lane (shift the extreme by the margin in
+    # the NON-kill direction — HIGH: minus, LOW: plus — so a belief collapse
+    # must clear the staleness envelope before it can drive an exit). Applies
+    # ONLY to the belief conditioning; the recorded observation facts, maturity
+    # gate, and metric-fact write keep the raw absorbing extreme.
+    _belief_margin_native = 0.0
+    _belief_obs_age_minutes: float | None = None
+    _belief_staleness_budget_min: float | None = None
+    try:
+        from src.engine.evaluator import _parse_day0_observation_time_utc
+        from src.signal.day0_obs_latency import (
+            stale_extreme_uncertainty_margin,
+            staleness_budget_minutes,
+        )
+
+        _belief_obs_at = _parse_day0_observation_time_utc(
+            _day0_observation_field(obs, "observation_time")
+        )
+        # Age against the belief's decision clock (the same clock that scopes
+        # the remaining-window extrema), falling back to wall-clock decision_time.
+        _belief_clock = _parse_day0_observation_time_utc(
+            getattr(temporal_context, "current_utc_timestamp", None)
+        ) or decision_time
+        if _belief_obs_at is not None:
+            _belief_obs_age_minutes = max(
+                0.0, (_belief_clock - _belief_obs_at).total_seconds() / 60.0
+            )
+        _belief_staleness_budget_min = staleness_budget_minutes(
+            str(getattr(city, "name", "") or "")
+        )
+        _belief_margin_native = float(
+            stale_extreme_uncertainty_margin(
+                unit=str(getattr(city, "settlement_unit", "") or "F"),
+                obs_age_minutes=_belief_obs_age_minutes,
+                budget_minutes=_belief_staleness_budget_min,
+            )
+        )
+    except Exception:  # noqa: BLE001 — protective widening only; absence degrades to legacy exact conditioning
+        _belief_margin_native = 0.0
+    belief_observed_high_so_far = observed_high_so_far
+    belief_observed_low_so_far = observed_low_so_far
+    if _belief_margin_native > 0.0:
+        if _belief_metric_is_low and observed_low_so_far is not None:
+            belief_observed_low_so_far = observed_low_so_far + _belief_margin_native
+        elif not _belief_metric_is_low and observed_high_so_far is not None:
+            belief_observed_high_so_far = observed_high_so_far - _belief_margin_native
+        coverage_validations.append(
+            "day0_stale_bound_margin_applied:"
+            f"margin_native={_belief_margin_native:.3f};"
+            f"obs_age_min={'unknown' if _belief_obs_age_minutes is None else format(_belief_obs_age_minutes, '.1f')};"
+            f"budget_min={_belief_staleness_budget_min:.1f}"
+        )
     observation_source_for_value = str(_day0_observation_field(obs, "source", "") or "")
     if current_temp is None and observation_source_for_value.startswith("ogimet_metar_"):
         current_temp = float("nan")
@@ -3116,8 +3182,11 @@ def _refresh_day0_observation(
         conditioned_extrema = _condition_daily_extrema_to_observed_bound(
             raw_daily_member_extrema_for_receipt,
             temperature_metric=temperature_metric,
+            # M-1: belief conditioning uses the staleness-margined bound.
             observed_extreme=(
-                observed_low_so_far if temperature_metric.is_low() else observed_high_so_far
+                belief_observed_low_so_far
+                if temperature_metric.is_low()
+                else belief_observed_high_so_far
             ),
             temporal_context=temporal_context,
             hours_remaining=hours_remaining,
@@ -3165,8 +3234,10 @@ def _refresh_day0_observation(
         ]
     day0 = Day0Router.route(Day0SignalInputs(
         temperature_metric=temperature_metric,
-        observed_high_so_far=observed_high_so_far,
-        observed_low_so_far=observed_low_so_far,
+        # M-1: the monitor belief conditions on the staleness-margined bound
+        # (raw absorbing extreme stays authoritative for facts + maturity).
+        observed_high_so_far=belief_observed_high_so_far,
+        observed_low_so_far=belief_observed_low_so_far,
         current_temp=current_temp,
         hours_remaining=hours_remaining,
         member_maxes_remaining=extrema.maxes,
@@ -3243,9 +3314,17 @@ def _refresh_day0_observation(
         position.direction,
     )
     current_p_posterior = _model_only_native_posterior(p_cal_native)
+    # M-2/H-3: a gap-suspect extreme (>=120min hole over the metric's likely
+    # extreme window) is the same epistemic state as a stale bound — the true
+    # extreme may have moved inside the unobserved window — so it must not
+    # sponsor settlement-grade zero-probability exit authority either.
+    coverage_gap_suspect = (
+        "day0_observation_bound_only:coverage_gap_suspect" in coverage_validations
+    )
     zero_probability_exit_authority_candidate = (
         maturity_rejection is None
         and "day0_observation_stale_monitor_bound" not in coverage_validations
+        and not coverage_gap_suspect
         and not daily_extrema_conditioned
     )
     held_probability_collapsed = current_p_posterior <= 1e-9
@@ -3262,7 +3341,11 @@ def _refresh_day0_observation(
             else (
                 "daily_extrema_conditioned_not_hard_fact"
                 if daily_extrema_conditioned
-                else "stale_or_immature_day0_remaining_window"
+                else (
+                    "coverage_gap_suspect_not_hard_fact"
+                    if coverage_gap_suspect
+                    else "stale_or_immature_day0_remaining_window"
+                )
             )
         )
     if held_probability_collapsed and not zero_probability_exit_authority:
@@ -3304,9 +3387,19 @@ def _refresh_day0_observation(
                     obs, "provider_reported_time"
                 ),
                 "coverage_status": _day0_observation_field(obs, "coverage_status"),
+                "max_gap_minutes": _monitor_receipt_float(
+                    _day0_observation_field(obs, "max_gap_minutes")
+                ),
                 "current_temp": _monitor_receipt_float(current_temp),
                 "observed_high_so_far": _monitor_receipt_float(observed_high_so_far),
                 "observed_low_so_far": _monitor_receipt_float(observed_low_so_far),
+                "stale_bound_margin_native": _monitor_receipt_float(_belief_margin_native),
+                "belief_observed_high_so_far": _monitor_receipt_float(
+                    belief_observed_high_so_far
+                ),
+                "belief_observed_low_so_far": _monitor_receipt_float(
+                    belief_observed_low_so_far
+                ),
             },
             "remaining_window": {
                 "source": live_forecast_source,
