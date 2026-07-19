@@ -7609,7 +7609,7 @@ class TestRecoveryResolutionTable:
             filled_size="11",
             fill_price="0.08",
         )
-        _append_order_fact(
+        terminal_fact_id = _append_order_fact(
             conn,
             state="MATCHED",
             matched_size="11",
@@ -7642,6 +7642,7 @@ class TestRecoveryResolutionTable:
                     "proof_class": "terminal_partial_order_fact",
                     "command_id": "cmd-001",
                     "venue_order_id": "ord-001",
+                    "latest_order_fact_id": terminal_fact_id,
                     "filled_size": "10",
                     "requested_size": "15.0",
                     "required_predicates": {
@@ -7652,6 +7653,15 @@ class TestRecoveryResolutionTable:
                 },
             )
         assert _get_state(conn, "cmd-001") == "FILLED"
+        _append_order_fact(
+            conn,
+            state="EXPIRED",
+            matched_size="11",
+            remaining_size="0",
+            raw_payload_json={
+                "proof_class": "confirmed_fill_plus_point_order_terminal_remainder"
+            },
+        )
         _insert_decision_log_trade_case_for_recovery(conn)
 
         from src.execution.command_recovery import reconcile_unresolved_commands

@@ -346,7 +346,6 @@ def _terminal_partial_correction_proven(
     remaining_size: str | None,
     matched_size: str | None,
     raw_payload_json: Any,
-    prior_terminal: sqlite3.Row | None,
 ) -> bool:
     """Allow only an exact terminal-partial correction of a false full-fill fact."""
 
@@ -354,12 +353,40 @@ def _terminal_partial_correction_proven(
         state != "PARTIALLY_MATCHED"
         or not _decimal_text_is_zero(remaining_size)
         or not _positive_finite_decimal_text(matched_size)
-        or prior_terminal is None
-        or str(prior_terminal["state"] or "") != "MATCHED"
-        or not _decimal_text_is_zero(prior_terminal["remaining_size"])
-        or not _decimal_text_equal(prior_terminal["matched_size"], matched_size)
         or not isinstance(raw_payload_json, Mapping)
         or raw_payload_json.get("proof_class") != "terminal_partial_order_fact"
+    ):
+        return False
+    proof_fact_id = raw_payload_json.get("latest_order_fact_id")
+    if proof_fact_id in (None, ""):
+        proof_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+               AND venue_order_id = ?
+               AND state = 'MATCHED'
+             ORDER BY local_sequence DESC, fact_id DESC
+             LIMIT 1
+            """,
+            (command_id, venue_order_id),
+        ).fetchone()
+    else:
+        proof_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE fact_id = ?
+               AND command_id = ?
+               AND venue_order_id = ?
+            """,
+            (proof_fact_id, command_id, venue_order_id),
+        ).fetchone()
+    if (
+        proof_fact is None
+        or str(proof_fact["state"] or "") != "MATCHED"
+        or not _decimal_text_is_zero(proof_fact["remaining_size"])
+        or not _decimal_text_equal(proof_fact["matched_size"], matched_size)
     ):
         return False
     predicates = raw_payload_json.get("required_predicates")
@@ -1445,16 +1472,35 @@ def _validate_terminal_partial_command_correction_payload(
             """,
             (command_id,),
         ).fetchone()
-        latest_order = conn.execute(
-            """
-            SELECT state, remaining_size, matched_size
-              FROM venue_order_facts
-             WHERE command_id = ?
-             ORDER BY local_sequence DESC, fact_id DESC
-             LIMIT 1
-            """,
-            (command_id,),
-        ).fetchone()
+        proof_fact_id = payload.get("latest_order_fact_id")
+        if proof_fact_id in (None, ""):
+            proof_order = conn.execute(
+                """
+                SELECT state, remaining_size, matched_size
+                  FROM venue_order_facts
+                 WHERE command_id = ?
+                   AND venue_order_id = ?
+                   AND state IN ('MATCHED', 'PARTIALLY_MATCHED', 'PARTIAL')
+                 ORDER BY local_sequence DESC, fact_id DESC
+                 LIMIT 1
+                """,
+                (command_id, str(payload.get("venue_order_id") or "")),
+            ).fetchone()
+        else:
+            proof_order = conn.execute(
+                """
+                SELECT state, remaining_size, matched_size
+                  FROM venue_order_facts
+                 WHERE fact_id = ?
+                   AND command_id = ?
+                   AND venue_order_id = ?
+                """,
+                (
+                    proof_fact_id,
+                    command_id,
+                    str(payload.get("venue_order_id") or ""),
+                ),
+            ).fetchone()
     venue_order_id = str(payload.get("venue_order_id") or "")
     if command is None:
         raise ValueError("terminal partial command correction command is missing")
@@ -1464,22 +1510,22 @@ def _validate_terminal_partial_command_correction_payload(
         or str(command["venue_order_id"] or "") != venue_order_id
     ):
         raise ValueError("terminal partial command correction command identity does not match")
-    if latest_order is None:
+    if proof_order is None:
         raise ValueError("terminal partial command correction order fact is missing")
-    if str(latest_order["state"] or "").upper() not in {
+    if str(proof_order["state"] or "").upper() not in {
         "MATCHED",
         "PARTIALLY_MATCHED",
         "PARTIAL",
     }:
         raise ValueError("terminal partial command correction order state is invalid")
-    if not _decimal_text_is_zero(latest_order["remaining_size"]):
+    if not _decimal_text_is_zero(proof_order["remaining_size"]):
         raise ValueError("terminal partial command correction order remainder is not zero")
     if not _decimal_text_equal(
-        latest_order["matched_size"], payload.get("filled_size")
+        proof_order["matched_size"], payload.get("filled_size")
     ):
         raise ValueError(
             "terminal partial command correction order size does not match: "
-            f"order={latest_order['matched_size']} trade={payload.get('filled_size')}"
+            f"order={proof_order['matched_size']} trade={payload.get('filled_size')}"
         )
     requested = _decimal_or_none(command["size"])
     filled = _decimal_or_none(payload.get("filled_size"))
@@ -3320,7 +3366,6 @@ def append_order_fact(
                 remaining_size=remaining_size,
                 matched_size=matched_size,
                 raw_payload_json=raw_payload_json,
-                prior_terminal=prior_terminal,
             )
             if prior_terminal is not None and not terminal_partial_correction:
                 from src.execution.order_truth_reducer import (
