@@ -884,6 +884,22 @@ class TestExecutor:
         assert result.status == "pending"
         assert captured["order_type"] == "FOK"
 
+    def test_risk_allocator_immediate_mode_preserves_frozen_fak(self):
+        from src.execution.executor import _risk_allocator_order_type_allows_intent
+
+        assert _risk_allocator_order_type_allows_intent(
+            selected_order_type="FOK",
+            intent_order_type="FAK",
+        )
+        assert _risk_allocator_order_type_allows_intent(
+            selected_order_type="FAK",
+            intent_order_type="FOK",
+        )
+        assert not _risk_allocator_order_type_allows_intent(
+            selected_order_type="FOK",
+            intent_order_type="GTC",
+        )
+
     def test_entry_ack_persistence_failure_returns_unknown_not_pending(self, monkeypatch):
         final_intent = _final_execution_intent(
             final_limit_price=Decimal("0.33"),

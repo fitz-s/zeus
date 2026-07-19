@@ -144,12 +144,16 @@ def _risk_allocator_order_type_allows_intent(
     selected_order_type: str,
     intent_order_type: str,
 ) -> bool:
+    """Preserve the frozen TIF when it satisfies the governor's order mode."""
+
     selected = str(selected_order_type or "").strip().upper()
     intended = str(intent_order_type or "").strip().upper()
     if not intended or selected == intended:
         return True
     resting = {"GTC", "GTD"}
     immediate = {"FOK", "FAK"}
+    if selected in immediate and intended in immediate:
+        return True
     if selected in resting and intended in immediate:
         return True
     return False
