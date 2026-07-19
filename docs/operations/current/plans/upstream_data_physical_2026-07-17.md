@@ -240,3 +240,21 @@ API-ERROR RECOVERY: all four wave implementers were killed by a transient 400 at
       cycle_advance_enqueues monotone guard; all admitted families, held
       auto-detected via 2b5ae40a3 helper; fail-soft  4dcba55e2
 STILL IN FLIGHT: coverage agent (fable, M-2/H-3 GAP_SUSPECT + M-1 stale margin).
+
+## Capital-efficiency wave (2026-07-19)
+
+Investigation: 6 read-only agents → docs/evidence/capital_efficiency_2026_07_19/ (pnl_attribution, fill_funnel, nosubmit_gates, exit_quality, capital_utilization, universe_coverage + escalation_gate_diagnosis erratum'd universe report).
+Chain-truth July: +$66.87 total; Zeus-decisions-only +$253.59 @ 55.2% WR (32 foreign chain_only_reconciliation positions −$186.72 excluded; all decision-grading surfaces proven structurally clean — no code change needed).
+
+Landed (this wave):
+- 7893ac0dc fix(risk-allocator): ws_gap reduce-only graded threshold; m5_reconcile latch split explicit (audit's literal fix would have disarmed the guard — ws_gap_seconds is always 0 live).
+- 089291484 docs(escalation): low TAKER_ESCALATED_AFTER_REST fire rate = design intent (selection-curse bound + q_exec_lcb gate, OOS −$45.74 toxic evidence). NOT unblocked.
+- 342534cbd fix(engine): no-submit receipt persistence restored (proof_accepted flipped False by 9e84989525 on 06-28 → 3-week receipt blackout); Day0 admission rejections now durable (DAY0_LIVE_ADMISSION_REJECTED registered); tautological city_allowlist deleted per operator open-all directives.
+- 845be2a49 fix(day0): M-2/H-3 GAP_SUSPECT coverage detector (metric-aware extreme-window overlap, entry fail-closed, monitor bound-only + exit-authority revoke) + M-1 stale-bound margin on monitor belief.
+- 6b4f99cc5 fix(state): chain-mirror settlement clobber guard (was_economically_closed) — realized_pnl_usd writer fixed.
+- 8b74e79b5 + 46d56436c feat(reactor): multi-winner sequential re-auction loop (plan docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md, INV-44, 6 antibodies; K-winner recovery antibody re-based onto 094e7e91e projection-proof gate).
+- Historical repair applied: scripts/repair_settled_clobbered_pnl.py --apply → 58 repairs; rollback snapshot docs/evidence/capital_efficiency_2026_07_19/pnl_repair_rollback_2026-07-19.sql; 10 SKIP (no exit-fill event, by design) + 49 NULL (foreign rows, no Zeus economics).
+
+Event bridge first fire confirmed live: DAY0_METAR_MATERIALIZATION_BRIDGE 118 log hits since 05:40 restart (mesh restart by coworker session at 2ffbd2d84).
+
+Open levers (next wave): p_fill_lcb recalibration (49% of decisions claim ≥0.999, realize 25.5%); dead-bin exit speed (6/7 dead-bin exits missed the bid — event-driven exit trigger); high-q 0.80–0.95 overconfidence (realized 53–65% vs stated 85–93%); m5_reconcile latch persistence (21% of cycles reduce-only at GREEN).
