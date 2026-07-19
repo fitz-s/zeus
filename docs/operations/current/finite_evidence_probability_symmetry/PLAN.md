@@ -727,5 +727,9 @@ monitor, and symmetry suites pass `436/436`; the full W3 integration file passes
 failures.  Compilation, YAML parse, changed-test topology filtering, and diff
 whitespace checks pass.  The environment has no Ruff executable; Pyflakes still
 reports the adapter's pre-existing dynamic/type-only names, with no new finding
-in the deterministic authority implementation.  Deployment remains contingent
-on the independent reviewer reproducing both original attacks as rejected.
+in the deterministic authority implementation.  Independent re-review passed
+the Day0 slice: both original attacks are rejected, `202` focused authority
+tests and `6` key integration tests pass.  Its overall release verdict remains
+red only because the same two unrelated W3 `epoch_superseded()` baseline
+fixtures fail outside this diff; that residual is reported separately rather
+than treated as evidence against this authority chain.
