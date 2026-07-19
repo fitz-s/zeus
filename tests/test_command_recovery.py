@@ -1671,9 +1671,25 @@ def test_multiwinner_loop_recovers_k_sequential_commands_independently(conn):
     filled_winners = []
     for index in range(2):
         command_id = f"cmd-epoch-winner-{index}"
-        _insert(conn, command_id=command_id)
+        position_id = f"pos-epoch-winner-{index}"
+        token_id = f"tok-epoch-winner-{index}"
+        order_id = f"order-{command_id}"
+        _insert(conn, command_id=command_id, position_id=position_id, token_id=token_id)
         _open_test_entry_obligation(conn, command_id)
         _append_test_entry_fill(conn, command_id, with_trade=True)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        _append_test_filled_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+        )
         filled_winners.append(command_id)
 
     crashed_mid_flight = "cmd-epoch-winner-crashed"
