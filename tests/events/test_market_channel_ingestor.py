@@ -1028,6 +1028,88 @@ def test_quote_projection_pump_commits_one_available_stream_batch():
     assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 0}
 
 
+def test_quote_projection_pump_rate_limits_only_burst_commits(monkeypatch):
+    from src.events.triggers import market_channel_ingestor as market_channel
+
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        coalescer=EventCoalescer(max_market_keys=8),
+    )
+    ingestor.handle_message(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "best_bid": "0.48",
+            "best_ask": "0.52",
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-07-17T12:00:00+00:00",
+    )
+    service = MarketChannelOnlineService(ingestor)
+    wake = asyncio.Event()
+    connection_done = asyncio.Event()
+    initial_seed_done = asyncio.Event()
+    wake.set()
+    initial_seed_done.set()
+    clock = [10.0]
+    sleeps: list[float] = []
+    commits = 0
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        clock[0] += delay
+
+    def commit() -> None:
+        nonlocal commits
+        conn.commit()
+        commits += 1
+        if commits == 1:
+            ingestor.handle_message(
+                {
+                    "event_type": "best_bid_ask",
+                    "asset_id": "token-1",
+                    "market": "0xcondition",
+                    "best_bid": "0.49",
+                    "best_ask": "0.53",
+                    "timestamp": "1766789469959",
+                },
+                received_at="2026-07-17T12:00:00.001000+00:00",
+            )
+            wake.set()
+        else:
+            connection_done.set()
+
+    monkeypatch.setattr(market_channel.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(market_channel.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(
+        service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids={"token-1"},
+            write_gate=nullcontext(),
+            commit=commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+    )
+
+    assert commits == 2
+    assert sleeps == pytest.approx(
+        [market_channel.MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS]
+    )
+    assert conn.execute(
+        "SELECT best_bid_before, best_ask_before "
+        "FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone() == (0.49, 0.53)
+
+
 def test_websocket_subscribes_before_rest_seed(monkeypatch):
     import websockets
 

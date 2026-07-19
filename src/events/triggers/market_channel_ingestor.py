@@ -34,6 +34,7 @@ REST_SEED_FETCH_BATCH_SIZE = 128
 MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = 128
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
+MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS = 0.01
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS = 0.05
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS = 1.0
 _logger = logging.getLogger(__name__)
@@ -1687,6 +1688,7 @@ class MarketChannelOnlineService:
         if self.ingestor._coalescer is None:
             return
         final_contention_attempts = 0
+        last_commit_monotonic: float | None = None
         retry_seconds = MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS
         while True:
             if not wake.is_set():
@@ -1703,6 +1705,12 @@ class MarketChannelOnlineService:
                 if connection_done.is_set() and initial_seed_done.is_set():
                     return
                 continue
+            if last_commit_monotonic is not None and not connection_done.is_set():
+                remaining = MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS - (
+                    time.monotonic() - last_commit_monotonic
+                )
+                if remaining > 0.0:
+                    await asyncio.sleep(remaining)
             try:
                 with self.ingestor.defer_market_event_sink():
                     with write_gate:
@@ -1738,6 +1746,7 @@ class MarketChannelOnlineService:
                 wake.set()
                 continue
 
+            last_commit_monotonic = time.monotonic()
             final_contention_attempts = 0
             retry_seconds = MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS
             self._publish_continuity(
