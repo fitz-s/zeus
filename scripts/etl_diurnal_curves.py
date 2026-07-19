@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-23; last_reviewed=2026-04-25; last_reused=2026-06-10
 # Purpose: Build canonical diurnal analytics from reader-safe obs_v2 instants.
 # Reuse: Check active packet scope and obs_v2 reader-gate predicates before running; writes state/zeus-world.db.
-# Last reused/audited: 2026-07-17 (short atomic projection replacement; no read/compute under WAL writer)
+# Last reused/audited: 2026-07-19 (read/compute isolated from projection publish)
 #   2026-06-10: STALE_REWRITE of p_high_set semantics —
 #   adversarial review /tmp/day0_adversarial_review.md finding 3: the prior
 #   computation compared the PER-HOUR bucket max against the daily max, i.e.
@@ -54,7 +54,13 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_world_connection as get_connection, init_schema  # noqa: E402
+from src.state.db import (  # noqa: E402
+    get_world_connection as get_write_connection,
+    get_world_connection_read_only as get_read_connection,
+)
+
+
+ETL_WORLD_WRITE_BUSY_TIMEOUT_MS = 250
 
 
 OBSERVATION_READER_GATE_SQL = """
@@ -152,55 +158,53 @@ def _cumulative_high_set_indicators(samples: list) -> list:
 
 
 def run_etl() -> dict:
-    zeus = get_connection()
-    init_schema(zeus)
-    zeus.commit()
+    source = get_read_connection()
+    try:
+        current_count = source.execute(
+            "SELECT COUNT(*) FROM observation_instants_current"
+        ).fetchone()[0]
+        if current_count == 0:
+            print(
+                "ERROR: observation_instants_current is empty. "
+                "Check zeus_meta.observation_data_version (Phase 2 cutover) and "
+                "observation_instants population."
+            )
+            return {"stored": 0, "error": "no observation_instants_current"}
 
-    current_count = zeus.execute(
-        "SELECT COUNT(*) FROM observation_instants_current"
-    ).fetchone()[0]
-    if current_count == 0:
-        print(
-            "ERROR: observation_instants_current is empty. "
-            "Check zeus_meta.observation_data_version (Phase 2 cutover) and "
-            "observation_instants population."
-        )
-        zeus.close()
-        return {"stored": 0, "error": "no observation_instants_current"}
+        safe_count = source.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM observation_instants_current
+            WHERE {OBSERVATION_READER_GATE_SQL}
+            """
+        ).fetchone()[0]
+        if safe_count == 0:
+            print(
+                "ERROR: observation_instants_current has no reader-safe rows. "
+                "Require authority, provenance identity, training_allowed=1, "
+                "source_role='historical_hourly', and causality_status='OK'."
+            )
+            return {
+                "stored": 0,
+                "error": "no_reader_safe_observation_instants_current",
+                "current_rows": current_count,
+            }
 
-    safe_count = zeus.execute(
-        f"""
-        SELECT COUNT(*)
-        FROM observation_instants_current
-        WHERE {OBSERVATION_READER_GATE_SQL}
-        """
-    ).fetchone()[0]
-    if safe_count == 0:
-        zeus.close()
-        print(
-            "ERROR: observation_instants_current has no reader-safe rows. "
-            "Require authority, provenance identity, training_allowed=1, "
-            "source_role='historical_hourly', and causality_status='OK'."
-        )
-        return {
-            "stored": 0,
-            "error": "no_reader_safe_observation_instants_current",
-            "current_rows": current_count,
-        }
-
-    rows = zeus.execute(
-        f"""
-        SELECT city, target_date, source, local_timestamp, utc_timestamp,
-               COALESCE(temp_current, running_max) AS temp_current,
-               running_max
-        FROM observation_instants_current
-        WHERE {OBSERVATION_READER_GATE_SQL}
-          AND COALESCE(temp_current, running_max) IS NOT NULL
-          AND is_missing_local_hour = 0
-          AND is_ambiguous_local_hour = 0
-        ORDER BY city, target_date, source, utc_timestamp
-        """
-    ).fetchall()
+        rows = source.execute(
+            f"""
+            SELECT city, target_date, source, local_timestamp, utc_timestamp,
+                   COALESCE(temp_current, running_max) AS temp_current,
+                   running_max
+            FROM observation_instants_current
+            WHERE {OBSERVATION_READER_GATE_SQL}
+              AND COALESCE(temp_current, running_max) IS NOT NULL
+              AND is_missing_local_hour = 0
+              AND is_ambiguous_local_hour = 0
+            ORDER BY city, target_date, source, utc_timestamp
+            """
+        ).fetchall()
+    finally:
+        source.close()
 
     print(
         f"Source: {safe_count:,} reader-safe observation_instants_current "
@@ -322,9 +326,13 @@ def run_etl() -> dict:
                 )
             )
 
-    # Full-table reads and NumPy aggregation are intentionally outside the
-    # transaction. The previous DELETE-first shape held SQLite's single WAL
-    # writer for the entire multi-minute ETL and starved live observation facts.
+    # Open the writer only after the read snapshot and all aggregation are done.
+    # The live DB is boot-initialized; repeating init_schema here can hold
+    # WORLD's single WAL writer for minutes.
+    zeus = get_write_connection(
+        write_class="bulk",
+        busy_timeout_ms=ETL_WORLD_WRITE_BUSY_TIMEOUT_MS,
+    )
     try:
         zeus.execute("BEGIN IMMEDIATE")
         zeus.execute("DELETE FROM diurnal_curves")
@@ -346,28 +354,27 @@ def run_etl() -> dict:
             peak_rows,
         )
         zeus.commit()
+
+        stored = len(curve_rows)
+        monthly_rows = len(peak_rows)
+        peak_check = zeus.execute(
+            """
+            SELECT hour, avg_temp FROM diurnal_curves
+            WHERE city = 'NYC' AND season = 'DJF'
+            ORDER BY avg_temp DESC
+            LIMIT 3
+            """
+        ).fetchall()
+        if peak_check:
+            print("\nVerification - NYC DJF peak hours:")
+            for row in peak_check:
+                print(f"  Hour {row['hour']:2d}: avg_temp={row['avg_temp']:.1f}")
     except BaseException:
         zeus.rollback()
-        zeus.close()
         raise
+    finally:
+        zeus.close()
 
-    stored = len(curve_rows)
-    monthly_rows = len(peak_rows)
-
-    peak_check = zeus.execute(
-        """
-        SELECT hour, avg_temp FROM diurnal_curves
-        WHERE city = 'NYC' AND season = 'DJF'
-        ORDER BY avg_temp DESC
-        LIMIT 3
-        """
-    ).fetchall()
-    if peak_check:
-        print("\nVerification - NYC DJF peak hours:")
-        for row in peak_check:
-            print(f"  Hour {row['hour']:2d}: avg_temp={row['avg_temp']:.1f}")
-
-    zeus.close()
     print(f"\nStored {stored} diurnal curve entries and {monthly_rows} monthly probability rows")
     return {"stored": stored, "monthly_rows": monthly_rows}
 

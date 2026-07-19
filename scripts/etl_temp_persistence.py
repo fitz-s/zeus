@@ -1,9 +1,9 @@
 # Created: (pre-rule legacy)
-# Last reused or audited: 2026-07-17
+# Last reused or audited: 2026-07-19
 """ETL: Temperature persistence from daily observations.
 
-Source: zeus.db:observations (daily, already imported via legacy-predecessor migration)
-Target: zeus.db:temp_persistence
+Source: zeus-forecasts.db:observations (canonical daily observations)
+Target: zeus-world.db:temp_persistence
 
 Computes day-over-day temperature change distribution per city×season.
 Used for ENS anomaly detection: when ENS predicts a 10°F drop but persistence
@@ -29,7 +29,13 @@ def season_from_date(date_str: str, city_name: str = "") -> str:
     return _sfd(date_str, lat=lat)
 
 
-from src.state.db import get_world_connection as get_connection, init_schema  # noqa: E402
+from src.state.db import (  # noqa: E402
+    get_forecasts_connection_read_only as get_read_connection,
+    get_world_connection as get_write_connection,
+)
+
+
+ETL_WORLD_WRITE_BUSY_TIMEOUT_MS = 250
 
 # Delta buckets for temperature change classification
 DELTA_BUCKETS = [
@@ -54,25 +60,25 @@ def _classify_delta(delta: float) -> str:
 
 
 def run_etl() -> dict:
-    zeus = get_connection()
-    init_schema(zeus)
-    zeus.commit()
-
-    # Get daily observations — prefer wu_daily_observed, then noaa, then openmeteo
-    # Use one observation per city-date (highest priority source)
-    rows = zeus.execute("""
-        SELECT city, target_date, high_temp, source
-        FROM observations
-        WHERE high_temp IS NOT NULL
-        ORDER BY city, target_date,
-            CASE source
-                WHEN 'wu_daily_observed' THEN 1
-                WHEN 'noaa_cdo_ghcnd' THEN 2
-                WHEN 'iem_asos' THEN 3
-                WHEN 'openmeteo_archive' THEN 4
-                ELSE 5
-            END
-    """).fetchall()
+    source = get_read_connection()
+    try:
+        # observations is forecast-class canonical truth. The world table with
+        # the same name is a retained ghost, not an input authority.
+        rows = source.execute("""
+            SELECT city, target_date, high_temp, source
+            FROM observations
+            WHERE high_temp IS NOT NULL
+            ORDER BY city, target_date,
+                CASE source
+                    WHEN 'wu_daily_observed' THEN 1
+                    WHEN 'noaa_cdo_ghcnd' THEN 2
+                    WHEN 'iem_asos' THEN 3
+                    WHEN 'openmeteo_archive' THEN 4
+                    ELSE 5
+                END
+        """).fetchall()
+    finally:
+        source.close()
 
     # Deduplicate: one observation per city-date (highest priority)
     daily_temps = {}
@@ -148,8 +154,12 @@ def run_etl() -> dict:
             )
         )
 
-    # Compute from the full history before taking SQLite's single WAL writer.
-    # Only the atomic projection replacement belongs in the write transaction.
+    # Publish only the finished projection. Schema initialization and canonical
+    # history reads must never run while WORLD's single writer is held.
+    zeus = get_write_connection(
+        write_class="bulk",
+        busy_timeout_ms=ETL_WORLD_WRITE_BUSY_TIMEOUT_MS,
+    )
     try:
         zeus.execute("BEGIN IMMEDIATE")
         zeus.execute("DELETE FROM temp_persistence")
@@ -164,10 +174,10 @@ def run_etl() -> dict:
         zeus.commit()
     except BaseException:
         zeus.rollback()
-        zeus.close()
         raise
+    finally:
+        zeus.close()
     stored = len(persistence_rows)
-    zeus.close()
 
     print(f"Stored {stored} persistence entries")
     return {"stored": stored}

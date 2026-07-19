@@ -169,7 +169,11 @@ def _db_busy_timeout_ms() -> int:
     return int(round(_db_busy_timeout_s() * 1000.0))
 
 
-def _apply_busy_timeout(conn: sqlite3.Connection) -> None:
+def _apply_busy_timeout(
+    conn: sqlite3.Connection,
+    *,
+    busy_timeout_ms: int | None = None,
+) -> None:
     """Set ``PRAGMA busy_timeout`` at the SQL level on ``conn``.
 
     CATEGORY ANTIBODY (Fitz #5 — make "database is locked" unconstructable):
@@ -182,11 +186,13 @@ def _apply_busy_timeout(conn: sqlite3.Connection) -> None:
     normalized to int before interpolation (PRAGMA forbids bound parameters), so
     no untrusted text can enter the statement.
 
-    Behavior-preserving: this only WIDENS the wait budget; it never changes
-    transaction semantics, write ordering, or the ATTACH+SAVEPOINT cross-DB path
-    (INV-37). It is a pure connection PRAGMA.
+    The default preserves the canonical configured budget. Explicit overrides
+    are reserved for optional work that must yield to live writers; they change
+    only connection wait time, never transaction ordering or INV-37 boundaries.
     """
-    busy_ms = _db_busy_timeout_ms()
+    busy_ms = _db_busy_timeout_ms() if busy_timeout_ms is None else busy_timeout_ms
+    if busy_ms < 0:
+        raise ValueError(f"busy_timeout_ms must be >= 0; got {busy_ms}")
     conn.execute("PRAGMA busy_timeout = %d" % busy_ms)
 
 
@@ -229,6 +235,7 @@ def _connect(
     db_path: Path,
     *,
     write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
 ) -> sqlite3.Connection:
     """Low-level connection with standard pragmas.
 
@@ -240,8 +247,15 @@ def _connect(
     ``db_writer_lock(...)`` themselves.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    # T1E: timeout read from ZEUS_DB_BUSY_TIMEOUT_MS env var (ms→s); default 30s.
-    timeout_s = _db_busy_timeout_s()
+    # Callers doing optional derived publication may choose a shorter budget so
+    # they yield to live writers. The default remains the canonical 30 seconds.
+    if busy_timeout_ms is None:
+        timeout_ms = _db_busy_timeout_ms()
+    else:
+        timeout_ms = busy_timeout_ms
+        if timeout_ms < 0:
+            raise ValueError(f"busy_timeout_ms must be >= 0; got {timeout_ms}")
+    timeout_s = timeout_ms / 1000.0
     conn = sqlite3.connect(str(db_path), timeout=timeout_s)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -268,7 +282,7 @@ def _connect(
     # "database is locked" instantly. sqlite3.connect(timeout=) alone only sets a
     # C-level handler that executescript() can null; this PRAGMA is the durable
     # budget. Connection PRAGMA only — INV-37 / txn semantics unchanged.
-    _apply_busy_timeout(conn)
+    _apply_busy_timeout(conn, busy_timeout_ms=timeout_ms)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
@@ -314,10 +328,16 @@ def get_trade_connection_read_only() -> sqlite3.Connection:
 
 
 def get_world_connection(
-    *, write_class: WriteClass | str | None = None,
+    *,
+    write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
 ) -> sqlite3.Connection:
     """Shared world data DB (settlements, calibration, ENS)."""
-    return _connect(ZEUS_WORLD_DB_PATH, write_class=write_class)
+    return _connect(
+        ZEUS_WORLD_DB_PATH,
+        write_class=write_class,
+        busy_timeout_ms=busy_timeout_ms,
+    )
 
 
 def get_forecasts_connection(

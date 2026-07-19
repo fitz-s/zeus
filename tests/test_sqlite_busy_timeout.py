@@ -24,6 +24,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -162,6 +163,52 @@ def test_default_timeout_is_30s_when_env_unset(monkeypatch, tmp_path):
     assert len(captured) >= 2
     for t in captured:
         assert t == pytest.approx(30.0), f"Expected timeout=30.0, got {t}"
+
+
+def test_per_connection_timeout_applies_before_factory_pragmas(monkeypatch, tmp_path):
+    """A derived publisher can yield quickly without changing the global budget."""
+    _set_env(monkeypatch, "30000")
+    captured = []
+    real_connect = sqlite3.connect
+
+    def fake_connect(path, **kwargs):
+        captured.append(kwargs.get("timeout"))
+        return real_connect(path, **kwargs)
+
+    with patch("src.state.db.sqlite3.connect", side_effect=fake_connect):
+        from src.state import db as _db
+
+        conn = _db._connect(tmp_path / "derived.db", busy_timeout_ms=250)
+
+    try:
+        assert captured == pytest.approx([0.25])
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 250
+    finally:
+        conn.close()
+
+
+def test_per_connection_timeout_yields_quickly_to_existing_writer(tmp_path):
+    """Optional derived work must not wait out the live writer's 30s budget."""
+    from src.state import db as _db
+
+    db_path = tmp_path / "contended-derived.db"
+    holder = sqlite3.connect(db_path)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("CREATE TABLE t (value INTEGER)")
+    holder.commit()
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("INSERT INTO t VALUES (1)")
+
+    started = time.monotonic()
+    conn = _db._connect(db_path, busy_timeout_ms=25)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            conn.execute("BEGIN IMMEDIATE")
+        assert time.monotonic() - started < 1.0
+    finally:
+        conn.close()
+        holder.rollback()
+        holder.close()
 
 
 # ---------------------------------------------------------------------------

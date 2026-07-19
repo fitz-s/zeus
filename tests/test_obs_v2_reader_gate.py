@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-04-25
 # Purpose: Protect P3 obs_v2 reader gates for canonical diurnal analytics.
 # Reuse: Run with tests/test_truth_surface_health.py when changing obs_v2 read predicates.
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-19
 # Authority basis: P3 4.5.B-lite observation_instants reader gate packet.
 """Regression coverage for obs_v2 reader-gate consumers."""
 from __future__ import annotations
@@ -155,8 +155,13 @@ def test_diurnal_etl_excludes_current_rows_that_fail_reader_gate(
 
     monkeypatch.setattr(
         etl_diurnal_curves,
-        "get_connection",
+        "get_read_connection",
         lambda: _connect(db_path),
+    )
+    monkeypatch.setattr(
+        etl_diurnal_curves,
+        "get_write_connection",
+        lambda **_kwargs: _connect(db_path),
     )
 
     result = etl_diurnal_curves.run_etl()
@@ -202,8 +207,13 @@ def test_diurnal_etl_fails_closed_when_current_rows_are_not_reader_safe(
 
     monkeypatch.setattr(
         etl_diurnal_curves,
-        "get_connection",
+        "get_read_connection",
         lambda: _connect(db_path),
+    )
+    monkeypatch.setattr(
+        etl_diurnal_curves,
+        "get_write_connection",
+        lambda **_kwargs: _connect(db_path),
     )
 
     result = etl_diurnal_curves.run_etl()
@@ -219,28 +229,126 @@ def test_derived_etls_read_and_compute_before_projection_replace(tmp_path, monke
     diurnal_path = tmp_path / "diurnal.db"
     _seed_world(diurnal_path, {"authority": "UNVERIFIED"})
     diurnal_sql: list[str] = []
+    diurnal_reader: sqlite3.Connection | None = None
+    diurnal_writer_opened = False
+    original_array = etl_diurnal_curves.np.array
 
-    def _diurnal_connection():
+    def _diurnal_read_connection():
+        nonlocal diurnal_reader
+        conn = _connect(diurnal_path)
+        conn.set_trace_callback(diurnal_sql.append)
+        diurnal_reader = conn
+        return conn
+
+    def _diurnal_write_connection(**_kwargs):
+        nonlocal diurnal_writer_opened
+        assert _kwargs == {
+            "write_class": "bulk",
+            "busy_timeout_ms": etl_diurnal_curves.ETL_WORLD_WRITE_BUSY_TIMEOUT_MS,
+        }
+        assert diurnal_reader is not None
+        with pytest.raises(sqlite3.ProgrammingError):
+            diurnal_reader.execute("SELECT 1")
+        diurnal_writer_opened = True
         conn = _connect(diurnal_path)
         conn.set_trace_callback(diurnal_sql.append)
         return conn
 
-    monkeypatch.setattr(etl_diurnal_curves, "get_connection", _diurnal_connection)
-    etl_diurnal_curves.run_etl()
+    def _diurnal_array(*args, **kwargs):
+        assert not diurnal_writer_opened
+        return original_array(*args, **kwargs)
 
-    persistence_path = tmp_path / "persistence.db"
-    conn = _connect(persistence_path)
-    init_schema(conn)
+    monkeypatch.setattr(
+        etl_diurnal_curves, "get_read_connection", _diurnal_read_connection
+    )
+    monkeypatch.setattr(
+        etl_diurnal_curves, "get_write_connection", _diurnal_write_connection
+    )
+    monkeypatch.setattr(etl_diurnal_curves.np, "array", _diurnal_array)
+    etl_diurnal_curves.run_etl()
+    monkeypatch.setattr(etl_diurnal_curves.np, "array", original_array)
+
+    persistence_source_path = tmp_path / "forecasts.db"
+    conn = _connect(persistence_source_path)
+    conn.execute(
+        """
+        CREATE TABLE observations (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            high_temp REAL,
+            source TEXT NOT NULL
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO observations VALUES ('NYC', ?, ?, 'wu_daily_observed')",
+        [
+            ("2026-01-01", 50.0),
+            ("2026-01-02", 51.0),
+            ("2026-01-03", 52.0),
+            ("2026-01-04", 53.0),
+            ("2026-01-05", 54.0),
+        ],
+    )
     conn.commit()
     conn.close()
-    persistence_sql: list[str] = []
 
-    def _persistence_connection():
-        conn = _connect(persistence_path)
-        conn.set_trace_callback(persistence_sql.append)
+    persistence_target_path = tmp_path / "world.db"
+    conn = _connect(persistence_target_path)
+    conn.execute(
+        """
+        CREATE TABLE temp_persistence (
+            city TEXT NOT NULL,
+            season TEXT NOT NULL,
+            delta_bucket TEXT NOT NULL,
+            frequency REAL NOT NULL,
+            avg_next_day_reversion REAL,
+            n_samples INTEGER NOT NULL,
+            PRIMARY KEY (city, season, delta_bucket)
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    persistence_read_sql: list[str] = []
+    persistence_write_sql: list[str] = []
+    persistence_reader: sqlite3.Connection | None = None
+    persistence_writer_opened = False
+    original_mean = etl_temp_persistence.np.mean
+
+    def _persistence_read_connection():
+        nonlocal persistence_reader
+        conn = _connect(persistence_source_path)
+        conn.set_trace_callback(persistence_read_sql.append)
+        persistence_reader = conn
         return conn
 
-    monkeypatch.setattr(etl_temp_persistence, "get_connection", _persistence_connection)
+    def _persistence_write_connection(**_kwargs):
+        nonlocal persistence_writer_opened
+        assert _kwargs == {
+            "write_class": "bulk",
+            "busy_timeout_ms": etl_temp_persistence.ETL_WORLD_WRITE_BUSY_TIMEOUT_MS,
+        }
+        assert persistence_reader is not None
+        with pytest.raises(sqlite3.ProgrammingError):
+            persistence_reader.execute("SELECT 1")
+        persistence_writer_opened = True
+        conn = _connect(persistence_target_path)
+        conn.set_trace_callback(persistence_write_sql.append)
+        return conn
+
+    def _persistence_mean(*args, **kwargs):
+        assert not persistence_writer_opened
+        return original_mean(*args, **kwargs)
+
+    monkeypatch.setattr(
+        etl_temp_persistence, "get_read_connection", _persistence_read_connection
+    )
+    monkeypatch.setattr(
+        etl_temp_persistence, "get_write_connection", _persistence_write_connection
+    )
+    monkeypatch.setattr(etl_temp_persistence.np, "mean", _persistence_mean)
     etl_temp_persistence.run_etl()
 
     diurnal_select = next(
@@ -251,12 +359,12 @@ def test_derived_etls_read_and_compute_before_projection_replace(tmp_path, monke
     diurnal_delete = next(
         index for index, sql in enumerate(diurnal_sql) if "DELETE FROM diurnal_curves" in sql
     )
-    persistence_select = next(
-        index for index, sql in enumerate(persistence_sql) if "FROM observations" in sql
-    )
-    persistence_delete = next(
-        index for index, sql in enumerate(persistence_sql) if "DELETE FROM temp_persistence" in sql
-    )
-
     assert diurnal_select < diurnal_delete
-    assert persistence_select < persistence_delete
+    assert any("FROM observations" in sql for sql in persistence_read_sql)
+    assert all("temp_persistence" not in sql for sql in persistence_read_sql)
+    assert any("DELETE FROM temp_persistence" in sql for sql in persistence_write_sql)
+    assert all("FROM observations" not in sql for sql in persistence_write_sql)
+    assert all(
+        "CREATE " not in sql.upper()
+        for sql in (*diurnal_sql, *persistence_read_sql, *persistence_write_sql)
+    )
