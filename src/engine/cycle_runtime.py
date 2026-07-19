@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from bisect import bisect_right
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -5124,6 +5124,227 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     )
 
 
+def _current_monitor_global_holding_coverage(
+    *,
+    conn,
+    clob,
+    portfolio,
+    position,
+    probability_witness_identity: str,
+    checked_at_utc: datetime,
+    current_time_provider: Callable[[], datetime] | None = None,
+):
+    """Resolve current ledger and executable token book before local delegation."""
+
+    if conn is None or checked_at_utc.tzinfo is None:
+        return None
+    try:
+        from src.contracts.executable_market_snapshot import (
+            FRESHNESS_WINDOW_DEFAULT,
+        )
+        from src.engine.global_auction_universe import (
+            _global_book_metadata_is_executable,
+            _global_book_snapshot_rows,
+            _global_sell_curve,
+            current_portfolio_wealth_witness,
+        )
+        from src.engine.global_batch_runtime import (
+            _CurrentHoldingWitness,
+            current_global_holding_coverage,
+        )
+        from src.engine.global_single_order_auction import (
+            global_sell_book_witness_identity,
+        )
+        from src.events.candidate_binding import weather_family_id
+        from src.state.collateral_ledger import (
+            COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
+        )
+
+        def current_time() -> datetime:
+            value = (
+                current_time_provider()
+                if current_time_provider is not None
+                else datetime.now(timezone.utc)
+            )
+            if value.tzinfo is None:
+                raise ValueError("GLOBAL_HOLDING_COVERAGE_CURRENT_TIME_NAIVE")
+            return value.astimezone(timezone.utc)
+
+        checked = checked_at_utc.astimezone(timezone.utc)
+        wealth = current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=checked,
+            max_age=timedelta(
+                seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
+            ),
+            portfolio_state=portfolio,
+        )
+        direction_raw = getattr(position, "direction", "")
+        direction = str(
+            getattr(direction_raw, "value", direction_raw) or ""
+        ).lower()
+        if direction == "buy_yes":
+            side = "YES"
+            token_id = str(getattr(position, "token_id", "") or "").strip()
+        elif direction == "buy_no":
+            side = "NO"
+            token_id = str(getattr(position, "no_token_id", "") or "").strip()
+        else:
+            return None
+        native_holdings = {
+            str(token): Decimal(int(amount)) / Decimal("1000000")
+            for token, amount in tuple(wealth.native_holdings_micro or ())
+        }
+        held_shares = native_holdings.get(token_id)
+        if held_shares is None or held_shares <= 0:
+            return None
+        condition_id = str(
+            getattr(position, "condition_id", "") or ""
+        ).strip()
+        family_key = weather_family_id(
+            city=str(getattr(position, "city", "") or ""),
+            target_date=str(getattr(position, "target_date", "") or ""),
+            metric=str(
+                getattr(position, "temperature_metric", "") or ""
+            ).lower(),
+        )
+
+        def current_sell_book_witness(coverage) -> str | None:
+            book_checked = current_time()
+            metadata_rows = _global_book_snapshot_rows(
+                conn,
+                condition_ids=[condition_id],
+                checked_at_utc=book_checked,
+            )
+            matches = tuple(
+                row
+                for row in metadata_rows
+                if str(row.get("condition_id") or "") == condition_id
+                and token_id
+                in {
+                    str(row.get("selected_outcome_token_id") or ""),
+                    str(row.get("yes_token_id") or ""),
+                    str(row.get("no_token_id") or ""),
+                }
+            )
+            if len(matches) != 1 or not _global_book_metadata_is_executable(
+                matches[0],
+                checked_at_utc=book_checked,
+            ):
+                return None
+            getter = getattr(clob, "get_orderbook_snapshot", None)
+            if not callable(getter):
+                getter = getattr(clob, "get_orderbook", None)
+            if not callable(getter):
+                return None
+            raw_book = getter(token_id)
+            if not isinstance(raw_book, Mapping):
+                return None
+            raw_asset_id = str(
+                raw_book.get("asset_id")
+                or raw_book.get("assetId")
+                or raw_book.get("token_id")
+                or ""
+            ).strip()
+            if raw_asset_id != token_id:
+                return None
+            curve = _global_sell_curve(
+                family_key=coverage.family_key,
+                bin_id=str(coverage.bin_id or ""),
+                condition_id=condition_id,
+                side=side,
+                token_id=token_id,
+                raw_book=raw_book,
+                metadata=matches[0],
+                captured_at_utc=book_checked,
+                max_age=FRESHNESS_WINDOW_DEFAULT,
+            )
+            return (
+                None
+                if curve is None
+                else global_sell_book_witness_identity(curve)
+            )
+
+        def current_probability_witness_identity(_coverage) -> str | None:
+            from src.engine.monitor_refresh import (
+                _refresh_current_global_day0_probability,
+            )
+
+            current = _refresh_current_global_day0_probability(
+                position,
+                trade_conn=conn,
+                decision_time=current_time(),
+                family_cache=None,
+            )
+            if current is None:
+                return None
+            receipt = getattr(
+                current[1],
+                "_day0_monitor_probability_receipt",
+                None,
+            )
+            return (
+                str(receipt.get("probability_witness_identity") or "")
+                if isinstance(receipt, dict)
+                else None
+            )
+
+        def current_holding_witness(_coverage) -> _CurrentHoldingWitness | None:
+            current_wealth = current_portfolio_wealth_witness(
+                conn,
+                decision_at_utc=current_time(),
+                max_age=timedelta(
+                    seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
+                ),
+                portfolio_state=portfolio,
+            )
+            current_native = {
+                str(token): Decimal(int(amount)) / Decimal("1000000")
+                for token, amount in tuple(
+                    current_wealth.native_holdings_micro or ()
+                )
+            }
+            current_shares = current_native.get(token_id)
+            if current_shares is None or current_shares <= 0:
+                return None
+            return _CurrentHoldingWitness(
+                ledger_snapshot_id=str(current_wealth.ledger_snapshot_id),
+                wealth_economic_identity=str(current_wealth.economic_identity),
+                held_shares=current_shares,
+            )
+
+        return current_global_holding_coverage(
+            position_id=str(
+                getattr(position, "position_id", "")
+                or getattr(position, "trade_id", "")
+                or ""
+            ),
+            probability_witness_identity=probability_witness_identity,
+            checked_at_utc=checked,
+            family_key=family_key,
+            bin_label=str(getattr(position, "bin_label", "") or "").strip(),
+            condition_id=condition_id,
+            side=side,
+            token_id=token_id,
+            held_shares=held_shares,
+            current_ledger_snapshot_id=str(wealth.ledger_snapshot_id),
+            current_wealth_economic_identity=str(wealth.economic_identity),
+            current_sell_book_witness_resolver=current_sell_book_witness,
+            current_probability_witness_identity_resolver=(
+                current_probability_witness_identity
+            ),
+            current_holding_witness_resolver=current_holding_witness,
+            current_time_provider=current_time,
+        )
+    except Exception as exc:  # noqa: BLE001 - incomplete witness preserves local exit
+        logger.debug(
+            "global holding coverage current-witness resolution failed for %s: %s",
+            getattr(position, "trade_id", "unknown"),
+            exc,
+        )
+        return None
+
+
 def _execution_stub(candidate, decision, result, city, mode, *, deps):
     edge_source = decision.edge_source or deps._classify_edge_source(mode, decision.edge)
     strategy_key = _resolve_strategy_key(decision)
@@ -6265,12 +6486,64 @@ def execute_monitoring_phase(
             # with exact terminal value zero, so it must not wait behind the
             # full-universe auction.
             local_exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
+            global_holding_coverage = None
             if (
                 should_exit
                 and local_exit_trigger != "RED_FORCE_EXIT"
                 and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
                 and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
             ):
+                probability_receipt = getattr(
+                    pos,
+                    "_day0_monitor_probability_receipt",
+                    None,
+                )
+                probability_witness_identity = (
+                    str(
+                        probability_receipt.get("probability_witness_identity")
+                        or ""
+                    )
+                    if isinstance(probability_receipt, dict)
+                    else ""
+                )
+                if probability_witness_identity:
+                    def coverage_time() -> datetime:
+                        try:
+                            value = (
+                                deps._utcnow()
+                                if hasattr(deps, "_utcnow")
+                                else datetime.now(timezone.utc)
+                            )
+                        except Exception:
+                            value = datetime.now(timezone.utc)
+                        return (
+                            value.replace(tzinfo=timezone.utc)
+                            if value.tzinfo is None
+                            else value.astimezone(timezone.utc)
+                        )
+
+                    try:
+                        coverage_checked_at = coverage_time()
+                    except Exception:
+                        coverage_checked_at = datetime.now(timezone.utc)
+                    global_holding_coverage = _current_monitor_global_holding_coverage(
+                        conn=conn,
+                        clob=clob,
+                        portfolio=portfolio,
+                        position=pos,
+                        probability_witness_identity=(
+                            probability_witness_identity
+                        ),
+                        checked_at_utc=coverage_checked_at,
+                        current_time_provider=coverage_time,
+                    )
+            if (
+                should_exit
+                and local_exit_trigger != "RED_FORCE_EXIT"
+                and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
+                and global_holding_coverage is not None
+            ):
+                coverage, coverage_receipt_id = global_holding_coverage
                 should_exit = False
                 exit_reason = "GLOBAL_AUCTION_OWNS_REDUCE_ONLY_SELL"
                 pos.applied_validations = list(
@@ -6278,12 +6551,24 @@ def execute_monitoring_phase(
                         [
                             *(pos.applied_validations or []),
                             "local_monitor_sell_delegated_to_global_auction",
+                            (
+                                "global_holding_coverage_receipt:"
+                                f"{coverage_receipt_id}"
+                            ),
+                            (
+                                "global_holding_coverage_epoch:"
+                                f"{coverage.selection_epoch_identity}"
+                            ),
                         ]
                     )
                 )
                 summary["monitor_sells_delegated_to_global_auction"] = (
                     summary.get("monitor_sells_delegated_to_global_auction", 0) + 1
                 )
+                summary.setdefault(
+                    "monitor_global_holding_coverage_receipt_ids",
+                    [],
+                ).append(coverage_receipt_id)
 
             exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
             if should_exit:
@@ -6376,6 +6661,11 @@ def execute_monitoring_phase(
                     summary["exits"] += 1
                     portfolio_dirty = True
                 else:
+                    from src.engine.global_batch_runtime import (
+                        _invalidate_global_holding_coverage,
+                    )
+
+                    _invalidate_global_holding_coverage()
                     outcome = execute_exit(
                         portfolio=portfolio,
                         position=pos,

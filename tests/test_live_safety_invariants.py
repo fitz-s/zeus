@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-19
 # Authority basis: midstream verdict v2; finite-evidence single-q global SELL ownership
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -13,10 +13,14 @@ GOLDEN RULE: economic close is ONLY created after CONFIRMED fill truth.
 """
 
 import logging
+import base64
 import json
 import math
 import sqlite3
+import zlib
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -4207,13 +4211,18 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
 
 
 @pytest.mark.parametrize(
-    ("trigger", "delegated"),
-    (("EDGE_REVERSAL", True), ("RED_FORCE_EXIT", False)),
+    ("trigger", "has_position_coverage", "delegated"),
+    (
+        ("EDGE_REVERSAL", True, True),
+        ("EDGE_REVERSAL", False, False),
+        ("RED_FORCE_EXIT", True, False),
+    ),
 )
 def test_current_global_monitor_sell_has_one_normal_actuator_and_preserves_red(
     tmp_path,
     monkeypatch,
     trigger,
+    has_position_coverage,
     delegated,
 ):
     """A local SELL verdict cannot bypass the global BUY/SELL/HOLD/CASH winner."""
@@ -4267,6 +4276,11 @@ def test_current_global_monitor_sell_has_one_normal_actuator_and_preserves_red(
             monitor_refresh._GLOBAL_MONITOR_SAMPLES_ATTR,
             np.array([0.05, 0.15]),
         )
+        setattr(
+            position,
+            "_day0_monitor_probability_receipt",
+            {"probability_witness_identity": "probability-current"},
+        )
         return EdgeContext(
             p_raw=np.array([]),
             p_cal=np.array([]),
@@ -4308,6 +4322,31 @@ def test_current_global_monitor_sell_has_one_normal_actuator_and_preserves_red(
         cycle_runtime,
         "_apply_family_monitor_overlay",
         lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_current_monitor_global_holding_coverage",
+        lambda **kwargs: (
+            (
+                SimpleNamespace(selection_epoch_identity="epoch-current"),
+                77,
+            )
+            if has_position_coverage
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_exit_evidence_gate_allows_statistical_exit",
+        lambda **kwargs: (True, None),
+    )
+    from src.engine import global_batch_runtime
+
+    invalidations = []
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_invalidate_global_holding_coverage",
+        lambda: invalidations.append("venue_side_effect"),
     )
     execute_calls = []
 
@@ -4369,8 +4408,896 @@ def test_current_global_monitor_sell_has_one_normal_actuator_and_preserves_red(
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
         assert summary["exits"] == 1
         assert results[0].should_exit is True
-        assert results[0].exit_reason == "RED_FORCE_EXIT"
+        assert results[0].exit_reason == trigger
         assert execute_calls == [pos]
+    assert invalidations == ([] if delegated else ["venue_side_effect"])
+    conn.close()
+
+
+def test_global_holding_coverage_requires_exact_position_wealth_and_current_book(
+    monkeypatch,
+):
+    from src.engine import global_batch_runtime
+    from src.engine.global_single_order_auction import (
+        GlobalHoldingAuctionCoverage,
+    )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_GLOBAL_HOLDING_COVERAGE_BY_POSITION",
+        {},
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY",
+        None,
+    )
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="position-1",
+        family_key="family-1",
+        bin_label="20C",
+        condition_id="condition-1",
+        side="YES",
+        token_id="token-1",
+        held_shares=Decimal("10"),
+    )
+    probability = SimpleNamespace(
+        witness_identity="q-1",
+        bindings=(
+            SimpleNamespace(
+                bin_id="canonical-bin-1",
+                condition_id="condition-1",
+                yes_token_id="token-1",
+                no_token_id="token-no-1",
+            ),
+        )
+    )
+    coverage = GlobalHoldingAuctionCoverage(
+        position_id="position-1",
+        family_key="family-1",
+        bin_id="canonical-bin-1",
+        bin_label="20C",
+        canonical_bin_identity="condition:condition-1",
+        condition_id="condition-1",
+        side="YES",
+        token_id="token-1",
+        held_shares=Decimal("10"),
+        ledger_snapshot_id="ledger-1",
+        probability_witness_identity="q-1",
+        wealth_economic_identity="wealth-1",
+        selection_epoch_identity="epoch-1",
+        book_epoch_identity="book-epoch-1",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + timedelta(seconds=1),
+        book_deadline_at_utc=at + timedelta(seconds=30),
+        status="EVALUATED",
+        candidate_id="sell-1",
+        sell_book_witness_identity="sell-book-content-1",
+    )
+    global_batch_runtime._publish_global_holding_coverage(
+        (coverage,),
+        expected_obligations=(obligation,),
+        probability_witnesses={"family-1": probability},
+        decision_log_id=42,
+    )
+    current = dict(
+        position_id="position-1",
+        probability_witness_identity="q-1",
+        checked_at_utc=at + timedelta(seconds=2),
+        family_key="family-1",
+        bin_label="20C",
+        condition_id="condition-1",
+        side="YES",
+        token_id="token-1",
+        held_shares=Decimal("10"),
+        current_ledger_snapshot_id="ledger-1",
+        current_wealth_economic_identity="wealth-1",
+        current_probability_witness_identity_resolver=lambda _row: "q-1",
+        current_holding_witness_resolver=lambda _row: (
+            global_batch_runtime._CurrentHoldingWitness(
+                ledger_snapshot_id="ledger-1",
+                wealth_economic_identity="wealth-1",
+                held_shares=Decimal("10"),
+            )
+        ),
+        current_time_provider=lambda: at + timedelta(seconds=2),
+    )
+
+    assert global_batch_runtime.current_global_holding_coverage(
+        **current,
+        current_sell_book_witness_resolver=(
+            lambda _row: "sell-book-content-1"
+        ),
+    ) == (coverage, 42)
+    assert global_batch_runtime.current_global_holding_coverage(
+        **{**current, "current_wealth_economic_identity": "wealth-2"},
+        current_sell_book_witness_resolver=(
+            lambda _row: "sell-book-content-1"
+        ),
+    ) is None
+    assert global_batch_runtime.current_global_holding_coverage(
+        **{**current, "current_ledger_snapshot_id": "ledger-2"},
+        current_sell_book_witness_resolver=(
+            lambda _row: "sell-book-content-1"
+        ),
+    ) is None
+    assert global_batch_runtime.current_global_holding_coverage(
+        **current,
+        current_sell_book_witness_resolver=(
+            lambda _row: "sell-book-content-price-wake"
+        ),
+    ) is None
+    assert global_batch_runtime.current_global_holding_coverage(
+        **{**current, "held_shares": Decimal("9.99")},
+        current_sell_book_witness_resolver=(
+            lambda _row: "sell-book-content-1"
+        ),
+    ) is None
+
+    global_batch_runtime._invalidate_global_holding_coverage()
+    assert global_batch_runtime.current_global_holding_coverage(
+        **current,
+        current_sell_book_witness_resolver=(
+            lambda _row: "sell-book-content-1"
+        ),
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("invalidate", "replace", "q_advance", "ledger", "wealth", "deadline"),
+)
+def test_global_holding_coverage_lease_revalidates_after_resolver_io(
+    monkeypatch,
+    mutation,
+):
+    from src.engine import global_batch_runtime
+    from src.engine.global_single_order_auction import (
+        GlobalHoldingAuctionCoverage,
+    )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_GLOBAL_HOLDING_COVERAGE_BY_POSITION",
+        {},
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY",
+        None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_GLOBAL_HOLDING_COVERAGE_GENERATION",
+        0,
+    )
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="position-lease",
+        family_key="family-lease",
+        bin_label="20C",
+        condition_id="condition-lease",
+        side="YES",
+        token_id="token-lease",
+        held_shares=Decimal("10"),
+    )
+    probability = SimpleNamespace(
+        witness_identity="q-lease",
+        bindings=(
+            SimpleNamespace(
+                bin_id="canonical-bin-lease",
+                condition_id="condition-lease",
+                yes_token_id="token-lease",
+                no_token_id="token-no-lease",
+            ),
+        ),
+    )
+    coverage = GlobalHoldingAuctionCoverage(
+        position_id=obligation.position_id,
+        family_key=obligation.family_key,
+        bin_id="canonical-bin-lease",
+        bin_label=obligation.bin_label,
+        condition_id=obligation.condition_id,
+        side=obligation.side,
+        token_id=obligation.token_id,
+        held_shares=obligation.held_shares,
+        ledger_snapshot_id="ledger-lease",
+        probability_witness_identity="q-lease",
+        wealth_economic_identity="wealth-lease",
+        selection_epoch_identity="epoch-lease",
+        book_epoch_identity="book-lease",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + timedelta(seconds=1),
+        book_deadline_at_utc=at + timedelta(seconds=30),
+        status="EVALUATED",
+        candidate_id="sell-lease",
+        sell_book_witness_identity="sell-book-lease",
+    )
+    def publish(decision_log_id):
+        global_batch_runtime._publish_global_holding_coverage(
+            (coverage,),
+            expected_obligations=(obligation,),
+            probability_witnesses={"family-lease": probability},
+            decision_log_id=decision_log_id,
+        )
+
+    publish(41)
+
+    def book_resolver(_row):
+        if mutation == "invalidate":
+            global_batch_runtime._invalidate_global_holding_coverage()
+        elif mutation == "replace":
+            publish(42)
+        return "sell-book-lease"
+
+    holding = global_batch_runtime._CurrentHoldingWitness(
+        ledger_snapshot_id=(
+            "ledger-advanced" if mutation == "ledger" else "ledger-lease"
+        ),
+        wealth_economic_identity=(
+            "wealth-advanced" if mutation == "wealth" else "wealth-lease"
+        ),
+        held_shares=Decimal("10"),
+    )
+    result = global_batch_runtime.current_global_holding_coverage(
+        position_id=obligation.position_id,
+        probability_witness_identity="q-lease",
+        checked_at_utc=at + timedelta(seconds=2),
+        family_key=obligation.family_key,
+        bin_label=obligation.bin_label,
+        condition_id=obligation.condition_id,
+        side=obligation.side,
+        token_id=obligation.token_id,
+        held_shares=obligation.held_shares,
+        current_ledger_snapshot_id="ledger-lease",
+        current_wealth_economic_identity="wealth-lease",
+        current_sell_book_witness_resolver=book_resolver,
+        current_probability_witness_identity_resolver=lambda _row: (
+            "q-advanced" if mutation == "q_advance" else "q-lease"
+        ),
+        current_holding_witness_resolver=lambda _row: holding,
+        current_time_provider=lambda: (
+            at + timedelta(seconds=31)
+            if mutation == "deadline"
+            else at + timedelta(seconds=2)
+        ),
+    )
+
+    assert result is None
+
+
+def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():
+    from src.engine import global_batch_runtime
+    from src.engine.global_single_order_auction import (
+        GlobalHoldingAuctionCoverage,
+    )
+
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    first = global_batch_runtime._CurrentHeldObligation(
+        position_id="position-evaluated",
+        family_key="family-evaluated",
+        bin_label="20C",
+        condition_id="condition-evaluated",
+        side="YES",
+        token_id="token-evaluated",
+        held_shares=Decimal("10"),
+    )
+    second = global_batch_runtime._CurrentHeldObligation(
+        position_id="position-excluded",
+        family_key="family-excluded",
+        bin_label="21C",
+        condition_id="condition-excluded",
+        side="NO",
+        token_id="token-excluded",
+        held_shares=Decimal("5"),
+    )
+    probability = SimpleNamespace(
+        witness_identity="q-current",
+        bindings=(
+            SimpleNamespace(
+                bin_id="canonical-bin-current",
+                condition_id=first.condition_id,
+                yes_token_id=first.token_id,
+                no_token_id="token-no-evaluated",
+            ),
+        ),
+    )
+    evaluated = GlobalHoldingAuctionCoverage(
+        position_id=first.position_id,
+        family_key=first.family_key,
+        bin_id="canonical-bin-current",
+        bin_label=first.bin_label,
+        condition_id=first.condition_id,
+        side=first.side,
+        token_id=first.token_id,
+        held_shares=first.held_shares,
+        ledger_snapshot_id="ledger-current",
+        probability_witness_identity="q-current",
+        wealth_economic_identity="wealth-current",
+        selection_epoch_identity="epoch-current",
+        book_epoch_identity="book-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + timedelta(seconds=1),
+        book_deadline_at_utc=at + timedelta(seconds=30),
+        status="EVALUATED",
+        candidate_id="sell-current",
+        sell_book_witness_identity="sell-book-current",
+    )
+    excluded = GlobalHoldingAuctionCoverage(
+        position_id=second.position_id,
+        family_key=second.family_key,
+        bin_id=None,
+        bin_label=second.bin_label,
+        condition_id=second.condition_id,
+        side=second.side,
+        token_id=second.token_id,
+        held_shares=second.held_shares,
+        ledger_snapshot_id="ledger-current",
+        probability_witness_identity=None,
+        wealth_economic_identity="wealth-current",
+        selection_epoch_identity="epoch-current",
+        book_epoch_identity="book-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + timedelta(seconds=1),
+        book_deadline_at_utc=at + timedelta(seconds=30),
+        status="EXCLUDED",
+        reason="PROBABILITY_AUTHORITY_UNAVAILABLE:q_missing",
+    )
+    obligations = (first, second)
+    probabilities = {first.family_key: probability}
+    assert global_batch_runtime._holding_coverage_partition_complete(
+        (evaluated, excluded),
+        obligations=obligations,
+        probability_witnesses=probabilities,
+    )
+    mismatches = {
+        "q": (replace(evaluated, probability_witness_identity="q-stale"), excluded),
+        "selection_epoch": (
+            evaluated,
+            replace(excluded, selection_epoch_identity="epoch-other"),
+        ),
+        "book_epoch": (
+            evaluated,
+            replace(excluded, book_epoch_identity="book-other"),
+        ),
+        "deadline": (
+            evaluated,
+            replace(
+                excluded,
+                book_deadline_at_utc=at + timedelta(seconds=29),
+            ),
+        ),
+    }
+    for field, rows in mismatches.items():
+        assert not global_batch_runtime._holding_coverage_partition_complete(
+            rows,
+            obligations=obligations,
+            probability_witnesses=probabilities,
+        ), field
+
+
+def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
+    monkeypatch,
+):
+    from src.engine import (
+        cycle_runtime,
+        global_auction_universe,
+        global_batch_runtime,
+        monitor_refresh,
+    )
+
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    portfolio = SimpleNamespace(positions=())
+    position = SimpleNamespace(
+        position_id="position-current",
+        trade_id="position-current",
+        direction="buy_yes",
+        token_id="token-current",
+        no_token_id="token-no-current",
+        condition_id="condition-current",
+        city="New York City",
+        target_date="2026-07-14",
+        temperature_metric="high",
+        bin_label="90F",
+    )
+    wealth = SimpleNamespace(
+        native_holdings_micro=(("token-current", 12_500_000),),
+        ledger_snapshot_id="ledger-current",
+        economic_identity="wealth-current",
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "current_portfolio_wealth_witness",
+        lambda _conn, **kwargs: (
+            wealth
+            if kwargs["portfolio_state"] is portfolio
+            and kwargs["decision_at_utc"] == at
+            else pytest.fail("monitor must bind the current portfolio and time")
+        ),
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "_global_book_snapshot_rows",
+        lambda _conn, **kwargs: (
+            {
+                "condition_id": "condition-current",
+                "selected_outcome_token_id": "token-current",
+                "yes_token_id": "token-current",
+                "no_token_id": "token-no-current",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "_global_book_metadata_is_executable",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def sell_curve(**kwargs):
+        bid = kwargs["raw_book"]["bids"][0]
+        return SimpleNamespace(
+            token_id=kwargs["token_id"],
+            side=kwargs["side"],
+            book_hash=f"bid:{bid['price']}:{bid['size']}",
+            fee_model=SimpleNamespace(fee_rate=Decimal("0.02")),
+            min_tick=Decimal("0.01"),
+            min_order_size=Decimal("5"),
+            levels=(
+                SimpleNamespace(
+                    price=Decimal(bid["price"]),
+                    size=Decimal(bid["size"]),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(global_auction_universe, "_global_sell_curve", sell_curve)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_refresh_current_global_day0_probability",
+        lambda *_args, **_kwargs: (
+            0.5,
+            SimpleNamespace(
+                _day0_monitor_probability_receipt={
+                    "probability_witness_identity": "q-current"
+                }
+            ),
+            True,
+        ),
+    )
+    captured = {}
+
+    def current_coverage(**kwargs):
+        captured.update(kwargs)
+        coverage = SimpleNamespace(
+            family_key=kwargs["family_key"],
+            bin_id="canonical-bin-current",
+        )
+        captured["sell_book_witness"] = kwargs[
+            "current_sell_book_witness_resolver"
+        ](coverage)
+        captured["probability_witness"] = kwargs[
+            "current_probability_witness_identity_resolver"
+        ](coverage)
+        captured["holding_witness"] = kwargs[
+            "current_holding_witness_resolver"
+        ](coverage)
+        captured["final_checked_at"] = kwargs["current_time_provider"]()
+        return coverage, 91
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_global_holding_coverage",
+        current_coverage,
+    )
+
+    result = cycle_runtime._current_monitor_global_holding_coverage(
+        conn=object(),
+        clob=SimpleNamespace(
+            get_orderbook_snapshot=lambda token: {
+                "asset_id": token,
+                "bids": [{"price": "0.61", "size": "20"}],
+            }
+        ),
+        portfolio=portfolio,
+        position=position,
+        probability_witness_identity="q-current",
+        checked_at_utc=at,
+        current_time_provider=lambda: at,
+    )
+
+    assert result[1] == 91
+    assert captured["current_ledger_snapshot_id"] == "ledger-current"
+    assert captured["current_wealth_economic_identity"] == "wealth-current"
+    assert captured["held_shares"] == Decimal("12.5")
+    assert captured["sell_book_witness"]
+    assert captured["probability_witness"] == "q-current"
+    assert captured["holding_witness"].ledger_snapshot_id == "ledger-current"
+    assert captured["holding_witness"].held_shares == Decimal("12.5")
+    assert captured["final_checked_at"] == at
+
+
+def test_global_holding_coverage_materializes_typed_q_missing_obligation():
+    from src.engine import global_batch_runtime
+
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="position-q-missing",
+        family_key="family-q-missing",
+        bin_label="21C",
+        condition_id="condition-q-missing",
+        side="NO",
+        token_id="token-q-missing",
+        held_shares=Decimal("4.5"),
+    )
+
+    coverage = global_batch_runtime._complete_holding_coverage(
+        (),
+        obligations=(obligation,),
+        probability_witnesses={},
+        ineligible_by_family={"family-q-missing": "q_missing"},
+        ledger_snapshot_id="ledger-current",
+        wealth_economic_identity="wealth-current",
+        selection_epoch_identity="epoch-current",
+        book_epoch_identity="book-unavailable-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        book_deadline_at_utc=at,
+    )
+
+    assert len(coverage) == 1
+    row = coverage[0]
+    assert row.status == "EXCLUDED"
+    assert row.bin_id is None
+    assert row.bin_label == "21C"
+    assert row.canonical_bin_identity == "condition:condition-q-missing"
+    assert row.reason == "PROBABILITY_AUTHORITY_UNAVAILABLE:q_missing"
+    assert global_batch_runtime._holding_coverage_partition_complete(
+        coverage,
+        obligations=(obligation,),
+        probability_witnesses={},
+    )
+
+
+def test_holding_coverage_receipt_compresses_and_references_exact_payload(
+    tmp_path,
+    monkeypatch,
+):
+    from src.engine import global_batch_runtime
+    from src.engine.global_single_order_auction import (
+        GlobalHoldingAuctionCoverage,
+        PreparedGlobalAuctionResult,
+    )
+    from src.solve.solver import GlobalSingleOrderDecision
+    from src.state.db import get_connection, init_schema
+
+    monkeypatch.setattr(global_batch_runtime, "_GLOBAL_AUCTION_PAYLOAD_REFS", {})
+    conn = get_connection(tmp_path / "holding-coverage-compression.db")
+    init_schema(conn)
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="position-q-missing",
+        family_key="family-q-missing",
+        bin_label="21C",
+        condition_id="condition-q-missing",
+        side="NO",
+        token_id="token-q-missing",
+        held_shares=Decimal("4.5"),
+    )
+    coverage = GlobalHoldingAuctionCoverage(
+        position_id=obligation.position_id,
+        family_key=obligation.family_key,
+        bin_id=None,
+        bin_label=obligation.bin_label,
+        condition_id=obligation.condition_id,
+        side=obligation.side,
+        token_id=obligation.token_id,
+        held_shares=obligation.held_shares,
+        ledger_snapshot_id="ledger-current",
+        probability_witness_identity=None,
+        wealth_economic_identity="wealth-current",
+        selection_epoch_identity="epoch-current",
+        book_epoch_identity="book-unavailable-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        book_deadline_at_utc=at,
+        status="EXCLUDED",
+        reason="PROBABILITY_AUTHORITY_UNAVAILABLE:q_missing",
+    )
+    selected = PreparedGlobalAuctionResult(
+        decision=GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="GLOBAL_FEASIBLE_SET_INCOMPLETE",
+            candidate_input_count=0,
+        ),
+        winner_event_id=None,
+        holding_coverage=(coverage,),
+    )
+    kwargs = dict(
+        selected=selected,
+        selection_epoch_identity="epoch-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        probability_manifest=(),
+        full_scope_identity="scope-current",
+        full_scope_family_keys=("family-q-missing",),
+        probability_ineligible_by_family={"family-q-missing": "q_missing"},
+        book_epoch_identity="book-unavailable-current",
+        book_asset_count=None,
+        book_asset_states=(),
+        wealth_witness=SimpleNamespace(
+            witness_identity="wealth-witness-current",
+            economic_identity="wealth-current",
+            ledger_snapshot_id="ledger-current",
+        ),
+        fractional_kelly_multiplier=Decimal("0.25"),
+        expected_holding_obligations=(obligation,),
+        holding_probability_witnesses={},
+    )
+    first_id = global_batch_runtime._store_global_auction_receipt(conn, **kwargs)
+    conn.commit()
+    second_id = global_batch_runtime._store_global_auction_receipt(conn, **kwargs)
+    conn.commit()
+
+    first = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id=?",
+            (first_id,),
+        ).fetchone()[0]
+    )["summary"]
+    second = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id=?",
+            (second_id,),
+        ).fetchone()[0]
+    )["summary"]
+    raw = zlib.decompress(
+        base64.b64decode(first["holding_auction_coverage_zlib_b64"])
+    )
+    assert first["schema_version"] == 16
+    assert "holding_auction_coverage" not in first
+    assert json.loads(raw) == [
+        {
+            key: str(value) if isinstance(value, (Decimal, datetime)) else value
+            for key, value in {
+                **coverage.__dict__,
+            }.items()
+        }
+    ]
+    assert second["payload_compacted"] is True
+    assert "holding_auction_coverage_zlib_b64" not in second
+    assert "holding_auction_coverage_zlib_b64" in second[
+        "payload_reference_fields"
+    ]
+    conn.close()
+
+
+@pytest.mark.parametrize("book_present", (False, True), ids=("no_book", "book"))
+def test_receipt_rejects_uniform_coverage_deadline_beyond_authoritative_book(
+    tmp_path,
+    book_present,
+):
+    from src.engine import global_batch_runtime
+    from src.engine.global_single_order_auction import (
+        GlobalHoldingAuctionCoverage,
+        PreparedGlobalAuctionResult,
+    )
+    from src.solve.solver import GlobalSingleOrderDecision
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "holding-coverage-deadline.db")
+    init_schema(conn)
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    obligations = tuple(
+        global_batch_runtime._CurrentHeldObligation(
+            position_id=f"position-{index}",
+            family_key=f"family-{index}",
+            bin_label=f"{20 + index}C",
+            condition_id=f"condition-{index}",
+            side="YES" if index == 1 else "NO",
+            token_id=f"token-{index}",
+            held_shares=Decimal(str(index)),
+        )
+        for index in (1, 2)
+    )
+    coverage = tuple(
+        GlobalHoldingAuctionCoverage(
+            position_id=obligation.position_id,
+            family_key=obligation.family_key,
+            bin_id=None,
+            bin_label=obligation.bin_label,
+            condition_id=obligation.condition_id,
+            side=obligation.side,
+            token_id=obligation.token_id,
+            held_shares=obligation.held_shares,
+            ledger_snapshot_id="ledger-current",
+            probability_witness_identity=None,
+            wealth_economic_identity="wealth-current",
+            selection_epoch_identity="epoch-current",
+            book_epoch_identity="book-unavailable-current",
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            book_deadline_at_utc=(
+                at + timedelta(seconds=31)
+                if book_present
+                else at + timedelta(seconds=1)
+            ),
+            status="EXCLUDED",
+            reason="PROBABILITY_AUTHORITY_UNAVAILABLE:q_missing",
+        )
+        for obligation in obligations
+    )
+    selected = PreparedGlobalAuctionResult(
+        decision=GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="GLOBAL_FEASIBLE_SET_INCOMPLETE",
+            candidate_input_count=0,
+        ),
+        winner_event_id=None,
+        holding_coverage=coverage,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_HELD_POSITION_COVERAGE_INCOMPLETE",
+    ):
+        global_batch_runtime._store_global_auction_receipt(
+            conn,
+            selected=selected,
+            selection_epoch_identity="epoch-current",
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            probability_manifest=(),
+            full_scope_identity="scope-current",
+            full_scope_family_keys=tuple(
+                obligation.family_key for obligation in obligations
+            ),
+            probability_ineligible_by_family={
+                obligation.family_key: "q_missing"
+                for obligation in obligations
+            },
+            book_epoch_identity="book-unavailable-current",
+            book_asset_count=0 if book_present else None,
+            book_asset_states=(),
+            wealth_witness=SimpleNamespace(
+                witness_identity="wealth-witness-current",
+                economic_identity="wealth-current",
+                ledger_snapshot_id="ledger-current",
+            ),
+            fractional_kelly_multiplier=Decimal("0.25"),
+            book_captured_at_utc=at if book_present else None,
+            book_max_age=(
+                timedelta(seconds=30) if book_present else None
+            ),
+            expected_holding_obligations=obligations,
+            holding_probability_witnesses={},
+        )
+    conn.close()
+
+
+def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path):
+    from src.engine import global_batch_runtime
+    from src.engine.global_single_order_auction import (
+        GlobalHoldingAuctionCoverage,
+        PreparedGlobalAuctionResult,
+    )
+    from src.solve.solver import (
+        GlobalSingleOrderCandidateEvaluation,
+        GlobalSingleOrderDecision,
+    )
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "holding-coverage-manifest.db")
+    init_schema(conn)
+    at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="position-sell",
+        family_key="family-sell",
+        bin_label="21C",
+        condition_id="condition-sell",
+        side="NO",
+        token_id="token-sell",
+        held_shares=Decimal("10"),
+    )
+    probability = SimpleNamespace(
+        witness_identity="q-sell",
+        bindings=(
+            SimpleNamespace(
+                bin_id="canonical-bin-sell",
+                condition_id=obligation.condition_id,
+                yes_token_id="token-yes-sell",
+                no_token_id=obligation.token_id,
+            ),
+        ),
+    )
+    coverage = GlobalHoldingAuctionCoverage(
+        position_id=obligation.position_id,
+        family_key=obligation.family_key,
+        bin_id="canonical-bin-sell",
+        bin_label=obligation.bin_label,
+        condition_id=obligation.condition_id,
+        side=obligation.side,
+        token_id=obligation.token_id,
+        held_shares=obligation.held_shares,
+        ledger_snapshot_id="ledger-current",
+        probability_witness_identity="q-sell",
+        wealth_economic_identity="wealth-current",
+        selection_epoch_identity="epoch-current",
+        book_epoch_identity="book-unavailable-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        book_deadline_at_utc=at,
+        status="EVALUATED",
+        candidate_id="sell-current",
+        sell_book_witness_identity="sell-book-current",
+    )
+    selected = PreparedGlobalAuctionResult(
+        decision=GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            rejection_reasons={"sell-current": "NON_POSITIVE_ROBUST_OBJECTIVE"},
+            candidate_evaluations=(
+                GlobalSingleOrderCandidateEvaluation(
+                    candidate_id="sell-current",
+                    family_key=obligation.family_key,
+                    bin_id="canonical-bin-sell",
+                    condition_id=obligation.condition_id,
+                    side=obligation.side,
+                    token_id=obligation.token_id,
+                    action="SELL",
+                    status="REJECTED",
+                    position_id=obligation.position_id,
+                    held_shares=obligation.held_shares,
+                    rejection_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+                ),
+            ),
+            candidate_input_count=1,
+        ),
+        winner_event_id=None,
+        holding_coverage=(coverage,),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_HELD_POSITION_COVERAGE_INCOMPLETE",
+    ):
+        global_batch_runtime._store_global_auction_receipt(
+            conn,
+            selected=selected,
+            selection_epoch_identity="epoch-current",
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            probability_manifest=((obligation.family_key, "q-new"),),
+            full_scope_identity="scope-current",
+            full_scope_family_keys=(obligation.family_key,),
+            probability_ineligible_by_family={},
+            book_epoch_identity="book-unavailable-current",
+            book_asset_count=None,
+            book_asset_states=(),
+            wealth_witness=SimpleNamespace(
+                witness_identity="wealth-witness-current",
+                economic_identity="wealth-current",
+                ledger_snapshot_id="ledger-current",
+            ),
+            fractional_kelly_multiplier=Decimal("0.25"),
+            expected_holding_obligations=(obligation,),
+            holding_probability_witnesses={obligation.family_key: probability},
+        )
     conn.close()
 
 

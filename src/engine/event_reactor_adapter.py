@@ -1240,7 +1240,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14}
+            schema_version not in {12, 13, 14, 15, 16}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -2404,7 +2404,9 @@ def _probe_global_book_cache_entry(
         current_stable = tuple(
             row for row in topology if row[0] not in mutable
         )
-        if not mutable or cached_stable != current_stable:
+        # Retired stable obligations are safe to remove when every current
+        # stable binding remains covered; delta merge captures only mutables.
+        if not mutable or not set(current_stable).issubset(cached_stable):
             expected = hashlib.sha256(
                 repr(entry.topology).encode("utf-8")
             ).hexdigest()[:12]
@@ -8889,7 +8891,7 @@ def event_bound_live_adapter_from_trade_conn(
                 bound_probabilities,
                 checked_at=cache_checked_at,
                 allowed=True,
-                mutable_family_keys=book_refresh_family_keys,
+                mutable_family_keys=effective_book_refresh_family_keys,
             )
             if cached is None:
                 logging.getLogger(__name__).info(

@@ -35,12 +35,126 @@ from src.solve.solver import (
 
 
 @dataclass(frozen=True)
+class GlobalHoldingAuctionCoverage:
+    """One exact held-position obligation in a current global auction."""
+
+    position_id: str
+    family_key: str
+    bin_id: str | None
+    condition_id: str
+    side: str
+    token_id: str
+    held_shares: Decimal
+    ledger_snapshot_id: str
+    probability_witness_identity: str | None
+    wealth_economic_identity: str
+    selection_epoch_identity: str
+    book_epoch_identity: str
+    selection_cut_at_utc: datetime
+    decision_at_utc: datetime
+    book_deadline_at_utc: datetime
+    status: str
+    candidate_id: str | None = None
+    reason: str | None = None
+    bin_label: str | None = None
+    canonical_bin_identity: str | None = None
+    sell_book_witness_identity: str | None = None
+
+    def __post_init__(self) -> None:
+        evaluated = self.status == "EVALUATED"
+        excluded = self.status == "EXCLUDED"
+        canonical_bin_identity = str(
+            self.canonical_bin_identity or f"condition:{self.condition_id}"
+        ).strip()
+        object.__setattr__(
+            self,
+            "canonical_bin_identity",
+            canonical_bin_identity,
+        )
+        if (
+            not (evaluated or excluded)
+            or not all(
+                str(value or "").strip()
+                for value in (
+                    self.position_id,
+                    self.family_key,
+                    self.condition_id,
+                    self.token_id,
+                    self.ledger_snapshot_id,
+                    self.wealth_economic_identity,
+                    self.selection_epoch_identity,
+                    self.book_epoch_identity,
+                    canonical_bin_identity,
+                )
+            )
+            or not (
+                str(self.bin_id or "").strip()
+                or str(self.bin_label or "").strip()
+            )
+            or self.side not in {"YES", "NO"}
+            or not Decimal(self.held_shares).is_finite()
+            or Decimal(self.held_shares) <= 0
+            or any(
+                value.tzinfo is None
+                for value in (
+                    self.selection_cut_at_utc,
+                    self.decision_at_utc,
+                    self.book_deadline_at_utc,
+                )
+            )
+            or self.selection_cut_at_utc > self.decision_at_utc
+            or self.decision_at_utc > self.book_deadline_at_utc
+            or evaluated
+            != bool(
+                str(self.candidate_id or "").strip()
+                and str(self.probability_witness_identity or "").strip()
+                and str(self.sell_book_witness_identity or "").strip()
+                and not str(self.reason or "").strip()
+            )
+            or excluded
+            != bool(
+                not str(self.candidate_id or "").strip()
+                and str(self.reason or "").strip()
+            )
+        ):
+            raise ValueError("GLOBAL_HOLDING_AUCTION_COVERAGE_INVALID")
+
+
+def global_sell_book_witness_identity(curve: object) -> str:
+    """Hash current executable SELL content without stale capture-time identity."""
+
+    digest = hashlib.sha256()
+    for value in (
+        getattr(curve, "token_id", ""),
+        getattr(curve, "side", ""),
+        getattr(curve, "book_hash", ""),
+        getattr(getattr(curve, "fee_model", None), "fee_rate", ""),
+        getattr(curve, "min_tick", ""),
+        getattr(curve, "min_order_size", ""),
+    ):
+        if not str(value).strip():
+            raise ValueError("GLOBAL_SELL_BOOK_WITNESS_INCOMPLETE")
+        digest.update(str(value).encode("utf-8"))
+        digest.update(b"\x1f")
+    levels = tuple(getattr(curve, "levels", ()) or ())
+    if not levels:
+        raise ValueError("GLOBAL_SELL_BOOK_WITNESS_INCOMPLETE")
+    for level in levels:
+        digest.update(str(getattr(level, "price", "")).encode("utf-8"))
+        digest.update(b"\x1e")
+        digest.update(str(getattr(level, "size", "")).encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
 class PreparedGlobalAuctionResult:
     """One selection result plus the event that may own later actuation."""
 
     decision: GlobalSingleOrderDecision
     winner_event_id: str | None
     actuation: "GlobalSingleOrderActuation | None" = None
+    holding_coverage: tuple[GlobalHoldingAuctionCoverage, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.decision.candidate is None) != (self.winner_event_id is None):
@@ -52,6 +166,9 @@ class PreparedGlobalAuctionResult:
             or self.actuation.winner_event_id != self.winner_event_id
         ):
             raise ValueError("global auction result and actuation disagree")
+        position_ids = tuple(row.position_id for row in self.holding_coverage)
+        if len(position_ids) != len(set(position_ids)):
+            raise ValueError("global auction holding coverage is not position-unique")
 
 
 def global_single_order_actuation_identity(
@@ -443,6 +560,7 @@ def select_prepared_global_auction(
     event_by_family: dict[str, str] = {}
     candidates: list[GlobalSingleOrderAnyCandidate] = []
     holdings_by_family = {}
+    holding_coverage: list[GlobalHoldingAuctionCoverage] = []
     for event_id, prepared in sorted(prepared_by_event.items()):
         event_key = str(event_id or "").strip()
         probability = getattr(prepared, "probability_witness", None)
@@ -488,7 +606,70 @@ def select_prepared_global_auction(
     if book_epoch is not None:
         if venue_universe_identity != book_epoch.witness_identity:
             return _no_trade("GLOBAL_BOOK_EPOCH_IDENTITY_MISMATCH")
+        book_deadline_at_utc = book_epoch.captured_at_utc + book_epoch.max_age
+        if decision_at_utc > book_deadline_at_utc:
+            return _no_trade("GLOBAL_BOOK_EPOCH_EXPIRED")
+
+        def holding_binding(holding: Any, probability: Any) -> Any:
+            try:
+                column = probability.bin_ids.index(str(holding.bin_id))
+            except ValueError as exc:
+                raise ValueError(
+                    "holding bin is absent from the family probability witness"
+                ) from exc
+            binding = probability.bindings[column]
+            side = str(holding.side)
+            expected_token = (
+                binding.yes_token_id if side == "YES" else binding.no_token_id
+            )
+            if (
+                side not in {"YES", "NO"}
+                or str(holding.family_key) != probability.family_key
+                or not expected_token
+                or str(holding.token_id) != expected_token
+            ):
+                raise ValueError(
+                    "holding condition/token does not own the selected q column"
+                )
+            return binding
+
+        def coverage_row(
+            holding: Any,
+            probability: Any,
+            *,
+            status: str,
+            candidate_id: str | None = None,
+            reason: str | None = None,
+            sell_book_witness_identity: str | None = None,
+        ) -> GlobalHoldingAuctionCoverage:
+            binding = holding_binding(holding, probability)
+            return GlobalHoldingAuctionCoverage(
+                position_id=str(holding.position_id),
+                family_key=str(holding.family_key),
+                bin_id=str(binding.bin_id),
+                condition_id=str(binding.condition_id),
+                side=str(holding.side),
+                token_id=str(holding.token_id),
+                held_shares=Decimal(holding.shares),
+                ledger_snapshot_id=str(holdings_by_family[holding.family_key].ledger_snapshot_id),
+                probability_witness_identity=str(probability.witness_identity),
+                wealth_economic_identity=wealth_witness.economic_identity,
+                selection_epoch_identity=selection_epoch_identity,
+                book_epoch_identity=book_epoch.witness_identity,
+                selection_cut_at_utc=selection_cut_at_utc,
+                decision_at_utc=decision_at_utc,
+                book_deadline_at_utc=book_deadline_at_utc,
+                status=status,
+                candidate_id=candidate_id,
+                reason=reason,
+                sell_book_witness_identity=sell_book_witness_identity,
+            )
+
         candidates = []
+        book_status_by_key = {
+            tuple(state[:5]): str(state[5])
+            for state in book_epoch.asset_states
+        }
         for asset in book_epoch.assets:
             probability = probability_witnesses.get(asset.family_key)
             if probability is None:
@@ -523,9 +704,20 @@ def select_prepared_global_auction(
                 )
         for family_key, holdings in holdings_by_family.items():
             probability = probability_witnesses[family_key]
-            if family_key in excluded:
-                continue
             for holding in holdings.holdings:
+                if family_key in excluded:
+                    holding_coverage.append(
+                        coverage_row(
+                            holding,
+                            probability,
+                            status="EXCLUDED",
+                            reason=(
+                                "FAMILY_PREFLIGHT_EXCLUDED:"
+                                f"{excluded_by_family[family_key]}"
+                            ),
+                        )
+                    )
+                    continue
                 asset = book_epoch.sell_asset_by_key.get(
                     (
                         family_key,
@@ -535,6 +727,32 @@ def select_prepared_global_auction(
                     )
                 )
                 if asset is None:
+                    binding = holding_binding(holding, probability)
+                    book_status = book_status_by_key.get(
+                        (
+                            family_key,
+                            str(binding.bin_id),
+                            str(binding.condition_id),
+                            str(holding.side),
+                            str(holding.token_id),
+                        )
+                    )
+                    reason = (
+                        f"SELL_{book_status}"
+                        if book_status in {
+                            "VENUE_NOT_EXECUTABLE",
+                            "VENUE_METADATA_STALE",
+                        }
+                        else "SELL_BOOK_NO_BID"
+                    )
+                    holding_coverage.append(
+                        coverage_row(
+                            holding,
+                            probability,
+                            status="EXCLUDED",
+                            reason=reason,
+                        )
+                    )
                     continue
                 try:
                     candidate = global_sell_candidate_from_holding(
@@ -546,6 +764,28 @@ def select_prepared_global_auction(
                     )
                     if candidate is not None:
                         candidates.append(candidate)
+                        holding_coverage.append(
+                            coverage_row(
+                                holding,
+                                probability,
+                                status="EVALUATED",
+                                candidate_id=candidate.candidate_id,
+                                sell_book_witness_identity=(
+                                    global_sell_book_witness_identity(
+                                        candidate.executable_sell_curve
+                                    )
+                                ),
+                            )
+                        )
+                    else:
+                        holding_coverage.append(
+                            coverage_row(
+                                holding,
+                                probability,
+                                status="EXCLUDED",
+                                reason="SELLABLE_SHARES_BELOW_PRECISION",
+                            )
+                        )
                 except Exception as exc:  # noqa: BLE001 - malformed holding invalidates globality
                     return _no_trade(
                         "GLOBAL_SELL_CANDIDATE_MATERIALIZATION_FAILED:"
@@ -645,8 +885,24 @@ def select_prepared_global_auction(
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
         cancelled=cancelled,
     )
+    evaluated = {
+        row.candidate_id: row.position_id
+        for row in holding_coverage
+        if row.status == "EVALUATED"
+    }
+    sell_evaluations = {
+        str(evaluation.candidate_id): str(evaluation.position_id or "")
+        for evaluation in tuple(decision.candidate_evaluations or ())
+        if evaluation.action == "SELL"
+    }
+    if evaluated != sell_evaluations:
+        return _no_trade("GLOBAL_HOLDING_COVERAGE_INCOMPLETE")
     if decision.candidate is None:
-        return PreparedGlobalAuctionResult(decision=decision, winner_event_id=None)
+        return PreparedGlobalAuctionResult(
+            decision=decision,
+            winner_event_id=None,
+            holding_coverage=tuple(holding_coverage),
+        )
     winner_event_id = event_by_family.get(decision.candidate.family_key)
     if winner_event_id is None:
         return _no_trade("GLOBAL_WINNER_EVENT_BINDING_MISSING")
@@ -682,4 +938,5 @@ def select_prepared_global_auction(
                 wealth_economic_identity=wealth_witness.economic_identity,
             ),
         ),
+        holding_coverage=tuple(holding_coverage),
     )

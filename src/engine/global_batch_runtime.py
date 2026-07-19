@@ -28,6 +28,7 @@ from src.engine.global_auction_universe import (
     scan_current_global_auction_scope,
 )
 from src.engine.global_single_order_auction import (
+    GlobalHoldingAuctionCoverage,
     global_single_order_actuation_identity,
     select_prepared_global_auction,
 )
@@ -41,6 +42,21 @@ from src.solve.solver import (
 )
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
+
+@dataclass(frozen=True)
+class _GlobalHoldingCoverageLease:
+    row: GlobalHoldingAuctionCoverage
+    decision_log_id: int
+    generation: int
+
+
+@dataclass(frozen=True)
+class _CurrentHoldingWitness:
+    ledger_snapshot_id: str
+    wealth_economic_identity: str
+    held_shares: Decimal
+
+
 UTC = timezone.utc
 _LOG = logging.getLogger(__name__)
 _GLOBAL_AUCTION_PAYLOAD_REFS: dict[
@@ -48,13 +64,472 @@ _GLOBAL_AUCTION_PAYLOAD_REFS: dict[
     tuple[str, int, str, str, tuple[tuple[str, ...], ...]],
 ] = {}
 _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK = threading.Lock()
+_GLOBAL_HOLDING_COVERAGE_LOCK = threading.Lock()
+_GLOBAL_HOLDING_COVERAGE_BY_POSITION: dict[
+    str, _GlobalHoldingCoverageLease
+] = {}
+_GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY: str | None = None
+_GLOBAL_HOLDING_COVERAGE_GENERATION = 0
 _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS = frozenset(
     {
         "book_native_side_states_zlib_b64",
         "buy_minimum_marketable_repairs_zlib_b64",
         "candidate_evaluations_zlib_b64",
+        "holding_auction_coverage_zlib_b64",
     }
 )
+
+
+@dataclass(frozen=True)
+class _CurrentHeldObligation:
+    position_id: str
+    family_key: str
+    bin_label: str
+    condition_id: str
+    side: str
+    token_id: str
+    held_shares: Decimal
+
+
+def _current_held_obligations(
+    portfolio_state: object,
+    wealth_witness: object,
+) -> tuple[_CurrentHeldObligation, ...]:
+    """Bind runtime-open positions to the same native ledger generation as wealth."""
+
+    token_shares = {
+        str(token): Decimal(int(amount)) / Decimal("1000000")
+        for token, amount in tuple(
+            getattr(wealth_witness, "native_holdings_micro", ()) or ()
+        )
+    }
+    obligations: list[_CurrentHeldObligation] = []
+    seen_positions: set[str] = set()
+    seen_tokens: set[str] = set()
+    for position in tuple(getattr(portfolio_state, "positions", ()) or ()):
+        direction_raw = getattr(position, "direction", "")
+        direction = str(getattr(direction_raw, "value", direction_raw) or "").lower()
+        if direction == "buy_yes":
+            side = "YES"
+            token_id = str(getattr(position, "token_id", "") or "").strip()
+        elif direction == "buy_no":
+            side = "NO"
+            token_id = str(getattr(position, "no_token_id", "") or "").strip()
+        else:
+            raise ValueError("GLOBAL_HOLDING_DIRECTION_INVALID")
+        shares = token_shares.get(token_id, Decimal("0"))
+        if shares <= 0:
+            continue
+        position_id = str(
+            getattr(position, "position_id", "")
+            or getattr(position, "trade_id", "")
+            or ""
+        ).strip()
+        metric = str(getattr(position, "temperature_metric", "") or "").lower()
+        family_key = weather_family_id(
+            city=str(getattr(position, "city", "") or ""),
+            target_date=str(getattr(position, "target_date", "") or ""),
+            metric=metric,
+        )
+        bin_label = str(getattr(position, "bin_label", "") or "").strip()
+        condition_id = str(getattr(position, "condition_id", "") or "").strip()
+        if (
+            not all((position_id, family_key, bin_label, condition_id, token_id))
+            or metric not in {"high", "low"}
+            or position_id in seen_positions
+            or token_id in seen_tokens
+        ):
+            raise ValueError("GLOBAL_HOLDING_OBLIGATION_INVALID_OR_AMBIGUOUS")
+        seen_positions.add(position_id)
+        seen_tokens.add(token_id)
+        obligations.append(
+            _CurrentHeldObligation(
+                position_id=position_id,
+                family_key=family_key,
+                bin_label=bin_label,
+                condition_id=condition_id,
+                side=side,
+                token_id=token_id,
+                held_shares=shares,
+            )
+        )
+    return tuple(sorted(obligations, key=lambda row: row.position_id))
+
+
+def _expected_holding_coverage_key(
+    obligation: _CurrentHeldObligation,
+    probability_witnesses: Mapping[str, object],
+) -> tuple[object, ...]:
+    witness = probability_witnesses.get(obligation.family_key)
+    bin_id = ""
+    if witness is not None:
+        matches = tuple(
+            binding
+            for binding in tuple(getattr(witness, "bindings", ()) or ())
+            if str(getattr(binding, "condition_id", "") or "")
+            == obligation.condition_id
+        )
+        if len(matches) != 1:
+            raise ValueError("GLOBAL_HOLDING_CANONICAL_BIN_IDENTITY_AMBIGUOUS")
+        binding = matches[0]
+        bin_id = str(getattr(binding, "bin_id", "") or "").strip()
+        expected_token = (
+            getattr(binding, "yes_token_id", None)
+            if obligation.side == "YES"
+            else getattr(binding, "no_token_id", None)
+        )
+        if not bin_id or str(expected_token or "") != obligation.token_id:
+            raise ValueError("GLOBAL_HOLDING_CANONICAL_BIN_IDENTITY_MISMATCH")
+    return (
+        obligation.position_id,
+        obligation.family_key,
+        bin_id,
+        f"condition:{obligation.condition_id}",
+        obligation.bin_label,
+        obligation.condition_id,
+        obligation.side,
+        obligation.token_id,
+        Decimal(obligation.held_shares),
+    )
+
+
+def _holding_coverage_key(
+    row: GlobalHoldingAuctionCoverage,
+) -> tuple[object, ...]:
+    return (
+        row.position_id,
+        row.family_key,
+        str(row.bin_id or ""),
+        str(row.canonical_bin_identity or ""),
+        str(row.bin_label or ""),
+        row.condition_id,
+        row.side,
+        row.token_id,
+        Decimal(row.held_shares),
+    )
+
+
+def _holding_coverage_partition_complete(
+    coverage: Sequence[GlobalHoldingAuctionCoverage],
+    *,
+    obligations: Sequence[_CurrentHeldObligation],
+    probability_witnesses: Mapping[str, object],
+) -> bool:
+    rows = tuple(coverage)
+    expected = tuple(
+        _expected_holding_coverage_key(obligation, probability_witnesses)
+        for obligation in obligations
+    )
+    actual = tuple(_holding_coverage_key(row) for row in rows)
+    epochs = {
+        (
+            row.selection_epoch_identity,
+            row.book_epoch_identity,
+            row.selection_cut_at_utc,
+            row.decision_at_utc,
+            row.book_deadline_at_utc,
+            row.ledger_snapshot_id,
+            row.wealth_economic_identity,
+        )
+        for row in rows
+    }
+    evaluated_q_current = all(
+        row.status != "EVALUATED"
+        or row.probability_witness_identity
+        == str(
+            getattr(
+                probability_witnesses.get(row.family_key),
+                "witness_identity",
+                "",
+            )
+            or ""
+        )
+        for row in rows
+    )
+    return (
+        len(expected) == len(set(expected))
+        and len(actual) == len(set(actual))
+        and set(actual) == set(expected)
+        and len(epochs) <= 1
+        and evaluated_q_current
+    )
+
+
+def _complete_holding_coverage(
+    coverage: Sequence[GlobalHoldingAuctionCoverage],
+    *,
+    obligations: Sequence[_CurrentHeldObligation],
+    probability_witnesses: Mapping[str, object],
+    ineligible_by_family: Mapping[str, str],
+    ledger_snapshot_id: str,
+    wealth_economic_identity: str,
+    selection_epoch_identity: str,
+    book_epoch_identity: str,
+    selection_cut_at_utc: datetime,
+    decision_at_utc: datetime,
+    book_deadline_at_utc: datetime,
+) -> tuple[GlobalHoldingAuctionCoverage, ...]:
+    """Build one typed row for every exact held obligation, never by id alone."""
+
+    rows = tuple(coverage)
+    by_position = {row.position_id: row for row in rows}
+    if len(by_position) != len(rows):
+        raise ValueError("GLOBAL_HOLDING_COVERAGE_POSITION_DUPLICATE")
+    completed: list[GlobalHoldingAuctionCoverage] = []
+    for obligation in obligations:
+        expected_key = _expected_holding_coverage_key(
+            obligation,
+            probability_witnesses,
+        )
+        row = by_position.get(obligation.position_id)
+        if row is None:
+            reason = str(
+                ineligible_by_family.get(obligation.family_key) or ""
+            ).strip()
+            if not reason:
+                raise ValueError(
+                    "GLOBAL_HOLDING_COVERAGE_SCOPE_INCOMPLETE:"
+                    f"{obligation.position_id}"
+                )
+            row = GlobalHoldingAuctionCoverage(
+                position_id=obligation.position_id,
+                family_key=obligation.family_key,
+                bin_id=(str(expected_key[2]) or None),
+                condition_id=obligation.condition_id,
+                side=obligation.side,
+                token_id=obligation.token_id,
+                held_shares=obligation.held_shares,
+                ledger_snapshot_id=ledger_snapshot_id,
+                probability_witness_identity=None,
+                wealth_economic_identity=wealth_economic_identity,
+                selection_epoch_identity=selection_epoch_identity,
+                book_epoch_identity=book_epoch_identity,
+                selection_cut_at_utc=selection_cut_at_utc,
+                decision_at_utc=decision_at_utc,
+                book_deadline_at_utc=book_deadline_at_utc,
+                status="EXCLUDED",
+                reason=f"PROBABILITY_AUTHORITY_UNAVAILABLE:{reason}",
+                bin_label=obligation.bin_label,
+                canonical_bin_identity=f"condition:{obligation.condition_id}",
+            )
+        else:
+            row = replace(
+                row,
+                bin_label=obligation.bin_label,
+                canonical_bin_identity=f"condition:{obligation.condition_id}",
+            )
+        completed.append(row)
+    out = tuple(sorted(completed, key=lambda row: row.position_id))
+    if not _holding_coverage_partition_complete(
+        out,
+        obligations=obligations,
+        probability_witnesses=probability_witnesses,
+    ):
+        raise ValueError("GLOBAL_HOLDING_COVERAGE_PARTITION_INCOMPLETE")
+    return out
+
+
+def _invalidate_global_holding_coverage() -> None:
+    """Clear every monitor handoff before a new epoch or venue side effect."""
+
+    global _GLOBAL_HOLDING_COVERAGE_GENERATION
+    global _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY
+    with _GLOBAL_HOLDING_COVERAGE_LOCK:
+        _GLOBAL_HOLDING_COVERAGE_GENERATION += 1
+        _GLOBAL_HOLDING_COVERAGE_BY_POSITION.clear()
+        _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY = None
+
+
+def _publish_global_holding_coverage(
+    coverage: Sequence[GlobalHoldingAuctionCoverage],
+    *,
+    expected_obligations: Sequence[_CurrentHeldObligation],
+    probability_witnesses: Mapping[str, object],
+    decision_log_id: int,
+) -> None:
+    """Publish only a committed, exact partition of current held obligations."""
+
+    rows = tuple(coverage)
+    exact_partition = _holding_coverage_partition_complete(
+        rows,
+        obligations=expected_obligations,
+        probability_witnesses=probability_witnesses,
+    )
+    if (
+        decision_log_id <= 0
+        or not rows
+        or not expected_obligations
+        or not exact_partition
+        or any(
+            row.status == "EVALUATED"
+            and not str(row.sell_book_witness_identity or "").strip()
+            for row in rows
+        )
+    ):
+        raise ValueError("GLOBAL_HOLDING_COVERAGE_PUBLISH_INCOMPLETE")
+    wealth_identities = {row.wealth_economic_identity for row in rows}
+    if len(wealth_identities) != 1:
+        raise ValueError("GLOBAL_HOLDING_COVERAGE_WEALTH_MIXED")
+    global _GLOBAL_HOLDING_COVERAGE_GENERATION
+    global _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY
+    with _GLOBAL_HOLDING_COVERAGE_LOCK:
+        _GLOBAL_HOLDING_COVERAGE_GENERATION += 1
+        generation = _GLOBAL_HOLDING_COVERAGE_GENERATION
+        _GLOBAL_HOLDING_COVERAGE_BY_POSITION.clear()
+        _GLOBAL_HOLDING_COVERAGE_BY_POSITION.update(
+            {
+                row.position_id: _GlobalHoldingCoverageLease(
+                    row=row,
+                    decision_log_id=decision_log_id,
+                    generation=generation,
+                )
+                for row in rows
+            }
+        )
+        _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY = next(iter(wealth_identities))
+
+
+def _invalidate_global_holding_coverage_for_wealth(
+    wealth_economic_identity: str,
+) -> None:
+    """Revoke a prior handoff as soon as the current position endowment changes."""
+
+    identity = str(wealth_economic_identity or "").strip()
+    if not identity:
+        raise ValueError("GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY_MISSING")
+    global _GLOBAL_HOLDING_COVERAGE_GENERATION
+    global _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY
+    with _GLOBAL_HOLDING_COVERAGE_LOCK:
+        if (
+            _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY is not None
+            and _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY != identity
+        ):
+            _GLOBAL_HOLDING_COVERAGE_GENERATION += 1
+            _GLOBAL_HOLDING_COVERAGE_BY_POSITION.clear()
+            _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY = None
+
+
+def current_global_holding_coverage(
+    *,
+    position_id: str,
+    probability_witness_identity: str,
+    checked_at_utc: datetime,
+    family_key: str = "",
+    bin_label: str = "",
+    condition_id: str = "",
+    side: str = "",
+    token_id: str = "",
+    held_shares: Decimal | None = None,
+    current_ledger_snapshot_id: str = "",
+    current_wealth_economic_identity: str = "",
+    current_sell_book_witness_resolver: Callable[
+        [GlobalHoldingAuctionCoverage], str | None
+    ]
+    | None = None,
+    current_probability_witness_identity_resolver: Callable[
+        [GlobalHoldingAuctionCoverage], str | None
+    ]
+    | None = None,
+    current_holding_witness_resolver: Callable[
+        [GlobalHoldingAuctionCoverage], _CurrentHoldingWitness | None
+    ]
+    | None = None,
+    current_time_provider: Callable[[], datetime] | None = None,
+) -> tuple[GlobalHoldingAuctionCoverage, int] | None:
+    """Return coverage only when every current position/wealth/book witness agrees."""
+
+    if (
+        checked_at_utc.tzinfo is None
+        or held_shares is None
+        or not all(
+            str(value or "").strip()
+            for value in (
+                position_id,
+                probability_witness_identity,
+                family_key,
+                bin_label,
+                condition_id,
+                side,
+                token_id,
+                current_ledger_snapshot_id,
+                current_wealth_economic_identity,
+            )
+        )
+        or side not in {"YES", "NO"}
+        or current_sell_book_witness_resolver is None
+        or current_probability_witness_identity_resolver is None
+        or current_holding_witness_resolver is None
+    ):
+        return None
+    with _GLOBAL_HOLDING_COVERAGE_LOCK:
+        lease = _GLOBAL_HOLDING_COVERAGE_BY_POSITION.get(str(position_id or ""))
+        published_wealth_identity = _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY
+        generation = _GLOBAL_HOLDING_COVERAGE_GENERATION
+    if lease is None or lease.generation != generation:
+        return None
+    row = lease.row
+    checked = checked_at_utc.astimezone(UTC)
+    if (
+        row.status != "EVALUATED"
+        or row.probability_witness_identity
+        != str(probability_witness_identity or "")
+        or row.family_key != family_key
+        or str(row.bin_label or "") != bin_label
+        or row.condition_id != condition_id
+        or row.side != side
+        or row.token_id != token_id
+        or Decimal(row.held_shares) != Decimal(held_shares)
+        or row.ledger_snapshot_id != current_ledger_snapshot_id
+        or row.wealth_economic_identity != current_wealth_economic_identity
+        or published_wealth_identity != current_wealth_economic_identity
+        or not str(row.sell_book_witness_identity or "").strip()
+        or checked < row.decision_at_utc.astimezone(UTC)
+        or checked > row.book_deadline_at_utc.astimezone(UTC)
+    ):
+        return None
+    try:
+        current_sell_book_witness_identity = current_sell_book_witness_resolver(row)
+        current_probability_witness_identity = (
+            current_probability_witness_identity_resolver(row)
+        )
+        current_holding_witness = current_holding_witness_resolver(row)
+        final_checked_at = (
+            current_time_provider()
+            if current_time_provider is not None
+            else datetime.now(UTC)
+        )
+    except Exception:  # noqa: BLE001 - missing current book preserves local authority
+        return None
+    if (
+        final_checked_at.tzinfo is None
+        or current_sell_book_witness_identity != row.sell_book_witness_identity
+        or current_probability_witness_identity
+        != row.probability_witness_identity
+        or current_holding_witness is None
+        or current_holding_witness.ledger_snapshot_id != row.ledger_snapshot_id
+        or current_holding_witness.wealth_economic_identity
+        != row.wealth_economic_identity
+        or Decimal(current_holding_witness.held_shares) != Decimal(row.held_shares)
+    ):
+        return None
+    final_checked = final_checked_at.astimezone(UTC)
+    with _GLOBAL_HOLDING_COVERAGE_LOCK:
+        current_lease = _GLOBAL_HOLDING_COVERAGE_BY_POSITION.get(
+            str(position_id or "")
+        )
+        if (
+            _GLOBAL_HOLDING_COVERAGE_GENERATION != generation
+            or current_lease is not lease
+            or current_lease.generation != generation
+            or current_lease.row != row
+            or current_lease.decision_log_id != lease.decision_log_id
+            or _GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY
+            != current_wealth_economic_identity
+            or final_checked < row.decision_at_utc.astimezone(UTC)
+            or final_checked > row.book_deadline_at_utc.astimezone(UTC)
+        ):
+            return None
+    return row, lease.decision_log_id
 
 
 @dataclass(frozen=True)
@@ -462,6 +937,10 @@ def _global_auction_payload_identity(receipt: Mapping[str, object]) -> str:
             receipt.get("buy_minimum_marketable_repair_encoding"),
             receipt.get("buy_minimum_marketable_repairs_sha256"),
         ),
+        "holding_auction_coverage": (
+            receipt.get("holding_auction_coverage_encoding"),
+            receipt.get("holding_auction_coverage_sha256"),
+        ),
     }
     encoded = json.dumps(
         payload,
@@ -483,6 +962,10 @@ def _global_auction_decision_payload_identity(
         "buy_minimum_marketable_repairs": (
             receipt.get("buy_minimum_marketable_repair_encoding"),
             receipt.get("buy_minimum_marketable_repairs_sha256"),
+        ),
+        "holding_auction_coverage": (
+            receipt.get("holding_auction_coverage_encoding"),
+            receipt.get("holding_auction_coverage_sha256"),
         ),
     }
     encoded = json.dumps(
@@ -538,6 +1021,8 @@ def _store_global_auction_receipt(
     ] | None = None,
     book_captured_at_utc: datetime | None = None,
     book_max_age: timedelta | None = None,
+    expected_holding_obligations: Sequence[_CurrentHeldObligation] = (),
+    holding_probability_witnesses: Mapping[str, object] | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
 
@@ -547,6 +1032,10 @@ def _store_global_auction_receipt(
 
     scope_keys = tuple(str(key) for key in full_scope_family_keys)
     probability_keys = tuple(str(key) for key, _ in probability_manifest)
+    manifest_by_family = {
+        str(key): str(witness_identity)
+        for key, witness_identity in probability_manifest
+    }
     ineligible = dict(
         sorted(
             (str(key), str(reason))
@@ -588,6 +1077,77 @@ def _store_global_auction_receipt(
     if decision is None:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
     evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
+    holding_coverage = tuple(
+        getattr(selected, "holding_coverage", ()) or ()
+    )
+    expected_holding_count = len(expected_holding_obligations)
+    evaluated_sell_by_candidate = {
+        (
+            str(row.candidate_id),
+            row.position_id,
+            row.family_key,
+            str(row.bin_id or ""),
+            row.condition_id,
+            row.side,
+            row.token_id,
+            Decimal(row.held_shares),
+        )
+        for row in holding_coverage
+        if row.status == "EVALUATED"
+    }
+    decision_sell_by_candidate = {
+        (
+            str(evaluation.candidate_id),
+            str(evaluation.position_id or ""),
+            str(evaluation.family_key),
+            str(evaluation.bin_id),
+            str(evaluation.condition_id),
+            str(evaluation.side),
+            str(evaluation.token_id),
+            Decimal(evaluation.held_shares),
+        )
+        for evaluation in evaluations
+        if evaluation.action == "SELL"
+    }
+    exact_holding_partition = _holding_coverage_partition_complete(
+        holding_coverage,
+        obligations=expected_holding_obligations,
+        probability_witnesses=holding_probability_witnesses or {},
+    )
+    evaluated_probability_manifest_complete = all(
+        row.status != "EVALUATED"
+        or row.probability_witness_identity
+        == manifest_by_family.get(row.family_key)
+        for row in holding_coverage
+    )
+    authoritative_holding_deadline = (
+        book_deadline_at_utc
+        if book_deadline_at_utc is not None
+        else decision_at_utc
+    )
+    held_position_coverage_complete = (
+        exact_holding_partition
+        and evaluated_probability_manifest_complete
+        and evaluated_sell_by_candidate == decision_sell_by_candidate
+        and all(
+            row.selection_epoch_identity == selection_epoch_identity
+            and row.book_epoch_identity == book_epoch_identity
+            and row.wealth_economic_identity
+            == str(getattr(wealth_witness, "economic_identity", "") or "")
+            and row.ledger_snapshot_id
+            == str(getattr(wealth_witness, "ledger_snapshot_id", "") or "")
+            and row.selection_cut_at_utc == selection_cut_at_utc
+            and row.decision_at_utc == decision_at_utc
+            and row.book_deadline_at_utc == authoritative_holding_deadline
+            and (
+                row.status != "EVALUATED"
+                or bool(str(row.sell_book_witness_identity or "").strip())
+            )
+            for row in holding_coverage
+        )
+    )
+    if not held_position_coverage_complete:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_HELD_POSITION_COVERAGE_INCOMPLETE")
     buy_minimum_repairs = {
         str(evaluation.candidate_id): evaluation.buy_minimum_marketable_repair
         for evaluation in evaluations
@@ -751,6 +1311,20 @@ def _store_global_auction_receipt(
         separators=(",", ":"),
     ).encode("utf-8")
     evaluation_zlib = zlib.compress(evaluation_json, level=9)
+    holding_coverage_rows = tuple(
+        asdict(row)
+        for row in sorted(
+            holding_coverage,
+            key=lambda item: item.position_id,
+        )
+    )
+    holding_coverage_json = json.dumps(
+        holding_coverage_rows,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    holding_coverage_zlib = zlib.compress(holding_coverage_json, level=9)
     candidate_ids = tuple(
         str(row.get("candidate_id") or "") for row in evaluation_rows
     )
@@ -781,7 +1355,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 15,
+        "schema_version": 16,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -838,6 +1412,23 @@ def _store_global_auction_receipt(
         "candidate_detailed_count": len(detailed_rows),
         "candidate_rejection_group_count": len(rejection_groups),
         "candidate_coverage_complete": coverage_complete,
+        "held_position_coverage_complete": held_position_coverage_complete,
+        "held_position_expected_count": expected_holding_count,
+        "held_position_evaluated_count": sum(
+            row.status == "EVALUATED" for row in holding_coverage
+        ),
+        "held_position_excluded_count": sum(
+            row.status == "EXCLUDED" for row in holding_coverage
+        ),
+        "holding_auction_coverage_encoding": (
+            "zlib+base64+canonical-json-v1"
+        ),
+        "holding_auction_coverage_sha256": hashlib.sha256(
+            holding_coverage_json
+        ).hexdigest(),
+        "holding_auction_coverage_zlib_b64": base64.b64encode(
+            holding_coverage_zlib
+        ).decode("ascii"),
         "candidate_condition_index_complete": condition_index_complete,
         "buy_candidate_index_complete": buy_candidate_index_complete,
         "buy_candidate_index_count": len(buy_candidate_index),
@@ -911,6 +1502,7 @@ def _store_global_auction_receipt(
             reference_fields = [
                 "buy_minimum_marketable_repairs_zlib_b64",
                 "candidate_evaluations_zlib_b64",
+                "holding_auction_coverage_zlib_b64",
             ]
             book_delta_bytes = 0
             if receipt["book_native_side_states_sha256"] == reference_book_hash:
@@ -1354,7 +1946,7 @@ def _forecast_carrier_matches(
 def _selection_epoch_identity(
     *,
     full_scope: CurrentGlobalAuctionScope,
-    eligible_scope: CurrentGlobalAuctionScope,
+    eligible_scope: CurrentGlobalAuctionScope | None,
     probability_witnesses: Mapping[str, object],
     ineligible_by_family: Mapping[str, str],
 ) -> str:
@@ -1364,7 +1956,10 @@ def _selection_epoch_identity(
     rows = (
         ("cut_at", full_scope.captured_at_utc.isoformat()),
         ("full_scope", full_scope.scope_identity),
-        ("eligible_scope", eligible_scope.scope_identity),
+        (
+            "eligible_scope",
+            eligible_scope.scope_identity if eligible_scope is not None else "NONE",
+        ),
     )
     for row in rows:
         digest.update(repr(row).encode("utf-8"))
@@ -1541,6 +2136,7 @@ def process_current_global_batch(
         or any(not str(family_key or "").strip() for family_key in restrict_to_family_keys)
     ):
         raise ValueError("GLOBAL_AUCTION_RESTRICTED_SCOPE_INVALID")
+    _invalidate_global_holding_coverage()
     claimed_target_by_scope_and_economics: dict[
         tuple[str, str], OpportunityEvent
     ] = {}
@@ -1877,16 +2473,19 @@ def process_current_global_batch(
                 if _family_key(event, payload) in restrict_to_family_keys
             )
             if (
-                not restricted_families
-                or frozenset(
-                    weather_family_id(
-                        city=city,
-                        target_date=target_date,
-                        metric=metric,
+                (not restricted_families and not held_families)
+                or (
+                    restricted_families
+                    and frozenset(
+                        weather_family_id(
+                            city=city,
+                            target_date=target_date,
+                            metric=metric,
+                        )
+                        for city, target_date, metric in restricted_families
                     )
-                    for city, target_date, metric in restricted_families
+                    != restrict_to_family_keys
                 )
-                != restrict_to_family_keys
             ):
                 return reject("GLOBAL_AUCTION_RESTRICTED_CARRIER_MISSING")
         day0_only_scope = bool(
@@ -1902,7 +2501,7 @@ def process_current_global_batch(
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
             held_families=held_families,
-            restrict_to_families=restricted_families,
+            restrict_to_families=(restricted_families or None),
             day0_only=day0_only_scope,
         )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
@@ -1931,7 +2530,10 @@ def process_current_global_batch(
                         if family_key in missing_family_keys
                     }
                 )
-                if missing_family_keys == restrict_to_family_keys:
+                if (
+                    missing_family_keys == restrict_to_family_keys
+                    and not held_families
+                ):
                     return reject(
                         "GLOBAL_AUCTION_RESTRICTED_SCOPE_MISSING:"
                         + ",".join(sorted(missing_family_keys))
@@ -1945,17 +2547,30 @@ def process_current_global_batch(
             current_restricted_family_keys = restrict_to_family_keys.difference(
                 missing_family_keys
             )
+            held_family_keys = frozenset(
+                weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+                for city, target_date, metric in held_families
+            )
+            decision_family_keys = current_restricted_family_keys.union(
+                held_family_keys
+            )
             decision_scope = current_global_auction_scope_from_events(
                 tuple(
                     event
                     for family_key, event in full_scope.events_by_family
-                    if family_key in current_restricted_family_keys
+                    if family_key in decision_family_keys
                 ),
                 captured_at_utc=scope_at,
             )
             _LOG.info(
-                "global batch restricted scope: families=%d global_families=%d",
+                "global batch restricted scope plus held obligations: "
+                "families=%d held_families=%d global_families=%d",
                 len(decision_scope.events_by_family),
+                len(held_family_keys),
                 len(full_scope.events_by_family),
             )
         if not buy_candidates_enabled:
@@ -2014,6 +2629,32 @@ def process_current_global_batch(
                 release_read_snapshot()
 
         release_selection_snapshot = release_primed_snapshot
+        wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
+
+        def capture_selection_wealth():
+            state = portfolio_state_provider() if portfolio_state_provider else None
+            if state is None and hasattr(trade_conn, "execute"):
+                from src.state.portfolio import load_runtime_open_portfolio
+
+                state = load_runtime_open_portfolio(trade_conn)
+            witness = current_portfolio_wealth_witness(
+                trade_conn,
+                decision_at_utc=current_time(),
+                max_age=wealth_age,
+                portfolio_state=state,
+            )
+            return state, witness
+
+        selection_state = None
+        selection_wealth = None
+        holding_obligations: tuple[_CurrentHeldObligation, ...] = ()
+        if held_families:
+            selection_state, selection_wealth = capture_selection_wealth()
+            holding_obligations = (
+                _current_held_obligations(selection_state, selection_wealth)
+                if selection_state is not None
+                else ()
+            )
         claimed_by_family = {}
         duplicate_owner_by_event: dict[str, str] = {}
         for event in event_tuple:
@@ -2067,22 +2708,27 @@ def process_current_global_batch(
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         log_stage("prepare_families", families=len(prepared_by_event))
         if not prepared_by_event:
-            if len(event_tuple) == 1 and ineligible_by_event:
+            if not holding_obligations and len(event_tuple) == 1 and ineligible_by_event:
                 reason = ineligible_by_event.get(event_tuple[0].event_id)
                 if reason:
                     return reject(f"GLOBAL_FAMILY_INELIGIBLE:{reason}")
-            return reject("GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY")
+            if not holding_obligations:
+                return reject("GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY")
 
         eligible_family_keys = frozenset(
             prepared.probability_witness.family_key
             for prepared in prepared_by_event.values()
         )
-        scope = current_global_auction_scope_from_events(
-            tuple(
-                full_scope_event_by_family[family_key]
-                for family_key in sorted(eligible_family_keys)
-            ),
-            captured_at_utc=scope_at,
+        scope = (
+            current_global_auction_scope_from_events(
+                tuple(
+                    full_scope_event_by_family[family_key]
+                    for family_key in sorted(eligible_family_keys)
+                ),
+                captured_at_utc=scope_at,
+            )
+            if eligible_family_keys
+            else decision_scope
         )
         probabilities = {
             prepared.probability_witness.family_key: prepared.probability_witness
@@ -2095,31 +2741,26 @@ def process_current_global_batch(
             return reject("GLOBAL_PROBABILITY_EPOCH_MIXED_CUT")
         selection_epoch_identity = _selection_epoch_identity(
             full_scope=decision_scope,
-            eligible_scope=scope,
+            eligible_scope=(scope if eligible_family_keys else None),
             probability_witnesses=probabilities,
             ineligible_by_family=ineligible_by_family,
         )
-        wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
-
-        def capture_selection_wealth():
-            state = portfolio_state_provider() if portfolio_state_provider else None
-            if state is None and hasattr(trade_conn, "execute"):
-                from src.state.portfolio import load_runtime_open_portfolio
-
-                state = load_runtime_open_portfolio(trade_conn)
-            # Capital is a cheap admission fact. Bind it before public book I/O so
-            # stale collateral cannot consume the auction's executable-price window.
-            witness = current_portfolio_wealth_witness(
-                trade_conn,
-                decision_at_utc=current_time(),
-                max_age=wealth_age,
-                portfolio_state=state,
+        if selection_wealth is None:
+            selection_state, selection_wealth = capture_selection_wealth()
+            holding_obligations = (
+                _current_held_obligations(selection_state, selection_wealth)
+                if selection_state is not None
+                else ()
             )
-            return state, witness
-
-        selection_state, selection_wealth = capture_selection_wealth()
+        selection_wealth_economic_identity = str(
+            getattr(selection_wealth, "economic_identity", "") or ""
+        )
+        if selection_wealth_economic_identity:
+            _invalidate_global_holding_coverage_for_wealth(
+                selection_wealth_economic_identity
+            )
         book_epoch = None
-        if current_book_epoch_provider is not None:
+        if current_book_epoch_provider is not None and probabilities:
             if cancelled("book_epoch_start"):
                 return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
             probabilities, book_epoch = current_book_epoch_provider(
@@ -2223,6 +2864,13 @@ def process_current_global_batch(
             venue_identity = (
                 attempt_book_epoch.witness_identity
                 if attempt_book_epoch is not None
+                else hashlib.sha256(
+                    (
+                        "GLOBAL_NO_CURRENT_Q_BOOK_UNAVAILABLE:"
+                        f"{attempt_selection_epoch_identity}"
+                    ).encode("utf-8")
+                ).hexdigest()
+                if not attempt_probabilities
                 else current_venue_auction_identity(
                     trade_conn,
                     probability_witnesses=attempt_probabilities,
@@ -2271,6 +2919,28 @@ def process_current_global_batch(
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 cancelled=selection_cancelled,
             )
+            if holding_obligations:
+                selected = replace(
+                    selected,
+                    holding_coverage=_complete_holding_coverage(
+                        getattr(selected, "holding_coverage", ()) or (),
+                        obligations=holding_obligations,
+                        probability_witnesses=attempt_probabilities,
+                        ineligible_by_family=ineligible_by_family,
+                        ledger_snapshot_id=selection_wealth.ledger_snapshot_id,
+                        wealth_economic_identity=selection_wealth.economic_identity,
+                        selection_epoch_identity=attempt_selection_epoch_identity,
+                        book_epoch_identity=venue_identity,
+                        selection_cut_at_utc=scope_at,
+                        decision_at_utc=selection_at,
+                        book_deadline_at_utc=(
+                            attempt_book_epoch.captured_at_utc
+                            + attempt_book_epoch.max_age
+                            if attempt_book_epoch is not None
+                            else selection_at
+                        ),
+                    ),
+                )
             _LOG.info(
                 "global auction selection compute completed: elapsed_s=%.3f families=%d",
                 time.monotonic() - selection_compute_started,
@@ -2283,7 +2953,7 @@ def process_current_global_batch(
             ):
                 return selected
             receipt_store_started = time.monotonic()
-            _store_global_auction_receipt(
+            receipt_row_id = _store_global_auction_receipt(
                 trade_conn,
                 selected=selected,
                 selection_epoch_identity=attempt_selection_epoch_identity,
@@ -2337,6 +3007,8 @@ def process_current_global_batch(
                     if attempt_book_epoch is not None
                     else None
                 ),
+                expected_holding_obligations=holding_obligations,
+                holding_probability_witnesses=attempt_probabilities,
             )
             _LOG.info(
                 "global auction receipt store completed: elapsed_s=%.3f",
@@ -2351,6 +3023,15 @@ def process_current_global_batch(
                 _LOG.info(
                     "global auction receipt commit completed: elapsed_s=%.3f",
                     time.monotonic() - receipt_commit_started,
+                )
+            if holding_obligations:
+                if receipt_row_id is None:
+                    raise RuntimeError("GLOBAL_HOLDING_COVERAGE_RECEIPT_ID_MISSING")
+                _publish_global_holding_coverage(
+                    selected.holding_coverage,
+                    expected_obligations=holding_obligations,
+                    probability_witnesses=attempt_probabilities,
+                    decision_log_id=receipt_row_id,
                 )
             return selected
 
@@ -2627,6 +3308,7 @@ def process_current_global_batch(
             return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
         before_calls = venue_submit_count()
         release_selection_snapshot()
+        _invalidate_global_holding_coverage()
         winner_receipt = (
             actuate_preflighted_winner.consume(
                 winner,

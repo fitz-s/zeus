@@ -2148,13 +2148,17 @@ def scan_current_global_auction_scope(
         raise ValueError("GLOBAL_AUCTION_RESTRICTED_FAMILY_INVALID")
     if day0_only and restricted is None:
         raise ValueError("GLOBAL_DAY0_ONLY_SCOPE_REQUIRES_FAMILY_RESTRICTION")
-    scope_held = (
-        held
+    # A producer wake may restrict which new BUY families need rebuilding, but
+    # it cannot restrict the already-held SELL obligations.  The auction owns
+    # every runtime-open holding on every epoch, so its read scope is the union.
+    scope_held = held
+    scoped_families = (
+        None
         if restricted is None
-        else tuple(family for family in held if family in restricted)
+        else set(restricted).union(scope_held)
     )
     forecast_events = ()
-    if not day0_only:
+    if not day0_only or scope_held:
         trigger = ForecastSnapshotReadyTrigger(
             EventWriter(world_conn),
             live_eligibility_reader=executable_forecast_live_eligible_reader(
@@ -2169,7 +2173,7 @@ def scan_current_global_auction_scope(
             source="global-auction-current-scope",
             phase_filter_exempt_families=set(scope_held),
             restrict_to_families=(
-                set(restricted) if restricted is not None else None
+                scoped_families
             ),
         )
     events = current_global_scope_events_with_day0(
@@ -2178,7 +2182,7 @@ def scan_current_global_auction_scope(
             world_conn,
             decision_at_utc=decision_at_utc,
             held_families=scope_held,
-            restrict_to_families=restricted,
+            restrict_to_families=scoped_families,
         ),
     )
     covered = {_event_family(event) for event in events}

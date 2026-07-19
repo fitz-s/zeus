@@ -50,6 +50,7 @@ from src.decision_kernel.canonicalization import (
 from src.decision_kernel.certificate import build_certificate
 from src.engine.global_single_order_auction import (
     _candidate_portfolio_endowment,
+    GlobalHoldingAuctionCoverage,
     global_single_order_actuation_identity,
     global_single_order_economic_identity,
     select_prepared_global_auction,
@@ -57,6 +58,7 @@ from src.engine.global_single_order_auction import (
 from src.engine.global_auction_universe import (
     CurrentGlobalBookAsset,
     CurrentGlobalBookEpoch,
+    CurrentGlobalSellAsset,
     _current_day0_events,
     _day0_event_is_current_for_entry,
     capture_current_global_book_epoch,
@@ -267,7 +269,6 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         candidate_evaluations=evaluations,
         candidate_input_count=2,
     )
-    selected = SimpleNamespace(decision=decision)
     identity_witness = SimpleNamespace(
         family_key="family-buy",
         family_binding_identity="family-binding-buy",
@@ -316,6 +317,85 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         selection_epoch_identity="epoch-buy",
         selection_cut_at_utc=at,
         decision_at_utc=at,
+    )
+    holding_obligations = (
+        global_batch_runtime._CurrentHeldObligation(
+            position_id="position-sell",
+            family_key="family-sell",
+            bin_label="21C",
+            condition_id="condition-sell",
+            side="NO",
+            token_id="token-sell",
+            held_shares=Decimal("12.34"),
+        ),
+        global_batch_runtime._CurrentHeldObligation(
+            position_id="position-q-missing",
+            family_key="family-q-missing",
+            bin_label="22C",
+            condition_id="condition-q-missing",
+            side="YES",
+            token_id="token-q-missing",
+            held_shares=Decimal("4.5"),
+        ),
+    )
+    holding_probability_witnesses = {
+        "family-sell": SimpleNamespace(
+            witness_identity="q-sell",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="21C",
+                    condition_id="condition-sell",
+                    yes_token_id="token-sell-yes",
+                    no_token_id="token-sell",
+                ),
+            )
+        )
+    }
+    selected = SimpleNamespace(
+        decision=decision,
+        holding_coverage=(
+            GlobalHoldingAuctionCoverage(
+                position_id="position-sell",
+                family_key="family-sell",
+                bin_id="21C",
+                bin_label="21C",
+                condition_id="condition-sell",
+                side="NO",
+                token_id="token-sell",
+                held_shares=Decimal("12.34"),
+                ledger_snapshot_id="ledger-current",
+                probability_witness_identity="q-sell",
+                wealth_economic_identity="wealth-economics-current",
+                selection_epoch_identity="epoch-current",
+                book_epoch_identity="book-current",
+                selection_cut_at_utc=at,
+                decision_at_utc=at + _dt.timedelta(seconds=1),
+                book_deadline_at_utc=at + _dt.timedelta(seconds=30.25),
+                status="EVALUATED",
+                candidate_id="sell-negative",
+                sell_book_witness_identity="sell-book-current",
+            ),
+            GlobalHoldingAuctionCoverage(
+                position_id="position-q-missing",
+                family_key="family-q-missing",
+                bin_id=None,
+                bin_label="22C",
+                condition_id="condition-q-missing",
+                side="YES",
+                token_id="token-q-missing",
+                held_shares=Decimal("4.5"),
+                ledger_snapshot_id="ledger-current",
+                probability_witness_identity=None,
+                wealth_economic_identity="wealth-economics-current",
+                selection_epoch_identity="epoch-current",
+                book_epoch_identity="book-current",
+                selection_cut_at_utc=at,
+                decision_at_utc=at + _dt.timedelta(seconds=1),
+                book_deadline_at_utc=at + _dt.timedelta(seconds=30.25),
+                status="EXCLUDED",
+                reason="PROBABILITY_AUTHORITY_UNAVAILABLE:test",
+            ),
+        ),
     )
     book_asset_states = (
         (
@@ -390,10 +470,13 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         wealth_witness=SimpleNamespace(
             witness_identity="wealth-current",
             economic_identity="wealth-economics-current",
+            ledger_snapshot_id="ledger-current",
         ),
         fractional_kelly_multiplier=Decimal("0.25"),
         book_captured_at_utc=at + _dt.timedelta(milliseconds=250),
         book_max_age=_dt.timedelta(seconds=30),
+        expected_holding_obligations=holding_obligations,
+        holding_probability_witnesses=holding_probability_witnesses,
         excluded_by_candidate={
             (
                 "BUY",
@@ -411,7 +494,28 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 15
+    assert summary["schema_version"] == 16
+    assert summary["held_position_coverage_complete"] is True
+    assert summary["held_position_expected_count"] == 2
+    assert summary["held_position_evaluated_count"] == 1
+    assert summary["held_position_excluded_count"] == 1
+    assert summary["holding_auction_coverage_encoding"] == (
+        "zlib+base64+canonical-json-v1"
+    )
+    holding_coverage_json = zlib.decompress(
+        base64.b64decode(summary["holding_auction_coverage_zlib_b64"])
+    )
+    assert hashlib.sha256(holding_coverage_json).hexdigest() == (
+        summary["holding_auction_coverage_sha256"]
+    )
+    holding_coverage = json.loads(holding_coverage_json)
+    assert {
+        row["position_id"]: row["status"]
+        for row in holding_coverage
+    } == {
+        "position-sell": "EVALUATED",
+        "position-q-missing": "EXCLUDED",
+    }
     assert summary["book_capture_freshness_complete"] is True
     assert summary["book_captured_at_utc"] == "2026-07-14T01:00:00.250000+00:00"
     assert summary["book_deadline_at_utc"] == "2026-07-14T01:00:30.250000+00:00"
@@ -559,6 +663,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             ]
         ],
     }
+
+
     assert summary["hold_cash"] == {
         "robust_delta_log_wealth": "0",
         "robust_ev_usd": "0",
@@ -685,6 +791,134 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             fractional_kelly_multiplier=Decimal("0.25"),
         )
     conn.close()
+
+
+def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_GLOBAL_HOLDING_COVERAGE_BY_POSITION",
+        {},
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY",
+        None,
+    )
+    at = _dt.datetime(2026, 7, 14, 1, 0, tzinfo=_dt.timezone.utc)
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="position-1",
+        family_key="family-1",
+        bin_label="20C",
+        condition_id="condition-1",
+        side="YES",
+        token_id="token-1",
+        held_shares=Decimal("10"),
+    )
+    probability = SimpleNamespace(
+        witness_identity="q-1",
+        bindings=(
+            SimpleNamespace(
+                bin_id="20C",
+                condition_id="condition-1",
+                yes_token_id="token-1",
+                no_token_id="token-no-1",
+            ),
+        )
+    )
+    evaluated = GlobalHoldingAuctionCoverage(
+        position_id="position-1",
+        family_key="family-1",
+        bin_id="20C",
+        bin_label="20C",
+        condition_id="condition-1",
+        side="YES",
+        token_id="token-1",
+        held_shares=Decimal("10"),
+        ledger_snapshot_id="ledger-1",
+        probability_witness_identity="q-1",
+        wealth_economic_identity="wealth-1",
+        selection_epoch_identity="epoch-1",
+        book_epoch_identity="book-1",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + _dt.timedelta(seconds=1),
+        book_deadline_at_utc=at + _dt.timedelta(seconds=30),
+        status="EVALUATED",
+        candidate_id="sell-1",
+        sell_book_witness_identity="sell-book-1",
+    )
+    global_batch_runtime._publish_global_holding_coverage(
+        (evaluated,),
+        expected_obligations=(obligation,),
+        probability_witnesses={"family-1": probability},
+        decision_log_id=42,
+    )
+
+    current = dict(
+        position_id="position-1",
+        probability_witness_identity="q-1",
+        checked_at_utc=at + _dt.timedelta(seconds=2),
+        family_key="family-1",
+        bin_label="20C",
+        condition_id="condition-1",
+        side="YES",
+        token_id="token-1",
+        held_shares=Decimal("10"),
+        current_ledger_snapshot_id="ledger-1",
+        current_wealth_economic_identity="wealth-1",
+        current_probability_witness_identity_resolver=lambda _row: "q-1",
+        current_holding_witness_resolver=lambda _row: (
+            global_batch_runtime._CurrentHoldingWitness(
+                ledger_snapshot_id="ledger-1",
+                wealth_economic_identity="wealth-1",
+                held_shares=Decimal("10"),
+            )
+        ),
+        current_time_provider=lambda: at + _dt.timedelta(seconds=2),
+    )
+    assert global_batch_runtime.current_global_holding_coverage(
+        **current,
+        current_sell_book_witness_resolver=lambda _row: "sell-book-1",
+    ) == (evaluated, 42)
+    assert global_batch_runtime.current_global_holding_coverage(
+        **{**current, "probability_witness_identity": "q-changed-kind"},
+        current_sell_book_witness_resolver=lambda _row: "sell-book-1",
+    ) is None
+    assert global_batch_runtime.current_global_holding_coverage(
+        **{**current, "checked_at_utc": at + _dt.timedelta(seconds=31)},
+        current_sell_book_witness_resolver=lambda _row: "sell-book-1",
+    ) is None
+    assert global_batch_runtime.current_global_holding_coverage(
+        **current,
+        current_sell_book_witness_resolver=lambda _row: "sell-book-changed",
+    ) is None
+    global_batch_runtime._invalidate_global_holding_coverage_for_wealth(
+        "wealth-2"
+    )
+    assert global_batch_runtime.current_global_holding_coverage(
+        **current,
+        current_sell_book_witness_resolver=lambda _row: "sell-book-1",
+    ) is None
+
+    excluded = replace(
+        evaluated,
+        probability_witness_identity=None,
+        status="EXCLUDED",
+        candidate_id=None,
+        reason="SELL_ASSET_NOT_EXECUTABLE",
+        sell_book_witness_identity=None,
+    )
+    global_batch_runtime._publish_global_holding_coverage(
+        (excluded,),
+        expected_obligations=(obligation,),
+        probability_witnesses={"family-1": probability},
+        decision_log_id=43,
+    )
+    assert global_batch_runtime.current_global_holding_coverage(
+        **current,
+        current_sell_book_witness_resolver=lambda _row: "sell-book-1",
+    ) is None
 
 
 def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
@@ -907,6 +1141,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     assert delta_summary["payload_reference_fields"] == [
         "buy_minimum_marketable_repairs_zlib_b64",
         "candidate_evaluations_zlib_b64",
+        "holding_auction_coverage_zlib_b64",
     ]
     assert delta_summary["book_native_side_base_decision_log_id"] == full_row_id
     assert delta_summary["book_native_side_delta_removed_count"] == 0
@@ -5113,7 +5348,11 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
         CREATE TABLE decision_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             mode TEXT NOT NULL,
-            artifact_json TEXT NOT NULL
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            env TEXT NOT NULL
         );
         INSERT INTO executable_market_snapshots VALUES (
             'snapshot-a',
@@ -5151,64 +5390,72 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             );
         """
     )
-    fields = [
-        "family_key",
-        "bin_id",
-        "condition_id",
-        "side",
-        "token_id",
-        "status",
-        "book_hash",
-        "market_event_id",
-        "gamma_market_id",
-    ]
-    rows = [
-        [
+    book_states = (
+        (
             "family",
             "bin-b",
             "condition-b",
             "YES",
             "yes-token-b",
-            "EXECUTABLE",
+            "NO_ASK",
             "hash-yes-b",
             "event-b",
             "market-b",
-        ],
-        [
+        ),
+        (
             "family",
             "bin-b",
             "condition-b",
             "NO",
             "no-token-b",
-            "EXECUTABLE",
+            "VENUE_NOT_EXECUTABLE",
             "hash-no-b",
             "event-b",
             "market-b",
-        ],
-    ]
-    encoded = json.dumps(
-        {"fields": fields, "rows": rows},
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    summary = {
-        "schema_version": 14,
-        "book_native_side_candidate_coverage_status": "COMPLETE",
-        "book_native_side_candidate_coverage_complete": True,
-        "book_native_side_encoding": "zlib+base64+canonical-json-v1",
-        "book_native_side_state_count": len(rows),
-        "book_native_side_states_sha256": hashlib.sha256(encoded).hexdigest(),
-        "book_native_side_states_zlib_b64": base64.b64encode(
-            zlib.compress(encoded)
-        ).decode(),
-    }
-    trade.execute(
-        """
-        INSERT INTO decision_log(mode, artifact_json)
-        VALUES ('global_single_order_auction', ?)
-        """,
-        (json.dumps({"summary": summary}),),
+        ),
     )
+    at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    decision = GlobalSingleOrderDecision(
+        candidate=None,
+        shares=Decimal("0"),
+        cost_usd=Decimal("0"),
+        robust_delta_log_wealth=0.0,
+        robust_ev_usd=0.0,
+        capital_efficiency=0.0,
+        no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        rejection_reasons={},
+        candidate_evaluations=(),
+        candidate_input_count=0,
+    )
+    row_id = global_batch_runtime._store_global_auction_receipt(
+        trade,
+        selected=SimpleNamespace(decision=decision),
+        selection_epoch_identity="epoch-schema-16",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + _dt.timedelta(seconds=1),
+        probability_manifest=(("family", "q-schema-16"),),
+        full_scope_identity="scope-schema-16",
+        full_scope_family_keys=("family",),
+        probability_ineligible_by_family={},
+        book_epoch_identity="book-schema-16",
+        book_asset_count=0,
+        book_asset_states=book_states,
+        wealth_witness=SimpleNamespace(
+            witness_identity="wealth-schema-16",
+            economic_identity="wealth-economic-schema-16",
+            ledger_snapshot_id="ledger-schema-16",
+        ),
+        fractional_kelly_multiplier=Decimal("0.25"),
+        book_captured_at_utc=at,
+        book_max_age=_dt.timedelta(seconds=30),
+    )
+    stored = json.loads(
+        trade.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (row_id,),
+        ).fetchone()[0]
+    )["summary"]
+    assert stored["schema_version"] == 16
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",
@@ -6186,6 +6433,86 @@ def test_global_book_epoch_cache_serves_exact_scoped_subset(monkeypatch):
     )
     assert cached is None
     assert reason.startswith("topology_changed:")
+
+
+def test_global_book_cache_replaces_only_mutable_held_family_delta(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    def probability(family):
+        return SimpleNamespace(
+            family_key=family,
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family}",
+                    condition_id=f"condition-{family}",
+                    yes_token_id=f"yes-{family}",
+                    no_token_id=f"no-{family}",
+                ),
+            ),
+        )
+
+    def epoch_for(*families):
+        states = tuple(
+            (
+                family,
+                f"bin-{family}",
+                f"condition-{family}",
+                side,
+                f"{side.lower()}-{family}",
+                "EXECUTABLE",
+                f"hash-{side.lower()}-{family}",
+                f"event-{family}",
+                f"market-{family}",
+            )
+            for family in families
+            for side in ("YES", "NO")
+        )
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=states,
+            captured_at_utc=at,
+            max_age=_dt.timedelta(seconds=180),
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=at,
+            ),
+        )
+
+    initial = {family: probability(family) for family in ("held", "a")}
+    cached_epoch = epoch_for("held", "a")
+    assert era._store_global_book_epoch(
+        conn,
+        initial,
+        cached_epoch,
+        checked_at=at,
+    ) == "stored"
+
+    current = {family: probability(family) for family in ("held", "b")}
+    cached, reason = era._probe_global_book_epoch_cache(
+        conn,
+        current,
+        checked_at=at,
+        allowed=True,
+        mutable_family_keys=frozenset({"b"}),
+    )
+
+    assert cached is cached_epoch
+    assert reason == "hit_mutable_topology"
+    merged = era._merge_global_book_epoch_delta(
+        cached_epoch,
+        epoch_for("b"),
+        frozenset({"a", "b"}),
+        allow_topology_change=True,
+    )
+    assert {row[0] for row in merged.asset_states} == {"held", "b"}
+    assert {
+        row for row in merged.asset_states if row[0] == "held"
+    } == {
+        row for row in cached_epoch.asset_states if row[0] == "held"
+    }
+    conn.close()
 
 
 def test_global_book_epoch_scope_projects_broad_cached_cut():
@@ -8368,10 +8695,11 @@ def test_global_scope_refuses_a_held_family_without_probability_carrier(
     }
 
 
-def test_global_scope_pushes_family_restriction_to_carrier_readers(monkeypatch):
+def test_global_scope_unions_restricted_wake_with_all_held_obligations(monkeypatch):
     trigger_calls = []
     day0_calls = []
-    event = _global_scope_event(city="Alpha", source_run_id="run-alpha")
+    alpha = _global_scope_event(city="Alpha", source_run_id="run-alpha")
+    beta = _global_scope_event(city="Beta", source_run_id="run-beta")
 
     class RestrictedTrigger:
         def __init__(self, *_args, **_kwargs):
@@ -8379,7 +8707,7 @@ def test_global_scope_pushes_family_restriction_to_carrier_readers(monkeypatch):
 
         def build_committed_snapshot_events(self, **kwargs):
             trigger_calls.append(kwargs)
-            return (event,)
+            return (alpha, beta)
 
     def current_day0(*_args, **kwargs):
         day0_calls.append(kwargs)
@@ -8410,18 +8738,22 @@ def test_global_scope_pushes_family_restriction_to_carrier_readers(monkeypatch):
         restrict_to_families=(("Alpha", "2026-07-11", "high"),),
     )
 
-    assert scope.events == (event,)
+    assert set(scope.events) == {alpha, beta}
     assert trigger_calls[0]["restrict_to_families"] == {
-        ("Alpha", "2026-07-11", "high")
+        ("Alpha", "2026-07-11", "high"),
+        ("Beta", "2026-07-11", "high"),
     }
     assert trigger_calls[0]["phase_filter_exempt_families"] == {
-        ("Alpha", "2026-07-11", "high")
+        ("Alpha", "2026-07-11", "high"),
+        ("Beta", "2026-07-11", "high"),
     }
-    assert day0_calls[0]["restrict_to_families"] == frozenset(
-        {("Alpha", "2026-07-11", "high")}
-    )
+    assert day0_calls[0]["restrict_to_families"] == {
+        ("Alpha", "2026-07-11", "high"),
+        ("Beta", "2026-07-11", "high"),
+    }
     assert day0_calls[0]["held_families"] == (
         ("Alpha", "2026-07-11", "high"),
+        ("Beta", "2026-07-11", "high"),
     )
 
 
@@ -11616,7 +11948,7 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     assert partial.actuation is None
     assert partial.decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
 
-    book_selected = select_prepared_global_auction(
+    plain_book_selected = select_prepared_global_auction(
         prepared_by_event,
         **{
             **auction_kwargs,
@@ -11626,7 +11958,91 @@ def test_two_prepared_families_choose_one_globally_unique_order():
             "current_capital_limit_resolver": current_capital_limit,
         },
     )
-    assert book_selected.decision.candidate is not None
+    assert plain_book_selected.decision.candidate is not None
+
+    held_event_id, held_prepared = next(iter(prepared_by_event.items()))
+    held_probability = held_prepared.probability_witness
+    evaluated_binding, missing_binding = held_probability.bindings[:2]
+    evaluated_holding = SimpleNamespace(
+        position_id="position-evaluated",
+        family_key=held_probability.family_key,
+        bin_id=evaluated_binding.bin_id,
+        side="YES",
+        token_id=evaluated_binding.yes_token_id,
+        shares=Decimal("10"),
+    )
+    missing_holding = SimpleNamespace(
+        position_id="position-missing-book",
+        family_key=held_probability.family_key,
+        bin_id=missing_binding.bin_id,
+        side="NO",
+        token_id=missing_binding.no_token_id,
+        shares=Decimal("8"),
+    )
+    prepared_with_holdings = dict(prepared_by_event)
+    prepared_with_holdings[held_event_id] = replace(
+        held_prepared,
+        holdings_snapshot=SimpleNamespace(
+            family_key=held_probability.family_key,
+            ledger_snapshot_id=wealth.ledger_snapshot_id,
+            holdings=(evaluated_holding, missing_holding),
+        ),
+    )
+    sell_curve = ExecutableSellCurve(
+        token_id=evaluated_holding.token_id,
+        side="YES",
+        snapshot_id="sell-position-evaluated",
+        book_hash="sell-position-evaluated-hash",
+        levels=(BookLevel(price=Decimal("0.45"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    held_book_epoch = replace(
+        book_epoch,
+        sell_assets=(
+            CurrentGlobalSellAsset(
+                family_key=held_probability.family_key,
+                bin_id=evaluated_binding.bin_id,
+                condition_id=evaluated_binding.condition_id,
+                gamma_market_id="gamma-held",
+                market_event_id="market-event-held",
+                side="YES",
+                token_id=evaluated_holding.token_id,
+                curve=sell_curve,
+                captured_at_utc=decision_at,
+            ),
+        ),
+    )
+    book_selected = select_prepared_global_auction(
+        prepared_with_holdings,
+        **{
+            **auction_kwargs,
+            "venue_universe_identity": book_venue_identity,
+            "current_venue_universe_identity_resolver": lambda: book_venue_identity,
+            "book_epoch": held_book_epoch,
+            "current_capital_limit_resolver": current_capital_limit,
+        },
+    )
+    assert {
+        row.position_id: row.status
+        for row in book_selected.holding_coverage
+    } == {
+        "position-evaluated": "EVALUATED",
+        "position-missing-book": "EXCLUDED",
+    }
+    assert {
+        row.reason
+        for row in book_selected.holding_coverage
+        if row.status == "EXCLUDED"
+    } == {"SELL_BOOK_NO_BID"}
+    sell_evaluations = {
+        evaluation.position_id
+        for evaluation in book_selected.decision.candidate_evaluations
+        if evaluation.action == "SELL"
+    }
+    assert sell_evaluations == {"position-evaluated"}
     assert capital_scopes
     assert all(
         gamma_market_id == f"gamma-{condition_id}"
@@ -12697,6 +13113,10 @@ def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
         buy_candidates_enabled=False,
+        portfolio_state_provider=lambda: PortfolioState(
+            authority="canonical_db",
+            authority_scope="runtime_exposure",
+        ),
     )
 
     assert prepared == [held_event]
