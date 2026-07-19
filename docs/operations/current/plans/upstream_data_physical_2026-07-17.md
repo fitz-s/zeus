@@ -335,3 +335,17 @@ no duplicate machinery):
 - Ruling: correctly-fixed content must stay on mainline; an accidental revert of a correct fix is itself the defect. Executed: 342534cbd re-landed as 106942322 (receipt persistence + DAY0_LIVE_ADMISSION_REJECTED registration + tautological city_allowlist deletion; one import-line conflict resolved; 196 + 171 tests green at HEAD). p_fill mode-certification landed be8932f13 (maker decisions now certify the measured maker fill prior ~0.19 instead of the taker depth bound ~1.0; consumer-seam regression shows candidate_future_value 19.99→11.9 on same inputs).
 - Coworker world-writer-pressure hypothesis for the revert: receipt INSERT sits on the live decision path. If contention re-manifests, the fix direction is moving the write off-hot-path (queue/drain), NOT re-reverting the correctness content. Watch edli_no_submit_receipts row flow after next daemon restart picks up 106942322.
 - Wave-4 mandate (operator): all upstream data evidence needs strict dialectic; temperature forecast + probability computation is a CONTINUOUS curve, not a single-timestamp peak decision; goal is always-ahead-of-market precision on the probability curve.
+
+## Wave-4 close (2026-07-19): center-bias causal chain CLOSED
+
+Dialectic chain (three investigations, each refuting its predecessor's mechanism):
+1. highq_overconfidence.md: 0.80-0.95 band overconfidence CONFIRMED; localized to center bias in mu* (HIGH cold z=+0.376, LOW warm; sigma nominal; tail transform uninvolved).
+2. curve_collapse_dialectic.md: Jensen/curve-collapse REFUTED by direct test (mean-of-member-maxes is MORE climatology-biased than mu*, opposite sign); all collapse points C1-C7 ruled out — do not touch anchor/fusion machinery. Bias reconfirmed at 20x sample (n=4025/498, ~0.3-0.4C, live-route posteriors included).
+3. eb_shrink_residual.md: EB-shrinkage residual REFUTED — eb_bias() (bayes_precision_fusion.py:68) is DEAD CODE, zero call sites; live route serves RAW z per operator RAW NO-DE-BIAS LAW (2026-06-18, regression-tested in test_raw_unify_forecast_posteriors.py; prior per-city EB correction deleted as measured net-worse, percity_corrected_oos.md). Raw ecmwf day-ahead high bias +0.488C; measured live residual +0.34-0.36C = full raw bias surviving BY DESIGN. No kappa/window parameter fix exists (nothing reads kappa).
+
+VERDICT: center bias is a DESIGN CONSEQUENCE of the RAW law, not a defect. The legal correction layer is downstream q-shrink: settlement_coverage_hierarchy (F1) — receipt persistence restored (106942322), position-outcome pool landed (3326e8bc4, STRATEGY_BUCKET/SUPERBUCKET fire in shadow: 0.85-0.90 q_exec 0.710 vs q_raw 0.870), shadow script scripts/shadow_settlement_coverage_hierarchy.py ready.
+
+OPERATOR DECISIONS OPEN:
+(a) arm settlement_coverage_hierarchy_enabled (shadow-verified, walk-forward, shrink-only) — recommended;
+(b) whether to re-open the RAW law for a validated center de-bias via the DebiasAuthority blueprint (src/forecast/debias_authority.py, built-not-wired) — bigger change, prior attempt measured net-worse, needs same OOS rigor.
+Guard noted: eb_bias re-import already regression-blocked in capture module; extend to any future center path only if/when (b) proceeds.
