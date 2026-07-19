@@ -558,10 +558,14 @@ def _schedule_day0_metar_commit_retry() -> bool:
         now_monotonic = time.monotonic()
         if now_monotonic < _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC:
             return True
-        failures = min(
-            _DAY0_METAR_RETRY_FAILURES + 1,
-            DAY0_METAR_COMMIT_RETRY_MAX_FAILURES,
-        )
+        if _DAY0_METAR_RETRY_FAILURES >= DAY0_METAR_COMMIT_RETRY_MAX_FAILURES:
+            logger.warning(
+                "DAY0_METAR_COMMIT_RETRY_EXHAUSTED failures=%d; "
+                "pending fact retained for the next source-clock tick",
+                _DAY0_METAR_RETRY_FAILURES,
+            )
+            return False
+        failures = _DAY0_METAR_RETRY_FAILURES + 1
         delay_seconds = min(
             DAY0_METAR_COMMIT_RETRY_SECONDS * (2 ** (failures - 1)),
             DAY0_METAR_COMMIT_RETRY_MAX_SECONDS,

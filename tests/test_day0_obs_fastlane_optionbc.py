@@ -1332,10 +1332,10 @@ class TestDay0MetarSourceClockTick:
             scheduled[-1][1]["run_date"] - now_utc
         ).total_seconds() == pytest.approx(1.0)
 
-        for now in (101.75, 103.75, 107.75, 112.75):
+        for now in (101.75, 103.75, 107.75):
             now_monotonic[0] = now
             assert im._schedule_day0_metar_commit_retry() is True
-        assert len(scheduled) == 7
+        assert len(scheduled) == 6
         assert (
             scheduled[-1][1]["run_date"] - now_utc
         ).total_seconds() == pytest.approx(5.0)
@@ -1344,7 +1344,20 @@ class TestDay0MetarSourceClockTick:
             == im.DAY0_METAR_COMMIT_RETRY_MAX_FAILURES
         )
 
-        im._reset_day0_metar_commit_retry()
+        now_monotonic[0] = 112.75
+        assert im._schedule_day0_metar_commit_retry() is False
+        assert len(scheduled) == 6
+        assert len(im._DAY0_METAR_PENDING_COMMITS) == 1
+
+        def _commit_success(*, origin):
+            assert origin == "source_clock"
+            im._DAY0_METAR_PENDING_COMMITS.clear()
+            return {"status": "COMMITTED"}
+
+        monkeypatch.setattr(im, "_commit_pending_day0_metar", _commit_success)
+        assert im._commit_or_schedule_day0_metar(origin="source_clock") == {
+            "status": "COMMITTED"
+        }
         assert im._DAY0_METAR_RETRY_FAILURES == 0
         assert im._DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC == 0.0
 
