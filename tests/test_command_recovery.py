@@ -764,7 +764,7 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
     monkeypatch.setattr(
         command_recovery,
-        "reconcile_edli_confirmed_legacy_command_repairs",
+        "reconcile_completed_partial_order_facts",
         _slow_db_pass,
     )
 
@@ -775,9 +775,12 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     assert summary["venue_snapshot_deferred"] is True
     assert summary["deferred_full_sweep"] is True
     assert summary["boot_fast_budget_exhausted"] is True
-    assert "edli_confirmed_legacy_command_repair" in summary["boot_fast_deferred_passes"]
-    assert summary["boot_fast_defer_reasons"]["edli_confirmed_legacy_command_repair"] == (
+    assert "completed_partial_order_facts" in summary["boot_fast_deferred_passes"]
+    assert summary["boot_fast_defer_reasons"]["completed_partial_order_facts"] == (
         "budget_exhausted_during_pass"
+    )
+    assert summary["boot_fast_defer_reasons"]["edli_confirmed_legacy_command_repair"] == (
+        "budget_exhausted_before_pass"
     )
     client.get_order.assert_not_called()
     client.get_open_orders.assert_not_called()
@@ -1104,7 +1107,7 @@ def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
 
     assert apply_attempts == [{"blocking": False, "busy_timeout_ms": 0}]
     assert summary["db_lock_deferred"] is True
-    assert summary["db_lock_deferred_at"] == "edli_post_submit_unknown_absence_fast"
+    assert summary["db_lock_deferred_at"] == "completed_partial_order_facts"
     assert summary["db_lock_deferred_count"] == 1
     assert summary["deferred_full_sweep"] is True
     assert summary["scope"] == "live_tick"
@@ -7697,6 +7700,162 @@ class TestRecoveryResolutionTable:
 
         repeated = reconcile_unresolved_commands(conn, mock_client)
         assert repeated["completed_partial_order_facts"]["scanned"] == 0
+
+    def test_true_filled_command_is_not_reprocessed_as_terminal_partial(
+        self,
+        conn,
+    ):
+        """Expanding legacy repair to FILLED must not rewrite real full fills."""
+
+        from src.execution.command_recovery import (
+            reconcile_completed_partial_order_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, order_type="FAK", size=10.0, price=0.08)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-full",
+            state="CONFIRMED",
+            filled_size="10",
+            fill_price="0.08",
+        )
+        _append_order_fact(
+            conn,
+            state="MATCHED",
+            matched_size="10",
+            remaining_size="0",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-001",
+                "filled_size": "10",
+                "fill_price": "0.08",
+            },
+        )
+
+        assert reconcile_completed_partial_order_facts(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "FILLED"
+
+    @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
+    def test_scoped_recovery_prioritizes_false_filled_terminal_partial(
+        self,
+        tmp_path,
+        monkeypatch,
+        scope,
+    ):
+        """Every production recovery scope corrects command truth before projections."""
+
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / f"{scope}-terminal-partial.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_collateral_schema(seed)
+        _insert(seed, order_type="FAK", size=15.0, price=0.08)
+        _seed_pending_entry_projection(seed)
+        _advance_to_partial(seed, venue_order_id="ord-001")
+        _append_trade_fact(
+            seed,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-terminal-partial",
+            state="CONFIRMED",
+            filled_size="11",
+            fill_price="0.08",
+        )
+        _append_order_fact(
+            seed,
+            state="MATCHED",
+            matched_size="11",
+            remaining_size="0",
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-001",
+                "filled_size": "11",
+                "fill_price": "0.08",
+            },
+        )
+        _insert_decision_log_trade_case_for_recovery(seed)
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            scoped = sqlite3.connect(db_path)
+            scoped.row_factory = sqlite3.Row
+            return scoped
+
+        _conn_factory.supports_nonblocking_flocks = True
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+            ]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope=scope,
+        )
+
+        check = _conn_factory()
+        try:
+            state = _get_state(check, "cmd-001")
+            executions = check.execute(
+                """
+                SELECT intent_id, venue_status, terminal_exec_status
+                  FROM execution_fact
+                 WHERE command_id = 'cmd-001'
+                   AND order_role = 'entry'
+                 ORDER BY intent_id
+                """
+            ).fetchall()
+        finally:
+            check.close()
+        assert summary["completed_partial_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert state == "PARTIAL"
+        assert [dict(row) for row in executions] == [
+            {
+                "intent_id": "pos-001:entry",
+                "venue_status": "PARTIAL",
+                "terminal_exec_status": "partial",
+            }
+        ]
 
     def test_partial_entry_uses_canonical_order_truth_over_later_weaker_fact(
         self,

@@ -2038,11 +2038,22 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
             matched_size=candidate.get("order_fact_matched_size"),
         ):
             continue
-        if str(candidate.get("intent_kind") or "").upper() == "EXIT":
-            fill_summary = _positive_fill_trade_fact_summary(
-                conn,
-                str(candidate.get("command_id") or ""),
+        fill_summary = _positive_fill_trade_fact_summary(
+            conn,
+            str(candidate.get("command_id") or ""),
+            venue_order_id=str(candidate.get("venue_order_id") or ""),
+        )
+        if (
+            str(candidate.get("state") or "").upper()
+            == CommandState.FILLED.value
+            and _fill_size_completes_limit_order(
+                fill_summary.get("filled_size"),
+                candidate.get("size"),
+                side=candidate.get("side"),
             )
+        ):
+            continue
+        if str(candidate.get("intent_kind") or "").upper() == "EXIT":
             if _command_fill_coverage_state(candidate, fill_summary) != "complete":
                 continue
         candidates.append(candidate)
@@ -8811,6 +8822,26 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
                             fill_price=str(fill_summary.get("fill_price") or row.get("price") or ""),
                             observed_at=observed_at,
                             order_fact_source=str(row.get("order_fact_source") or "REST"),
+                        )
+                        execution_candidate = dict(row)
+                        execution_candidate.update(
+                            cmd_state=CommandState.PARTIAL.value,
+                            cmd_size=row.get("size"),
+                            cmd_price=row.get("price"),
+                            cmd_created_at=row.get("created_at"),
+                            order_fact_state="PARTIALLY_MATCHED",
+                            order_fact_remaining_size="0",
+                            filled_size=filled_size,
+                            fill_price=str(
+                                fill_summary.get("fill_price")
+                                or row.get("price")
+                                or ""
+                            ),
+                            execution_filled_at=observed_at,
+                        )
+                        _log_filled_entry_trade_candidate_execution_fact(
+                            conn,
+                            candidate=execution_candidate,
                         )
                     conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                 except Exception:
@@ -18520,6 +18551,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 )
 
         _boot_db_pass(
+            "completed_partial_order_facts",
+            reconcile_completed_partial_order_facts,
+            "completed_partial_order_facts",
+        )
+        _boot_db_pass(
             "edli_confirmed_legacy_command_repair",
             reconcile_edli_confirmed_legacy_command_repairs,
             "edli_confirmed_legacy_command_repair",
@@ -18659,6 +18695,13 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         summary["venue_snapshot_deferred"] = True
         summary["deferred_full_sweep"] = True
         return
+
+    if scope in {"restart_preflight", "live_tick"}:
+        _db_pass(
+            "completed_partial_order_facts",
+            reconcile_completed_partial_order_facts,
+            "completed_partial_order_facts",
+        )
 
     if scope == "live_tick":
         _post_submit_unknown_absence_fast_pass()
