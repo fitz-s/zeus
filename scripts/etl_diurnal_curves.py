@@ -354,21 +354,8 @@ def run_etl() -> dict:
             peak_rows,
         )
         zeus.commit()
-
         stored = len(curve_rows)
         monthly_rows = len(peak_rows)
-        peak_check = zeus.execute(
-            """
-            SELECT hour, avg_temp FROM diurnal_curves
-            WHERE city = 'NYC' AND season = 'DJF'
-            ORDER BY avg_temp DESC
-            LIMIT 3
-            """
-        ).fetchall()
-        if peak_check:
-            print("\nVerification - NYC DJF peak hours:")
-            for row in peak_check:
-                print(f"  Hour {row['hour']:2d}: avg_temp={row['avg_temp']:.1f}")
     except BaseException:
         zeus.rollback()
         raise

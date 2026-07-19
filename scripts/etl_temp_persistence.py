@@ -21,6 +21,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.config import cities_by_name  # noqa: E402
+
 
 def season_from_date(date_str: str, city_name: str = "") -> str:
     """Hemisphere-aware season code."""
@@ -59,30 +61,57 @@ def _classify_delta(delta: float) -> str:
     return ">10"  # fallback
 
 
+def _is_canonical_daily_observation(
+    city_name: str,
+    source: str,
+    station_id: str | None,
+) -> bool:
+    """Match the executable harvester's finalized source-family contract."""
+    city = cities_by_name.get(city_name)
+    if city is None:
+        return False
+    src = source.strip().lower()
+    if city.settlement_source_type == "wu_icao":
+        family_match = src == "wu_icao_history" or src.startswith("wu_icao_history_")
+        expected_station = str(city.wu_station or "").strip().upper()
+    elif city.settlement_source_type == "noaa":
+        family_match = src.startswith("ogimet_metar_")
+        expected_station = str(city.wu_station or "").strip().upper()
+    elif city.settlement_source_type == "hko":
+        family_match = src == "hko_daily_api" or src.startswith("hko_daily_api_")
+        expected_station = "HKO"
+    else:
+        return False
+    if not family_match or not expected_station:
+        return False
+    station = str(station_id or "").strip().upper()
+    return station == expected_station or station.startswith(f"{expected_station}:")
+
+
 def run_etl() -> dict:
     source = get_read_connection()
     try:
         # observations is forecast-class canonical truth. The world table with
         # the same name is a retained ghost, not an input authority.
         rows = source.execute("""
-            SELECT city, target_date, high_temp, source
+            SELECT city, target_date, high_temp, source, station_id
             FROM observations
             WHERE high_temp IS NOT NULL
-            ORDER BY city, target_date,
-                CASE source
-                    WHEN 'wu_daily_observed' THEN 1
-                    WHEN 'noaa_cdo_ghcnd' THEN 2
-                    WHEN 'iem_asos' THEN 3
-                    WHEN 'openmeteo_archive' THEN 4
-                    ELSE 5
-                END
+              AND authority = 'VERIFIED'
+            ORDER BY city, target_date, source
         """).fetchall()
     finally:
         source.close()
 
-    # Deduplicate: one observation per city-date (highest priority)
+    # The executable source contract admits at most one finalized row per city-date.
     daily_temps = {}
     for r in rows:
+        if not _is_canonical_daily_observation(
+            str(r["city"]),
+            str(r["source"]),
+            r["station_id"],
+        ):
+            continue
         key = (r["city"], r["target_date"])
         if key not in daily_temps:
             daily_temps[key] = r["high_temp"]

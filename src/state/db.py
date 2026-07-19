@@ -257,36 +257,42 @@ def _connect(
             raise ValueError(f"busy_timeout_ms must be >= 0; got {timeout_ms}")
     timeout_s = timeout_ms / 1000.0
     conn = sqlite3.connect(str(db_path), timeout=timeout_s)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    # 2026-05-12 antibody (cold-cache K3 partial fix): bump page cache to 1 GB
-    # so the hot working set of large forecast tables stays resident across
-    # cycles. Default is ~2 MB which is fatal for 35 GB forecasts.db cold-cache
-    # B-tree descent. ZEUS_DB_CACHE_KB env var overrides; -1048576 = 1 GiB.
-    # Per-connection, so independent for trade/world/forecasts/backtest.
-    cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
-    conn.execute(f"PRAGMA cache_size = -{cache_kb}")
-    # 2026-05-13 antibody (cold-cache K3 follow-up): mmap_size lets SQLite use
-    # OS-managed page cache instead of bounded per-connection cache. On the
-    # post-promote 51 GB forecasts.db, 1 GB cache_size still thrashes when
-    # the working set (2945 distinct ingest tuples × 5-column autoindex
-    # descent) exceeds it. Setting mmap_size to a 32 GB ceiling lets the OS
-    # cache reused autoindex/data pages across queries WITHOUT churning the
-    # SQLite cache. ZEUS_DB_MMAP_BYTES env var overrides.
-    mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
-    conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
-    _install_connection_functions(conn)
-    # CATEGORY ANTIBODY (Fitz #5): set the SQL-level wait budget so a writer that
-    # loses the WAL write lock WAITS up to busy_timeout instead of raising
-    # "database is locked" instantly. sqlite3.connect(timeout=) alone only sets a
-    # C-level handler that executescript() can null; this PRAGMA is the durable
-    # budget. Connection PRAGMA only — INV-37 / txn semantics unchanged.
-    _apply_busy_timeout(conn, busy_timeout_ms=timeout_ms)
-    resolved = _resolve_write_class(write_class)
-    if resolved is not None:
-        _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        # 2026-05-12 antibody (cold-cache K3 partial fix): bump page cache to 1 GB
+        # so the hot working set of large forecast tables stays resident across
+        # cycles. Default is ~2 MB which is fatal for 35 GB forecasts.db cold-cache
+        # B-tree descent. ZEUS_DB_CACHE_KB env var overrides; -1048576 = 1 GiB.
+        # Per-connection, so independent for trade/world/forecasts/backtest.
+        cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
+        conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+        # 2026-05-13 antibody (cold-cache K3 follow-up): mmap_size lets SQLite use
+        # OS-managed page cache instead of bounded per-connection cache. On the
+        # post-promote 51 GB forecasts.db, 1 GB cache_size still thrashes when
+        # the working set (2945 distinct ingest tuples × 5-column autoindex
+        # descent) exceeds it. Setting mmap_size to a 32 GB ceiling lets the OS
+        # cache reused autoindex/data pages across queries WITHOUT churning the
+        # SQLite cache. ZEUS_DB_MMAP_BYTES env var overrides.
+        mmap_bytes = int(
+            os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024))
+        )
+        conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+        _install_connection_functions(conn)
+        # CATEGORY ANTIBODY (Fitz #5): set the SQL-level wait budget so a writer that
+        # loses the WAL write lock WAITS up to busy_timeout instead of raising
+        # "database is locked" instantly. sqlite3.connect(timeout=) alone only sets a
+        # C-level handler that executescript() can null; this PRAGMA is the durable
+        # budget. Connection PRAGMA only — INV-37 / txn semantics unchanged.
+        _apply_busy_timeout(conn, busy_timeout_ms=timeout_ms)
+        resolved = _resolve_write_class(write_class)
+        if resolved is not None:
+            _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _connect_read_only(db_path: Path) -> sqlite3.Connection:
@@ -303,16 +309,22 @@ def _connect_read_only(db_path: Path) -> sqlite3.Connection:
         uri=True,
         timeout=max(0.001, timeout_ms / 1000.0),
     )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only = ON")
-    conn.execute("PRAGMA foreign_keys=ON")
-    cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
-    conn.execute(f"PRAGMA cache_size = -{cache_kb}")
-    mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
-    conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
-    _install_connection_functions(conn)
-    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA foreign_keys=ON")
+        cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
+        conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+        mmap_bytes = int(
+            os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024))
+        )
+        conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+        _install_connection_functions(conn)
+        conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def get_trade_connection(

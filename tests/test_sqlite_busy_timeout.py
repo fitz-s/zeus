@@ -211,6 +211,78 @@ def test_per_connection_timeout_yields_quickly_to_existing_writer(tmp_path):
         holder.close()
 
 
+def test_per_connection_timeout_bounds_factory_journal_mode(tmp_path):
+    """The override applies while the factory establishes WAL mode."""
+    from src.state import db as _db
+
+    db_path = tmp_path / "contended-factory.db"
+    holder = sqlite3.connect(db_path)
+    holder.execute("CREATE TABLE t (value INTEGER)")
+    holder.commit()
+    holder.execute("BEGIN EXCLUSIVE")
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            _db._connect(db_path, busy_timeout_ms=25)
+        assert time.monotonic() - started < 1.0
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_factory_closes_connection_when_initialization_fails(monkeypatch, tmp_path):
+    from src.state import db as _db
+
+    captured = []
+    real_connect = sqlite3.connect
+
+    def fake_connect(path, **kwargs):
+        conn = real_connect(path, **kwargs)
+        captured.append(conn)
+        return conn
+
+    def fail_install(_conn):
+        raise RuntimeError("install failed")
+
+    monkeypatch.setattr(_db, "_install_connection_functions", fail_install)
+    with patch("src.state.db.sqlite3.connect", side_effect=fake_connect):
+        with pytest.raises(RuntimeError, match="install failed"):
+            _db._connect(tmp_path / "failed-init.db", busy_timeout_ms=25)
+
+    assert len(captured) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        captured[0].execute("SELECT 1")
+
+
+def test_read_only_factory_closes_connection_when_initialization_fails(
+    monkeypatch, tmp_path
+):
+    from src.state import db as _db
+
+    db_path = tmp_path / "failed-read-init.db"
+    sqlite3.connect(db_path).close()
+    captured = []
+    real_connect = sqlite3.connect
+
+    def fake_connect(path, **kwargs):
+        conn = real_connect(path, **kwargs)
+        captured.append(conn)
+        return conn
+
+    def fail_install(_conn):
+        raise RuntimeError("install failed")
+
+    monkeypatch.setattr(_db, "_install_connection_functions", fail_install)
+    with patch("src.state.db.sqlite3.connect", side_effect=fake_connect):
+        with pytest.raises(RuntimeError, match="install failed"):
+            _db._connect_read_only(db_path)
+
+    assert len(captured) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        captured[0].execute("SELECT 1")
+
+
 # ---------------------------------------------------------------------------
 # T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH: connect_or_degrade
 # ---------------------------------------------------------------------------

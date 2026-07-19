@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from scripts import etl_diurnal_curves, etl_temp_persistence
+from src.state import db as db_module
 from src.state.db import init_schema
 
 
@@ -144,6 +145,63 @@ def _seed_world(db_path: Path, unsafe_overrides: dict[str, object]) -> None:
     conn.close()
 
 
+def _seed_persistence_source(db_path: Path) -> None:
+    conn = _connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE observations (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            high_temp REAL,
+            source TEXT NOT NULL,
+            station_id TEXT,
+            authority TEXT NOT NULL
+        )
+        """
+    )
+    station = etl_temp_persistence.cities_by_name["NYC"].wu_station
+    conn.executemany(
+        "INSERT INTO observations VALUES ('NYC', ?, 999.0, 'wu_icao_history_revision_2', 'WRONG', 'VERIFIED')",
+        [(f"2026-01-{day:02d}",) for day in range(1, 6)],
+    )
+    conn.executemany(
+        "INSERT INTO observations VALUES ('NYC', ?, ?, 'wu_icao_history_revision_2', ?, 'VERIFIED')",
+        [(f"2026-01-{day:02d}", 49.0 + day, station) for day in range(1, 6)],
+    )
+    conn.executemany(
+        "INSERT INTO observations VALUES ('NYC', ?, 999.0, ?, ?, ?)",
+        [
+            (f"2026-01-{day:02d}", source, station, authority)
+            for day in range(1, 6)
+            for source, authority in (
+                ("openmeteo_archive", "VERIFIED"),
+                ("wu_icao_history_revision_2", "UNVERIFIED"),
+            )
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _seed_persistence_target(db_path: Path) -> None:
+    conn = _connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE temp_persistence (
+            city TEXT NOT NULL,
+            season TEXT NOT NULL,
+            delta_bucket TEXT NOT NULL,
+            frequency REAL NOT NULL,
+            avg_next_day_reversion REAL,
+            n_samples INTEGER NOT NULL,
+            PRIMARY KEY (city, season, delta_bucket)
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
 @pytest.mark.parametrize("unsafe_overrides", UNSAFE_READER_GATE_CASES)
 def test_diurnal_etl_excludes_current_rows_that_fail_reader_gate(
     tmp_path,
@@ -244,7 +302,7 @@ def test_derived_etls_read_and_compute_before_projection_replace(tmp_path, monke
         nonlocal diurnal_writer_opened
         assert _kwargs == {
             "write_class": "bulk",
-            "busy_timeout_ms": etl_diurnal_curves.ETL_WORLD_WRITE_BUSY_TIMEOUT_MS,
+            "busy_timeout_ms": 250,
         }
         assert diurnal_reader is not None
         with pytest.raises(sqlite3.ProgrammingError):
@@ -269,47 +327,10 @@ def test_derived_etls_read_and_compute_before_projection_replace(tmp_path, monke
     monkeypatch.setattr(etl_diurnal_curves.np, "array", original_array)
 
     persistence_source_path = tmp_path / "forecasts.db"
-    conn = _connect(persistence_source_path)
-    conn.execute(
-        """
-        CREATE TABLE observations (
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            high_temp REAL,
-            source TEXT NOT NULL
-        )
-        """
-    )
-    conn.executemany(
-        "INSERT INTO observations VALUES ('NYC', ?, ?, 'wu_daily_observed')",
-        [
-            ("2026-01-01", 50.0),
-            ("2026-01-02", 51.0),
-            ("2026-01-03", 52.0),
-            ("2026-01-04", 53.0),
-            ("2026-01-05", 54.0),
-        ],
-    )
-    conn.commit()
-    conn.close()
+    _seed_persistence_source(persistence_source_path)
 
     persistence_target_path = tmp_path / "world.db"
-    conn = _connect(persistence_target_path)
-    conn.execute(
-        """
-        CREATE TABLE temp_persistence (
-            city TEXT NOT NULL,
-            season TEXT NOT NULL,
-            delta_bucket TEXT NOT NULL,
-            frequency REAL NOT NULL,
-            avg_next_day_reversion REAL,
-            n_samples INTEGER NOT NULL,
-            PRIMARY KEY (city, season, delta_bucket)
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
+    _seed_persistence_target(persistence_target_path)
 
     persistence_read_sql: list[str] = []
     persistence_write_sql: list[str] = []
@@ -328,7 +349,7 @@ def test_derived_etls_read_and_compute_before_projection_replace(tmp_path, monke
         nonlocal persistence_writer_opened
         assert _kwargs == {
             "write_class": "bulk",
-            "busy_timeout_ms": etl_temp_persistence.ETL_WORLD_WRITE_BUSY_TIMEOUT_MS,
+            "busy_timeout_ms": 250,
         }
         assert persistence_reader is not None
         with pytest.raises(sqlite3.ProgrammingError):
@@ -351,6 +372,17 @@ def test_derived_etls_read_and_compute_before_projection_replace(tmp_path, monke
     monkeypatch.setattr(etl_temp_persistence.np, "mean", _persistence_mean)
     etl_temp_persistence.run_etl()
 
+    conn = _connect(persistence_target_path)
+    projected = conn.execute(
+        """
+        SELECT season, delta_bucket, frequency, avg_next_day_reversion, n_samples
+        FROM temp_persistence
+        WHERE city = 'NYC'
+        """
+    ).fetchall()
+    assert [tuple(row) for row in projected] == [("DJF", "1 to 3", 1.0, 1.0, 4)]
+    conn.close()
+
     diurnal_select = next(
         index
         for index, sql in enumerate(diurnal_sql)
@@ -368,3 +400,134 @@ def test_derived_etls_read_and_compute_before_projection_replace(tmp_path, monke
         "CREATE " not in sql.upper()
         for sql in (*diurnal_sql, *persistence_read_sql, *persistence_write_sql)
     )
+
+
+def test_temp_persistence_binds_forecasts_reader_and_source_contract() -> None:
+    assert etl_temp_persistence.get_read_connection is db_module.get_forecasts_connection_read_only
+    nyc_station = etl_temp_persistence.cities_by_name["NYC"].wu_station
+    assert etl_temp_persistence._is_canonical_daily_observation(
+        "NYC", "wu_icao_history_revision_2", nyc_station
+    )
+    assert not etl_temp_persistence._is_canonical_daily_observation(
+        "NYC", "wu_icao_history_revision_2", "WRONG"
+    )
+    assert not etl_temp_persistence._is_canonical_daily_observation(
+        "NYC", "openmeteo_archive", nyc_station
+    )
+    assert etl_temp_persistence._is_canonical_daily_observation(
+        "Hong Kong", "hko_daily_api_revision_2", "HKO:DAILY"
+    )
+    assert not etl_temp_persistence._is_canonical_daily_observation(
+        "Hong Kong", "hko_realtime_api", "HKO"
+    )
+    istanbul_station = etl_temp_persistence.cities_by_name["Istanbul"].wu_station
+    assert etl_temp_persistence._is_canonical_daily_observation(
+        "Istanbul", "ogimet_metar_revision_2", istanbul_station
+    )
+    assert not etl_temp_persistence._is_canonical_daily_observation(
+        "Istanbul", "ogimet_metar_revision_2", "WRONG"
+    )
+
+
+def test_diurnal_publish_failure_preserves_previous_projection(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "diurnal-rollback.db"
+    _seed_world(db_path, {"authority": "UNVERIFIED"})
+    conn = _connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO diurnal_curves
+        (city, season, hour, avg_temp, std_temp, n_samples, p_high_set)
+        VALUES ('SENTINEL', 'DJF', 0, 1.0, 1.0, 1, 0.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO diurnal_peak_prob (city, month, hour, p_high_set, n_obs)
+        VALUES ('SENTINEL', 1, 0, 0.0, 1)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER reject_diurnal_publish
+        BEFORE INSERT ON diurnal_curves
+        WHEN NEW.city != 'SENTINEL'
+        BEGIN SELECT RAISE(ABORT, 'publish failed'); END
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    writer: sqlite3.Connection | None = None
+
+    def _writer(**_kwargs):
+        nonlocal writer
+        writer = _connect(db_path)
+        return writer
+
+    monkeypatch.setattr(etl_diurnal_curves, "get_read_connection", lambda: _connect(db_path))
+    monkeypatch.setattr(etl_diurnal_curves, "get_write_connection", _writer)
+
+    with pytest.raises(sqlite3.IntegrityError, match="publish failed"):
+        etl_diurnal_curves.run_etl()
+
+    assert writer is not None
+    with pytest.raises(sqlite3.ProgrammingError):
+        writer.execute("SELECT 1")
+    conn = _connect(db_path)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM diurnal_curves WHERE city='SENTINEL'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM diurnal_peak_prob WHERE city='SENTINEL'"
+    ).fetchone()[0] == 1
+    conn.close()
+
+
+def test_persistence_publish_failure_preserves_previous_projection(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "forecasts-rollback.db"
+    target_path = tmp_path / "world-rollback.db"
+    _seed_persistence_source(source_path)
+    _seed_persistence_target(target_path)
+    conn = _connect(target_path)
+    conn.execute(
+        """
+        INSERT INTO temp_persistence
+        VALUES ('SENTINEL', 'DJF', '1 to 3', 1.0, 0.0, 1)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER reject_persistence_publish
+        BEFORE INSERT ON temp_persistence
+        WHEN NEW.city != 'SENTINEL'
+        BEGIN SELECT RAISE(ABORT, 'publish failed'); END
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    writer: sqlite3.Connection | None = None
+
+    def _writer(**_kwargs):
+        nonlocal writer
+        writer = _connect(target_path)
+        return writer
+
+    monkeypatch.setattr(
+        etl_temp_persistence, "get_read_connection", lambda: _connect(source_path)
+    )
+    monkeypatch.setattr(etl_temp_persistence, "get_write_connection", _writer)
+
+    with pytest.raises(sqlite3.IntegrityError, match="publish failed"):
+        etl_temp_persistence.run_etl()
+
+    assert writer is not None
+    with pytest.raises(sqlite3.ProgrammingError):
+        writer.execute("SELECT 1")
+    conn = _connect(target_path)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM temp_persistence WHERE city='SENTINEL'"
+    ).fetchone()[0] == 1
+    conn.close()
