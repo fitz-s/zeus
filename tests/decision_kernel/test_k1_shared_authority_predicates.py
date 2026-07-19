@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-26
-# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K1.3
+# Last reused/audited: 2026-07-19
+# Authority basis: shared live/no-submit calibration authority predicate.
 # (twin-authority elimination: maturity ALT tuple verifier L945 + compiler L582 must be
 # ONE shared constant + ONE shared predicate; divergent carve-out tuples caused 53/h
 # false rejects when FUSED_BOOTSTRAP was added to one side only — CERT BRIDGE 2026-06-10).
@@ -39,6 +39,8 @@ def test_alt_credential_constant_is_shared_single_source():
             verifier_module.FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
             verifier_module.FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
             verifier_module.DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
+            verifier_module.DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
+            verifier_module.DAY0_DETERMINISTIC_BIN_PAYOFF_CALIBRATION_AUTHORITY,
         }
     )
     # Compiler must reference the same object (imported, not redefined).

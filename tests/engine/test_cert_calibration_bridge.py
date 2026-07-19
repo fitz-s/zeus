@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-13
+# Last reused/audited: 2026-07-19
 # Authority basis: Operator-gated funnel #1 unlock (2026-06-10) — first-class calibration
 #   authority for replacement-chain candidates (FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE). Tears
 #   down the Platt-cohort wall: replacement candidates' q never passes through Platt, so the
@@ -39,7 +39,11 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import runtime_cities_by_name, settings
-from src.decision_kernel.verifier import APPROVED_CALIBRATION_AUTHORITIES
+from src.decision_kernel.verifier import (
+    APPROVED_CALIBRATION_AUTHORITIES,
+    DAY0_DETERMINISTIC_BIN_PAYOFF_CALIBRATION_AUTHORITY,
+    _validate_calibration_payload,
+)
 from src.engine import event_reactor_adapter as adapter
 from src.engine.event_reactor_adapter import (
     FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
@@ -49,7 +53,13 @@ from src.engine.event_reactor_adapter import (
     _assert_event_bound_calibration_live_admitted,
     _build_replacement_calibration_credential,
     _calibration_authority_payload_and_clock,
+    _day0_calibration_authority_payload_and_clock,
     _replacement_family_coverage_verdict,
+)
+from src.solve.solver import (
+    OutcomeTokenBinding,
+    deterministic_bin_payoff_sample_identity,
+    deterministic_bin_payoff_witness_identity,
 )
 from src.types.market import Bin
 
@@ -222,6 +232,149 @@ def test_day0_live_observation_hard_fact_cannot_authorize_entry_probability():
             forecast_payload={"horizon_profile": "full"},
             decision_time=DECISION_TIME,
         )
+
+
+def test_day0_deterministic_payoff_round_trips_calibration_authority():
+    family_key = "chicago-2026-05-25-high"
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="bin-72f",
+            condition_id="condition-72f",
+            yes_token_id="yes-token-72f",
+            no_token_id="no-token-72f",
+        ),
+        OutcomeTokenBinding(
+            bin_id="bin-73f",
+            condition_id="condition-73f",
+            yes_token_id="yes-token-73f",
+            no_token_id="no-token-73f",
+        ),
+    )
+    exact_yes_payoffs = (("bin-72f", 0),)
+    q_version = "q-version-1"
+    resolution_identity = "resolution-1"
+    topology_identity = "topology-1"
+    posterior_identity_hash = "posterior-1"
+    source_truth_identity = "source-truth-1"
+    authority_certificate_hash = "authority-cert-1"
+    band_alpha = 0.05
+    band_basis = "day0_deterministic_bin_payoff_v1"
+    captured_at = DECISION_TIME
+    witness_identity = deterministic_bin_payoff_witness_identity(
+        family_key=family_key,
+        bindings=bindings,
+        exact_yes_payoffs=exact_yes_payoffs,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=topology_identity,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=band_alpha,
+        band_basis=band_basis,
+        captured_at_utc=captured_at,
+    )
+    binding = {
+        "city": _CITY,
+        "target_date": _TARGET_DATE,
+        "metric": _METRIC,
+        "station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "F",
+        "observation_time": "2026-05-24T18:00:00+00:00",
+        "observation_available_at": "2026-05-24T18:01:00+00:00",
+        "observed_extreme_native": 72.0,
+        "rounded_value": 72,
+        "sample_count": 6,
+        "probability_base_identity": "day0-base-1",
+    }
+    payload = {
+        **binding,
+        "raw_value": binding["observed_extreme_native"],
+        "sample_count": binding["sample_count"],
+        "temperature_metric": _METRIC,
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "horizon_profile": "full",
+        "condition_id": "condition-72f",
+        "token_id": "no-token-72f",
+        "candidate_bin_id": "bin-72f",
+        "direction": "buy_no",
+        "q_live": 1.0,
+        "q_lcb_5pct": 1.0,
+        "probability_authority": "day0_deterministic_bin_payoff_v1",
+        "q_source": "day0_deterministic_bin_payoff",
+        "_edli_q_source": "day0_deterministic_bin_payoff",
+        "_edli_day0_q_mode": "deterministic_bin_payoff",
+        "_edli_day0_exact_yes_payoffs": dict(exact_yes_payoffs),
+        "_edli_day0_condition_by_bin": {
+            "bin-72f": "condition-72f",
+            "bin-73f": "condition-73f",
+        },
+        "_edli_day0_deterministic_witness_identity": witness_identity,
+        "_edli_day0_deterministic_q_version": q_version,
+        "_edli_day0_deterministic_sample_identity": (
+            deterministic_bin_payoff_sample_identity(exact_yes_payoffs)
+        ),
+        "_edli_day0_deterministic_source_truth_identity": source_truth_identity,
+        "_edli_day0_deterministic_authority_certificate_hash": (
+            authority_certificate_hash
+        ),
+        "_edli_day0_deterministic_family_key": family_key,
+        "_edli_day0_deterministic_bindings": [
+            {
+                "bin_id": item.bin_id,
+                "condition_id": item.condition_id,
+                "yes_token_id": item.yes_token_id,
+                "no_token_id": item.no_token_id,
+            }
+            for item in bindings
+        ],
+        "_edli_day0_deterministic_resolution_identity": resolution_identity,
+        "_edli_day0_deterministic_topology_identity": topology_identity,
+        "_edli_day0_deterministic_posterior_identity_hash": (
+            posterior_identity_hash
+        ),
+        "_edli_day0_deterministic_band_alpha": band_alpha,
+        "_edli_day0_deterministic_band_basis": band_basis,
+        "_edli_day0_deterministic_captured_at_utc": captured_at.isoformat(),
+        "_edli_global_day0_binding": binding,
+    }
+    city = runtime_cities_by_name()[_CITY]
+
+    calibration, _clock = _day0_calibration_authority_payload_and_clock(
+        city=city,
+        family=_family(),
+        payload=payload,
+        forecast_payload={"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
+
+    assert (
+        calibration["authority"]
+        == DAY0_DETERMINISTIC_BIN_PAYOFF_CALIBRATION_AUTHORITY
+    )
+    assert calibration["day0_probability_authority"]["selected_bin_id"] == "bin-72f"
+    assert calibration["day0_probability_authority"]["selected_q_lcb"] == 1.0
+    assert (
+        DAY0_DETERMINISTIC_BIN_PAYOFF_CALIBRATION_AUTHORITY
+        in APPROVED_CALIBRATION_AUTHORITIES
+    )
+    _assert_event_bound_calibration_live_admitted(
+        SimpleNamespace(payload=calibration)
+    )
+    _validate_calibration_payload(
+        calibration,
+        {"calibration_input_space": "day0_deterministic_bin_payoff"},
+        {"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
 
 
 def test_q1_unlicensed_unshrunk_is_blocked(monkeypatch):

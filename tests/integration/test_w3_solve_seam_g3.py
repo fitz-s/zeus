@@ -1802,7 +1802,7 @@ def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
     assert rebound["_edli_global_day0_binding"]["posterior_id"] == 29914
 
 
-def test_global_day0_actuation_can_bind_current_remaining_day_base_directly():
+def test_global_day0_observation_cannot_default_to_remaining_day_probability():
     conn, carrier = _stale_day0_carrier_and_current_observations()
     rebound = era._global_day0_execution_payload(
         carrier,
@@ -1819,10 +1819,8 @@ def test_global_day0_actuation_can_bind_current_remaining_day_base_directly():
     binding = rebound["_edli_global_day0_binding"]
     assert binding["probability_base_identity"] == "current-base-snapshot-1"
     assert "posterior_id" not in binding
-    authority = era._global_day0_probability_authority_payload(rebound)
-    assert authority["probability_base_identity"] == "current-base-snapshot-1"
-    assert "posterior_id" not in authority
-    assert authority["q_source"] == "day0_remaining_day"
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_PROBABILITY_TYPE_MISSING"):
+        era._global_day0_probability_authority_payload(rebound)
 
 
 def test_global_day0_actuation_compares_physical_state_not_carrier_provenance():
@@ -2825,6 +2823,12 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     assert binding["probability_base_identity"]
     assert "posterior_id" not in binding
     assert remaining_day_calls == 1
+    assert day0_payload["q_source"] == "day0_remaining_day"
+    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
+    assert (
+        day0_payload["probability_authority"]
+        == "day0_remaining_day_global_probability_v1"
+    )
 
     observed_extreme["value"] = 71.0
     deterministic_payload: dict[str, object] = {}

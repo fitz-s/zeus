@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-19
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -35,6 +36,11 @@ from src.contracts.execution_intent import DecisionSourceContext
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import build_certificate
+from src.solve.solver import (
+    OutcomeTokenBinding,
+    deterministic_bin_payoff_sample_identity,
+    deterministic_bin_payoff_witness_identity,
+)
 from src.types.market import Bin
 
 
@@ -206,6 +212,200 @@ def _day0_probability_fields(
         "_edli_day0_remaining_models": 3,
         "_edli_day0_lcb_transform": lcb_transform,
     }
+
+
+def _deterministic_day0_observation_payload() -> dict[str, object]:
+    family_key = "hong-kong-2026-07-20-high"
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="bin-29c",
+            condition_id="condition-29c",
+            yes_token_id="yes-token-29c",
+            no_token_id="no-token-29c",
+        ),
+        OutcomeTokenBinding(
+            bin_id="bin-30c",
+            condition_id="condition-30c",
+            yes_token_id=None,
+            no_token_id=None,
+        ),
+    )
+    exact_yes_payoffs = (("bin-29c", 0),)
+    q_version = "q-version-1"
+    resolution_identity = "resolution-1"
+    topology_identity = "topology-1"
+    posterior_identity_hash = "posterior-1"
+    source_truth_identity = "source-truth-1"
+    authority_certificate_hash = "authority-cert-1"
+    band_alpha = 0.05
+    band_basis = "day0_deterministic_bin_payoff_v1"
+    captured_at = datetime(2026, 7, 19, 8, 3, tzinfo=timezone.utc)
+    witness_identity = deterministic_bin_payoff_witness_identity(
+        family_key=family_key,
+        bindings=bindings,
+        exact_yes_payoffs=exact_yes_payoffs,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=topology_identity,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=band_alpha,
+        band_basis=band_basis,
+        captured_at_utc=captured_at,
+    )
+    binding = {
+        "city": "Hong Kong",
+        "target_date": "2026-07-20",
+        "metric": "high",
+        "station_id": "HKO",
+        "settlement_source": "hko",
+        "settlement_unit": "C",
+        "observation_time": "2026-07-19T08:00:00+00:00",
+        "observation_available_at": "2026-07-19T08:02:00+00:00",
+        "observed_extreme_native": 30.0,
+        "rounded_value": 30,
+        "sample_count": 8,
+        "probability_base_identity": "day0-base-1",
+    }
+    return {
+        "city": binding["city"],
+        "target_date": binding["target_date"],
+        "metric": binding["metric"],
+        "temperature_metric": binding["metric"],
+        "station_id": binding["station_id"],
+        "settlement_source": binding["settlement_source"],
+        "settlement_unit": binding["settlement_unit"],
+        "observation_time": binding["observation_time"],
+        "observation_available_at": binding["observation_available_at"],
+        "raw_value": binding["observed_extreme_native"],
+        "rounded_value": binding["rounded_value"],
+        "sample_count": binding["sample_count"],
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "probability_authority": "day0_deterministic_bin_payoff_v1",
+        "q_source": "day0_deterministic_bin_payoff",
+        "_edli_q_source": "day0_deterministic_bin_payoff",
+        "_edli_day0_q_mode": "deterministic_bin_payoff",
+        "_edli_day0_exact_yes_payoffs": dict(exact_yes_payoffs),
+        "_edli_day0_condition_by_bin": {
+            item.bin_id: item.condition_id for item in bindings
+        },
+        "_edli_day0_deterministic_witness_identity": witness_identity,
+        "_edli_day0_deterministic_q_version": q_version,
+        "_edli_day0_deterministic_sample_identity": (
+            deterministic_bin_payoff_sample_identity(exact_yes_payoffs)
+        ),
+        "_edli_day0_deterministic_source_truth_identity": source_truth_identity,
+        "_edli_day0_deterministic_authority_certificate_hash": (
+            authority_certificate_hash
+        ),
+        "_edli_day0_deterministic_family_key": family_key,
+        "_edli_day0_deterministic_bindings": [
+            {
+                "bin_id": item.bin_id,
+                "condition_id": item.condition_id,
+                "yes_token_id": item.yes_token_id,
+                "no_token_id": item.no_token_id,
+            }
+            for item in bindings
+        ],
+        "_edli_day0_deterministic_resolution_identity": resolution_identity,
+        "_edli_day0_deterministic_topology_identity": topology_identity,
+        "_edli_day0_deterministic_posterior_identity_hash": (
+            posterior_identity_hash
+        ),
+        "_edli_day0_deterministic_band_alpha": band_alpha,
+        "_edli_day0_deterministic_band_basis": band_basis,
+        "_edli_day0_deterministic_captured_at_utc": captured_at.isoformat(),
+        "_edli_global_day0_binding": binding,
+    }
+
+
+def _deterministic_day0_global_qkernel_cert() -> dict[str, object]:
+    sample_identity = deterministic_bin_payoff_sample_identity((("bin-29c", 0),))
+    cert = _global_current_qkernel_cert(side="NO")
+    cert.update(
+        q_version="q-version-1",
+        sample_hash=sample_identity,
+        q_lcb_guard_cell_key=sample_identity,
+        selection_guard_cell_key=sample_identity,
+        payoff_q_point=1.0,
+        payoff_q_lcb=1.0,
+        pre_qkernel_q_lcb_5pct=1.0,
+        cost=0.84,
+        edge_lcb=0.16,
+        false_edge_rate=0.0,
+        selection_guard_q_safe=1.0,
+        global_bin_id="bin-29c",
+        global_expected_cost_usd="16.8",
+        global_max_spend_usd="16.8",
+        global_robust_delta_log_wealth=math.log(1.032),
+        global_robust_ev_usd=3.2,
+        global_cut_time_win_probability_lcb=1.0,
+        global_cut_time_loss_probability_ucb=0.0,
+        global_terminal_win_probability_lcb=1.0,
+        global_terminal_loss_probability_ucb=0.0,
+        global_terminal_loss_payoff_usd="-16.8",
+        global_terminal_win_payoff_usd="3.2",
+        global_terminal_median_payoff_usd="3.2",
+        global_terminal_wealth_after_loss_usd="83.2",
+        global_terminal_wealth_after_win_usd="103.2",
+        global_cut_time_expected_value_diagnostic_usd=3.2,
+        global_expected_value_diagnostic_usd=3.2,
+    )
+    _seal_current_qkernel_cert(cert)
+    return cert
+
+
+def _deterministic_day0_actionable_payload() -> dict[str, object]:
+    observation = _deterministic_day0_observation_payload()
+    authority = era._global_day0_probability_authority_payload(observation)
+    authority.update(
+        {
+            "selected_condition_id": "condition-29c",
+            "selected_bin_id": "bin-29c",
+            "selected_token_id": "no-token-29c",
+            "selected_direction": "buy_no",
+            "selected_q_live": 1.0,
+            "selected_q_lcb": 1.0,
+        }
+    )
+    receipt = EventSubmissionReceipt(
+        False,
+        "global-day0-event-1",
+        "global-day0-snapshot-1",
+        proof_accepted=True,
+        strategy_key="day0_nowcast_entry",
+        family_id="hong-kong-2026-07-20-high",
+        candidate_id="global-candidate-29c-no",
+        condition_id="condition-29c",
+        token_id="no-token-29c",
+        direction="buy_no",
+        candidate_bin_id="bin-29c",
+        q_source="day0_deterministic_bin_payoff",
+        probability_authority="day0_deterministic_bin_payoff_v1",
+        selection_authority_applied="qkernel_spine",
+        q_live=1.0,
+        q_lcb_5pct=1.0,
+        qkernel_execution_economics=_deterministic_day0_global_qkernel_cert(),
+        day0_probability_authority=authority,
+    )
+    event = SimpleNamespace(
+        event_type="DAY0_EXTREME_UPDATED",
+        payload=observation,
+        payload_json=json.dumps(observation),
+    )
+    live_cap = SimpleNamespace(
+        payload={"usage_id": "usage-day0-1", "reserved_notional_usd": 16.8}
+    )
+    return era._actionable_payload_from_receipt(receipt, live_cap, event=event)
 
 
 def _day0_qkernel_cert(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dict:
@@ -2666,6 +2866,238 @@ def test_live_entry_day0_gate_accepts_live_observation_authority_with_qkernel():
             qkernel_execution_economics=_day0_qkernel_cert(),
         )
     )
+
+
+def test_global_deterministic_day0_receipt_projects_and_admits_exact_selected_no():
+    payload = _deterministic_day0_actionable_payload()
+
+    assert payload["_edli_q_source"] == "day0_deterministic_bin_payoff"
+    assert payload["_edli_day0_q_mode"] == "deterministic_bin_payoff"
+    assert payload["_edli_day0_exact_yes_payoffs"] == {"bin-29c": 0}
+    assert payload["_edli_day0_condition_by_bin"] == {
+        "bin-29c": "condition-29c",
+        "bin-30c": "condition-30c",
+    }
+    observation = payload["day0_probability_authority"][
+        "global_current_observation_payload"
+    ]
+    assert observation["station_id"] == "HKO"
+    assert observation["settlement_source"] == "hko"
+    _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_entry_rejects_missing_probability_type():
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    payload["q_source"] = None
+    payload["_edli_q_source"] = None
+    authority = payload["day0_probability_authority"]
+    authority.pop("q_source")
+    observation = authority["global_current_observation_payload"]
+    observation.pop("q_source")
+    observation.pop("_edli_q_source")
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "day0_probability_q_source required:missing",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_entry_rejects_selected_q_payoff_drift():
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    payload["q_live"] = 0.99
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "deterministic_selected_q/payoff mismatch",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_entry_rejects_condition_bin_drift():
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    payload["condition_id"] = "condition-other"
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "deterministic_selected_condition mismatch",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_entry_rejects_nested_probability_type_drift():
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    observation = payload["day0_probability_authority"][
+        "global_current_observation_payload"
+    ]
+    observation["q_source"] = "day0_remaining_day"
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "deterministic_q_source mismatch",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("raw_value", 29.0),
+        ("rounded_value", 29),
+        ("observation_time", "2026-07-19T09:00:00+00:00"),
+    ),
+)
+def test_global_deterministic_day0_entry_rejects_outer_observation_drift(
+    field_name: str,
+    value: object,
+):
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    payload[field_name] = value
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:deterministic_",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_entry_recomputes_payoff_sample_identity():
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    authority = payload["day0_probability_authority"]
+    observation = authority["global_current_observation_payload"]
+    for owner, key in (
+        (payload, "_edli_day0_deterministic_sample_identity"),
+        (authority, "sample_identity"),
+        (observation, "_edli_day0_deterministic_sample_identity"),
+    ):
+        owner[key] = "forged-consistent-sample"
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "deterministic_sample_identity/payoff mismatch",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_entry_recomputes_complete_witness_identity():
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    authority = payload["day0_probability_authority"]
+    observation = authority["global_current_observation_payload"]
+    forged_payoffs = {"bin-29c": 1}
+    forged_sample = deterministic_bin_payoff_sample_identity((("bin-29c", 1),))
+    for owner, key in (
+        (payload, "_edli_day0_exact_yes_payoffs"),
+        (authority, "exact_yes_payoffs"),
+        (observation, "_edli_day0_exact_yes_payoffs"),
+    ):
+        owner[key] = forged_payoffs
+    for owner, key in (
+        (payload, "_edli_day0_deterministic_sample_identity"),
+        (authority, "sample_identity"),
+        (observation, "_edli_day0_deterministic_sample_identity"),
+    ):
+        owner[key] = forged_sample
+    payload.update(
+        direction="buy_yes",
+        token_id="yes-token-29c",
+        q_live=1.0,
+        q_lcb_5pct=1.0,
+    )
+    authority.update(
+        selected_direction="buy_yes",
+        selected_token_id="yes-token-29c",
+        selected_q_live=1.0,
+        selected_q_lcb=1.0,
+    )
+    economics = payload["qkernel_execution_economics"]
+    economics.update(
+        side="YES",
+        sample_hash=forged_sample,
+        q_lcb_guard_cell_key=forged_sample,
+        selection_guard_cell_key=forged_sample,
+        payoff_q_point=1.0,
+        payoff_q_lcb=1.0,
+        selection_guard_q_safe=1.0,
+    )
+    _seal_current_qkernel_cert(economics)
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "deterministic_witness_content mismatch",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_entry_recomputes_witness_identity():
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    authority = payload["day0_probability_authority"]
+    observation = authority["global_current_observation_payload"]
+    for owner, key in (
+        (payload, "_edli_day0_deterministic_authority_certificate_hash"),
+        (authority, "authority_certificate_hash"),
+        (observation, "_edli_day0_deterministic_authority_certificate_hash"),
+    ):
+        owner[key] = "forged-consistent-authority-certificate"
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "deterministic_witness_content mismatch",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_entry_rejects_selected_token_drift():
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    payload["token_id"] = "yes-token-29c"
+
+    with pytest.raises(
+        ValueError,
+        match="LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "deterministic_selected_token mismatch",
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected"),
+    (
+        (
+            "q_version",
+            "other-q-version",
+            "deterministic_qkernel_q_version mismatch",
+        ),
+        (
+            "sample_hash",
+            "other-sample",
+            "deterministic_qkernel_sample_identity mismatch",
+        ),
+    ),
+)
+def test_global_deterministic_day0_entry_rejects_qkernel_witness_drift(
+    field_name: str,
+    value: str,
+    expected: str,
+):
+    payload = deepcopy(_deterministic_day0_actionable_payload())
+    economics = payload["qkernel_execution_economics"]
+    economics[field_name] = value
+    if field_name == "sample_hash":
+        economics["q_lcb_guard_cell_key"] = value
+        economics["selection_guard_cell_key"] = value
+    _seal_current_qkernel_cert(economics)
+
+    with pytest.raises(
+        ValueError,
+        match=f"LIVE_ENTRY_DAY0_QKERNEL_GUARD_AUTHORITY_REQUIRED:{expected}",
+    ):
+        _assert_live_entry_submit_authority(payload)
 
 
 def test_live_entry_day0_gate_accepts_degenerate_lcb_with_remaining_window_guard():

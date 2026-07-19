@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import math
 from typing import Mapping
 
@@ -26,6 +27,11 @@ DAY0_LIVE_AUTHORITY_MATCHES = {
 
 DAY0_REMAINING_DAY_Q_SOURCE = "day0_remaining_day"
 DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
+DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
+DAY0_DETERMINISTIC_BIN_PAYOFF_Q_MODE = "deterministic_bin_payoff"
+DAY0_DETERMINISTIC_BIN_PAYOFF_GLOBAL_AUTHORITY = (
+    "day0_deterministic_bin_payoff_v1"
+)
 DAY0_REPLACEMENT_Q_SOURCE = "replacement_0_1"
 DAY0_REPLACEMENT_GLOBAL_AUTHORITY = "replacement_current_global_probability_v1"
 DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS = "CURRENT_POSTERIOR_BAND"
@@ -455,6 +461,498 @@ def _assert_replacement_global_day0_probability_authority(
         )
 
 
+def _matching_text(label: str, *values: object) -> str:
+    present = {str(value).strip() for value in values if value not in (None, "")}
+    if not present:
+        raise Day0AuthorityError(f"{label} missing")
+    if len(present) != 1:
+        raise Day0AuthorityError(f"{label} mismatch:{sorted(present)}")
+    return next(iter(present))
+
+
+def _matching_float(label: str, *values: object) -> float:
+    present: list[float] = []
+    for value in values:
+        if value in (None, ""):
+            continue
+        if isinstance(value, bool):
+            raise Day0AuthorityError(f"{label} is not numeric")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise Day0AuthorityError(f"{label} is not numeric") from None
+        if not math.isfinite(number):
+            raise Day0AuthorityError(f"{label} is not finite")
+        present.append(number)
+    if not present:
+        raise Day0AuthorityError(f"{label} missing")
+    if any(
+        not math.isclose(value, present[0], rel_tol=0.0, abs_tol=1e-9)
+        for value in present[1:]
+    ):
+        raise Day0AuthorityError(f"{label} mismatch")
+    return present[0]
+
+
+def _exact_binary_payoffs(
+    payload: Mapping[str, object],
+    block: Mapping[str, object],
+    observation: Mapping[str, object],
+) -> dict[str, float]:
+    maps: list[dict[str, float]] = []
+    for owner, key in (
+        (payload, "_edli_day0_exact_yes_payoffs"),
+        (payload, "exact_yes_payoffs"),
+        (block, "exact_yes_payoffs"),
+        (observation, "_edli_day0_exact_yes_payoffs"),
+    ):
+        raw = owner.get(key)
+        if raw in (None, ""):
+            continue
+        if not isinstance(raw, Mapping) or not raw:
+            raise Day0AuthorityError("deterministic_exact_yes_payoffs invalid")
+        normalized: dict[str, float] = {}
+        for raw_bin_id, raw_payoff in raw.items():
+            bin_id = str(raw_bin_id or "").strip()
+            if not bin_id or isinstance(raw_payoff, bool):
+                raise Day0AuthorityError("deterministic_exact_yes_payoffs invalid")
+            try:
+                payoff = float(raw_payoff)
+            except (TypeError, ValueError):
+                raise Day0AuthorityError(
+                    f"deterministic_yes_payoff nonnumeric:{bin_id}"
+                ) from None
+            if not math.isfinite(payoff) or payoff not in {0.0, 1.0}:
+                raise Day0AuthorityError(
+                    f"deterministic_yes_payoff nonbinary:{bin_id}"
+                )
+            normalized[bin_id] = payoff
+        maps.append(normalized)
+    if not maps:
+        raise Day0AuthorityError("deterministic_exact_yes_payoffs missing")
+    if any(candidate != maps[0] for candidate in maps[1:]):
+        raise Day0AuthorityError("deterministic_exact_yes_payoffs mismatch")
+    return maps[0]
+
+
+def _deterministic_condition_by_bin(
+    payload: Mapping[str, object],
+    block: Mapping[str, object],
+    observation: Mapping[str, object],
+) -> dict[str, str]:
+    maps: list[dict[str, str]] = []
+    for owner, key in (
+        (payload, "_edli_day0_condition_by_bin"),
+        (payload, "condition_by_bin"),
+        (block, "condition_by_bin"),
+        (observation, "_edli_day0_condition_by_bin"),
+    ):
+        raw = owner.get(key)
+        if raw in (None, ""):
+            continue
+        if not isinstance(raw, Mapping) or not raw:
+            raise Day0AuthorityError("deterministic_condition_by_bin invalid")
+        normalized = {
+            str(raw_bin_id or "").strip(): str(raw_condition_id or "").strip()
+            for raw_bin_id, raw_condition_id in raw.items()
+        }
+        if any(not key or not value for key, value in normalized.items()):
+            raise Day0AuthorityError("deterministic_condition_by_bin invalid")
+        maps.append(normalized)
+    if not maps:
+        raise Day0AuthorityError("deterministic_condition_by_bin missing")
+    if any(candidate != maps[0] for candidate in maps[1:]):
+        raise Day0AuthorityError("deterministic_condition_by_bin mismatch")
+    return maps[0]
+
+
+def _deterministic_bindings(
+    payload: Mapping[str, object],
+    block: Mapping[str, object],
+    observation: Mapping[str, object],
+) -> tuple[tuple[str, str, str | None, str | None], ...]:
+    candidates: list[tuple[tuple[str, str, str | None, str | None], ...]] = []
+    for owner, key in (
+        (payload, "_edli_day0_deterministic_bindings"),
+        (block, "bindings"),
+        (observation, "_edli_day0_deterministic_bindings"),
+    ):
+        raw = owner.get(key)
+        if raw in (None, ""):
+            continue
+        if not isinstance(raw, (list, tuple)) or not raw:
+            raise Day0AuthorityError("deterministic_bindings invalid")
+        normalized: list[tuple[str, str, str | None, str | None]] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise Day0AuthorityError("deterministic_bindings invalid")
+            bin_id = str(item.get("bin_id") or "").strip()
+            condition = str(item.get("condition_id") or "").strip()
+            yes_token = str(item.get("yes_token_id") or "").strip() or None
+            no_token = str(item.get("no_token_id") or "").strip() or None
+            if not bin_id or not condition:
+                raise Day0AuthorityError("deterministic_bindings invalid")
+            normalized.append((bin_id, condition, yes_token, no_token))
+        value = tuple(normalized)
+        if len({row[0] for row in value}) != len(value):
+            raise Day0AuthorityError("deterministic_bindings duplicate bin")
+        candidates.append(value)
+    if not candidates:
+        raise Day0AuthorityError("deterministic_bindings missing")
+    if any(candidate != candidates[0] for candidate in candidates[1:]):
+        raise Day0AuthorityError("deterministic_bindings mismatch")
+    return candidates[0]
+
+
+def _assert_deterministic_bin_payoff_authority(
+    payload: Mapping[str, object],
+    block: Mapping[str, object],
+    *,
+    direction: object | None,
+    condition_id: object | None,
+    q_live: float | None,
+    q_lcb: float | None,
+) -> None:
+    observation = block.get("global_current_observation_payload")
+    if not isinstance(observation, Mapping) and isinstance(
+        payload.get("_edli_global_day0_binding"), Mapping
+    ):
+        observation = payload
+    if not isinstance(observation, Mapping):
+        raise Day0AuthorityError("deterministic_current_observation missing")
+    assert_live_day0_payload_authority(observation)
+    binding = observation.get("_edli_global_day0_binding")
+    if not isinstance(binding, Mapping):
+        raise Day0AuthorityError("deterministic_day0_binding missing")
+
+    authority = _matching_text(
+        "deterministic_probability_authority",
+        payload.get("probability_authority"),
+        block.get("probability_authority"),
+        observation.get("probability_authority"),
+    )
+    if authority != DAY0_DETERMINISTIC_BIN_PAYOFF_GLOBAL_AUTHORITY:
+        raise Day0AuthorityError(
+            f"deterministic_probability_authority invalid:{authority}"
+        )
+    q_source = _matching_text(
+        "deterministic_q_source",
+        payload.get("_edli_q_source"),
+        payload.get("q_source"),
+        block.get("q_source"),
+        observation.get("q_source"),
+        observation.get("_edli_q_source"),
+    )
+    if q_source != DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE:
+        raise Day0AuthorityError(f"deterministic_q_source invalid:{q_source}")
+    q_mode = _matching_text(
+        "deterministic_q_mode",
+        payload.get("_edli_day0_q_mode"),
+        payload.get("q_mode"),
+        block.get("q_mode"),
+        observation.get("_edli_day0_q_mode"),
+        observation.get("q_mode"),
+    )
+    if q_mode != DAY0_DETERMINISTIC_BIN_PAYOFF_Q_MODE:
+        raise Day0AuthorityError(f"deterministic_q_mode invalid:{q_mode}")
+
+    if block:
+        required_block_fields = (
+            "probability_authority",
+            "q_source",
+            "q_mode",
+            "exact_yes_payoffs",
+            "condition_by_bin",
+            "witness_identity",
+            "q_version",
+            "sample_identity",
+            "source_truth_identity",
+            "authority_certificate_hash",
+            "family_key",
+            "bindings",
+            "resolution_identity",
+            "topology_identity",
+            "posterior_identity_hash",
+            "band_alpha",
+            "band_basis",
+            "captured_at_utc",
+            "selected_condition_id",
+            "selected_bin_id",
+            "selected_token_id",
+            "selected_direction",
+            "selected_q_live",
+            "selected_q_lcb",
+        )
+        missing = tuple(
+            field_name
+            for field_name in required_block_fields
+            if block.get(field_name) in (None, "")
+        )
+        if missing:
+            raise Day0AuthorityError(
+                f"deterministic_probability_block incomplete:{','.join(missing)}"
+            )
+
+    identities: dict[str, str] = {}
+    for field_name, top_key in (
+        ("q_version", "_edli_day0_deterministic_q_version"),
+        ("source_truth_identity", "_edli_day0_deterministic_source_truth_identity"),
+        (
+            "authority_certificate_hash",
+            "_edli_day0_deterministic_authority_certificate_hash",
+        ),
+    ):
+        identities[field_name] = _matching_text(
+            f"deterministic_{field_name}",
+            payload.get(top_key),
+            block.get(field_name),
+            observation.get(top_key),
+        )
+
+    witness_identity = _matching_text(
+        "deterministic_witness_identity",
+        payload.get("_edli_day0_deterministic_witness_identity"),
+        block.get("witness_identity"),
+        observation.get("_edli_day0_deterministic_witness_identity"),
+    )
+    sample_identity = _matching_text(
+        "deterministic_sample_identity",
+        payload.get("_edli_day0_deterministic_sample_identity"),
+        block.get("sample_identity"),
+        observation.get("_edli_day0_deterministic_sample_identity"),
+    )
+
+    for field_name in ("city", "target_date"):
+        selected = _matching_text(
+            f"deterministic_{field_name}",
+            payload.get(field_name),
+            observation.get(field_name),
+        )
+        bound = str(binding.get(field_name) or "").strip()
+        if selected != bound:
+            raise Day0AuthorityError(f"deterministic_{field_name} binding mismatch")
+    metric = _matching_text(
+        "deterministic_metric",
+        payload.get("metric"),
+        payload.get("temperature_metric"),
+        observation.get("metric"),
+        observation.get("temperature_metric"),
+    ).lower()
+    if metric != str(binding.get("metric") or "").strip().lower():
+        raise Day0AuthorityError("deterministic_metric binding mismatch")
+    for field_name in (
+        "observation_time",
+        "observation_available_at",
+        "station_id",
+        "settlement_source",
+        "settlement_unit",
+    ):
+        _matching_text(
+            f"deterministic_{field_name}",
+            payload.get(field_name),
+            observation.get(field_name),
+            binding.get(field_name),
+        )
+    _matching_float(
+        "deterministic_observed_extreme",
+        payload.get("raw_value"),
+        payload.get("observed_extreme_native"),
+        observation.get("raw_value"),
+        observation.get("observed_extreme_native"),
+        binding.get("observed_extreme_native"),
+    )
+    _matching_float(
+        "deterministic_rounded_value",
+        payload.get("rounded_value"),
+        observation.get("rounded_value"),
+        binding.get("rounded_value"),
+    )
+    observed_samples = _matching_float(
+        "deterministic_sample_count",
+        payload.get("sample_count"),
+        payload.get("samples_count"),
+        observation.get("sample_count"),
+        observation.get("samples_count"),
+        binding.get("sample_count"),
+    )
+    if observed_samples <= 0 or not observed_samples.is_integer():
+        raise Day0AuthorityError("deterministic_observation binding mismatch")
+
+    selected_condition = _matching_text(
+        "deterministic_selected_condition",
+        condition_id,
+        payload.get("condition_id"),
+        block.get("selected_condition_id"),
+    )
+    selected_bin = _matching_text(
+        "deterministic_selected_bin",
+        payload.get("candidate_bin_id"),
+        block.get("selected_bin_id"),
+    )
+    selected_direction = _matching_text(
+        "deterministic_selected_direction",
+        direction,
+        payload.get("direction"),
+        block.get("selected_direction"),
+    ).lower()
+    if selected_direction not in {"buy_yes", "buy_no"}:
+        raise Day0AuthorityError(
+            f"deterministic_selected_direction unsupported:{selected_direction}"
+        )
+    condition_by_bin = _deterministic_condition_by_bin(payload, block, observation)
+    binding_rows = _deterministic_bindings(payload, block, observation)
+    bound_conditions = {row[0]: row[1] for row in binding_rows}
+    if condition_by_bin != bound_conditions:
+        raise Day0AuthorityError("deterministic_condition_by_bin/bindings mismatch")
+    if condition_by_bin.get(selected_bin) != selected_condition:
+        raise Day0AuthorityError("deterministic_selected_condition/bin mismatch")
+    exact_yes_payoffs = _exact_binary_payoffs(payload, block, observation)
+    from src.solve.solver import deterministic_bin_payoff_sample_identity
+
+    expected_sample_identity = deterministic_bin_payoff_sample_identity(
+        tuple((bin_id, int(payoff)) for bin_id, payoff in exact_yes_payoffs.items())
+    )
+    if sample_identity != expected_sample_identity:
+        raise Day0AuthorityError("deterministic_sample_identity/payoff mismatch")
+    if selected_bin not in exact_yes_payoffs:
+        raise Day0AuthorityError(
+            f"deterministic_selected_payoff missing:{selected_bin}"
+        )
+    yes_payoff = exact_yes_payoffs[selected_bin]
+    expected_q = yes_payoff if selected_direction == "buy_yes" else 1.0 - yes_payoff
+    selected_token = _matching_text(
+        "deterministic_selected_token",
+        payload.get("token_id"),
+        block.get("selected_token_id"),
+    )
+    selected_binding = next(row for row in binding_rows if row[0] == selected_bin)
+    expected_token = (
+        selected_binding[2]
+        if selected_direction == "buy_yes"
+        else selected_binding[3]
+    )
+    if not expected_token or selected_token != expected_token:
+        raise Day0AuthorityError("deterministic_selected_token/bin/side mismatch")
+    live_q = _first_float(
+        {"q_live": q_live},
+        payload,
+        "q_live",
+        "selected_q_live",
+    )
+    lcb_q = _first_float(
+        {"q_lcb": q_lcb},
+        payload,
+        "q_lcb",
+        "q_lcb_5pct",
+        "selected_q_lcb",
+    )
+    block_live_q = _first_float(block, {}, "selected_q_live")
+    block_lcb_q = _first_float(block, {}, "selected_q_lcb")
+    if live_q is None or lcb_q is None:
+        raise Day0AuthorityError("deterministic_selected_q missing")
+    bound_q_values = [live_q, lcb_q]
+    if block:
+        if block_live_q is None or block_lcb_q is None:
+            raise Day0AuthorityError("deterministic_selected_q missing")
+        bound_q_values.extend((block_live_q, block_lcb_q))
+    if not all(
+        math.isclose(value, expected_q, rel_tol=0.0, abs_tol=1e-12)
+        for value in bound_q_values
+    ):
+        raise Day0AuthorityError(
+            "deterministic_selected_q/payoff mismatch:"
+            f"expected={expected_q}:q_live={live_q}:q_lcb={lcb_q}"
+        )
+
+    family_key = _matching_text(
+        "deterministic_family_key",
+        payload.get("_edli_day0_deterministic_family_key"),
+        payload.get("family_id"),
+        block.get("family_key"),
+        observation.get("_edli_day0_deterministic_family_key"),
+    )
+    resolution_identity = _matching_text(
+        "deterministic_resolution_identity",
+        payload.get("_edli_day0_deterministic_resolution_identity"),
+        block.get("resolution_identity"),
+        observation.get("_edli_day0_deterministic_resolution_identity"),
+    )
+    topology_identity = _matching_text(
+        "deterministic_topology_identity",
+        payload.get("_edli_day0_deterministic_topology_identity"),
+        block.get("topology_identity"),
+        observation.get("_edli_day0_deterministic_topology_identity"),
+    )
+    posterior_identity_hash = _matching_text(
+        "deterministic_posterior_identity_hash",
+        payload.get("_edli_day0_deterministic_posterior_identity_hash"),
+        block.get("posterior_identity_hash"),
+        observation.get("_edli_day0_deterministic_posterior_identity_hash"),
+    )
+    band_basis = _matching_text(
+        "deterministic_band_basis",
+        payload.get("_edli_day0_deterministic_band_basis"),
+        block.get("band_basis"),
+        observation.get("_edli_day0_deterministic_band_basis"),
+    )
+    band_alpha_text = _matching_text(
+        "deterministic_band_alpha",
+        payload.get("_edli_day0_deterministic_band_alpha"),
+        block.get("band_alpha"),
+        observation.get("_edli_day0_deterministic_band_alpha"),
+    )
+    captured_text = _matching_text(
+        "deterministic_captured_at_utc",
+        payload.get("_edli_day0_deterministic_captured_at_utc"),
+        block.get("captured_at_utc"),
+        observation.get("_edli_day0_deterministic_captured_at_utc"),
+    )
+    try:
+        band_alpha = float(band_alpha_text)
+        captured_at = datetime.fromisoformat(captured_text.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise Day0AuthorityError("deterministic_witness_content invalid") from exc
+    if captured_at.tzinfo is None:
+        raise Day0AuthorityError("deterministic_captured_at_utc invalid")
+
+    from src.solve.solver import DeterministicBinPayoffWitness, OutcomeTokenBinding
+
+    try:
+        reconstructed = DeterministicBinPayoffWitness(
+            family_key=family_key,
+            bindings=tuple(
+                OutcomeTokenBinding(
+                    bin_id=bin_id,
+                    condition_id=bound_condition,
+                    yes_token_id=yes_token,
+                    no_token_id=no_token,
+                )
+                for bin_id, bound_condition, yes_token, no_token in binding_rows
+            ),
+            exact_yes_payoffs=tuple(
+                (bin_id, int(payoff))
+                for bin_id, payoff in exact_yes_payoffs.items()
+            ),
+            q_version=identities["q_version"],
+            resolution_identity=resolution_identity,
+            topology_identity=topology_identity,
+            posterior_identity_hash=posterior_identity_hash,
+            source_truth_identity=identities["source_truth_identity"],
+            authority_certificate_hash=identities["authority_certificate_hash"],
+            band_alpha=band_alpha,
+            band_basis=band_basis,
+            captured_at_utc=captured_at,
+            max_age=timedelta(seconds=1),
+            witness_identity=witness_identity,
+        )
+    except (TypeError, ValueError) as exc:
+        raise Day0AuthorityError(
+            f"deterministic_witness_content mismatch:{exc}"
+        ) from None
+    if reconstructed.sample_matrix_identity != sample_identity:
+        raise Day0AuthorityError("deterministic_sample_identity/content mismatch")
+
+
 def assert_live_day0_probability_authority(
     payload: Mapping[str, object],
     *,
@@ -466,10 +964,10 @@ def assert_live_day0_probability_authority(
     """Fail closed unless Day0 entry probability has one current typed authority.
 
     A live Day0 observation can authoritatively mask already-impossible bins, but it is
-    not itself an exact-bin probability model. Live entry submit therefore needs either
-    the legacy remaining-window surface or a current replacement posterior that was
-    conditioned on the exact current observation bound. Both sides then use the same
-    selected-side q/q_lcb contract.
+    not itself an exact-bin probability model. Live entry submit therefore needs a
+    current remaining-window surface, a current replacement posterior conditioned on
+    the observation, or an exact pathwise payoff witness for the selected bin. Every
+    route uses the same selected-side q/q_lcb contract.
     """
 
     block = _day0_probability_block(payload)
@@ -483,6 +981,16 @@ def assert_live_day0_probability_authority(
     q_source = _first_text(payload, block, "_edli_q_source", "day0_q_source", "q_source")
     if q_source == DAY0_REPLACEMENT_Q_SOURCE:
         _assert_replacement_global_day0_probability_authority(
+            payload,
+            block,
+            direction=direction,
+            condition_id=condition_id,
+            q_live=q_live,
+            q_lcb=q_lcb,
+        )
+        return
+    if q_source == DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE:
+        _assert_deterministic_bin_payoff_authority(
             payload,
             block,
             direction=direction,
@@ -636,6 +1144,7 @@ def assert_live_day0_qkernel_guard_authority(
         else ""
     )
     replacement_global = q_source == DAY0_REPLACEMENT_Q_SOURCE
+    deterministic_payoff = q_source == DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE
     current_band = any(
         str(economics.get(field_name) or "").strip()
         == DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS
@@ -722,7 +1231,41 @@ def assert_live_day0_qkernel_guard_authority(
             raise Day0AuthorityError(
                 "day0_qkernel selection_guard_q_safe mismatches payoff_q_lcb"
             )
-    if probability_payload is not None and not replacement_global:
+        if deterministic_payoff:
+            observation = block.get("global_current_observation_payload")
+            if not isinstance(observation, Mapping):
+                raise Day0AuthorityError("deterministic_current_observation missing")
+            authority_q_version = _matching_text(
+                "deterministic_q_version",
+                probability_payload.get("_edli_day0_deterministic_q_version"),
+                block.get("q_version"),
+                observation.get("_edli_day0_deterministic_q_version"),
+            )
+            authority_sample_identity = _matching_text(
+                "deterministic_sample_identity",
+                probability_payload.get(
+                    "_edli_day0_deterministic_sample_identity"
+                ),
+                block.get("sample_identity"),
+                observation.get("_edli_day0_deterministic_sample_identity"),
+            )
+            economics_q_version = str(economics.get("q_version") or "").strip()
+            economics_sample_identity = str(
+                economics.get("sample_hash") or ""
+            ).strip()
+            if economics_q_version != authority_q_version:
+                raise Day0AuthorityError(
+                    "deterministic_qkernel_q_version mismatch"
+                )
+            if economics_sample_identity != authority_sample_identity:
+                raise Day0AuthorityError(
+                    "deterministic_qkernel_sample_identity mismatch"
+                )
+    if (
+        probability_payload is not None
+        and not replacement_global
+        and not deterministic_payoff
+    ):
         remaining_models = _first_int(
             probability_payload,
             block,

@@ -677,3 +677,55 @@ diff whitespace checks pass. Independent adversarial re-review is PASS. The
 broader architecture/hygiene baseline retains two unrelated failures: a
 wall-clock-aged reconciliation fixture and the existing TIGGE AST metric-stamp
 fixture; neither intersects this slice.
+
+## 2026-07-19 deterministic Day0 authority continuity
+
+Fresh complete-auction receipts selected a positive Hong Kong July 20 HIGH
+29C NO action from a `DeterministicBinPayoffWitness`: the authorized current
+observation had already made the exact 29C YES payoff zero, so the selected NO
+payoff and both selected probability bounds were one.  No venue command was
+created because the certificate bridge relabeled every global Day0 probability
+as remaining-window probability and the shared Day0 verifier recognized only
+replacement and remaining-window q sources.
+
+This is a typed-authority continuity defect, not permission to weaken live
+admission.  The repair must preserve the deterministic witness identity, exact
+YES-payoff map, current observation binding, and selected condition/bin/side/q
+through receipt projection, calibration certification, actionable validation,
+and pre-submit validation.  It may admit only binary exact payoffs whose
+selected YES/NO complement equals both `q_live` and `q_lcb`; missing, mixed,
+nonbinary, mismatched, or relabeled evidence remains fail-closed.  Ordinary
+remaining-window candidates continue to require current remaining models and
+their existing transform.  No price threshold, Kelly multiplier, risk level,
+operator control, venue command, or canonical DB state changes in this slice.
+
+Allowed additional implementation surfaces are
+`src/events/day0_authority.py`, `src/decision_kernel/verifier.py`,
+`tests/engine/test_event_reactor_live_qkernel_gate.py`, and
+`tests/engine/test_cert_calibration_bridge.py`, plus the existing shared
+calibration-authority predicate antibody, as enumerated in the packet
+scope. Acceptance requires producer-to-actionable and calibration-certificate
+positive tests, missing/mixed/payoff-side/q-drift counterexamples, existing
+remaining-window regressions, compilation, diff checks, independent
+adversarial verification, one conventional commit, standard live restart, and
+fresh natural auction/venue reconciliation.  A model EV is not realized PnL;
+post-deploy reporting must keep selected economics, venue command/order/fill,
+and settlement evidence separate.
+
+Independent review first refuted the initial bridge: synchronized payoff/side/q
+edits could retain an opaque stale witness identity, and a nested observation
+could claim a different q source.  The corrected certificate now carries the
+complete ordered bin-to-condition-to-YES/NO-token bindings and every input of
+the canonical deterministic witness identity.  Pre-submit reconstructs that
+witness, recomputes the exact-payoff sample identity, matches the selected
+native token to bin and side, and compares every present q-source copy.  The
+production-shaped fixture uses Hong Kong's actual `HKO`/`hko` settlement source.
+
+Focused engine, calibration bridge, shared verifier, certificate, solver,
+monitor, and symmetry suites pass `436/436`; the full W3 integration file passes
+`221` tests and retains two unrelated pre-existing `epoch_superseded()` fixture
+failures.  Compilation, YAML parse, changed-test topology filtering, and diff
+whitespace checks pass.  The environment has no Ruff executable; Pyflakes still
+reports the adapter's pre-existing dynamic/type-only names, with no new finding
+in the deterministic authority implementation.  Deployment remains contingent
+on the independent reviewer reproducing both original attacks as rejected.

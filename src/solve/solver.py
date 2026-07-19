@@ -563,6 +563,22 @@ def deterministic_bin_payoff_witness_identity(
     return _hash(*(str(value) for value in values))
 
 
+def deterministic_bin_payoff_sample_identity(
+    exact_yes_payoffs: Sequence[tuple[str, int]],
+) -> str:
+    """Bind the ordered exact-payoff sample used by deterministic Day0 qkernel."""
+
+    exact = tuple(
+        sorted((str(bin_id), int(value)) for bin_id, value in exact_yes_payoffs)
+    )
+    if not exact or any(not bin_id or value not in {0, 1} for bin_id, value in exact):
+        raise ValueError("deterministic payoff samples must be non-empty and binary")
+    return _hash(
+        "deterministic_bin_payoff_samples_v1",
+        *(str(value) for value in exact),
+    )
+
+
 @dataclass(frozen=True)
 class DeterministicBinPayoffWitness:
     """Exact Day0 payoffs for proved bins over one complete family topology.
@@ -601,10 +617,7 @@ class DeterministicBinPayoffWitness:
 
     @property
     def sample_matrix_identity(self) -> str:
-        return _hash(
-            "deterministic_bin_payoff_samples_v1",
-            *(str(value) for value in self.exact_yes_payoffs),
-        )
+        return deterministic_bin_payoff_sample_identity(self.exact_yes_payoffs)
 
     def exact_yes_payoff(self, bin_id: str) -> int | None:
         return dict(self.exact_yes_payoffs).get(str(bin_id))

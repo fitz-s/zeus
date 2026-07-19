@@ -221,6 +221,7 @@ from src.decision_kernel.compiler import (
 )
 from src.decision_kernel.ledger import DecisionCertificateLedger
 from src.decision_kernel.verifier import (
+    DAY0_DETERMINISTIC_BIN_PAYOFF_CALIBRATION_AUTHORITY,
     DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
     DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
 )
@@ -4950,6 +4951,19 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
             assert_live_day0_probability_authority(payload)
         except Day0AuthorityError as exc:
             raise ValueError(f"EDLI_LIVE_CALIBRATION_DAY0_REMAINING_WINDOW_BLOCKED:{exc}") from None
+        return
+    if authority == DAY0_DETERMINISTIC_BIN_PAYOFF_CALIBRATION_AUTHORITY:
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_probability_authority,
+        )
+
+        try:
+            assert_live_day0_probability_authority(payload)
+        except Day0AuthorityError as exc:
+            raise ValueError(
+                f"EDLI_LIVE_CALIBRATION_DAY0_DETERMINISTIC_BLOCKED:{exc}"
+            ) from None
         return
     if authority == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY:
         if coverage_status != "INSUFFICIENT_DATA":
@@ -14845,6 +14859,15 @@ def build_event_bound_no_submit_receipt(
         receipt = dataclass_replace(receipt, global_actuation=global_actuation)
     _day0_probability = provenance_capture.get("day0_probability_authority")
     if _day0_probability is not None and receipt.day0_probability_authority is None:
+        _day0_probability = {
+            **dict(_day0_probability),
+            "selected_condition_id": receipt.condition_id,
+            "selected_bin_id": receipt.candidate_bin_id,
+            "selected_token_id": receipt.token_id,
+            "selected_direction": receipt.direction,
+            "selected_q_live": receipt.q_live,
+            "selected_q_lcb": receipt.q_lcb_5pct,
+        }
         receipt = dataclass_replace(
             receipt,
             day0_probability_authority=_json_finite(_day0_probability),
@@ -17357,6 +17380,51 @@ def _actionable_payload_from_receipt(
         "_edli_day0_finite_evidence_absorbing_no_conditions": (
             _day0_probability_value("finite_evidence_absorbing_no_conditions")
         ),
+        "_edli_day0_exact_yes_payoffs": _day0_probability_value(
+            "exact_yes_payoffs"
+        ),
+        "_edli_day0_condition_by_bin": _day0_probability_value(
+            "condition_by_bin"
+        ),
+        "_edli_day0_deterministic_witness_identity": (
+            _day0_probability_value("witness_identity")
+        ),
+        "_edli_day0_deterministic_q_version": _day0_probability_value(
+            "q_version"
+        ),
+        "_edli_day0_deterministic_sample_identity": (
+            _day0_probability_value("sample_identity")
+        ),
+        "_edli_day0_deterministic_source_truth_identity": (
+            _day0_probability_value("source_truth_identity")
+        ),
+        "_edli_day0_deterministic_authority_certificate_hash": (
+            _day0_probability_value("authority_certificate_hash")
+        ),
+        "_edli_day0_deterministic_family_key": _day0_probability_value(
+            "family_key"
+        ),
+        "_edli_day0_deterministic_bindings": _day0_probability_value(
+            "bindings"
+        ),
+        "_edli_day0_deterministic_resolution_identity": (
+            _day0_probability_value("resolution_identity")
+        ),
+        "_edli_day0_deterministic_topology_identity": (
+            _day0_probability_value("topology_identity")
+        ),
+        "_edli_day0_deterministic_posterior_identity_hash": (
+            _day0_probability_value("posterior_identity_hash")
+        ),
+        "_edli_day0_deterministic_band_alpha": _day0_probability_value(
+            "band_alpha"
+        ),
+        "_edli_day0_deterministic_band_basis": _day0_probability_value(
+            "band_basis"
+        ),
+        "_edli_day0_deterministic_captured_at_utc": (
+            _day0_probability_value("captured_at_utc")
+        ),
         "opportunity_book": _json_finite(receipt.opportunity_book),
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
@@ -19425,6 +19493,19 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     kelly_multiplier: float,
 ) -> NoSubmitProofBundle:
     payload = dict(payload)
+    if str(proof.q_source or "") == "day0_deterministic_bin_payoff":
+        payload.update(
+            {
+                "condition_id": str(proof.candidate.condition_id or ""),
+                "candidate_bin_id": _candidate_bin_id(proof),
+                "token_id": str(proof.candidate.token_id or ""),
+                "direction": proof.direction,
+                "q_live": float(proof.q_posterior),
+                "q_lcb_5pct": float(proof.q_lcb_5pct),
+                "q_source": proof.q_source,
+                "probability_authority": proof.probability_authority,
+            }
+        )
     # Selected-leg authority only. Earlier code stamped a family-level replacement
     # credential before proof selection; that could license/block a sibling bin or side.
     # The proof carries the credential built for its exact (condition_id, direction).
@@ -21072,7 +21153,7 @@ def _day0_calibration_authority_payload_and_clock(
     forecast_payload: Mapping[str, Any],
     decision_time: datetime,
 ) -> tuple[dict[str, Any], EvidenceClock]:
-    """Certificate calibration authority for live Day0 remaining-window probability."""
+    """Certificate authority for the selected live Day0 probability type."""
 
     from src.events.day0_authority import (
         Day0AuthorityEvidence,
@@ -21115,13 +21196,86 @@ def _day0_calibration_authority_payload_and_clock(
     available_time = _parse_utc(evidence.observation_available_at)
     if source_time is None or available_time is None:
         raise ValueError("DAY0_CALIBRATION_AUTHORITY_MISSING:clock")
+    horizon_profile = _nonnull(
+        payload.get("horizon_profile") or forecast_payload.get("horizon_profile")
+    )
+    q_source = str(
+        payload.get("_edli_q_source") or payload.get("q_source") or ""
+    ).strip()
+    if q_source == "day0_deterministic_bin_payoff":
+        try:
+            assert_live_day0_probability_authority(
+                payload,
+                direction=payload.get("direction"),
+                condition_id=payload.get("condition_id"),
+                q_live=payload.get("q_live"),
+                q_lcb=payload.get("q_lcb_5pct"),
+            )
+        except Exception as exc:
+            raise ValueError(f"DAY0_CALIBRATION_AUTHORITY_BLOCKED:{exc}") from exc
+        probability_payload = _global_day0_probability_authority_payload(payload)
+        probability_payload.update(
+            {
+                "selected_condition_id": payload.get("condition_id"),
+                "selected_bin_id": payload.get("candidate_bin_id"),
+                "selected_token_id": payload.get("token_id"),
+                "selected_direction": payload.get("direction"),
+                "selected_q_live": payload.get("q_live"),
+                "selected_q_lcb": payload.get("q_lcb_5pct"),
+            }
+        )
+        model_key = (
+            "day0_deterministic_bin_payoff_v1:"
+            f"{probability_payload['witness_identity']}:"
+            f"{payload.get('candidate_bin_id')}:"
+            f"{payload.get('direction')}"
+        )
+        payload_out = {
+            "identity": model_key,
+            "calibrator_model_key": model_key,
+            "calibrator_version": model_key,
+            "calibration_method": "day0_deterministic_bin_payoff",
+            "model_hash": _hash_jsonish(
+                {
+                    "model_key": model_key,
+                    "probability_payload": probability_payload,
+                }
+            ),
+            "horizon_profile": horizon_profile,
+            "training_cutoff": evidence.observation_time,
+            "model_available_at": evidence.observation_available_at,
+            "model_materialized_at": decision_time.astimezone(UTC).isoformat(),
+            "observation_time": evidence.observation_time,
+            "observation_available_at": evidence.observation_available_at,
+            "source_authorized_status": evidence.source_authorized_status,
+            "live_authority_status": evidence.live_authority_status,
+            "city": evidence.city,
+            "target_date": evidence.target_date,
+            "metric": evidence.metric,
+            "condition_id": payload.get("condition_id"),
+            "candidate_bin_id": payload.get("candidate_bin_id"),
+            "token_id": payload.get("token_id"),
+            "direction": payload.get("direction"),
+            "q_live": payload.get("q_live"),
+            "q_lcb_5pct": payload.get("q_lcb_5pct"),
+            "probability_authority": payload.get("probability_authority"),
+            "q_source": q_source,
+            "q_mode": payload.get("_edli_day0_q_mode"),
+            "input_space": "day0_deterministic_bin_payoff",
+            "day0_probability_authority": probability_payload,
+            "maturity_level": 4,
+            "n_samples": 1,
+            "authority": DAY0_DETERMINISTIC_BIN_PAYOFF_CALIBRATION_AUTHORITY,
+        }
+        try:
+            assert_live_day0_probability_authority(payload_out)
+        except Exception as exc:
+            raise ValueError(f"DAY0_CALIBRATION_AUTHORITY_BLOCKED:{exc}") from exc
+        return payload_out, EvidenceClock(source_time, available_time, decision_time)
     try:
         assert_live_day0_probability_authority(payload)
     except Exception as exc:
         raise ValueError(f"DAY0_CALIBRATION_AUTHORITY_BLOCKED:{exc}") from exc
-    horizon_profile = _nonnull(
-        payload.get("horizon_profile") or forecast_payload.get("horizon_profile")
-    )
     lcb_transform = payload.get("_edli_day0_lcb_transform")
     lcb_transform_hash = _hash_jsonish(lcb_transform) if isinstance(lcb_transform, Mapping) else ""
     model_key = (
@@ -27648,7 +27802,7 @@ def _global_day0_execution_payload(
 def _global_day0_probability_authority_payload(
     current_observation_payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Name the remaining-day Day0 probability type and bind its current base."""
+    """Preserve the producer's Day0 probability type and current observation base."""
 
     binding = current_observation_payload.get("_edli_global_day0_binding")
     if not isinstance(binding, Mapping):
@@ -27657,11 +27811,83 @@ def _global_day0_probability_authority_payload(
     base_identity = str(binding.get("probability_base_identity") or "").strip()
     if posterior_id in (None, "") and not base_identity:
         raise ValueError("GLOBAL_DAY0_PROBABILITY_BASE_IDENTITY_MISSING")
-    payload = {
-        "probability_authority": "day0_remaining_day_global_probability_v1",
-        "q_source": "day0_remaining_day",
+    q_source = str(
+        current_observation_payload.get("_edli_q_source")
+        or current_observation_payload.get("q_source")
+        or ""
+    ).strip()
+    q_mode = str(
+        current_observation_payload.get("_edli_day0_q_mode") or ""
+    ).strip()
+    probability_authority = str(
+        current_observation_payload.get("probability_authority") or ""
+    ).strip()
+    if not q_source or not q_mode or not probability_authority:
+        raise ValueError("GLOBAL_DAY0_PROBABILITY_TYPE_MISSING")
+    payload: dict[str, object] = {
+        "probability_authority": probability_authority,
+        "q_source": q_source,
+        "q_mode": q_mode,
         "global_current_observation_payload": dict(current_observation_payload),
     }
+    if q_source == "day0_deterministic_bin_payoff":
+        fields = {
+            "exact_yes_payoffs": "_edli_day0_exact_yes_payoffs",
+            "condition_by_bin": "_edli_day0_condition_by_bin",
+            "witness_identity": "_edli_day0_deterministic_witness_identity",
+            "q_version": "_edli_day0_deterministic_q_version",
+            "sample_identity": "_edli_day0_deterministic_sample_identity",
+            "source_truth_identity": (
+                "_edli_day0_deterministic_source_truth_identity"
+            ),
+            "authority_certificate_hash": (
+                "_edli_day0_deterministic_authority_certificate_hash"
+            ),
+            "family_key": "_edli_day0_deterministic_family_key",
+            "bindings": "_edli_day0_deterministic_bindings",
+            "resolution_identity": (
+                "_edli_day0_deterministic_resolution_identity"
+            ),
+            "topology_identity": "_edli_day0_deterministic_topology_identity",
+            "posterior_identity_hash": (
+                "_edli_day0_deterministic_posterior_identity_hash"
+            ),
+            "band_alpha": "_edli_day0_deterministic_band_alpha",
+            "band_basis": "_edli_day0_deterministic_band_basis",
+            "captured_at_utc": "_edli_day0_deterministic_captured_at_utc",
+        }
+        for output_key, source_key in fields.items():
+            value = current_observation_payload.get(source_key)
+            if value in (None, ""):
+                raise ValueError(
+                    f"GLOBAL_DAY0_DETERMINISTIC_AUTHORITY_MISSING:{source_key}"
+                )
+            payload[output_key] = value
+    else:
+        for output_key, source_key in (
+            ("remaining_models", "_edli_day0_remaining_models"),
+            ("remaining_model_names", "_edli_day0_remaining_model_names"),
+            (
+                "remaining_source_cycle_time_utc",
+                "_edli_day0_remaining_source_cycle_time_utc",
+            ),
+            (
+                "remaining_capture_times_utc",
+                "_edli_day0_remaining_capture_times_utc",
+            ),
+            ("remaining_expected_models", "_edli_day0_remaining_expected_models"),
+            ("exit_authority_status", "_edli_day0_exit_authority_status"),
+            ("exit_authority_reason", "_edli_day0_exit_authority_reason"),
+            ("bound_classification", "_edli_day0_bound_classification"),
+            ("lcb_transform", "_edli_day0_lcb_transform"),
+            (
+                "finite_evidence_absorbing_no_conditions",
+                "_edli_day0_finite_evidence_absorbing_no_conditions",
+            ),
+        ):
+            value = current_observation_payload.get(source_key)
+            if value not in (None, ""):
+                payload[output_key] = value
     if posterior_id not in (None, ""):
         payload["posterior_id"] = posterior_id
     if base_identity:
@@ -28466,8 +28692,48 @@ def _prepare_current_global_probability_family(
                 deterministic_payload = {
                     "probability_authority": probability_authority,
                     "q_source": "day0_deterministic_bin_payoff",
+                    "_edli_q_source": "day0_deterministic_bin_payoff",
                     "_edli_day0_q_mode": "deterministic_bin_payoff",
                     "_edli_day0_exact_yes_payoffs": dict(exact_yes_payoffs),
+                    "_edli_day0_condition_by_bin": {
+                        binding.bin_id: binding.condition_id
+                        for binding in bindings
+                    },
+                    "_edli_day0_deterministic_witness_identity": witness_identity,
+                    "_edli_day0_deterministic_q_version": q_version,
+                    "_edli_day0_deterministic_sample_identity": (
+                        witness.sample_matrix_identity
+                    ),
+                    "_edli_day0_deterministic_source_truth_identity": (
+                        source_truth_identity
+                    ),
+                    "_edli_day0_deterministic_authority_certificate_hash": (
+                        authority_certificate_hash
+                    ),
+                    "_edli_day0_deterministic_family_key": witness.family_key,
+                    "_edli_day0_deterministic_bindings": [
+                        {
+                            "bin_id": binding.bin_id,
+                            "condition_id": binding.condition_id,
+                            "yes_token_id": binding.yes_token_id,
+                            "no_token_id": binding.no_token_id,
+                        }
+                        for binding in witness.bindings
+                    ],
+                    "_edli_day0_deterministic_resolution_identity": (
+                        witness.resolution_identity
+                    ),
+                    "_edli_day0_deterministic_topology_identity": (
+                        witness.topology_identity
+                    ),
+                    "_edli_day0_deterministic_posterior_identity_hash": (
+                        witness.posterior_identity_hash
+                    ),
+                    "_edli_day0_deterministic_band_alpha": witness.band_alpha,
+                    "_edli_day0_deterministic_band_basis": witness.band_basis,
+                    "_edli_day0_deterministic_captured_at_utc": (
+                        witness.captured_at_utc.isoformat()
+                    ),
                 }
                 payload.update(deterministic_payload)
                 if day0_payload_out is not None:
@@ -28492,6 +28758,14 @@ def _prepare_current_global_probability_family(
                 snapshot=day0_snapshot,
             )
             probability_authority = "day0_remaining_day_global_probability_v1"
+            payload.update(
+                {
+                    "probability_authority": probability_authority,
+                    "q_source": "day0_remaining_day",
+                    "_edli_q_source": "day0_remaining_day",
+                    "_edli_day0_q_mode": "remaining_day",
+                }
+            )
     else:
         if bundle is None:
             raise ValueError("GLOBAL_CURRENT_REPLACEMENT_BUNDLE_MISSING")
@@ -28509,6 +28783,19 @@ def _prepare_current_global_probability_family(
         and day0_payload_out is not None
     ):
         for key in (
+            "probability_authority",
+            "q_source",
+            "_edli_q_source",
+            "_edli_day0_q_mode",
+            "_edli_day0_remaining_models",
+            "_edli_day0_remaining_model_names",
+            "_edli_day0_remaining_source_cycle_time_utc",
+            "_edli_day0_remaining_capture_times_utc",
+            "_edli_day0_remaining_expected_models",
+            "_edli_day0_exit_authority_status",
+            "_edli_day0_exit_authority_reason",
+            "_edli_day0_bound_classification",
+            "_edli_day0_lcb_transform",
             "_edli_day0_finite_evidence_member_count",
             "_edli_day0_finite_evidence_hits_by_condition",
             "_edli_day0_finite_evidence_yes_ucb_by_condition",
