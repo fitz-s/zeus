@@ -233,9 +233,16 @@ def ensure_token_suppression_reason_schema(conn: sqlite3.Connection) -> None:
                     """
                 )
             conn.execute("DROP TABLE token_suppression")
-            conn.execute(
-                "ALTER TABLE token_suppression_reason_upgrade RENAME TO token_suppression"
-            )
+            _create_token_suppression_table(conn, "token_suppression")
+            if shared_columns:
+                conn.execute(
+                    f"""
+                    INSERT INTO token_suppression ({", ".join(shared_columns)})
+                    SELECT {", ".join(shared_columns)}
+                    FROM token_suppression_reason_upgrade
+                    """
+                )
+            conn.execute("DROP TABLE token_suppression_reason_upgrade")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_token_suppression_reason
@@ -268,10 +275,16 @@ def ensure_token_suppression_reason_schema(conn: sqlite3.Connection) -> None:
                 """
             )
             conn.execute("DROP TABLE token_suppression_history")
+            _create_token_suppression_history_table(conn, "token_suppression_history")
             conn.execute(
-                "ALTER TABLE token_suppression_history_reason_upgrade "
-                "RENAME TO token_suppression_history"
+                f"""
+                INSERT INTO token_suppression_history ({columns})
+                SELECT {columns}
+                FROM token_suppression_history_reason_upgrade
+                ORDER BY history_id ASC
+                """
             )
+            conn.execute("DROP TABLE token_suppression_history_reason_upgrade")
             _create_token_suppression_history_projection(conn)
             _create_token_suppression_views(
                 conn, include_legacy_alias=alias_view_exists

@@ -2059,6 +2059,26 @@ def test_deploy_restart_trade_schema_installs_auto_resolution_on_legacy_db(tmp_p
         )
         """
     )
+    conn.executescript(
+        """
+        CREATE TABLE token_suppression_history (
+            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_id TEXT NOT NULL,
+            condition_id TEXT,
+            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
+                'operator_quarantine_clear', 'chain_only_quarantined', 'settled_position'
+            )),
+            source_module TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
+            recorded_at TEXT NOT NULL
+        );
+        CREATE VIEW observation_instants_current AS
+        SELECT * FROM observation_instants;
+        """
+    )
     conn.execute(
         """
         INSERT INTO token_suppression (
@@ -2076,6 +2096,10 @@ def test_deploy_restart_trade_schema_installs_auto_resolution_on_legacy_db(tmp_p
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression'"
     ).fetchone()[0]
     assert "chain_only_auto_resolved_match" in create_sql
+    assert "chain_only_auto_resolved_match" in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'token_suppression_history'"
+    ).fetchone()[0]
     assert conn.execute(
         "SELECT suppression_reason FROM token_suppression WHERE token_id = 'legacy-token'"
     ).fetchone()[0] == "chain_only_quarantined"
