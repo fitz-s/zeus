@@ -1,5 +1,21 @@
 # Capital Utilization Audit — Zeus (2026-07-19)
 
+## ERRATUM (post-publish correction)
+
+Item 3 in "Ranked idle-capital causes" below is **corrected** per the follow-up
+investigation in `m5_latch_persistence.md`: the "~55% of reduce_only trips are
+GREEN + zero-second `ws_gap_active`" claim was wrong — that was the total
+GREEN-risk-level reduce_only bucket, not the ws_gap-caused subset. The actual
+`ws_gap_active`-driven GREEN count is **91 rows (2.8% of reduce_only rows, 0.6%
+of all 15,251 exit_monitor cycles)**, with negligible measured blocked-entry cost
+(3 requeue events in 12 days of logs) — **no fix warranted** on this cause. The
+GREEN=1808 bucket was actually `kill_switch_armed`/`heartbeat_lost` (~1874 rows,
+~58% of all reduce_only cycles — the real dominant driver, flagged for separate
+investigation) plus `systemic_unknown_side_effect_count>0` (~412) plus the 91
+ws_gap rows. All other findings in this report (idle fraction, single-winner
+auction bottleneck, Kelly sizing cascade, collateral/cap analysis) stand
+unchanged.
+
 Read-only investigation. All queries run `sqlite3 -readonly`. All timestamps UTC.
 Window: last 30 days (2026-06-19 → 2026-07-19) unless noted.
 
