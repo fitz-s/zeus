@@ -899,10 +899,37 @@ def _apply_settlement_finding(
 
     _shares = float(current["chain_shares"] or current["shares"] or 0.0)
     _cost = float(current["cost_basis_usd"] or 0.0)
-    _exit_price = 1.0 if position_won else 0.0
-    _pnl = compute_realized_pnl_usd(
-        shares=_shares, exit_price=_exit_price, cost_basis_usd=_cost
-    )
+    # Bug C (realized_pnl_usd clobbering, docs/evidence/capital_efficiency_
+    # 2026_07_19/pnl_attribution.md §1): a position that already exited via a
+    # REAL fill before this chain-observed settlement fired
+    # (phase_before == economically_closed) has already booked its true
+    # realized_pnl_usd/exit_price from the actual fill price -- the binary
+    # 1.0/0.0 settlement price computed below is not the price it exited at,
+    # and is not the redemption value either (a real exit sells the token on
+    # the open market, not through CTF redemption at par). Overwriting the
+    # booked values here regrades the close using the wrong price -- at best
+    # a small drift, at worst clobbering a real gain/loss to 0.0 or flipping
+    # its sign when the market's binary outcome disagrees with the fill's own
+    # economics (e.g. exited profitably before an adverse late move flips the
+    # settlement). This mirrors the was_economically_closed guard in
+    # src.state.portfolio.compute_settlement_close, which this sibling writer
+    # never had -- a redundant settlement sweep must not re-derive economics
+    # for a position the exit path already closed.
+    was_economically_closed = phase_before == "economically_closed"
+    if was_economically_closed:
+        _booked_pnl = current["realized_pnl_usd"]
+        _booked_exit_price = current["exit_price"]
+        _pnl = float(_booked_pnl) if _booked_pnl is not None else 0.0
+        _exit_price = (
+            float(_booked_exit_price)
+            if _booked_exit_price is not None
+            else (1.0 if position_won else 0.0)
+        )
+    else:
+        _exit_price = 1.0 if position_won else 0.0
+        _pnl = compute_realized_pnl_usd(
+            shares=_shares, exit_price=_exit_price, cost_basis_usd=_cost
+        )
     # Bug B (truth-path PnL booking, 2026-07-07): _pnl above was already
     # computed correctly for the audit payload below, but `projection` (built
     # by copying pre-transition columns forward) never carried it into the
@@ -928,7 +955,13 @@ def _apply_settlement_finding(
             "position_won": position_won,
             "outcome": 1 if position_won else 0,
             "p_posterior": current["p_posterior"],
-            "exit_price": 1.0 if position_won else 0.0,
+            # Bug C: the payload's own exit_price/pnl must agree with what
+            # was durably projected above -- previously this re-derived the
+            # raw binary 1.0/0.0 here even when the guarded `_exit_price`
+            # above had preserved a booked real fill price, so a downstream
+            # reader of the SETTLED event payload (rather than
+            # position_current) would still see the wrong economics.
+            "exit_price": _exit_price,
             "pnl": _pnl,
             "exit_reason": "chain_mirror_settlement",
             "settlement_authority": "VERIFIED",
