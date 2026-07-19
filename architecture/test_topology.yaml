@@ -175,7 +175,7 @@ test_trust_policy:
     tests/strategy/test_sigma_shape_ring_calibration.py: {created: "2026-06-13", last_used: "2026-06-13", note: "GATE-2 RT (RED-on-revert): RT-1 ring-calibration invariant — the near-center ring q must carry its realized mass; the live uniform-pedestal σ-shape leaves dist-2 grossly under-weighted (synthetic ratio 4.15, real ratio 1.31), GREEN ONLY under the refit regime-aware σ-FLOOR shape (scripts/fit_sigma_shape_kernel.py, floor≈1.8 step; reverting floor_steps=0 turns it RED). RT-2 market-anchor-cap blind spot — q_anchor_no=a*q_model_no+(1-a)*mkt; out=min(in,anchor) is one-sided so it CANNOT veto a confident NO whose market also leans NO (pins the algebra so no one re-claims the cap fixes GATE-2; the fix must be upstream at q production). Authority: workflow A4 calibration diagnosis 2026-06-13 + statistical_calibration_addendum."}
     tests/engine/test_bias_decay_kelly_haircut.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/engine/test_chain_sync_exit_wired_in_edli_mode.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/test_edli_stage_status_summary_freshness.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/test_edli_stage_status_summary_freshness.py: {created: "2026-05-31", last_used: "2026-07-19"}
     tests/test_edli_stage_source_health_freshness.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_edli_stage_loaded_sha.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_edli_live_boot_stage_surfaces.py: {created: "2026-05-31", last_used: "2026-06-19"}
@@ -312,7 +312,7 @@ test_trust_policy:
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_monitor_refresh_ci_fallback.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-07-11", note: "Monitor Day0 persistence wiring: world-owned observation facts run only after any earlier TRADE transaction is released, plus _maybe_write_day0_nowcast and _maybe_write_day0_metric_fact durable evidence contracts."}
+    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-07-19", note: "Monitor Day0 persistence wiring: world-owned observation facts run only after any earlier TRADE transaction is released, plus _maybe_write_day0_nowcast and _maybe_write_day0_metric_fact durable evidence contracts."}
     tests/test_position_metric_resolver.py: {created: "2026-04-26", last_used: "2026-04-26"}
     # Phase 2 T5: Position.market_slug JSON-only field antibodies (2026-05-20).
     tests/test_position_market_slug_persistence.py: {created: "2026-05-20", last_used: "2026-05-21"}
