@@ -426,7 +426,10 @@ def coalescible_reactor_wakes(
         return (selected,)
 
     candidates: list[ReactorWake] = []
-    if selected.reason == "forecast_posterior_advanced":
+    if selected.reason in {
+        "forecast_posterior_advanced",
+        "market_price_advanced",
+    }:
         candidates = [
             wake
             for wake in queued
