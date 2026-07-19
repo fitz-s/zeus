@@ -894,7 +894,7 @@ def test_lost_summary_blocks_new_entry_but_preserves_immediate_exit_type():
     assert payload["entry"]["immediate_allow_submit"] is False
     assert payload["entry"]["allowed_order_types"] == ["FOK", "FAK"]
     assert _edli_heartbeat_authority_summary("GTC")["allow_submit"] is False
-    assert _edli_heartbeat_authority_summary("FOK")["allow_submit"] is True
+    assert _edli_heartbeat_authority_summary("FOK")["allow_submit"] is False
     assert _heartbeat_component(payload)["allowed"] is False
     assert _heartbeat_component(payload, order_type="FAK")["allowed"] is True
     assert _heartbeat_component(payload, order_type="GTC")["allowed"] is False
@@ -1135,6 +1135,47 @@ def test_external_heartbeat_supervisor_requires_fresh_healthy_status(tmp_path):
     assert supervisor.gate_for_order_type(OrderType.GTC) is False
     assert supervisor.status().health is HeartbeatHealth.LOST
     assert "stale" in (supervisor.status().last_error or "")
+
+
+def test_external_heartbeat_supervisor_rejects_future_status_for_entry(tmp_path):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    write_heartbeat_keeper_status(
+        HeartbeatStatus(
+            health=HeartbeatHealth.HEALTHY,
+            last_success_at=datetime.now(timezone.utc),
+            consecutive_failures=0,
+            heartbeat_id="keeper-id",
+            cadence_seconds=5,
+        ),
+        path=status_path,
+    )
+    payload = json.loads(status_path.read_text())
+    payload["written_at"] = (
+        datetime.now(timezone.utc) + timedelta(hours=1)
+    ).isoformat()
+    status_path.write_text(json.dumps(payload))
+
+    supervisor = ExternalHeartbeatSupervisor(
+        status_path=status_path,
+        max_age_seconds=8,
+        cadence_seconds=5,
+    )
+    configure_global_supervisor(supervisor)
+    try:
+        status = supervisor.status()
+        assert status.health is HeartbeatHealth.LOST
+        assert status.status_reason == "heartbeat_snapshot_from_future"
+        assert status.age_seconds is not None and status.age_seconds < 0
+        with pytest.raises(HeartbeatNotHealthy):
+            heartbeat_supervisor_module.assert_heartbeat_allows_order_type("GTC")
+        with pytest.raises(HeartbeatNotHealthy):
+            heartbeat_supervisor_module.assert_heartbeat_allows_order_type("FOK")
+        heartbeat_supervisor_module.assert_heartbeat_allows_order_type(
+            "FAK",
+            reduce_only=True,
+        )
+    finally:
+        configure_global_supervisor(None)
 
 
 def test_external_mode_cold_singleton_reads_fresh_keeper_without_false_lost(

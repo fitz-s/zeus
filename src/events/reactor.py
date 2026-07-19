@@ -8583,11 +8583,12 @@ def _edli_heartbeat_authority_summary(order_type: str) -> dict[str, object]:
         str(value).strip().upper()
         for value in entry.get("allowed_order_types", ())
     }
-    allowed = (
+    order_type_allowed = (
         str(order_type).strip().upper() in allowed_order_types
         if allowed_order_types
         else bool(entry.get("allow_submit", False))
     )
+    allowed = bool(entry.get("allow_submit", False)) and order_type_allowed
     return {
         "authority_id": "heartbeat_supervisor",
         "allow_submit": allowed,

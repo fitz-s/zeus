@@ -1033,6 +1033,27 @@ class ExternalHeartbeatSupervisor:
             )
         age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
         cadence_seconds = int(payload.get("cadence_seconds") or self._cadence_seconds)
+        if age_seconds < 0:
+            return HeartbeatStatus(
+                health=HeartbeatHealth.LOST,
+                last_success_at=last_success_at,
+                consecutive_failures=int(payload.get("consecutive_failures") or 0),
+                heartbeat_id="external",
+                cadence_seconds=cadence_seconds,
+                last_error=(
+                    "external heartbeat status is from the future: "
+                    f"age={age_seconds:.3f}s"
+                ),
+                last_failure_at=last_failure_at,
+                last_invalid_id_at=last_invalid_id_at,
+                consecutive_successes=consecutive_successes,
+                lease_continuous_since=lease_continuous_since,
+                lease_gap_suspected_until=lease_gap_suspected_until,
+                source=source,
+                status_reason="heartbeat_snapshot_from_future",
+                written_at=written_at,
+                age_seconds=age_seconds,
+            )
         if _freshness_registry.evaluate("heartbeat_status", age_seconds, override_threshold_seconds=self._max_age_seconds) >= FreshnessLevel.STALE:
             return HeartbeatStatus(
                 health=HeartbeatHealth.LOST,

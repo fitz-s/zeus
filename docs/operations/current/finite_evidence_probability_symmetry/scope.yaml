@@ -38,6 +38,7 @@ in_scope:
 - src/control/heartbeat_supervisor.py
 - src/engine/monitor_refresh.py
 - src/events/opportunity_book.py
+- src/events/reactor.py
 - src/events/edli_trade_fact_bridge.py
 - src/execution/command_recovery.py
 - src/execution/exchange_reconcile.py

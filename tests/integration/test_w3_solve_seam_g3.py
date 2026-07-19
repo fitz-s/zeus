@@ -6867,6 +6867,258 @@ def test_exact_token_refresh_keeps_returned_and_cached_book_scope_aligned(
     world.close()
 
 
+def test_family_delta_cache_keeps_full_current_q_and_expires_oldest_book(
+    monkeypatch,
+):
+    """A narrow book refresh must not shrink q scope or extend an old sibling."""
+
+    import src.data.polymarket_client as polymarket_client
+    from src.events.candidate_binding import weather_family_id
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+
+    class Clock(_dt.datetime):
+        current = _dt.datetime.now(_dt.timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            value = cls.current
+            return value if tz is None else value.astimezone(tz)
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    monkeypatch.setattr(era, "datetime", Clock)
+
+    dallas = weather_family_id(
+        city="Dallas",
+        target_date="2026-07-11",
+        metric="high",
+    )
+    miami = weather_family_id(
+        city="Miami",
+        target_date="2026-07-11",
+        metric="high",
+    )
+    event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="EDLI_REDECISION_PENDING",
+    )
+    payload = json.loads(event.payload_json)
+    # A family-level price wake has no exact changed-token witness.  It must
+    # refresh Dallas as a delta, not discard Miami from the cached book cut.
+    payload["redecision_origin"] = "market_price"
+    event = replace(event, payload_json=json.dumps(payload))
+
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    adapter.process_global_batch((event,), Clock.current)
+
+    def probability(family_key, marker, token_marker):
+        return SimpleNamespace(
+            family_key=family_key,
+            witness_identity=f"q-{marker}",
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family_key}",
+                    condition_id=f"condition-{family_key}",
+                    yes_token_id=f"yes-{token_marker}",
+                    no_token_id=f"no-{token_marker}",
+                ),
+            ),
+        )
+
+    def epoch(probabilities, marker, *, max_age):
+        states = tuple(
+            (
+                family_key,
+                binding.bin_id,
+                binding.condition_id,
+                side,
+                token_id,
+                "EXECUTABLE",
+                f"book-{marker}-{token_id}",
+                f"event-{family_key}",
+                f"market-{family_key}",
+            )
+            for family_key, witness in probabilities.items()
+            for binding in witness.bindings
+            for side, token_id in (
+                ("YES", binding.yes_token_id),
+                ("NO", binding.no_token_id),
+            )
+        )
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=states,
+            captured_at_utc=Clock.current,
+            max_age=max_age,
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=Clock.current,
+            ),
+        )
+
+    cached_probabilities = {
+        dallas: probability(dallas, "a-cached", "a1"),
+        miami: probability(miami, "b-cached", "b1"),
+    }
+    assert (
+        era._store_global_book_epoch(
+            trade,
+            cached_probabilities,
+            epoch(cached_probabilities, "base", max_age=_dt.timedelta(seconds=1)),
+            checked_at=Clock.current,
+        )
+        == "stored"
+    )
+
+    current_probabilities = {
+        # Dallas changes token topology; Miami changes q only and must retain
+        # its still-current book while returning this fresh q witness.
+        dallas: probability(dallas, "a-current", "a2"),
+        miami: probability(miami, "b-current", "b1"),
+    }
+    capture_calls = []
+
+    def fake_bind(
+        _forecast_conn,
+        *,
+        probability_witnesses,
+        metadata_sink=None,
+        **_,
+    ):
+        if metadata_sink is not None:
+            for witness in probability_witnesses.values():
+                for binding in witness.bindings:
+                    for token_id in (binding.yes_token_id, binding.no_token_id):
+                        metadata_sink[(binding.condition_id, token_id)] = {
+                            "_global_current_gamma": True,
+                            "enable_orderbook": True,
+                            "active": True,
+                            "closed": False,
+                            "accepting_orders": True,
+                        }
+        return dict(probability_witnesses)
+
+    def fake_capture(_trade_conn, *, probability_witnesses, **_):
+        keys = frozenset(probability_witnesses)
+        capture_calls.append(keys)
+        return epoch(
+            probability_witnesses,
+            "delta" if keys == frozenset({dallas}) else "full",
+            max_age=_dt.timedelta(seconds=180),
+        )
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    monkeypatch.setattr(
+        universe,
+        "bind_current_global_probability_tokens",
+        fake_bind,
+    )
+    monkeypatch.setattr(
+        universe,
+        "capture_current_global_book_epoch",
+        fake_capture,
+    )
+    monkeypatch.setattr(
+        universe,
+        "fetch_current_global_books",
+        lambda tokens, **_: {str(token): {} for token in tokens},
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakeClient)
+    monkeypatch.setattr(
+        era,
+        "_projected_global_book_hint",
+        lambda *_args, **_kwargs: None,
+    )
+
+    provider = captured["current_book_epoch_provider"]
+    returned_probabilities, returned_epoch = provider(
+        current_probabilities,
+        Clock.current,
+    )
+
+    cache = era._GLOBAL_BOOK_EPOCH_CACHE
+    assert cache is not None
+    cache_probabilities = dict(cache.bound_probabilities)
+    assert set(returned_probabilities) == {dallas, miami}
+    assert {row[0] for row in returned_epoch.asset_states} == {dallas, miami}
+    assert {row[0] for row in cache.epoch.asset_states} == set(cache_probabilities) == {
+        dallas,
+        miami,
+    }
+    assert returned_probabilities[miami].witness_identity == "q-b-current"
+    assert cache_probabilities[miami].witness_identity == "q-b-cached"
+    assert {
+        row[0]: row[6]
+        for row in returned_epoch.asset_states
+        if row[3] == "YES"
+    } == {
+        dallas: "book-delta-yes-a2",
+        miami: "book-base-yes-b1",
+    }
+    coverage = global_batch_runtime._book_native_side_receipt(
+        asset_states=returned_epoch.asset_states,
+        probability_keys=tuple(returned_probabilities),
+        buy_candidate_index=tuple(
+            ("BUY",) + row[:5] for row in returned_epoch.asset_states
+        ),
+        excluded_by_family={},
+    )
+    assert coverage["book_native_side_candidate_coverage_status"] == "COMPLETE"
+    assert capture_calls == [frozenset({dallas})]
+
+    # The merged epoch keeps the base cut's earliest expiry.  Once it expires,
+    # the provider must recapture both current families instead of reusing Miami.
+    Clock.current += _dt.timedelta(seconds=2)
+    refreshed_probabilities, refreshed_epoch = provider(
+        current_probabilities,
+        Clock.current,
+    )
+    assert set(refreshed_probabilities) == {dallas, miami}
+    assert {row[0] for row in refreshed_epoch.asset_states} == {dallas, miami}
+    assert capture_calls == [frozenset({dallas}), frozenset({dallas, miami})]
+    assert {
+        row[0]: row[6]
+        for row in refreshed_epoch.asset_states
+        if row[3] == "YES"
+    } == {
+        dallas: "book-full-yes-a2",
+        miami: "book-full-yes-b1",
+    }
+
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
 def test_global_book_epoch_cache_metadata_expires_with_epoch(monkeypatch):
     conn = sqlite3.connect(":memory:")
     monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
