@@ -34,6 +34,7 @@ in_scope:
 - src/events/day0_authority.py
 - src/decision_kernel/verifier.py
 - src/control/live_health.py
+- src/control/heartbeat_supervisor.py
 - src/engine/monitor_refresh.py
 - src/events/opportunity_book.py
 - src/events/edli_trade_fact_bridge.py
@@ -58,6 +59,7 @@ in_scope:
 - src/engine/qkernel_spine_bridge.py
 - src/solve/solver.py
 - src/solve/menu_adapter.py
+- src/risk_allocator/governor.py
 - architecture/capabilities.yaml
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/_schema_fingerprint.txt
@@ -105,6 +107,8 @@ in_scope:
 - tests/integration/test_w3_solve_seam_g3.py
 - tests/money_path/test_edli_live_readiness.py
 - tests/test_run_mode_failure_surfaces.py
+- tests/test_heartbeat_supervisor.py
+- tests/test_risk_allocator.py
 - tests/solve/test_shim_decide.py
 - tests/solve/test_menu_adapter.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py

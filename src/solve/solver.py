@@ -1411,7 +1411,7 @@ class BinaryTerminalWealthCertificate:
 
 @dataclass(frozen=True)
 class GlobalBuyMinimumMarketableRepair:
-    """Proof that one venue-minimum BUY is the safe discrete Kelly repair."""
+    """Legacy receipt shape for the retired minimum-lot BUY exception."""
 
     current_token_shares: Decimal
     full_kelly_target_shares: Decimal
@@ -2822,118 +2822,19 @@ def _score_global_single_order(
         at_most=True,
     )
     if fractional_legal_max is None or fractional_legal_max < legal_min_shares:
-        continuous_best = _single_order_continuous_optimum(
-            candidate,
-            q_samples=q_samples,
-            robust_q=robust_q,
-            wealth_floor_usd=wealth_floor_usd,
-            wealth_ceiling_usd=wealth_ceiling_usd,
-            alpha=band_alpha,
-            max_shares=_single_order_max_shares(
-                candidate.executable_cost_curve,
-                spend_limit_usd=optimization_limit,
-                quantize=False,
-            ),
-        )
-        (
-            minimum_robust_du,
-            minimum_robust_ev,
-            minimum_efficiency,
-            minimum_cost,
-        ) = _single_order_metrics(
-            candidate,
-            q_samples=q_samples,
-            shares=legal_min_shares,
-            wealth_floor_usd=wealth_floor_usd,
-            wealth_ceiling_usd=wealth_ceiling_usd,
-            alpha=band_alpha,
-            robust_q=robust_q,
-        )
-        (
-            minimum_limit_price,
-            minimum_expected_fill_price,
-            minimum_max_spend,
-        ) = _single_order_execution_boundary(candidate, legal_min_shares)
-        if not (
-            continuous_best[0] > 0.0
-            and minimum_robust_du > 0.0
-            and minimum_robust_ev > _ROBUST_EV_EPS_USD
-            and minimum_efficiency > 0.0
-        ):
-            return GlobalSingleOrderDecision(
-                candidate=None,
-                shares=Decimal("0"),
-                cost_usd=Decimal("0"),
-                robust_delta_log_wealth=0.0,
-                robust_ev_usd=0.0,
-                capital_efficiency=0.0,
-                no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
-                rejection_reasons={
-                    candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
-                },
-            )
-        if (
-            legal_min_shares > capacity_max_shares
-            or minimum_max_spend > spend_limit
-        ):
-            reason = "CAPITAL_CAPACITY_EXHAUSTED"
-            return GlobalSingleOrderDecision(
-                candidate=None,
-                shares=Decimal("0"),
-                cost_usd=Decimal("0"),
-                robust_delta_log_wealth=0.0,
-                robust_ev_usd=0.0,
-                capital_efficiency=0.0,
-                no_trade_reason=reason,
-                rejection_reasons={candidate.candidate_id: reason},
-            )
-        continuous_full_target = held_shares + continuous_best[4]
-        repair = GlobalBuyMinimumMarketableRepair(
-            current_token_shares=held_shares,
-            full_kelly_target_shares=full_kelly_target_shares,
-            fractional_kelly_target_shares=fractional_kelly_target_shares,
-            minimum_marketable_increment_shares=legal_min_shares,
-            minimum_fractional_kelly_multiplier=(
-                (held_shares + legal_min_shares) / full_kelly_target_shares
-            ),
-            continuous_full_kelly_target_shares=continuous_full_target,
-            continuous_fractional_kelly_target_shares=(
-                continuous_full_target * multiplier
-            ),
-            continuous_full_robust_delta_log_wealth=continuous_best[0],
-            continuous_full_robust_ev_usd=continuous_best[1],
-            minimum_marketable_cost_usd=minimum_cost,
-            minimum_marketable_robust_delta_log_wealth=minimum_robust_du,
-            minimum_marketable_robust_ev_usd=minimum_robust_ev,
-            minimum_marketable_capital_efficiency=minimum_efficiency,
-            minimum_marketable_positive=(
-                minimum_robust_du > 0.0
-                and minimum_robust_ev > _ROBUST_EV_EPS_USD
-            ),
-        )
+        # Fractional Kelly is a hard terminal-holding budget.  A venue minimum
+        # is executable only when a legal order fits within the remaining target;
+        # it cannot create an extra minimum-lot exception.
+        reason = "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
         return GlobalSingleOrderDecision(
-            candidate=candidate,
-            shares=legal_min_shares,
-            cost_usd=minimum_cost,
-            robust_delta_log_wealth=minimum_robust_du,
-            robust_ev_usd=minimum_robust_ev,
-            capital_efficiency=minimum_efficiency,
-            no_trade_reason=None,
-            limit_price=minimum_limit_price,
-            expected_fill_price_before_fee=minimum_expected_fill_price,
-            max_spend_usd=minimum_max_spend,
-            current_token_shares=held_shares,
-            full_kelly_target_shares=full_kelly_target_shares,
-            fractional_kelly_target_shares=fractional_kelly_target_shares,
-            buy_sizing_mode="MINIMUM_MARKETABLE_DISCRETE_REPAIR",
-            terminal_wealth=_binary_terminal_wealth_certificate(
-                robust_q=robust_q,
-                shares=legal_min_shares,
-                cost_usd=minimum_cost,
-                wealth_floor_usd=wealth_floor_usd,
-                wealth_ceiling_usd=wealth_ceiling_usd,
-            ),
-            buy_minimum_marketable_repair=repair,
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons={candidate.candidate_id: reason},
         )
     fractional_max_shares = min(
         capacity_max_shares,

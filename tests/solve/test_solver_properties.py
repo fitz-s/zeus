@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-19
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and complete auction receipts
 """W3 SOLVE math-core acceptance — the property anchors (design packet §4, consult REV-2).
 
@@ -809,28 +809,14 @@ def test_fractional_kelly_targets_final_holding_instead_of_reallocating_each_epo
         current_token_shares=str(first.shares),
     )
 
-    assert second.candidate is candidate
-    assert second.buy_sizing_mode == "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
-    assert second.buy_minimum_marketable_repair is not None
-    assert second.shares == second.buy_minimum_marketable_repair.minimum_marketable_increment_shares
-
-    cash_after_repair = cash_after - second.cost_usd
-    third = _global_score(
-        candidate,
-        floor=str(cash_after_repair),
-        ceiling=str(cash_after_repair + first.shares + second.shares),
-        cash=str(cash_after_repair),
-        cap="100",
-        multiplier="0.25",
-        current_token_shares=str(first.shares + second.shares),
-    )
-    assert third.candidate is None
-    assert third.rejection_reasons[candidate.candidate_id] == (
-        "FRACTIONAL_KELLY_TARGET_REACHED"
+    assert second.candidate is None
+    assert second.shares == 0
+    assert second.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
 
 
-def test_fractional_kelly_repairs_a_positive_subminimum_target_to_one_venue_lot():
+def test_fractional_kelly_rejects_a_positive_subminimum_target():
     candidate = _global_candidate(
         candidate_id="fractional-below-minimum",
         family="fractional-below-minimum",
@@ -846,49 +832,47 @@ def test_fractional_kelly_repairs_a_positive_subminimum_target_to_one_venue_lot(
         multiplier="0.03125",
     )
 
-    assert decision.candidate is candidate
-    assert decision.buy_sizing_mode == "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
-    sizing = decision.buy_minimum_marketable_repair
-    assert sizing is not None
-    assert sizing.current_token_shares == 0
-    assert sizing.full_kelly_target_shares > 0
-    assert sizing.fractional_kelly_target_shares == (
-        sizing.full_kelly_target_shares * Decimal("0.03125")
+    assert decision.candidate is None
+    assert decision.shares == 0
+    assert decision.buy_sizing_mode == "NOT_APPLICABLE"
+    assert decision.buy_minimum_marketable_repair is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
-    assert sizing.minimum_marketable_increment_shares >= Decimal("1")
-    assert sizing.fractional_kelly_target_shares < (
-        sizing.current_token_shares
-        + sizing.minimum_marketable_increment_shares
-    )
-    assert sizing.minimum_fractional_kelly_multiplier == (
-        (
-            sizing.current_token_shares
-            + sizing.minimum_marketable_increment_shares
-        )
-        / sizing.full_kelly_target_shares
-    )
-    assert sizing.continuous_full_kelly_target_shares > 0
-    assert sizing.continuous_fractional_kelly_target_shares == (
-        sizing.continuous_full_kelly_target_shares * Decimal("0.03125")
-    )
-    assert sizing.continuous_full_robust_delta_log_wealth > 0
-    assert sizing.continuous_full_robust_ev_usd > 0
-    assert sizing.minimum_marketable_cost_usd > 0
-    assert sizing.minimum_marketable_robust_delta_log_wealth > 0
-    assert sizing.minimum_marketable_robust_ev_usd > 0
-    assert sizing.minimum_marketable_capital_efficiency > 0
-    assert sizing.minimum_marketable_positive is True
-    assert decision.shares == sizing.minimum_marketable_increment_shares
-    assert decision.cost_usd == sizing.minimum_marketable_cost_usd
-    assert decision.current_token_shares + decision.shares <= (
-        decision.full_kelly_target_shares
-    )
-    fak = S.global_buy_fak_prefix_certificate(decision)
-    assert fak["global_buy_fak_full_robust_delta_log_wealth"] > 0.0
-    assert fak["global_buy_fak_full_robust_ev_usd"] > 0.0
 
 
-def test_discrete_repair_is_exactly_symmetric_for_yes_and_no():
+def test_fractional_kelly_does_not_turn_7_015625_target_into_a_five_share_buy():
+    candidate = _global_candidate(
+        candidate_id="strict-target-below-five-share-lot",
+        family="strict-target-below-five-share-lot",
+        side="YES",
+        q=0.65,
+        levels=(("0.40", "1000"),),
+        min_order="5",
+    )
+    common = {
+        "floor": "212.7",
+        "ceiling": "219.7",
+        "cash": "212.7",
+        "cap": "1000",
+        "current_token_shares": "7",
+    }
+    full = _global_score(candidate, multiplier="1", **common)
+    assert full.full_kelly_target_shares == Decimal("224.50")
+    assert full.full_kelly_target_shares * Decimal("0.03125") == Decimal(
+        "7.015625"
+    )
+
+    decision = _global_score(candidate, multiplier="0.03125", **common)
+
+    assert decision.candidate is None
+    assert decision.shares == 0
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+    )
+
+
+def test_subminimum_fractional_kelly_rejection_is_exactly_symmetric_for_yes_and_no():
     yes = _global_candidate(
         candidate_id="repair-yes",
         family="repair-yes",
@@ -909,23 +893,10 @@ def test_discrete_repair_is_exactly_symmetric_for_yes_and_no():
     yes_decision = _global_score(yes, cap="100", multiplier="0.03125")
     no_decision = _global_score(no, cap="100", multiplier="0.03125")
 
-    assert yes_decision.buy_sizing_mode == no_decision.buy_sizing_mode == (
-        "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
-    )
-    assert (
-        yes_decision.shares,
-        yes_decision.cost_usd,
-        yes_decision.max_spend_usd,
-        yes_decision.robust_delta_log_wealth,
-        yes_decision.robust_ev_usd,
-        yes_decision.capital_efficiency,
-    ) == (
-        no_decision.shares,
-        no_decision.cost_usd,
-        no_decision.max_spend_usd,
-        no_decision.robust_delta_log_wealth,
-        no_decision.robust_ev_usd,
-        no_decision.capital_efficiency,
+    assert yes_decision.candidate is no_decision.candidate is None
+    assert yes_decision.shares == no_decision.shares == 0
+    assert yes_decision.no_trade_reason == no_decision.no_trade_reason == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
 
 
@@ -966,7 +937,7 @@ def test_rejected_buy_cannot_claim_a_discrete_repair_mode_without_proof():
         )
 
 
-def test_discrete_repair_recomputes_the_candidate_curve_legal_minimum():
+def test_subminimum_target_never_emits_a_minimum_lot_repair_certificate():
     candidate = _global_candidate(
         candidate_id="forged-minimum",
         family="forged-minimum",
@@ -980,64 +951,12 @@ def test_discrete_repair_recomputes_the_candidate_curve_legal_minimum():
         cap="100",
         multiplier="0.001",
     )
-    assert decision.candidate is candidate
-    assert decision.buy_sizing_mode == "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
-    assert decision.shares == Decimal("10")
-
-    forged_shares = Decimal("11")
-    q_samples, alpha = _global_probability_projection(candidate)
-    robust_q = S._lower_cvar(
-        q_samples,
-        np.ones(q_samples.size, dtype=np.float64),
-        alpha,
+    assert decision.candidate is None
+    assert decision.shares == 0
+    assert decision.buy_minimum_marketable_repair is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
-    forged_du, forged_ev, forged_efficiency, forged_cost = (
-        S._single_order_metrics(
-            candidate,
-            q_samples=q_samples,
-            shares=forged_shares,
-            wealth_floor_usd=Decimal("100"),
-            wealth_ceiling_usd=Decimal("100"),
-            alpha=alpha,
-            robust_q=robust_q,
-        )
-    )
-    forged_limit, forged_fill, forged_spend = S._single_order_execution_boundary(
-        candidate,
-        forged_shares,
-    )
-    forged_repair = replace(
-        decision.buy_minimum_marketable_repair,
-        minimum_marketable_increment_shares=forged_shares,
-        minimum_fractional_kelly_multiplier=(
-            forged_shares / decision.full_kelly_target_shares
-        ),
-        minimum_marketable_cost_usd=forged_cost,
-        minimum_marketable_robust_delta_log_wealth=forged_du,
-        minimum_marketable_robust_ev_usd=forged_ev,
-        minimum_marketable_capital_efficiency=forged_efficiency,
-    )
-
-    with pytest.raises(ValueError, match="discrete-repair coherent"):
-        replace(
-            decision,
-            shares=forged_shares,
-            cost_usd=forged_cost,
-            robust_delta_log_wealth=forged_du,
-            robust_ev_usd=forged_ev,
-            capital_efficiency=forged_efficiency,
-            limit_price=forged_limit,
-            expected_fill_price_before_fee=forged_fill,
-            max_spend_usd=forged_spend,
-            terminal_wealth=S._binary_terminal_wealth_certificate(
-                robust_q=robust_q,
-                shares=forged_shares,
-                cost_usd=forged_cost,
-                wealth_floor_usd=Decimal("100"),
-                wealth_ceiling_usd=Decimal("100"),
-            ),
-            buy_minimum_marketable_repair=forged_repair,
-        )
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -1155,35 +1074,10 @@ def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
         candidate_portfolio_endowment_resolver=lambda _: held_endowment,
     )
 
-    assert second.candidate is candidate
-    assert second.buy_sizing_mode == "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
-    assert second.buy_minimum_marketable_repair is not None
-
-    cash_after_repair = cash_after - second.cost_usd
-    repaired_endowment = S.CandidatePortfolioEndowment(
-        loss_wealth_floor_usd=cash_after_repair,
-        win_wealth_ceiling_usd=(
-            cash_after_repair + first.shares + second.shares
-        ),
-        current_token_shares=first.shares + second.shares,
-        ledger_snapshot_id="ledger-current",
-    )
-    repaired_wealth = _global_witness(
-        floor=str(cash_after_repair),
-        ceiling=str(cash_after_repair + first.shares + second.shares),
-        cash=str(cash_after_repair),
-        position_hash="positions-after-repair-fill",
-    )
-    third = _global_select(
-        (candidate,),
-        cap="100",
-        witness=repaired_wealth,
-        fractional_kelly_multiplier="0.25",
-        candidate_portfolio_endowment_resolver=lambda _: repaired_endowment,
-    )
-    assert third.candidate is None
-    assert third.rejection_reasons[candidate.candidate_id] == (
-        "FRACTIONAL_KELLY_TARGET_REACHED"
+    assert second.candidate is None
+    assert second.shares == 0
+    assert second.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
 
 
@@ -1577,11 +1471,10 @@ def test_positive_sell_still_beats_a_discrete_repair_buy():
 
     assert decision.candidate is sell
     assert evaluations[sell.candidate_id].status == "SELECTED"
-    assert evaluations[repair_buy.candidate_id].status == "SCORED"
-    assert evaluations[repair_buy.candidate_id].buy_sizing_mode == (
-        "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
+    assert evaluations[repair_buy.candidate_id].status == "REJECTED"
+    assert evaluations[repair_buy.candidate_id].rejection_reason == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
-    assert evaluations[repair_buy.candidate_id].buy_minimum_marketable_repair is not None
 
 
 def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
@@ -2521,7 +2414,7 @@ def test_global_single_order_fractional_kelly_bounds_final_holding_for_both_side
     assert capacity_bounded.shares < fractional_yes.shares
 
 
-def test_global_single_order_repairs_only_the_minimum_cheap_depth_lot():
+def test_global_single_order_rejects_cheap_minimum_lot_above_fractional_target():
     candidate = _global_candidate(
         candidate_id="cheap-depth",
         family="cheap-depth",
@@ -2548,13 +2441,10 @@ def test_global_single_order_repairs_only_the_minimum_cheap_depth_lot():
         multiplier="0.03125",
     )
 
-    assert decision.candidate is candidate
-    assert decision.buy_sizing_mode == "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
-    repair = decision.buy_minimum_marketable_repair
-    assert repair is not None
-    assert decision.shares == repair.minimum_marketable_increment_shares
-    assert decision.current_token_shares + decision.shares <= (
-        decision.full_kelly_target_shares
+    assert decision.candidate is None
+    assert decision.shares == 0
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
 
 
@@ -2575,7 +2465,7 @@ def test_global_single_order_capacity_frontier_never_shrinks_on_a_deeper_price_j
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_single_order_repairs_subminimum_kelly_target_symmetrically(side):
+def test_global_single_order_rejects_subminimum_kelly_target_symmetrically(side):
     candidate = _global_candidate(
         candidate_id=f"marketable-min-{side.lower()}",
         family=f"marketable-min-{side.lower()}",
@@ -2593,9 +2483,11 @@ def test_global_single_order_repairs_subminimum_kelly_target_symmetrically(side)
         fractional_kelly_multiplier="0.03125",
     )
 
-    assert decision.candidate is candidate
-    assert decision.buy_sizing_mode == "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
-    assert decision.buy_minimum_marketable_repair is not None
+    assert decision.candidate is None
+    assert decision.shares == 0
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+    )
 
 
 @pytest.mark.parametrize("multiplier", ("0", "-0.1", "NaN", "1.01"))
