@@ -24747,6 +24747,16 @@ def _generate_candidate_proofs(
                 proof_rest_then_cross_policy = _DAY0_MAKER_ONLY_REST_POLICY
                 if not proof_taker_forbidden_reason:
                     proof_taker_forbidden_reason = _DAY0_MAKER_ONLY_TAKER_FORBIDDEN_REASON
+            # CALIBRATION FIX (docs/evidence/capital_efficiency_2026_07_19/fill_funnel.md
+            # §3/§7-2): the certified p_fill_lcb must reflect the CHOSEN execution
+            # mode's fill probability, not always the taker depth-coverage bound —
+            # see _certified_p_fill_lcb_for_proof for the full root-cause and
+            # provenance note.
+            certified_p_fill_lcb = _certified_p_fill_lcb_for_proof(
+                mode_ev=mode_ev,
+                proof_execution_mode_intent=proof_execution_mode_intent,
+                taker_p_fill_lcb=p_fill_lcb,
+            )
             proofs.append(
                 _CandidateProof(
                     candidate=candidate,
@@ -24759,7 +24769,7 @@ def _generate_candidate_proofs(
                     q_lcb_5pct=q_lcb,
                     q_lcb_calibration_source=q_lcb_source,
                     c_cost_95pct=c_cost_95pct,
-                    p_fill_lcb=p_fill_lcb,
+                    p_fill_lcb=certified_p_fill_lcb,
                     trade_score=score,
                     p_value=p_value,
                     passed_prefilter=passed_prefilter,
@@ -25095,6 +25105,43 @@ def _native_side_top_of_book(row: dict[str, Any], *, direction: str) -> tuple[fl
     best_ask = min((float(level.price) for level in asks), default=None)
     best_bid = max((float(level.price) for level in bids), default=None)
     return best_bid, best_ask, float(book.min_tick_size)
+
+
+def _certified_p_fill_lcb_for_proof(
+    *,
+    mode_ev: "ModeConsistentEv | None",
+    proof_execution_mode_intent: str | None,
+    taker_p_fill_lcb: float,
+) -> float:
+    """The fill-probability value the certificate/receipt PERSISTS as ``p_fill_lcb``.
+
+    Root cause (docs/evidence/capital_efficiency_2026_07_19/fill_funnel.md §3/§7-2):
+    ``taker_p_fill_lcb`` (from ``_execution_price_from_snapshot`` /
+    ``_p_fill_lcb_for_direction``) is a visible-depth-coverage bound on a TAKER
+    cross — honest for that lane, but every ``_CandidateProof`` used to persist it
+    as ``p_fill_lcb`` UNCONDITIONALLY, even when the chosen mode is MAKER (94% of
+    live ENTRY decisions land in a maker-rest policy). Every downstream consumer
+    of the certificate's top-level ``p_fill_lcb`` (``portfolio_rotation.
+    candidate_future_value``, ``no_trade_regret``, the settlement-loop join) reads
+    this ONE field, so a resting order whose measured GTC fill rate is ~13%
+    carried a near-certainty ``p_fill_lcb``.
+
+    ``mode_ev`` already carries the CORRECT, measured maker-fill prior
+    (``maker_fill_probability``, basis=MEASURED KM-curve; W4.4 2026-07-03 made it
+    the sole maker-EV fill source after a LEARNED per-decision recalibration of
+    this same prior was deleted as the order-engine-rebuild anti-pattern §3.4 —
+    docs/rebuild/order_engine_implementation_architecture_2026-07-02.md:55). This
+    function does NOT reintroduce that: it only routes the EXISTING sanctioned
+    value to the field consumers actually read.
+
+    ``proof_execution_mode_intent`` (the FINAL displayed mode, already accounting
+    for the Day0 maker-only override) is the gate, not the raw
+    ``mode_ev.chosen_mode``, so the persisted field always agrees with what the
+    certificate reports as the chosen execution mode.
+    """
+    if mode_ev is not None and proof_execution_mode_intent == "MAKER":
+        return float(mode_ev.maker_fill_probability)
+    return float(taker_p_fill_lcb)
 
 
 def _mode_consistent_ev_for_proof(
