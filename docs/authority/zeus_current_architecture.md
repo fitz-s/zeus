@@ -286,7 +286,7 @@ Do not invent fallback governance buckets.
 
 ---
 
-## 10. Risk, Execution, Backtest, And Shadow Law
+## 10. Risk, Execution, And Backtest Law
 
 ### 10.1 Risk Must Act
 
@@ -318,29 +318,24 @@ current-evidence robust win majority, positive robust EV and delta log wealth,
 and only the remaining shares below the cumulative Fractional Kelly final-
 holding target. These economic conditions apply symmetrically to YES and NO.
 
-### 10.3 Live / Backtest / Shadow Boundary
+### 10.3 Live / Backtest Boundary — NO SHADOW LANE
 
 - Live may act.
-- Backtest may evaluate.
-- Shadow may observe.
+- Backtest may evaluate (walk-forward, settlement-truth graded, no
+  market-price replay).
 
-Backtest output and shadow metrics cannot promote live behavior by themselves.
-Promotion to live requires evidence, operator approval, and a governance
-packet. Shadow instrumentation may report additive metrics but may not gate
-live entries until promoted.
+There is NO shadow lane (operator law 2026-06-13 "不准再shadow了",
+reaffirmed 2026-07-19 "shadow不应该存在…从源头上就不存在"). A change is
+proven by mathematics/statistics on already-settled history plus invariant
+tests, then goes LIVE DIRECT — or it is not made. Time-boxed parallel
+observation ("collect N days of shadow data", "keep cutover reversible for
+N days") is a forbidden proposal shape: correctness is proven by evidence
+that already exists, never by waiting. Promotion to live requires that
+proof and explicit operator approval; rollback is a git revert, not a
+standing observation window.
 
 Replay is diagnostic until it has full market-price linkage, active sizing
 parity, and selection-family parity with live control units.
-
-Shadow/backtest promotion protocol:
-
-1. collect at least 30 days of parallel shadow data
-2. evaluate with honest replay, including full market-price linkage, active
-   sizing parity, and selection-family parity
-3. prove live-relevant metric improvement
-4. obtain explicit operator approval
-5. document rollback in a governance packet
-6. keep live cutover reversible for at least 7 days
 
 ### 10.4 Authority-Loss Degradation
 
