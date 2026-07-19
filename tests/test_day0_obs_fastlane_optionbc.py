@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-19
 # Authority basis: day0_obs_fastlane_plan.md §4.2 (Option B) and §4.3 (Option C);
 #   operator task brief /tmp/day0_obs_fastlane_plan.md.
 """Antibody tests for Day0 observation fast-lane Options B and C.
@@ -36,6 +36,7 @@ from datetime import date, datetime, timezone, timedelta
 from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -86,6 +87,7 @@ def _make_fast_extremes(
     sample_count: int = 10,
     last_receipt_time_hours_ago: float = 0.08,
     reference_utc: Optional[datetime] = None,
+    sample_times_utc=None,
 ):
     """Build a FastObsExtremes-like SimpleNamespace for testing."""
     ref = reference_utc or datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
@@ -95,6 +97,15 @@ def _make_fast_extremes(
     first_obs = local_midnight + timedelta(hours=first_obs_time_hours_after_midnight)
     last_obs = ref - timedelta(hours=last_obs_time_hours_ago)
     last_receipt = ref - timedelta(hours=last_receipt_time_hours_ago)
+    if sample_times_utc is None:
+        if sample_count <= 1:
+            sample_times_utc = (first_obs.astimezone(UTC),)
+        else:
+            span = (last_obs - first_obs) / (sample_count - 1)
+            sample_times_utc = tuple(
+                (first_obs + span * index).astimezone(UTC)
+                for index in range(sample_count)
+            )
     return SimpleNamespace(
         city=city,
         station_id=station,
@@ -109,6 +120,7 @@ def _make_fast_extremes(
         sample_count=sample_count,
         skipped_unit_law=0,
         held_implausible=0,
+        sample_times_utc=tuple(sample_times_utc),
     )
 
 
@@ -297,6 +309,35 @@ class TestFetchMetarFastLaneObservation:
 
         assert result is not None
         assert result.coverage_status == "WINDOW_INCOMPLETE"
+
+    def test_internal_high_window_gap_is_metric_attributed(self):
+        city = _wu_icao_city()
+        ref = datetime(2026, 6, 13, 2, 0, tzinfo=UTC)  # Jun 12 20:00 Denver
+        tz = ZoneInfo("America/Denver")
+        sample_times = tuple(
+            datetime(2026, 6, 12, hour, tzinfo=tz).astimezone(UTC)
+            for hour in [*range(0, 10), 18, 19]
+        )
+        extremes = _make_fast_extremes(
+            reference_utc=ref,
+            first_obs_time_hours_after_midnight=0.0,
+            sample_count=len(sample_times),
+            sample_times_utc=sample_times,
+        )
+
+        from src.data import observation_client as oc
+
+        mock_emitter = MagicMock()
+        mock_emitter.latest_extremes.return_value = extremes
+        with patch("src.data.day0_fast_obs.get_fast_obs_emitter", return_value=mock_emitter):
+            result = oc._fetch_same_station_fast_tail_observation(
+                city, target_day=date(2026, 6, 12), reference_utc=ref
+            )
+
+        assert result is not None
+        assert result.coverage_status == "GAP_SUSPECT"
+        assert result.gap_suspect_metrics == ("high",)
+        assert result.max_gap_minutes == pytest.approx(540.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1596,6 +1637,14 @@ class TestWuPrefixMetarTailFusion:
             last_sample_time="2026-06-12T20:00:00+00:00",
         )
         base.update(kw)
+        if "sample_times_utc" not in kw:
+            first = datetime.fromisoformat(str(base["first_sample_time"]))
+            last = datetime.fromisoformat(str(base["observation_time"]))
+            count = int(base["sample_count"])
+            step = (last - first) / max(1, count - 1)
+            base["sample_times_utc"] = tuple(
+                first + step * index for index in range(count)
+            )
         return Day0ObservationContext(**base)
 
     def test_fusion_unions_extremes_and_keeps_wu_coverage(self):

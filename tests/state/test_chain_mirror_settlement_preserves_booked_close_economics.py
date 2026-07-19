@@ -157,6 +157,61 @@ class TestChainMirrorSettlementPreservesBookedCloseEconomics:
         )
         assert payload["exit_price"] == pytest.approx(0.205)
 
+    @pytest.mark.parametrize("missing_field", ["realized_pnl_usd", "exit_price"])
+    def test_missing_booked_close_economics_fails_without_settling(
+        self, trades_conn, missing_field
+    ):
+        """An economic close without its booked money facts is corrupt truth.
+
+        The settlement backstop must expose that corruption for recovery; it
+        must not invent zero P&L or a binary exit price and then make the false
+        economics terminal by advancing the position to settled.
+        """
+        position_id = f"pos-missing-{missing_field}"
+        _insert_economically_closed_position(
+            trades_conn,
+            position_id=position_id,
+            direction="buy_no",
+            shares=10.0,
+            cost_basis_usd=5.0,
+            entry_price=0.5,
+            realized_pnl_usd=-1.0,
+            exit_price=0.4,
+        )
+        trades_conn.execute(
+            f"UPDATE position_current SET {missing_field} = NULL WHERE position_id = ?",
+            (position_id,),
+        )
+        trades_conn.commit()
+        finding = MirrorFinding(
+            classification=CLOSED_WORTHLESS,
+            position_id=position_id,
+            asset=f"tok-{position_id}",
+            writes=True,
+            details={"won": False, "settlement_value": 26.0},
+        )
+
+        with pytest.raises(ValueError, match="missing booked close economics"):
+            _apply_settlement_finding(
+                trades_conn,
+                finding,
+                now=datetime(2026, 7, 19, tzinfo=timezone.utc),
+            )
+
+        row = trades_conn.execute(
+            "SELECT phase, realized_pnl_usd, exit_price FROM position_current "
+            "WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert row["phase"] == "economically_closed"
+        assert row[missing_field] is None
+        event_count = trades_conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+            "AND event_type = 'SETTLED'",
+            (position_id,),
+        ).fetchone()[0]
+        assert event_count == 0
+
     def test_settlement_from_active_still_computes_binary_economics(self, trades_conn):
         """Regression: a position with no prior real exit fill (phase_before
         != economically_closed) must still get its economics from the binary

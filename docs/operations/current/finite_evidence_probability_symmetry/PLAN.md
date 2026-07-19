@@ -829,3 +829,29 @@ recent 100 collateral refreshes.  Collateral-ledger suites pass `76`, focused
 wealth tests pass `20`, executor collateral tests pass `2`, and the full W3 file
 passes `229` with only its two known `epoch_superseded()` baseline failures.
 Deployment and natural receipt evidence remain required.
+
+## 2026-07-19 Day0 coverage truth and close-economics integrity
+
+Current Day0 evidence can be numerous yet discontinuous. A gap overlapping the
+metric's likely extreme window therefore cannot be called complete merely from
+row count: entry must fail closed for the affected metric, while monitoring may
+retain the one-sided physical bound only as non-actionable evidence until the
+missing interval is bounded. An observed HIGH never moves down and an observed
+LOW never moves up. HIGH and LOW attribution remains separate, HKO cumulative
+observations use their own trailing-coverage semantics, and the canonical DB,
+WU HTTP, and same-station fast-tail paths all derive continuity from exact
+sample instants rather than first-sample time plus count. This changes neither
+the settlement source nor the executable objective.
+
+The same release set includes a truth-preservation correction at settlement.
+When a real exit fill has already made a position `economically_closed`, a
+later chain-mirror settlement may advance lifecycle but must preserve the
+booked fill price and realized PnL. If either booked field is missing, the row
+fails closed and remains economically closed for explicit recovery; the writer
+must not manufacture zero PnL or a binary exit price.
+
+Acceptance requires metric-specific coverage and monitor-bound tests, complete
+and incomplete HKO cases, fresh/stale bound monotonicity, booked-close
+preservation plus missing-field counterexamples, test-topology registration,
+the full W3 seam, independent review, standard deployment, and fresh natural
+auction/venue evidence. No forced order is authorized.

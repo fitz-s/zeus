@@ -1,11 +1,12 @@
 # Created: 2026-07-18
+# Last reused or audited: 2026-07-19
 # Authority basis: docs/evidence/upstream_physical_2026_07_17/day0_mechanism_first_principles_audit.md
 #   §M-1 (stale monitor bound, no margin) + §M-2/§H-3 (coverage count, not contiguity).
 # Purpose: antibodies for the two monitor-lane fixes:
 #   M-2/H-3 — GAP_SUSPECT coverage serves the monitor as a ONE-SIDED bound only
 #             (never exit authority), and only for the attributed metric.
-#   M-1     — the monitor belief conditions on a staleness-margined bound
-#             (stale_extreme_uncertainty_margin, non-kill direction), inert when fresh.
+#   M-1     — stale evidence never moves an absorbing observed extreme inward
+#             and remains non-actionable until the missing interval is bounded.
 """Deep-path tests for _refresh_day0_observation gap/staleness handling."""
 from __future__ import annotations
 
@@ -152,8 +153,7 @@ def _run(monitor_refresh, position, obs, monkeypatch):
 
 
 class TestGapSuspectMonitorBoundOnly:
-    """M-2/H-3: monitor keeps serving on GAP_SUSPECT (bound-only), but the
-    suspect extreme never sponsors zero-probability exit authority."""
+    """M-2/H-3: a metric-relevant gap remains visible but non-actionable."""
 
     def test_gap_suspect_serves_bound_only_and_blocks_exit_authority(self, wired):
         monitor_refresh, captured, now, monkeypatch = wired
@@ -165,10 +165,10 @@ class TestGapSuspectMonitorBoundOnly:
 
         prob, applied = _run(monitor_refresh, position, obs, monkeypatch)
 
-        # Serving continues (add-data-never-blocks-serving): fresh belief returned.
-        assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is True
-        assert prob == pytest.approx(0.5)
+        assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+        assert prob == pytest.approx(0.4)
         assert "day0_observation_bound_only:coverage_gap_suspect" in applied
+        assert "day0_bound_only_probability_not_actionable" in applied
         receipt = position._day0_monitor_probability_receipt
         assert receipt["zero_probability_exit_authority"] is False
         assert receipt["zero_probability_exit_authority_reason"] == (
@@ -204,13 +204,13 @@ class TestGapSuspectMonitorBoundOnly:
         _, applied = _run(monitor_refresh, position, obs, monkeypatch)
 
         assert "day0_observation_bound_only:coverage_gap_suspect" in applied
+        assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
         receipt = position._day0_monitor_probability_receipt
         assert receipt["zero_probability_exit_authority"] is False
 
 
-class TestStaleBoundMarginOnMonitorBelief:
-    """M-1: the monitor belief widens the observed bound by the staleness
-    margin in the NON-kill direction; inert when the observation is fresh."""
+class TestStaleObservationPhysicalSupport:
+    """M-1: staleness cannot reverse an already observed physical extreme."""
 
     def test_fresh_observation_margin_inert(self, wired):
         monitor_refresh, captured, now, monkeypatch = wired
@@ -226,9 +226,7 @@ class TestStaleBoundMarginOnMonitorBelief:
         assert receipt["observation"]["stale_bound_margin_native"] == pytest.approx(0.0)
         assert receipt["observation"]["belief_observed_high_so_far"] == pytest.approx(30.0)
 
-    def test_stale_high_bound_widened_downward(self, wired):
-        """HIGH: belief bound = extreme - margin (non-kill direction).
-        age=220min, budget=100min, C rate 2.5/h -> margin = 2.5 * 2h = 5.0."""
+    def test_stale_high_keeps_absorbing_floor_and_is_not_actionable(self, wired):
         monitor_refresh, captured, now, monkeypatch = wired
         position = _position()
         obs = _obs(now=now, age_minutes=220.0)
@@ -245,20 +243,19 @@ class TestStaleBoundMarginOnMonitorBelief:
             lambda **k: True,
         )
 
-        _, applied = _run(monitor_refresh, position, obs, monkeypatch)
+        prob, applied = _run(monitor_refresh, position, obs, monkeypatch)
 
         inputs = captured["inputs"]
-        assert inputs.observed_high_so_far == pytest.approx(25.0, abs=0.05)  # 30 - 5
-        # (abs tolerance: real-clock seconds accrue between fixture and refresh)
-        assert any(a.startswith("day0_stale_bound_margin_applied") for a in applied)
+        assert inputs.observed_high_so_far == pytest.approx(30.0)
+        assert prob == pytest.approx(0.4)
+        assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+        assert "day0_bound_only_probability_not_actionable" in applied
         receipt = position._day0_monitor_probability_receipt
-        # Recorded observation facts keep the RAW absorbing extreme.
         assert receipt["observation"]["observed_high_so_far"] == pytest.approx(30.0)
-        assert receipt["observation"]["belief_observed_high_so_far"] == pytest.approx(25.0, abs=0.05)
-        assert receipt["observation"]["stale_bound_margin_native"] == pytest.approx(5.0, abs=0.05)
+        assert receipt["observation"]["belief_observed_high_so_far"] == pytest.approx(30.0)
+        assert receipt["observation"]["stale_bound_margin_native"] == pytest.approx(0.0)
 
-    def test_stale_low_bound_widened_upward(self, wired):
-        """LOW: belief bound = extreme + margin (non-kill direction)."""
+    def test_stale_low_keeps_absorbing_ceiling_and_is_not_actionable(self, wired):
         monitor_refresh, captured, now, monkeypatch = wired
         position = _position(metric="low", bin_label="18°C")
         obs = _obs(now=now, age_minutes=220.0)
@@ -278,26 +275,21 @@ class TestStaleBoundMarginOnMonitorBelief:
         _, applied = _run(monitor_refresh, position, obs, monkeypatch)
 
         inputs = captured["inputs"]
-        assert inputs.observed_low_so_far == pytest.approx(23.0, abs=0.05)  # 18 + 5
+        assert inputs.observed_low_so_far == pytest.approx(18.0)
+        assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+        assert "day0_bound_only_probability_not_actionable" in applied
         receipt = position._day0_monitor_probability_receipt
         assert receipt["observation"]["observed_low_so_far"] == pytest.approx(18.0)
-        assert receipt["observation"]["belief_observed_low_so_far"] == pytest.approx(23.0, abs=0.05)
+        assert receipt["observation"]["belief_observed_low_so_far"] == pytest.approx(18.0)
 
-    def test_unparseable_observation_age_fails_closed_to_max_margin(self, wired):
-        """Unknown obs age is maximally stale: margin saturates at rate*6h = 15C."""
-        monitor_refresh, captured, now, monkeypatch = wired
-        position = _position()
-        obs = _obs(now=now, age_minutes=10.0)
-        obs.observation_time = "not-a-timestamp"
-        monkeypatch.setattr(
-            monitor_refresh, "_day0_observation_quality_rejection_reason",
-            lambda *a, **k: None,
+    def test_absorbing_high_distribution_has_no_mass_below_observation(self):
+        from src.signal.day0_high_distribution import build_day0_high_distribution
+
+        outcomes = build_day0_high_distribution(
+            observed_high_so_far=30.0,
+            future_member_maxes=np.array([25.0, 26.0, 27.0, 28.0, 30.0]),
+            round_fn=lambda values: np.asarray(values),
+            precision=1.0,
         )
-
-        prob, applied = _run(monitor_refresh, position, obs, monkeypatch)
-
-        # missing observation_time is rejected earlier by the wiring only when
-        # falsy; an unparseable one reaches the margin path and fails closed.
-        receipt = position._day0_monitor_probability_receipt
-        assert receipt["observation"]["stale_bound_margin_native"] == pytest.approx(15.0)
-        assert captured["inputs"].observed_high_so_far == pytest.approx(15.0)  # 30 - 15
+        assert np.all(outcomes >= 30.0)
+        assert np.mean(outcomes == 30.0) == pytest.approx(1.0)

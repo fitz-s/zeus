@@ -28,6 +28,9 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/state/test_chain_mirror_settlement_preserves_booked_close_economics.py: {created: "2026-07-19", last_used: "2026-07-19", note: "Chain-mirror settlement preserves real EXIT fill economics for already economically_closed positions and refuses to invent missing booked PnL or exit price."}
+    tests/engine/test_day0_coverage_gate.py: {created: "2026-05-24", last_used: "2026-07-19", note: "Day0 executable coverage fails closed on incomplete start or a metric-attributed interior gap, including the WU HTTP fallback."}
+    tests/engine/test_day0_monitor_gap_and_stale_margin.py: {created: "2026-07-18", last_used: "2026-07-19", note: "Day0 monitor gap attribution and stale one-sided extreme-bound uncertainty antibodies; incomplete evidence cannot become exit authority."}
     tests/test_bayes_precision_fusion_download.py: {created: "2026-06-08", last_used: "2026-07-17", note: "BPF raw capture batching, injected pre-request quota authority, exact committed-family reporting, deadline-bound persistence, LIVE writer priority, and chunk durability."}
     tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-07-17", note: "BPF source-clock capture coverage, reserved quota priority, per-commit family notification, fixpoint, quota cooldown, and held-family-first target ordering."}
     tests/data/test_fusion_upgrade_trigger.py: {created: "2026-06-11", last_used: "2026-07-17", note: "Fusion upgrade detects both provider-family growth and exact persisted source-row revision changes without repeated no-op materialization."}
@@ -392,7 +395,7 @@ test_trust_policy:
     tests/test_day0_extreme_updated_materialization_bridge.py: {created: "2026-07-19", last_used: "2026-07-19", note: "Event-driven Day0 posterior rematerialization bridge: one seed per current observation, monotone newer-observation advance, held-family priority, and fail-soft event emission."}
     tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-17", note: "Fast METAR publication persistence, event identities, and exact committed-family wake propagation."}
-    tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-17", note: "Day0 METAR source-clock scheduling, bounded commit retry, and durable event/family wake ordering."}
+    tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-19", note: "Day0 METAR source-clock scheduling, exact-timestamp continuity proof, WU-prefix fusion, bounded commit retry, and durable event/family wake ordering."}
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}

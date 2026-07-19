@@ -18,6 +18,10 @@ in_scope:
 - docs/reference/AGENTS.md
 - src/data/replacement_forecast_materializer.py
 - src/data/replacement_forecast_cycle_policy.py
+- src/data/day0_observation_reader.py
+- src/data/day0_fast_obs.py
+- src/data/day0_source_health.py
+- src/data/observation_client.py
 - src/main.py
 - src/engine/position_belief.py
 - src/execution/venue_sync_contract.py
@@ -41,6 +45,7 @@ in_scope:
 - src/state/fill_dedup.py
 - src/state/venue_command_repo.py
 - src/state/collateral_ledger.py
+- src/state/chain_mirror_reconciler.py
 - src/ops/monitor_cadence.py
 - src/events/price_channel_redecision_router.py
 - src/engine/global_auction_universe.py
@@ -84,6 +89,12 @@ in_scope:
 - tests/test_gate_runtime.py
 - tests/test_lifecycle.py
 - tests/test_day0_exit_gate.py
+- tests/test_day0_observation_reader.py
+- tests/test_day0_obs_fastlane_optionbc.py
+- tests/test_day0_source_health.py
+- tests/engine/test_day0_coverage_gate.py
+- tests/engine/test_day0_monitor_gap_and_stale_margin.py
+- tests/state/test_chain_mirror_settlement_preserves_booked_close_economics.py
 - tests/test_live_safety_invariants.py
 - tests/integration/test_w3_solve_seam_g3.py
 - tests/money_path/test_edli_live_readiness.py

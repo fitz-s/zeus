@@ -692,6 +692,7 @@ class FastObsExtremes:
     sample_count: int
     skipped_unit_law: int
     held_implausible: int = 0
+    sample_times_utc: tuple[datetime, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -866,6 +867,7 @@ def running_extremes_for_local_day(
         last_receipt_time=max(receipts) if receipts else None,
         sample_count=len(values), skipped_unit_law=skipped,
         held_implausible=held,
+        sample_times_utc=tuple(v[0].astimezone(UTC) for v in values),
     )
 
 

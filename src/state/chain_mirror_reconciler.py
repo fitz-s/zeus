@@ -919,12 +919,16 @@ def _apply_settlement_finding(
     if was_economically_closed:
         _booked_pnl = current["realized_pnl_usd"]
         _booked_exit_price = current["exit_price"]
-        _pnl = float(_booked_pnl) if _booked_pnl is not None else 0.0
-        _exit_price = (
-            float(_booked_exit_price)
-            if _booked_exit_price is not None
-            else (1.0 if position_won else 0.0)
-        )
+        if _booked_pnl is None or _booked_exit_price is None:
+            raise ValueError(
+                "chain-mirror settlement refuses economically_closed position "
+                "with missing booked close economics: "
+                f"position_id={position_id!r} "
+                f"realized_pnl_usd={_booked_pnl!r} "
+                f"exit_price={_booked_exit_price!r}"
+            )
+        _pnl = float(_booked_pnl)
+        _exit_price = float(_booked_exit_price)
     else:
         _exit_price = 1.0 if position_won else 0.0
         _pnl = compute_realized_pnl_usd(

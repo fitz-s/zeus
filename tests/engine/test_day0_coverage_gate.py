@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused or audited: 2026-05-24
+# Last reused or audited: 2026-07-19
 # Authority basis: review5.23 P1-1 (Day0 observation coverage window proof)
 """Antibody tests for the Day0 observation coverage-window completeness gate.
 
@@ -22,6 +22,7 @@ Post-fix:
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -31,6 +32,8 @@ from src.data.observation_client import (
     _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
     _DAY0_MIN_SAMPLE_COUNT,
     _compute_day0_coverage_status,
+    _fetch_wu_observation,
+    _select_local_day_samples,
 )
 from src.engine.evaluator import (
     _day0_observation_quality_rejection_reason,
@@ -229,6 +232,119 @@ class TestComputeDay0CoverageStatusBoundary:
         assert status == "LOW_COVERAGE", (
             f"Expected LOW_COVERAGE for {self._MIN - 1} samples, got {status!r}"
         )
+
+
+def test_wu_fallback_detects_internal_high_window_gap(monkeypatch) -> None:
+    """The executable HTTP fallback cannot turn first+count into continuity."""
+    tz = ZoneInfo("America/New_York")
+    target_day = date(2026, 5, 24)
+    local_samples = [
+        datetime(2026, 5, 24, hour, tzinfo=tz)
+        for hour in [*range(0, 10), 18, 19]
+    ]
+    payload = {
+        "observations": [
+            {
+                "temp": 60.0 + index,
+                "valid_time_gmt": int(instant.timestamp()),
+                "obs_id": "KLGA",
+            }
+            for index, instant in enumerate(local_samples)
+        ]
+    }
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return payload
+
+    monkeypatch.setattr(
+        "src.data.observation_client.httpx.get", lambda *args, **kwargs: _Response()
+    )
+    result = _fetch_wu_observation(
+        _NYC,
+        target_day=target_day,
+        reference_local=datetime(2026, 5, 24, 20, tzinfo=tz),
+        tz=tz,
+    )
+
+    assert result is not None
+    assert result.coverage_status == "GAP_SUSPECT"
+    assert result.gap_suspect_metrics == ("high",)
+    assert result.max_gap_minutes == pytest.approx(540.0)
+    high_reason = _day0_observation_quality_rejection_reason(
+        _NYC,
+        result,
+        HIGH_LOCALDAY_MAX,
+        decision_time=datetime(2026, 5, 25, 0, tzinfo=timezone.utc),
+    )
+    assert high_reason is not None and "gap-suspect" in high_reason
+
+
+def test_local_sample_selection_orders_repeated_hour_by_utc() -> None:
+    """Fall-back folds share wall time but remain distinct causal instants."""
+    tz = ZoneInfo("America/New_York")
+    target_day = date(2026, 11, 1)
+    first_fold = datetime(2026, 11, 1, 1, 30, tzinfo=tz, fold=0)
+    second_fold = datetime(2026, 11, 1, 1, 10, tzinfo=tz, fold=1)
+    reference_local = datetime(2026, 11, 1, 1, 15, tzinfo=tz, fold=1)
+
+    selected = _select_local_day_samples(
+        [
+            (99.0, first_fold, "first-fold"),
+            (70.0, second_fold, "second-fold"),
+        ],
+        target_day,
+        reference_local,
+    )
+
+    assert [row[2] for row in selected] == ["first-fold", "second-fold"]
+
+
+def test_wu_fallback_repeated_hour_uses_utc_causality_and_latest(monkeypatch) -> None:
+    """An earlier EDT reading remains causal after the clock repeats in EST."""
+    tz = ZoneInfo("America/New_York")
+    target_day = date(2026, 11, 1)
+    local_samples = [
+        (60.0, datetime(2026, 11, 1, 0, 30, tzinfo=tz, fold=0)),
+        (99.0, datetime(2026, 11, 1, 1, 30, tzinfo=tz, fold=0)),
+        (70.0, datetime(2026, 11, 1, 1, 10, tzinfo=tz, fold=1)),
+    ]
+    payload = {
+        "observations": [
+            {
+                "temp": temp,
+                "valid_time_gmt": int(instant.timestamp()),
+                "obs_id": "KLGA",
+            }
+            for temp, instant in local_samples
+        ]
+    }
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return payload
+
+    monkeypatch.setattr(
+        "src.data.observation_client.httpx.get", lambda *args, **kwargs: _Response()
+    )
+    result = _fetch_wu_observation(
+        _NYC,
+        target_day=target_day,
+        reference_local=datetime(2026, 11, 1, 1, 15, tzinfo=tz, fold=1),
+        tz=tz,
+    )
+
+    assert result is not None
+    assert result.sample_count == 3
+    assert result.high_so_far == 99.0
+    assert result.current_temp == 70.0
+    assert result.observation_time == "2026-11-01T06:10:00+00:00"
 
 
 def _make_gap_obs(

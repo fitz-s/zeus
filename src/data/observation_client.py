@@ -27,6 +27,10 @@ import httpx
 
 from src.config import City
 from src.contracts.exceptions import MissingCalibrationError, ObservationUnavailableError
+from src.data.day0_observation_reader import (
+    COVERAGE_GAP_SUSPECT,
+    _coverage_gap_analysis,
+)
 from src.data.openmeteo_client import fetch as _fetch_openmeteo
 from src.types.temperature import Fahrenheit, FahrenheitBox
 
@@ -69,6 +73,10 @@ class Day0ObservationContext:
     # status must then fail closed for every metric.
     max_gap_minutes: Optional[float] = None
     gap_suspect_metrics: Optional[tuple[str, ...]] = None
+    # Exact accepted observation instants carried only while provider lanes are
+    # being combined. Canonical DB contexts may leave this absent because they
+    # already persist the derived gap proof above.
+    sample_times_utc: Optional[tuple[str, ...]] = None
 
     def __post_init__(self) -> None:
         if self.low_so_far is None:
@@ -100,6 +108,8 @@ class Day0ObservationContext:
             "source_authority": self.source_authority,
             "data_version": self.data_version,
             "training_allowed": self.training_allowed,
+            "max_gap_minutes": self.max_gap_minutes,
+            "gap_suspect_metrics": self.gap_suspect_metrics,
         }
 
     # Allow dict-style .get() used by legacy callers in evaluator / monitor_refresh
@@ -190,16 +200,70 @@ def _compute_day0_coverage_status(
     At exactly grace_hours the sample is still within the window → "OK" or
     "LOW_COVERAGE" per sample count.  Extracted for testability.
 
-    Elapsed hours are computed via timedelta subtraction (not ``hour + minute/60``)
-    so that DST fall-back days (where 01:xx appears twice) are handled correctly.
+    Elapsed hours are computed between UTC instants so DST fall-back folds do
+    not collapse two distinct local times into one wall-clock comparison.
     """
     _local_midnight = first_local.replace(hour=0, minute=0, second=0, microsecond=0, fold=0)
-    elapsed_hours = (first_local - _local_midnight).total_seconds() / 3600.0
+    elapsed_hours = (
+        first_local.astimezone(timezone.utc)
+        - _local_midnight.astimezone(timezone.utc)
+    ).total_seconds() / 3600.0
     if elapsed_hours > grace_hours:
         return "WINDOW_INCOMPLETE"
     elif n_samples < min_samples:
         return "LOW_COVERAGE"
     return "OK"
+
+
+def _parse_sample_times_utc(values: object) -> tuple[datetime, ...]:
+    """Normalize provider sample instants; malformed evidence is omitted."""
+    if not isinstance(values, (list, tuple)):
+        return ()
+    parsed: set[datetime] = set()
+    for value in values:
+        try:
+            if isinstance(value, datetime):
+                instant = value
+            else:
+                instant = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if instant.tzinfo is None:
+                instant = instant.replace(tzinfo=timezone.utc)
+            parsed.add(instant.astimezone(timezone.utc))
+        except (TypeError, ValueError, OSError, OverflowError):
+            continue
+    return tuple(sorted(parsed))
+
+
+def _coverage_status_from_sample_times(
+    *,
+    first_local: datetime,
+    n_samples: int,
+    sample_times_utc: object,
+    target_day: date,
+    timezone_name: str,
+    reference_utc: datetime,
+) -> tuple[str, Optional[float], tuple[str, ...], tuple[datetime, ...]]:
+    """Return row-window plus metric-aware continuity proof for a provider lane.
+
+    Count and first-sample time cannot prove that the extreme window was
+    observed. Missing exact timestamps therefore fail closed for both metrics
+    whenever the older window test would otherwise claim usable coverage.
+    """
+    base = _compute_day0_coverage_status(first_local, n_samples)
+    times = _parse_sample_times_utc(sample_times_utc)
+    if base == "WINDOW_INCOMPLETE":
+        return base, None, (), times
+    if not times:
+        return COVERAGE_GAP_SUSPECT, None, ("high", "low"), times
+    max_gap, metrics = _coverage_gap_analysis(
+        sample_times_utc=list(times),
+        target_date=target_day.isoformat(),
+        timezone_name=timezone_name,
+        decision_time_utc=reference_utc,
+        cumulative_rows=False,
+    )
+    status = COVERAGE_GAP_SUSPECT if metrics else base
+    return status, max_gap, metrics, times
 
 
 def _coerce_reference_time(value: datetime | str | None) -> datetime:
@@ -234,12 +298,14 @@ def _select_local_day_samples(
     target_day: date,
     reference_local: datetime,
 ) -> list[tuple[float, datetime, object]]:
+    reference_utc = reference_local.astimezone(timezone.utc)
     selected = [
         (float(temp), dt_local, raw_time)
         for temp, dt_local, raw_time in samples
-        if dt_local.date() == target_day and dt_local <= reference_local
+        if dt_local.date() == target_day
+        and dt_local.astimezone(timezone.utc) <= reference_utc
     ]
-    selected.sort(key=lambda row: row[1])
+    selected.sort(key=lambda row: row[1].astimezone(timezone.utc))
     return selected
 
 
@@ -380,14 +446,18 @@ def _wu_result_needs_fast_tail(
         except (ValueError, TypeError, OSError, OverflowError):
             pass  # unparseable timestamp; fall through to coverage check
     coverage = str(getattr(result, "coverage_status", "") or "").strip().upper()
-    if coverage == "WINDOW_INCOMPLETE":
-        return "wu_coverage_window_incomplete"
+    if coverage in {"WINDOW_INCOMPLETE", COVERAGE_GAP_SUSPECT}:
+        return f"wu_coverage_{coverage.lower()}"
     return None
 
 
 def _fuse_wu_prefix_with_same_station_tail(
     wu: "Day0ObservationContext",
     fast_tail: "Day0ObservationContext",
+    *,
+    city: Optional["City"] = None,
+    target_day: Optional[date] = None,
+    reference_utc: Optional[datetime] = None,
 ) -> Optional["Day0ObservationContext"]:
     """Fuse a coverage-proving WU prefix with a fresh same-station tail.
 
@@ -414,7 +484,7 @@ def _fuse_wu_prefix_with_same_station_tail(
     import dataclasses
 
     wu_cov = str(getattr(wu, "coverage_status", "") or "").strip().upper()
-    if wu_cov not in ("OK", "LOW_COVERAGE"):
+    if wu_cov not in ("OK", "LOW_COVERAGE", COVERAGE_GAP_SUSPECT):
         return None  # WU cannot prove the prefix — stay honest-incomplete.
     if str(getattr(wu, "unit", "")) != str(getattr(fast_tail, "unit", "")):
         return None
@@ -423,6 +493,41 @@ def _fuse_wu_prefix_with_same_station_tail(
         low = min(float(wu.low_so_far), float(fast_tail.low_so_far))
     except (TypeError, ValueError):
         return None
+    wu_times = _parse_sample_times_utc(getattr(wu, "sample_times_utc", None))
+    tail_times = _parse_sample_times_utc(
+        getattr(fast_tail, "sample_times_utc", None)
+    )
+    combined_times = tuple(sorted(set(wu_times) | set(tail_times)))
+    coverage_status = wu_cov
+    max_gap_minutes = getattr(wu, "max_gap_minutes", None)
+    gap_suspect_metrics = getattr(wu, "gap_suspect_metrics", None)
+    if city is not None and target_day is not None and reference_utc is not None:
+        first = min(combined_times) if combined_times else None
+        if first is not None:
+            coverage_status, max_gap_minutes, gap_suspect_metrics, combined_times = (
+                _coverage_status_from_sample_times(
+                    first_local=first.astimezone(ZoneInfo(str(city.timezone))),
+                    n_samples=len(combined_times),
+                    sample_times_utc=combined_times,
+                    target_day=target_day,
+                    timezone_name=str(city.timezone),
+                    reference_utc=reference_utc,
+                )
+            )
+        else:
+            coverage_status = COVERAGE_GAP_SUSPECT
+            gap_suspect_metrics = ("high", "low")
+    elif wu_cov == COVERAGE_GAP_SUSPECT or str(
+        getattr(fast_tail, "coverage_status", "") or ""
+    ).strip().upper() == COVERAGE_GAP_SUSPECT:
+        coverage_status = COVERAGE_GAP_SUSPECT
+        wu_metrics = getattr(wu, "gap_suspect_metrics", None)
+        tail_metrics = getattr(fast_tail, "gap_suspect_metrics", None)
+        if wu_metrics is None or tail_metrics is None:
+            gap_suspect_metrics = ("high", "low")
+        else:
+            gap_suspect_metrics = tuple(sorted(set(wu_metrics) | set(tail_metrics)))
+
     annotation = (
         f"{fast_tail.provider_reported_time or ''};prefix=wu_api"
         f";prefix_coverage={wu_cov}"
@@ -433,10 +538,25 @@ def _fuse_wu_prefix_with_same_station_tail(
         high_so_far=high,
         low_so_far=low,
         source=COMBINED_WU_FAST_TAIL_SOURCE,
-        coverage_status=wu_cov,
-        first_sample_time=getattr(wu, "first_sample_time", None),
-        sample_count=int(getattr(wu, "sample_count", 0) or 0)
-        + int(getattr(fast_tail, "sample_count", 0) or 0),
+        coverage_status=coverage_status,
+        first_sample_time=(
+            combined_times[0].isoformat()
+            if combined_times
+            else getattr(wu, "first_sample_time", None)
+        ),
+        sample_count=(
+            len(combined_times)
+            if combined_times
+            else int(getattr(wu, "sample_count", 0) or 0)
+            + int(getattr(fast_tail, "sample_count", 0) or 0)
+        ),
+        max_gap_minutes=max_gap_minutes,
+        gap_suspect_metrics=gap_suspect_metrics,
+        sample_times_utc=(
+            tuple(instant.isoformat() for instant in combined_times)
+            if combined_times
+            else None
+        ),
         provider_reported_time=annotation,
     )
 
@@ -491,14 +611,31 @@ def _fetch_same_station_fast_tail_observation(
     if extremes is None:
         return None
 
-    # Coverage computation from METAR first_obs_time (same window rule as WU).
+    # Count plus first-observation time cannot prove continuity. Carry exact
+    # accepted METAR instants through the same metric-aware gap proof as the
+    # canonical and WU paths.
     if extremes.first_obs_time is not None:
         tz = ZoneInfo(str(getattr(city, "timezone", "UTC") or "UTC"))
         first_local = extremes.first_obs_time.astimezone(tz)
-        coverage_status = _compute_day0_coverage_status(first_local, extremes.sample_count)
+        (
+            coverage_status,
+            max_gap_minutes,
+            gap_suspect_metrics,
+            sample_times_utc,
+        ) = _coverage_status_from_sample_times(
+            first_local=first_local,
+            n_samples=extremes.sample_count,
+            sample_times_utc=getattr(extremes, "sample_times_utc", None),
+            target_day=target_day,
+            timezone_name=str(getattr(city, "timezone", "UTC") or "UTC"),
+            reference_utc=reference_utc,
+        )
     else:
         # No first_obs_time from METAR data — cannot prove coverage.
         coverage_status = "WINDOW_INCOMPLETE"
+        max_gap_minutes = None
+        gap_suspect_metrics = ()
+        sample_times_utc = ()
 
     obs_time_iso = extremes.last_obs_time.astimezone(timezone.utc).isoformat()
     # observation_available_at: use feed receiptTime when present (honest
@@ -532,6 +669,13 @@ def _fetch_same_station_fast_tail_observation(
         ),
         last_sample_time=obs_time_iso,
         coverage_status=coverage_status,
+        max_gap_minutes=max_gap_minutes,
+        gap_suspect_metrics=gap_suspect_metrics,
+        sample_times_utc=(
+            tuple(instant.isoformat() for instant in sample_times_utc)
+            if sample_times_utc
+            else None
+        ),
         observation_available_at=available_at,
         provider_reported_time=provenance_annotation,
     )
@@ -601,10 +745,20 @@ def get_current_observation(
                 # applies.
                 if (
                     result is not None
-                    and str(fast_result.coverage_status).strip().upper()
-                    == "WINDOW_INCOMPLETE"
+                    and (
+                        str(fast_result.coverage_status).strip().upper()
+                        in {"WINDOW_INCOMPLETE", COVERAGE_GAP_SUSPECT}
+                        or str(result.coverage_status).strip().upper()
+                        == COVERAGE_GAP_SUSPECT
+                    )
                 ):
-                    fused = _fuse_wu_prefix_with_same_station_tail(result, fast_result)
+                    fused = _fuse_wu_prefix_with_same_station_tail(
+                        result,
+                        fast_result,
+                        city=city,
+                        target_day=target_day,
+                        reference_utc=reference_utc,
+                    )
                     if fused is not None:
                         fast_result = fused
                 logger.info(
@@ -738,12 +892,14 @@ def _fetch_wu_observation(
                 continue
             samples.append((float(temp), dt_local, raw_time, station_id))
 
+        reference_utc = reference_local.astimezone(timezone.utc)
         selected = [
             (float(temp), dt_local, raw_time, station_id)
             for temp, dt_local, raw_time, station_id in samples
-            if dt_local.date() == target_day and dt_local <= reference_local
+            if dt_local.date() == target_day
+            and dt_local.astimezone(timezone.utc) <= reference_utc
         ]
-        selected.sort(key=lambda row: row[1])
+        selected.sort(key=lambda row: row[1].astimezone(timezone.utc))
         if not selected:
             return None
 
@@ -753,8 +909,22 @@ def _fetch_wu_observation(
         first_local = selected[0][1]
         last_local = selected[-1][1]
         n_samples = len(selected)
-        # review5.23 P1-1: prove coverage interval starts at/near local-day start.
-        coverage_status = _compute_day0_coverage_status(first_local, n_samples)
+        sample_times = tuple(
+            dt_local.astimezone(timezone.utc) for _, dt_local, _, _ in selected
+        )
+        (
+            coverage_status,
+            max_gap_minutes,
+            gap_suspect_metrics,
+            sample_times_utc,
+        ) = _coverage_status_from_sample_times(
+            first_local=first_local,
+            n_samples=n_samples,
+            sample_times_utc=sample_times,
+            target_day=target_day,
+            timezone_name=str(getattr(city, "timezone", "UTC") or "UTC"),
+            reference_utc=reference_local.astimezone(timezone.utc),
+        )
         return Day0ObservationContext(
             high_so_far=float(high_so_far),
             low_so_far=float(low_so_far),
@@ -767,6 +937,11 @@ def _fetch_wu_observation(
             first_sample_time=_observation_time_utc_iso(first_local),
             last_sample_time=_observation_time_utc_iso(last_local),
             coverage_status=coverage_status,
+            max_gap_minutes=max_gap_minutes,
+            gap_suspect_metrics=gap_suspect_metrics,
+            sample_times_utc=tuple(
+                instant.isoformat() for instant in sample_times_utc
+            ),
             observation_available_at=datetime.now(timezone.utc).isoformat(),
             provider_reported_time=None,  # WU API has no separate reported-at field
         )
