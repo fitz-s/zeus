@@ -139,6 +139,10 @@ class _CachedCurrentGlobalDay0FamilyError(RuntimeError):
     pass
 
 
+class _Day0UnobservedPrefixUnavailable(ObservationUnavailableError):
+    """The target local day has no canonical observation yet."""
+
+
 def install_monitor_orderbook_prefetch(
     clob,
     books: dict[str, dict],
@@ -4435,8 +4439,24 @@ def _build_current_global_day0_family_snapshot(
             (str(position.city), str(position.target_date), metric),
         ).fetchone()
         if row is None:
+            observed = world.execute(
+                """
+                SELECT 1
+                  FROM observation_instants
+                 WHERE city = ?
+                   AND target_date = ?
+                 LIMIT 1
+                """,
+                (str(position.city), str(position.target_date)),
+            ).fetchone()
+            if observed is None:
+                raise _Day0UnobservedPrefixUnavailable(
+                    "current global Day0 family event unavailable: "
+                    "zero target-date canonical observations"
+                )
             raise ObservationUnavailableError(
-                "current global Day0 family event unavailable"
+                "current global Day0 family event unavailable despite "
+                "target-date canonical observation"
             )
         event = OpportunityEvent(**dict(row))
         from src.engine.event_reactor_adapter import (
@@ -4585,6 +4605,58 @@ def _refresh_current_global_day0_probability(
     return _materialize_current_global_day0_probability(position, snapshot)
 
 
+def _refresh_day0_unobserved_prefix_probability(
+    position: Position,
+    *,
+    city,
+    target_d,
+) -> tuple[float, Position, bool] | None:
+    """Keep current belief continuous before the first target-day observation."""
+
+    if not _within_day0_observation_start_grace(city, target_d):
+        return None
+
+    metric = resolve_position_metric(position)[0]
+    from src.engine.position_belief import (
+        SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+        load_replacement_belief,
+        monitor_belief_max_age_hours,
+    )
+
+    try:
+        belief = load_replacement_belief(
+            city=position.city,
+            target_date=position.target_date,
+            temperature_metric=metric,
+            bin_label=position.bin_label,
+            direction=str(getattr(position.direction, "value", position.direction)),
+            max_age_hours=monitor_belief_max_age_hours(),
+        )
+    except Exception as exc:  # noqa: BLE001 - absence remains fail-closed
+        logger.debug(
+            "Day0 unobserved-prefix replacement read failed for %s: %s",
+            getattr(position, "trade_id", "?"),
+            exc,
+        )
+        return None
+    if belief is None or not belief.fresh:
+        return None
+
+    refreshed = _clone_for_probability_refresh(position)
+    refreshed.selected_method = SELECTED_METHOD_REPLACEMENT_POSTERIOR
+    _append_monitor_validation(
+        refreshed,
+        "day0_unobserved_prefix_within_start_grace:replacement_posterior_authority",
+    )
+    _append_monitor_validation(
+        refreshed,
+        "day0_observation_unavailable_within_start_grace:replacement_posterior_authority",
+    )
+    _append_monitor_validation(refreshed, belief.freshness_validation())
+    _set_monitor_probability_fresh(refreshed, True)
+    return float(belief.held_side_prob), refreshed, True
+
+
 def _current_global_monitor_edge_band(
     held_samples,
     *,
@@ -4646,48 +4718,13 @@ def _refresh_day0_monitor_probability(
         )
     except ObservationUnavailableError:
         metric = resolve_position_metric(pos)[0]
-        from src.engine.position_belief import (
-            SELECTED_METHOD_REPLACEMENT_POSTERIOR,
-            load_replacement_belief,
-            monitor_belief_max_age_hours,
+        unobserved_prefix = _refresh_day0_unobserved_prefix_probability(
+            refresh_pos,
+            city=city,
+            target_d=target_d,
         )
-
-        try:
-            belief = load_replacement_belief(
-                city=pos.city,
-                target_date=pos.target_date,
-                temperature_metric=metric,
-                bin_label=pos.bin_label,
-                direction=str(getattr(pos.direction, "value", pos.direction)),
-                max_age_hours=monitor_belief_max_age_hours(),
-            )
-        except Exception as exc:  # noqa: BLE001 - fallback must stay fail-soft
-            belief = None
-            logger.debug(
-                "day0 observation unavailable replacement fallback read failed for %s: %s",
-                getattr(pos, "trade_id", "?"),
-                exc,
-            )
-        if belief is not None and belief.fresh:
-            if _within_day0_observation_start_grace(city, target_d):
-                fresh_pos = replace(refresh_pos)
-                setattr(
-                    fresh_pos,
-                    "selected_method",
-                    SELECTED_METHOD_REPLACEMENT_POSTERIOR,
-                )
-                _append_monitor_validation(
-                    fresh_pos,
-                    "day0_observation_unavailable_within_start_grace:replacement_posterior_authority",
-                )
-                _append_monitor_validation(fresh_pos, belief.freshness_validation())
-                _set_monitor_probability_fresh(fresh_pos, True)
-                return float(belief.held_side_prob), fresh_pos, True
-            _append_monitor_validation(
-                refresh_pos,
-                "day0_observation_unavailable:replacement_posterior_available_not_exit_authority",
-            )
-            _append_monitor_validation(refresh_pos, belief.freshness_validation())
+        if unobserved_prefix is not None:
+            return unobserved_prefix
 
         readthrough_prob = _attempt_held_belief_readthrough(
             pos, city=city, target_d=target_d, metric=metric
@@ -4787,6 +4824,14 @@ def monitor_probability_refresh(
                     family_cache=day0_family_cache,
                 )
             except Exception as exc:  # noqa: BLE001 - current authority fails closed
+                if isinstance(exc, _Day0UnobservedPrefixUnavailable):
+                    unobserved_prefix = _refresh_day0_unobserved_prefix_probability(
+                        pos,
+                        city=city,
+                        target_d=target_d,
+                    )
+                    if unobserved_prefix is not None:
+                        return unobserved_prefix
                 stale = _clone_for_probability_refresh(pos)
                 _set_monitor_probability_fresh(stale, False)
                 post_day_final_missing = (

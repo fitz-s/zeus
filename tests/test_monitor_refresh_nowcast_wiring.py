@@ -273,7 +273,7 @@ def test_pre_first_day0_observation_uses_fresh_replacement_belief(monkeypatch) -
     assert prob == pytest.approx(0.73)
     assert refresh_pos.selected_method == "replacement_posterior"
     assert (
-        "day0_observation_unavailable_within_start_grace:replacement_posterior_authority"
+        "day0_unobserved_prefix_within_start_grace:replacement_posterior_authority"
         in refresh_pos.applied_validations
     )
 
@@ -1007,6 +1007,60 @@ def test_identified_day0_monitor_fails_closed_without_global_probability(
     assert reseeds == [
         {"city": "Paris", "target_date": "2026-07-14", "metric": "high"}
     ]
+
+
+def test_identified_day0_monitor_uses_fresh_belief_before_first_observation(
+    monkeypatch,
+) -> None:
+    """Canonical holdings keep one current q across the local-midnight boundary."""
+    from src.engine import position_belief
+
+    pos = _make_position()
+    pos.city = "London"
+    pos.target_date = "2026-07-20"
+    pos.entry_method = "day0_observation"
+    pos.p_posterior = 0.41
+    pos.condition_id = "0x" + "4e" * 32
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_refresh_current_global_day0_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            monitor_refresh_module._Day0UnobservedPrefixUnavailable(
+                "current global Day0 family event unavailable: "
+                "zero target-date canonical observations"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_within_day0_observation_start_grace",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: _replacement_belief(),
+    )
+
+    probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
+        pos,
+        conn=object(),
+        city=SimpleNamespace(name="London", timezone="Europe/London"),
+        target_d=date(2026, 7, 20),
+    )
+
+    assert probability == pytest.approx(0.73)
+    assert fresh is True
+    assert refreshed.selected_method == "replacement_posterior"
+    assert (
+        "day0_unobserved_prefix_within_start_grace:replacement_posterior_authority"
+        in refreshed.applied_validations
+    )
 
 
 def test_post_local_day_waits_for_final_observation_without_reseed(
