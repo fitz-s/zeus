@@ -652,6 +652,48 @@ def _write_request(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def _cycle_advance_never_priced_scopes(
+    conn: object,
+    fam_scopes: frozenset[tuple[str, str, str]],
+) -> frozenset[tuple[str, str, str]]:
+    """Return the subset of (city, target_date, metric) scopes with zero prior posterior.
+
+    Best-effort: any failure (missing ``forecast_posteriors`` table on an older
+    fixture/test db, locked db, etc.) yields an empty result, which falls back
+    to the legacy held/non-held two-tier priority below rather than raising.
+    """
+    if not fam_scopes:
+        return frozenset()
+    try:
+        priced_scopes: set[tuple[str, str, str]] = set()
+        fam_list = tuple(fam_scopes)
+        for offset in range(0, len(fam_list), 200):
+            chunk = fam_list[offset : offset + 200]
+            values = ", ".join("(?, ?, ?)" for _ in chunk)
+            priced_rows = conn.execute(
+                f"""
+                WITH fam(city, target_date, metric) AS (
+                    VALUES {values}
+                )
+                SELECT DISTINCT f.city, f.target_date, f.metric
+                FROM fam AS f
+                JOIN forecast_posteriors AS p
+                  ON p.source_id = ?
+                 AND p.city = f.city
+                 AND p.target_date = f.target_date
+                 AND p.temperature_metric = f.metric
+                """,
+                tuple(value for scope in chunk for value in scope) + (SOURCE_ID,),
+            ).fetchall()
+            priced_scopes.update(
+                (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
+                for row in priced_rows
+            )
+    except Exception:  # noqa: BLE001 - never-priced tier is best-effort; falls back to 0/1 priority
+        return frozenset()
+    return frozenset(fam_scopes - priced_scopes)
+
+
 def _cycle_advance_seed_priority_map(
     forecast_db: Path | str | None,
     queue_files: Sequence[Path],
@@ -663,6 +705,14 @@ def _cycle_advance_seed_priority_map(
     seed becomes either a seed file or a request file; plain filename ordering
     can otherwise spend live cycles on non-held cities while a held position has
     stale belief.
+
+    A family that has never had a single ``forecast_posteriors`` row (never
+    priced at all) sorts strictly ahead of a held-position refresh: getting a
+    first price at all dominates the entry-lag budget (see
+    ``docs/evidence/capital_efficiency_2026_07_19/entry_leadtime.md``), and a
+    held-position refresh delayed by a burst of never-priced families is
+    bounded to low single-digit seconds at the default poll cadence (1s tick,
+    8 files/tick) against a refresh cadence measured in hours — negligible.
     """
     if forecast_db is None or not queue_files:
         return {}
@@ -717,6 +767,10 @@ def _cycle_advance_seed_priority_map(
                         tuple(value for scope in chunk for value in scope),
                     ).fetchall()
                 )
+            fam_scopes = frozenset(
+                (str(row[0] or ""), str(row[1] or ""), str(row[2] or "")) for row in rows
+            )
+            never_priced_scopes = _cycle_advance_never_priced_scopes(conn, fam_scopes)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
@@ -727,7 +781,14 @@ def _cycle_advance_seed_priority_map(
         scope = tuple(str(value or "") for value in row[:4])
         names = names_by_scope.get(scope, ())
         held_position, enqueued_at = row[4:]
-        value = (0 if int(held_position or 0) == 1 else 1, str(enqueued_at or ""))
+        fam_scope = scope[:3]
+        if fam_scope in never_priced_scopes:
+            tier = -1
+        elif int(held_position or 0) == 1:
+            tier = 0
+        else:
+            tier = 1
+        value = (tier, str(enqueued_at or ""))
         for name in names:
             current = priority.get(name)
             if current is None or value < current:

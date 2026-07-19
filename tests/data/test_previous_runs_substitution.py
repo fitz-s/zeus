@@ -629,6 +629,225 @@ def test_cycle_priority_reads_only_queued_forecast_scopes(tmp_path) -> None:
     assert priority == {queued.name: (0, "2026-06-11T13:01:00+00:00")}
 
 
+def test_cycle_priority_never_priced_family_sorts_ahead_of_held_position(tmp_path) -> None:
+    """A family with zero prior forecast_posteriors row (never priced) must
+    outrank a held-position refresh: the entry-lag evidence
+    (docs/evidence/capital_efficiency_2026_07_19/entry_leadtime.md) shows
+    getting a first price at all dominates the lag, and this queue previously
+    put every held-position refresh ahead of brand-new families with no price
+    at all."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            seed_file TEXT,
+            held_position INTEGER NOT NULL,
+            enqueued_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX uq_cycle_advance_enqueues_scope_target_cycle
+            ON cycle_advance_enqueues(city, target_date, metric, target_cycle_time);
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "Paris",
+                "2026-06-12",
+                "low",
+                "2026-06-11T12:00:00+00:00",
+                str(tmp_path / "Paris.current.low.json"),
+                1,
+                "2026-06-11T13:00:00+00:00",
+            ),
+            (
+                "Tokyo",
+                "2026-06-12",
+                "high",
+                "2026-06-11T12:00:00+00:00",
+                str(tmp_path / "Tokyo.current.high.json"),
+                0,
+                "2026-06-11T13:01:00+00:00",
+            ),
+        ],
+    )
+    # Paris already has a posterior on record (any prior cycle); Tokyo never does.
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            queue_mod.SOURCE_ID,
+            "Paris",
+            "2026-06-12",
+            "low",
+            "2026-06-10T12:00:00+00:00",
+            "2026-06-10T20:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    paris = tmp_path / "Paris.current.low.json"
+    paris.write_text(
+        json.dumps(
+            {
+                "city": "Paris",
+                "target_date": "2026-06-12",
+                "temperature_metric": "low",
+                "source_cycle_time": "2026-06-11T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    tokyo = tmp_path / "Tokyo.current.high.json"
+    tokyo.write_text(
+        json.dumps(
+            {
+                "city": "Tokyo",
+                "target_date": "2026-06-12",
+                "temperature_metric": "high",
+                "source_cycle_time": "2026-06-11T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(forecast_db, (paris, tokyo))
+
+    assert priority[tokyo.name][0] == -1
+    assert priority[paris.name][0] == 0
+    assert priority[tokyo.name] < priority[paris.name]
+    sort_key_tokyo = queue_mod._cycle_advance_file_sort_key(tokyo, priority)
+    sort_key_paris = queue_mod._cycle_advance_file_sort_key(paris, priority)
+    assert sort_key_tokyo < sort_key_paris
+
+
+def test_cycle_priority_held_position_still_beats_plain_refresh_when_both_priced(
+    tmp_path,
+) -> None:
+    """When neither family is new (both already have a forecast_posteriors
+    row), the legacy ordering must hold: a held-position refresh still beats
+    a plain (non-held) refresh of an already-priced family."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            seed_file TEXT,
+            held_position INTEGER NOT NULL,
+            enqueued_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX uq_cycle_advance_enqueues_scope_target_cycle
+            ON cycle_advance_enqueues(city, target_date, metric, target_cycle_time);
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "Paris",
+                "2026-06-12",
+                "low",
+                "2026-06-11T12:00:00+00:00",
+                str(tmp_path / "Paris.current.low.json"),
+                1,
+                "2026-06-11T13:00:00+00:00",
+            ),
+            (
+                "Seoul",
+                "2026-06-12",
+                "high",
+                "2026-06-11T12:00:00+00:00",
+                str(tmp_path / "Seoul.current.high.json"),
+                0,
+                "2026-06-11T12:59:00+00:00",
+            ),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (
+                queue_mod.SOURCE_ID,
+                "Paris",
+                "2026-06-12",
+                "low",
+                "2026-06-10T12:00:00+00:00",
+                "2026-06-10T20:00:00+00:00",
+            ),
+            (
+                queue_mod.SOURCE_ID,
+                "Seoul",
+                "2026-06-12",
+                "high",
+                "2026-06-10T12:00:00+00:00",
+                "2026-06-10T20:00:00+00:00",
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    paris = tmp_path / "Paris.current.low.json"
+    paris.write_text(
+        json.dumps(
+            {
+                "city": "Paris",
+                "target_date": "2026-06-12",
+                "temperature_metric": "low",
+                "source_cycle_time": "2026-06-11T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    seoul = tmp_path / "Seoul.current.high.json"
+    seoul.write_text(
+        json.dumps(
+            {
+                "city": "Seoul",
+                "target_date": "2026-06-12",
+                "temperature_metric": "high",
+                "source_cycle_time": "2026-06-11T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(forecast_db, (paris, seoul))
+
+    assert priority[paris.name][0] == 0
+    assert priority[seoul.name][0] == 1
+    assert priority[paris.name] < priority[seoul.name]
+
+
 def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
