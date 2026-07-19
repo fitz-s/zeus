@@ -9,6 +9,10 @@
 Unit: _day0_remaining_center_delta_c reads the anchor family's (ecmwf_ifs) hourly
 vector and licenses delta = elapsed share of the day's forecast extreme; every
 absence/error fails OPEN to (0.0, None, None) so serving stays byte-identical.
+SUB-HOURLY (operator directive 2026-07-18): the remaining window is the continuous
+[computed_at, end-of-local-day] over the piecewise-linear hourly series — the
+remaining extreme includes the interpolated value AT computed_at (partial hours
+count exactly), and hours_remaining is FRACTIONAL (last valid knot - computed_at).
 Behavior: the corrected mu moves beyond-obs mass into the straddle bin in BOTH the
 point q and the bootstrap bounds; non-Day0 materialization is byte-identical with a
 delta-bearing vector present (the machinery must not even run).
@@ -94,24 +98,26 @@ def test_high_post_peak_delta_is_whole_max_minus_remaining_max() -> None:
     conn = _vector_conn()
     _insert_vector(conn)
     # local 18:00 (Helsinki UTC+3) = 15:00Z: remaining h18..h23, max 21.7; whole max 25.5.
+    # hours_remaining is fractional: local 18:00 -> last knot 23:00 = 5.0h.
     delta, vector_id, hours = _day0_remaining_center_delta_c(
         conn, _stub_request(), metric="high", computed_at_utc=_utc(15)
     )
     assert delta == pytest.approx(25.5 - 21.7)
     assert vector_id == "v-test"
-    assert hours == pytest.approx(6.0)
+    assert hours == pytest.approx(5.0)
 
 
 def test_high_pre_peak_delta_is_zero() -> None:
     conn = _vector_conn()
     _insert_vector(conn)
     # local 10:00 = 07:00Z: remaining window still contains the peak -> delta 0.
+    # Fractional hours: local 10:00 -> last knot 23:00 = 13.0h.
     delta, vector_id, hours = _day0_remaining_center_delta_c(
         conn, _stub_request(), metric="high", computed_at_utc=_utc(7)
     )
     assert delta == 0.0
     assert vector_id == "v-test"
-    assert hours == pytest.approx(14.0)
+    assert hours == pytest.approx(13.0)
 
 
 def test_low_post_trough_delta_is_remaining_min_minus_whole_min() -> None:
@@ -233,6 +239,102 @@ def test_bad_timezone_fails_open() -> None:
     assert _day0_remaining_center_delta_c(
         conn, _stub_request(), metric="high", computed_at_utc=_utc(15)
     ) == (0.0, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Sub-hourly: partial hours count exactly (operator directive 2026-07-18).
+# ---------------------------------------------------------------------------
+
+def test_partial_hour_high_uses_interpolated_value_at_computed_at() -> None:
+    conn = _vector_conn()
+    _insert_vector(conn)
+    # local 16:30 = 13:30Z: day's max 25.5 sits AT the 16:00 knot, falling to 22.6
+    # at 17:00. The 16:00->17:00 segment is half elapsed: remaining max is the
+    # interpolated 16:30 value (25.5+22.6)/2 = 24.05, NOT the h17.. knot max 22.6.
+    delta, vector_id, hours = _day0_remaining_center_delta_c(
+        conn, _stub_request(), metric="high", computed_at_utc=_utc(13, 30)
+    )
+    assert delta == pytest.approx(25.5 - 24.05)
+    # Strictly between the old all-or-nothing values: 0 (16:00 knot kept) and
+    # 25.5 - 22.6 = 2.9 (16:00 knot dropped entirely).
+    assert 0.0 < delta < 25.5 - 22.6
+    assert vector_id == "v-test"
+    assert hours == pytest.approx(6.5)  # local 16:30 -> last knot 23:00
+
+
+def test_partial_hour_low_uses_interpolated_value_at_computed_at() -> None:
+    conn = _vector_conn()
+    # Captured before the early-morning computed_at so the vector is causal.
+    _insert_vector(conn, captured_at="2026-07-17T20:00:00+00:00")
+    # local 05:30 = 02:30Z: trough 17.0 at the h5 knot, rising to 18.0 at h6.
+    # Remaining min is the interpolated 05:30 value 17.5, not the h6.. knot min 18.0.
+    delta, _vector_id, _hours = _day0_remaining_center_delta_c(
+        conn, _stub_request(), metric="low", computed_at_utc=_utc(2, 30)
+    )
+    assert delta == pytest.approx(17.5 - 17.0)
+    assert 0.0 < delta < 18.0 - 17.0
+
+
+def test_high_delta_monotone_nondecreasing_within_one_falling_hour() -> None:
+    conn = _vector_conn()
+    _insert_vector(conn)
+    # Falling 16:00->17:00 segment (25.5 -> 22.6): delta(t) must be non-decreasing
+    # sub-hourly — later inside the hour means more of the peak has elapsed.
+    deltas = [
+        _day0_remaining_center_delta_c(
+            conn, _stub_request(), metric="high", computed_at_utc=_utc(13, minute)
+        )[0]
+        for minute in (10, 30, 50)
+    ]
+    assert deltas[0] < deltas[1] < deltas[2]
+
+
+def test_computed_at_on_grid_point_matches_hourly_behavior() -> None:
+    conn = _vector_conn()
+    _insert_vector(conn)
+    # Exactly on the local 18:00 knot: interpolated value == knot value, so the
+    # delta is identical to the pre-sub-hourly answer at that point.
+    delta, _vector_id, hours = _day0_remaining_center_delta_c(
+        conn, _stub_request(), metric="high", computed_at_utc=_utc(15)
+    )
+    assert delta == pytest.approx(25.5 - 21.7)
+    assert hours == pytest.approx(5.0)
+
+
+def test_computed_at_on_last_grid_point_has_zero_fractional_hours() -> None:
+    conn = _vector_conn()
+    _insert_vector(conn)
+    # Exactly on the final knot (local 23:00 = 20:00Z): remaining collapses to the
+    # last value; fractional hours_remaining is 0.0.
+    delta, _vector_id, hours = _day0_remaining_center_delta_c(
+        conn, _stub_request(), metric="high", computed_at_utc=_utc(20)
+    )
+    assert delta == pytest.approx(25.5 - 18.0)
+    assert hours == 0.0
+
+
+def test_computed_at_after_last_grid_point_keeps_day_over_rule() -> None:
+    conn = _vector_conn()
+    _insert_vector(conn)
+    # local next-day 00:30 = 21:30Z: day over -> last-entry rule, hours 0.0.
+    delta, _vector_id, hours = _day0_remaining_center_delta_c(
+        conn, _stub_request(), metric="high", computed_at_utc=_utc(21, 30)
+    )
+    assert delta == pytest.approx(25.5 - 18.0)
+    assert hours == 0.0
+
+
+def test_null_gap_interpolates_between_valid_neighbours() -> None:
+    conn = _vector_conn()
+    temps = list(_TEMPS)
+    temps[17] = None  # gap: valid neighbours h16 (25.5) and h18 (21.7)
+    _insert_vector(conn, temps=temps)
+    # local 16:30 = 13:30Z: interpolate across the 2h gap 16:00->18:00 at
+    # fraction 0.25: 25.5 + 0.25 * (21.7 - 25.5) = 24.55.
+    delta, _vector_id, _hours = _day0_remaining_center_delta_c(
+        conn, _stub_request(), metric="high", computed_at_utc=_utc(13, 30)
+    )
+    assert delta == pytest.approx(25.5 - 24.55)
 
 
 # ---------------------------------------------------------------------------

@@ -583,15 +583,27 @@ def _day0_remaining_center_delta_c(
 
     Authority: T0-1 audit §7 2026-07-18. Post-peak the whole-day forecast center no
     longer describes the remaining-day extreme (served P(new extreme beyond obs)
-    0.314 vs realized 0.070, 4.50x). HIGH: delta = max(whole local day) - max
-    (remaining hours >= computed_at) — how much of the day's forecast peak has
-    already elapsed. LOW: delta = min(remaining) - min(whole day). Clamped >= 0.
-    No remaining grid hours (day effectively over): the extreme can no longer move —
-    the LAST target-day entry is the remaining value (delta = whole range, maximal
-    shrink toward obs). hours_remaining = count of remaining valid grid entries.
-    Fail-open (0.0, None, None) on any absence/error: vector missing, < 2 valid
-    target-day entries, remaining hours all null, unparseable timestamps,
-    timezone failure — absence must leave serving byte-identical.
+    0.314 vs realized 0.070, 4.50x). SUB-HOURLY (operator directive 2026-07-18):
+    the settlement source refreshes every few tens of minutes, so hourly
+    quantization of the remaining window is too coarse — the true remaining
+    window is the continuous [computed_at, end-of-local-day] (at 16:59 the
+    16:00->17:00 segment still holds 1/60 of the hour). The hourly series is
+    treated as piecewise-LINEAR; a piecewise-linear series attains its extremes
+    at segment endpoints, so the exact continuous remaining extreme is the
+    interpolated value AT computed_at plus every grid knot >= computed_at —
+    identical to sampling a 5-minute (or any) fine grid, with no grid to build.
+    HIGH: delta = max(whole series) - max(remaining). LOW: delta =
+    min(remaining) - min(whole). Clamped >= 0. No remaining grid entries (day
+    effectively over): the extreme can no longer move — the series value at the
+    final grid point is the remaining value (delta = whole range, maximal
+    shrink toward obs).
+    hours_remaining = FRACTIONAL hours (last_grid_ts - max(computed_at,
+    first_grid_ts)), >= 0.0. Null temps are gaps bridged by their valid
+    neighbours; with no valid right neighbour the series ends at the last valid
+    point. Fail-open (0.0, None, None) on any absence/error: vector missing,
+    < 2 valid target-day entries, remaining grid slots exist but the valid series
+    ends before computed_at, unparseable timestamps, timezone failure — absence
+    must leave serving byte-identical.
     """
     try:
         row = conn.execute(
@@ -622,19 +634,47 @@ def _day0_remaining_center_delta_c(
             if value is not None and not math.isfinite(value):
                 value = None
             day_entries.append((moment, value))
-        valid = [(when, value) for when, value in day_entries if value is not None]
+        valid = sorted(
+            ((when, value) for when, value in day_entries if value is not None),
+            key=lambda item: item[0],
+        )
         if len(valid) < 2:
             return 0.0, None, None
         remaining_grid_exists = any(when >= computed_at_utc for when, _ in day_entries)
         remaining_valid = [value for when, value in valid if when >= computed_at_utc]
         if remaining_grid_exists and not remaining_valid:
             return 0.0, None, None
+        first_when, last_when = valid[0][0], valid[-1][0]
         if remaining_valid:
-            hours_remaining = float(len(remaining_valid))
+            # SUB-HOURLY: the remaining window is the continuous [computed_at, series
+            # end] over the piecewise-linear series (null gaps bridged by their valid
+            # neighbours). A linear segment attains its extremes at its endpoints, so
+            # remaining = knots >= computed_at PLUS the interpolated value AT
+            # computed_at (the partial segment's left endpoint) — exactly the 5-minute
+            # fine-grid answer at every resolution, with no grid to build.
+            if first_when < computed_at_utc:
+                prev_when, prev_value = max(
+                    ((when, value) for when, value in valid if when <= computed_at_utc),
+                    key=lambda item: item[0],
+                )
+                next_when, next_value = min(
+                    ((when, value) for when, value in valid if when >= computed_at_utc),
+                    key=lambda item: item[0],
+                )
+                if next_when == prev_when:
+                    interpolated = prev_value
+                else:
+                    fraction = (computed_at_utc - prev_when) / (next_when - prev_when)
+                    interpolated = prev_value + fraction * (next_value - prev_value)
+                remaining_valid.append(interpolated)
+            hours_remaining = max(
+                0.0,
+                (last_when - max(computed_at_utc, first_when)).total_seconds() / 3600.0,
+            )
             remaining_value = max(remaining_valid) if metric == "high" else min(remaining_valid)
         else:
             hours_remaining = 0.0
-            remaining_value = max(valid, key=lambda item: item[0])[1]
+            remaining_value = valid[-1][1]
         whole_values = [value for _, value in valid]
         if metric == "high":
             delta = max(whole_values) - remaining_value
