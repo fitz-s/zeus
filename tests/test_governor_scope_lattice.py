@@ -303,6 +303,36 @@ def test_classify_two_unknowns_same_market_is_not_systemic(conn):
     assert scope.is_systemic is False
 
 
+def test_settled_review_required_entry_is_historical_not_current_risk(conn):
+    """Settled lifecycle truth removes contingent exposure from the live book.
+
+    The command remains REVIEW_REQUIRED for audit/recovery, but its unknown fill
+    economics cannot freeze allocation after the position's weather outcome is
+    final.  Current bankroll and settlement own the resulting cash truth.
+    """
+
+    _insert_review_required(conn, command_id="c-settled", market_id="m-settled")
+    conn.execute(
+        """
+        INSERT INTO position_current
+          (position_id, phase, strategy_key, updated_at, temperature_metric)
+        VALUES (?, 'settled', 'forecast_qkernel_entry', ?, 'high')
+        """,
+        ("pos-c-settled", NOW.isoformat()),
+    )
+    conn.commit()
+
+    scope = classify_unknown_side_effect_scope(
+        conn,
+        CapPolicy(systemic_market_count_limit=1),
+    )
+
+    assert scope.total_count == 0
+    assert scope.scoped_markets == ()
+    assert scope.systemic_count == 0
+    assert scope.is_systemic is False
+
+
 def test_classify_no_unknowns(conn):
     scope = classify_unknown_side_effect_scope(conn, CapPolicy())
     assert scope.total_count == 0

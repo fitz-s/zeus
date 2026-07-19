@@ -1388,6 +1388,25 @@ def _review_required_has_materialized_entry_exposure(conn: Any, row: Mapping[str
     return current_row is not None
 
 
+def _review_required_position_is_settled(conn: Any, row: Mapping[str, Any]) -> bool:
+    """Return whether canonical lifecycle truth has ended all market risk."""
+
+    position_id = str(row.get("position_id") or "").strip()
+    if not position_id or not _has_table(conn, "position_current"):
+        return False
+    current_row = conn.execute(
+        """
+        SELECT 1
+          FROM position_current
+         WHERE position_id = ?
+           AND phase = 'settled'
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    return current_row is not None
+
+
 def _review_required_carries_submit_side_effect_risk(conn: Any, row: Mapping[str, Any]) -> bool:
     """Classify REVIEW_REQUIRED rows for the global unknown-side-effect latch.
 
@@ -1398,6 +1417,8 @@ def _review_required_carries_submit_side_effect_risk(conn: Any, row: Mapping[str
     """
 
     command_id = str(row.get("command_id") or "")
+    if _review_required_position_is_settled(conn, row):
+        return False
     if _review_required_has_materialized_entry_exposure(conn, row):
         return False
     latest_reason = _latest_review_required_reason(conn, command_id)
