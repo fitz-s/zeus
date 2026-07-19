@@ -3790,7 +3790,14 @@ def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(
 
 def test_live_adapter_reuses_book_cache_after_probability_rebind(
     monkeypatch,
+    tmp_path,
 ):
+    from src.data.polymarket_request_governor import (
+        PolymarketRequestGovernor,
+        RequestAdmissionDenied,
+        RequestPriority,
+    )
+
     trade = sqlite3.connect(":memory:")
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
@@ -3881,6 +3888,22 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
 
     capture_calls = []
     book_calls = []
+    priorities = []
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json")
+    scan_lease = governor.acquire(
+        "GET",
+        "https://clob.polymarket.com/book",
+        params={"token_id": "scan-failure"},
+        priority=RequestPriority.SCAN,
+    )
+    assert governor.record_failure(scan_lease) is True
+    with pytest.raises(RequestAdmissionDenied, match="ENDPOINT_EMBARGOED"):
+        governor.acquire(
+            "GET",
+            "https://clob.polymarket.com/book",
+            params={"token_id": "scan-still-blocked"},
+            priority=RequestPriority.SCAN,
+        )
 
     def fake_capture(_trade_conn, **kwargs):
         capture_calls.append(kwargs)
@@ -3918,8 +3941,10 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
         )
 
     class FakeClient:
-        def __init__(self, **_):
-            pass
+        def __init__(self, **kwargs):
+            self.priority = kwargs["public_request_priority"]
+            priorities.append(self.priority)
+            assert self.priority is RequestPriority.SUBMIT_JIT
 
         def __enter__(self):
             return self
@@ -3928,6 +3953,13 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
             return False
 
         def get_orderbook_snapshots(self, tokens, **_):
+            lease = governor.acquire(
+                "POST",
+                "https://clob.polymarket.com/books",
+                json_body={"token_ids": sorted(tokens)},
+                priority=self.priority,
+            )
+            assert governor.record_success(lease) is True
             book_calls.append(tuple(sorted(tokens)))
             return {
                 token: {"asset_id": token, "hash": f"hash-{token}"}
@@ -3964,6 +3996,7 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
     assert epoch_reauction is epoch
     assert bind_calls == [(True, "request-probability-1")]
     assert len(capture_calls) == 1
+    assert priorities and all(priority is RequestPriority.SUBMIT_JIT for priority in priorities)
     assert book_calls == [
         (
             "no-token-a",
@@ -4282,6 +4315,8 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     projection_mode,
     event_type,
 ):
+    from src.data.polymarket_request_governor import RequestPriority
+
     trade = sqlite3.connect(":memory:")
     trade.executescript(
         """
@@ -4461,8 +4496,11 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
         }
 
     class FakeClient:
-        def __init__(self, **_):
-            pass
+        def __init__(self, **kwargs):
+            assert (
+                kwargs["public_request_priority"]
+                is RequestPriority.SUBMIT_JIT
+            )
 
         def __enter__(self):
             return self
