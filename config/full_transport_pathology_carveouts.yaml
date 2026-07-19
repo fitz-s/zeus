@@ -25,7 +25,7 @@
 # full_transport_v1 correction on the same path as all other HIGH cohorts. No
 # pathology carve-out is required.
 #
-# If real-world live shadow data shows drift (bin bias > 1 unit vs settled),
+# If accumulated live settlement data shows drift (bin bias > 1 unit vs settled),
 # re-introduce a carve-out under `carveouts:` below.
 
 carveouts: []
