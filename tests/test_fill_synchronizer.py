@@ -5,7 +5,7 @@
 #   one-time replay is not enough). Packet I / wave-1.5 addition (2026-07-13,
 #   §KEEP-spine 完备性补遗 "归属图+歧义证据 — foreign/ambiguous 留 observation
 #   不丢"): durable wallet_fill_observations lane tests.
-# Lifecycle: created=2026-07-13; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-07-13; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: unit tests for src.ingest.fill_synchronizer.sync_fills — watermark
 #   resume, idempotent re-append rejection, foreign-fill handling, the
 #   advance-after-persist rollback contract, and (packet I / wave-1.5) the
@@ -300,6 +300,30 @@ class TestIdempotentReappend:
         assert len(rows) == 2
         assert {row["state"] for row in rows} == {"MATCHED", "CONFIRMED"}
 
+    def test_replay_reserves_writer_only_after_idempotency_snapshot(self, conn):
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        adapter = FakeSyncAdapter([_trade(trade_id="trade-1", order_id="ord-1")])
+        sync_fills(conn, adapter, observed_at=NOW)
+
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            sync_fills(conn, adapter, observed_at=NOW + timedelta(seconds=60))
+        finally:
+            conn.set_trace_callback(None)
+
+        begin_index = statements.index("BEGIN IMMEDIATE")
+        before_begin = statements[:begin_index]
+        reserved_writer = statements[begin_index:]
+        assert any("FROM wallet_fill_observations" in sql for sql in before_begin)
+        assert any("FROM venue_trade_facts" in sql for sql in before_begin)
+        assert not any(
+            "FROM wallet_fill_observations" in sql
+            or "FROM venue_trade_facts" in sql
+            for sql in reserved_writer
+        )
+        assert any("INSERT INTO fill_sync_watermarks" in sql for sql in reserved_writer)
+
 
 class TestDurableCoverageWatermark:
     def test_watermark_is_absent_before_first_sync(self, conn):
@@ -431,3 +455,39 @@ class TestWalletFillObservationsDbLevelInvariants:
                 "UPDATE wallet_fill_observations SET superseded_by = ? WHERE id = ?",
                 (new_id, row_id),
             )
+
+
+def test_cycle_reports_failure_to_scheduler_health(monkeypatch):
+    import src.data.polymarket_client as client_mod
+    import src.ingest.fill_synchronizer as fill_synchronizer_mod
+    import src.ingest.price_channel_ingest as price_channel_mod
+    import src.state.db as db_mod
+
+    conn = sqlite3.connect(":memory:")
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return object()
+
+    monkeypatch.setattr(
+        price_channel_mod,
+        "_settings_section",
+        lambda *_args, **_kwargs: {"fill_synchronizer_enabled": True},
+    )
+    monkeypatch.setattr(db_mod, "get_trade_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(client_mod, "PolymarketClient", FakeClient)
+    monkeypatch.setattr(
+        fill_synchronizer_mod,
+        "sync_fills",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+
+    result = fill_synchronizer_mod.fill_synchronizer_cycle()
+
+    assert result == {
+        "status": "failed",
+        "scheduler_failed": True,
+        "scheduler_failure_reason": "fill_synchronizer_cycle_failed",
+    }

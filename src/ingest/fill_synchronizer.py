@@ -217,6 +217,31 @@ def _observation_already_recorded(
     return row is not None
 
 
+def _recorded_observation_keys(
+    conn: sqlite3.Connection,
+) -> set[tuple[str, str]]:
+    return {
+        (str(row[0]), str(row[1]))
+        for row in conn.execute(
+            "SELECT trade_id, raw_payload_hash FROM wallet_fill_observations"
+        )
+    }
+
+
+def _recorded_fact_keys(
+    conn: sqlite3.Connection,
+) -> set[tuple[str, str, str, str, str]]:
+    return {
+        tuple(str(value) for value in row)
+        for row in conn.execute(
+            """
+            SELECT trade_id, command_id, state, filled_size, fill_price
+              FROM venue_trade_facts
+            """
+        )
+    }
+
+
 def _coerce_optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -341,6 +366,24 @@ def sync_fills(
 
     raw_trades = list(adapter.get_trades(since=since_cursor) or [])
     local_by_order = _local_commands_by_order(conn)
+    recorded_observations = _recorded_observation_keys(conn)
+    recorded_facts = _recorded_fact_keys(conn)
+    prepared_trades = []
+    for trade in raw_trades:
+        raw = _raw(trade)
+        order_ids = _trade_order_ids(raw)
+        order_id, command = _local_command_for_trade(raw, local_by_order)
+        prepared_trades.append(
+            (
+                raw,
+                _hash_payload(raw),
+                _trade_id(raw),
+                _trade_state(raw),
+                order_ids,
+                order_id,
+                command,
+            )
+        )
 
     appended = 0
     skipped_idempotent = 0
@@ -359,25 +402,33 @@ def sync_fills(
         # INSERT/UPDATE/DELETE. Without this explicit BEGIN, each
         # append_trade_fact call in the loop below would durably commit on its
         # own, defeating "advance-after-persist": a later failure in the SAME
-        # cycle would leave earlier appends committed with no watermark
-        # advance, so a retry would see them as already-recorded (harmless,
-        # since _fact_already_recorded is idempotent) but the batch would no
-        # longer be all-or-nothing. Mirrors src/engine/global_auction_universe.py
-        # / src/state/portfolio.py's plain ``conn.execute("BEGIN")`` precedent.
-        conn.execute("BEGIN")
-        for trade in raw_trades:
-            raw = _raw(trade)
-            raw_hash = _hash_payload(raw)
-            trade_id = _trade_id(raw)
-            state = _trade_state(raw)
-            order_ids = _trade_order_ids(raw)
-            order_id, command = _local_command_for_trade(raw, local_by_order)
+        # cycle would leave earlier appends committed with no watermark advance.
+        #
+        # A deferred transaction that reads 1k+ replayed fills before its final
+        # watermark UPSERT can lose the WAL snapshot-upgrade race to any live
+        # writer. Venue I/O, parsing, command lookup, and idempotency snapshots
+        # therefore happen above; the reserved-writer interval is only the
+        # append delta plus watermark publication.
+        conn.execute("BEGIN IMMEDIATE")
+        for (
+            raw,
+            raw_hash,
+            trade_id,
+            state,
+            order_ids,
+            order_id,
+            command,
+        ) in prepared_trades:
 
             # Durable observation lane FIRST (packet I / wave-1.5): every swept
             # trade lands here regardless of attribution outcome, BEFORE the
             # Zeus-attributed-only lane below runs — see module docstring
             # "DURABLE OBSERVATION LANE".
-            if _append_wallet_fill_observation(
+            observation_trade_id = trade_id or _stable_subject("wallet_fill", raw)
+            observation_key = (observation_trade_id, raw_hash)
+            if observation_key in recorded_observations:
+                observation_skipped_idempotent += 1
+            elif _append_wallet_fill_observation(
                 conn,
                 raw=raw,
                 raw_payload_hash=raw_hash,
@@ -387,8 +438,10 @@ def sync_fills(
                 observed_at=observed,
             ):
                 observation_appended += 1
+                recorded_observations.add(observation_key)
             else:
                 observation_skipped_idempotent += 1
+                recorded_observations.add(observation_key)
 
             if not trade_id or state is None:
                 unattributable_count += 1
@@ -409,7 +462,14 @@ def sync_fills(
 
             filled_size_s = str(filled_size)
             fill_price_s = str(fill_price)
-            if _fact_already_recorded(
+            fact_key = (
+                trade_id,
+                command_id,
+                state,
+                filled_size_s,
+                fill_price_s,
+            )
+            if fact_key in recorded_facts or _fact_already_recorded(
                 conn,
                 trade_id=trade_id,
                 command_id=command_id,
@@ -418,6 +478,7 @@ def sync_fills(
                 fill_price=fill_price_s,
             ):
                 skipped_idempotent += 1
+                recorded_facts.add(fact_key)
                 continue
 
             append_trade_fact(
@@ -436,6 +497,7 @@ def sync_fills(
                 tx_hash=raw.get("transaction_hash") or raw.get("tx_hash"),
             )
             appended += 1
+            recorded_facts.add(fact_key)
 
         _advance_watermark(
             conn,
@@ -492,6 +554,10 @@ def fill_synchronizer_cycle() -> dict[str, Any] | None:
         return sync_fills(conn, adapter)
     except Exception as exc:  # noqa: BLE001
         logger.error("fill_synchronizer cycle failed (non-fatal; next tick retries): %s", exc, exc_info=True)
-        return None
+        return {
+            "status": "failed",
+            "scheduler_failed": True,
+            "scheduler_failure_reason": "fill_synchronizer_cycle_failed",
+        }
     finally:
         conn.close()
