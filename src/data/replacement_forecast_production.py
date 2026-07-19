@@ -33,13 +33,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from src.config import settings
 
 logger = logging.getLogger("zeus.replacement_forecast_production")
+
+_SOURCE_CLOCK_DOWNLOAD_INFLIGHT_LOCK = Lock()
+_SOURCE_CLOCK_DOWNLOAD_INFLIGHT: dict[tuple[object, ...], object] = {}
 
 # The source-clock downloader can parse up to this many Open-Meteo locations
 # from one response. Keep the urgent first request equally dense: after a run
@@ -909,20 +912,54 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         scheduled_tasks = (priority_task, *tasks)
         executor_worker_count = min(max_workers, len(scheduled_tasks))
         callback_futures = {}
+        source_executor = ThreadPoolExecutor(
+            max_workers=executor_worker_count,
+            thread_name_prefix="source-clock-bpf",
+        )
         callback_executor = ThreadPoolExecutor(
             max_workers=executor_worker_count,
             thread_name_prefix="source-clock-commit",
         )
         try:
-            with ThreadPoolExecutor(
-                max_workers=executor_worker_count,
-                thread_name_prefix="source-clock-bpf",
-            ) as executor:
-                futures = {
-                    executor.submit(_download_task, *task): (task[0], index == 0)
-                    for index, task in enumerate(scheduled_tasks)
-                }
-                for future in as_completed(futures):
+            futures = {}
+            for index, task in enumerate(scheduled_tasks):
+                source, cycle, chunk = task
+                task_key = (
+                    source,
+                    cycle.isoformat(),
+                    tuple(
+                        (
+                            target.city,
+                            target.target_date,
+                            target.metric,
+                        )
+                        for target in chunk
+                    ),
+                )
+                created = False
+                with _SOURCE_CLOCK_DOWNLOAD_INFLIGHT_LOCK:
+                    future = _SOURCE_CLOCK_DOWNLOAD_INFLIGHT.get(task_key)
+                    if future is None:
+                        future = source_executor.submit(_download_task, *task)
+                        _SOURCE_CLOCK_DOWNLOAD_INFLIGHT[task_key] = future
+                        created = True
+
+                if created:
+                    def _release_source_future(_future, *, key=task_key) -> None:
+                        with _SOURCE_CLOCK_DOWNLOAD_INFLIGHT_LOCK:
+                            if _SOURCE_CLOCK_DOWNLOAD_INFLIGHT.get(key) is _future:
+                                _SOURCE_CLOCK_DOWNLOAD_INFLIGHT.pop(key, None)
+
+                    future.add_done_callback(_release_source_future)
+                futures[future] = (source, index == 0)
+
+            source_timeout = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            try:
+                for future in as_completed(futures, timeout=source_timeout):
                     source, is_priority = futures[future]
                     try:
                         result_source, task_report = future.result()
@@ -945,6 +982,18 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                                 task_report,
                             )
                         ] = result_source
+            except TimeoutError:
+                pass
+
+            fanout_deadline_pending_sources = tuple(
+                sorted(
+                    {
+                        source
+                        for future, (source, _is_priority) in futures.items()
+                        if not future.done()
+                    }
+                )
+            )
 
             callback_timeout = (
                 None
@@ -984,6 +1033,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             for future in set(callback_futures) - completed_callbacks:
                 future.add_done_callback(_log_late_callback_result)
         finally:
+            source_executor.shutdown(wait=False, cancel_futures=False)
             callback_executor.shutdown(wait=False, cancel_futures=False)
         source_commit_notifications_pending = (
             len(callback_futures) - source_commit_notifications
@@ -1015,6 +1065,8 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             )
             if not targets_by_source[source]:
                 status = "SOURCE_CLOCK_SOURCE_NO_TARGETS"
+            elif source in fanout_deadline_pending_sources:
+                status = "SOURCE_CLOCK_SOURCE_TIMEBOXED_INCOMPLETE"
             elif source_errors:
                 status = "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"
             elif "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE" in statuses:
@@ -1161,6 +1213,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             ),
             "fanout_workers": worker_count,
             "fanout_errors": tuple(fanout_errors),
+            "fanout_deadline_pending_sources": fanout_deadline_pending_sources,
             "source_commit_notifications": source_commit_notifications,
             "source_commit_notifications_pending": source_commit_notifications_pending,
             "source_commit_notification_errors": tuple(
