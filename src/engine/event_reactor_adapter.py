@@ -6856,10 +6856,27 @@ def event_bound_live_adapter_from_trade_conn(
                 proof_accepted=False,
             )
         except _SubmitAbortedModeFlipped as exc:
-            # Fresh book evidence invalidated the previously built intent before
-            # the venue boundary. No venue side effect exists and the final intent
-            # is no longer accepted; the reactor classifies the typed reason and
-            # re-decides from fresh evidence when it is transient.
+            # P0 mode-authority (operator review 2026-06-10): the proven proof mode is no
+            # longer executable on the fresh book (or is missing — fail-closed). This is a
+            # FIRST-CLASS deferral, not a build failure: the proof WAS valid (proof_accepted
+            # stays True), we abort this submit and let the next cycle do a full re-rank. The
+            # reason string is DERIVED from the lifecycle state machine's terminal state
+            # (single source of truth), exactly as the recapture FAMILY_REVERSED / day0-cap
+            # aborts derive theirs — so the receipt reason and the lifecycle state can never
+            # disagree. NEVER a default taker submit.
+            #
+            # RECEIPT-WRITER REGRESSION (2026-07-19 audit, docs/evidence/
+            # capital_efficiency_2026_07_19/nosubmit_gates.md): commit 9e84989525
+            # (2026-06-28, "fix(live): simplify execution state semantics") flipped this to
+            # proof_accepted=False while deleting the comment above, framed as removing a
+            # "misleading diagnostic label". SUBMIT_ABORTED_MODE_FLIPPED's base is TRANSIENT
+            # (TRANSIENT_MONEY_PATH_REASONS in reactor.py) so this specific reason still
+            # requeues correctly either way and never persists — but the flip broke the
+            # documented invariant this comment states, and its twin (the strategy-floor
+            # abort below, which is NOT transient) silently zeroed edli_no_submit_receipts
+            # from 2026-06-29 onward: EdliNoSubmitReceiptLedger.insert_idempotent (and
+            # _persist_terminal_no_submit_receipt) both require proof_accepted=True to write,
+            # and a proof-valid deferral was no longer marking itself as such. Restored.
             return dataclass_replace(
                 no_submit_receipt,
                 side_effect_status="NO_SUBMIT",
@@ -6867,7 +6884,7 @@ def event_bound_live_adapter_from_trade_conn(
                     f"{_SUBMIT_ABORT_RECEIPT_REASON[CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED]}"
                     f":{exc}"
                 ),
-                proof_accepted=False,
+                proof_accepted=True,
             )
         except Exception as exc:
             if _live_order_build_phase == "building_live_order_certificates":
@@ -6901,12 +6918,30 @@ def event_bound_live_adapter_from_trade_conn(
                     pass
             _strategy_floor_abort = _presubmit_strategy_floor_abort_reason(exc)
             if _strategy_floor_abort is not None:
+                # RECEIPT-WRITER REGRESSION (2026-07-19 audit): this was proof_accepted=True
+                # until commit 9e84989525 (2026-06-28 20:11:50, "fix(live): simplify
+                # execution state semantics") flipped it to False. Unlike the mode-flipped
+                # abort above, SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR is NOT
+                # in TRANSIENT_MONEY_PATH_REASONS (reactor.py) — it is a genuine terminal
+                # economic floor reject with valid Kelly/FDR/trade-score proof upstream. With
+                # proof_accepted=False, _receipt_money_path_blocker (reactor.py) routes it to
+                # EXECUTOR_EXPRESSIBILITY/NO_SUBMIT_PROOF_FALSE, and
+                # _persist_terminal_no_submit_receipt refuses to write it (requires
+                # proof_accepted is True) — the candidate still gets a no_trade_regret_events
+                # row (honest, via _write_regret) but silently vanishes from
+                # edli_no_submit_receipts, the table settlement_attribution and this audit's
+                # counterfactual grading join against. Verified against zeus-world.db: this
+                # reason has 0 edli_no_submit_receipts rows after 2026-06-28 (70 rows total,
+                # all dated on/before 2026-06-28) versus 191 no_trade_regret_events rows with
+                # decision_time > 2026-06-28 (last through 2026-07-13). Restored to
+                # proof_accepted=True so the durable economic-receipt ledger resumes carrying
+                # this gate's rejects instead of only the diagnostic regret stream.
                 return dataclass_replace(
                     no_submit_receipt,
                     submitted=False,
                     side_effect_status="NO_SUBMIT",
                     reason=_strategy_floor_abort,
-                    proof_accepted=False,
+                    proof_accepted=True,
                 )
             _price_moved_abort = _submit_price_moved_abort_reason(exc)
             if _price_moved_abort is not None:
@@ -6916,6 +6951,28 @@ def event_bound_live_adapter_from_trade_conn(
                     side_effect_status="NO_SUBMIT",
                     reason=_price_moved_abort,
                     proof_accepted=False,
+                )
+            # DAY0 ADMISSION RECEIPT PERSISTENCE (2026-07-19 audit, docs/evidence/
+            # capital_efficiency_2026_07_19/nosubmit_gates.md §5): _day0_live_submit_admission_
+            # rejection_reason (below) raises a bare ValueError("DAY0_LIVE_ADMISSION_REJECTED:
+            # <gate>") from inside _build_live_execution_command_certificates. Before this fix
+            # that fell straight to the generic EDLI_LIVE_CERTIFICATE_BUILD_FAILED fallback
+            # below with proof_accepted=False — the SAME persist-gate hole the strategy-floor
+            # abort above just had restored — so every Day0 circuit-breaker reject (city/metric/
+            # source-health/quote-freshness/one-bin-fragility/final-localday/taker-forbidden)
+            # left zero trace in edli_no_submit_receipts, exactly as the audit found (it does
+            # reach no_trade_regret_events via _write_regret, which is why it wasn't ALSO
+            # invisible in that ledger). This is a genuine gate verdict with valid upstream
+            # Kelly/FDR/trade-score proof, not a build failure — same category as the strategy
+            # floor abort — so it gets its own classification and proof_accepted=True.
+            _day0_admission_abort = _day0_admission_rejection_receipt_reason(exc)
+            if _day0_admission_abort is not None:
+                return dataclass_replace(
+                    no_submit_receipt,
+                    submitted=False,
+                    side_effect_status="NO_SUBMIT",
+                    reason=_day0_admission_abort,
+                    proof_accepted=True,
                 )
             if (
                 real_order_submit_enabled
@@ -15176,6 +15233,27 @@ def _presubmit_strategy_floor_abort_reason(exc: BaseException) -> str | None:
     return None
 
 
+_DAY0_ADMISSION_REJECTED_PREFIX = "DAY0_LIVE_ADMISSION_REJECTED:"
+
+
+def _day0_admission_rejection_receipt_reason(exc: BaseException) -> str | None:
+    """Classify the Day0 live-admission circuit-breaker's raise as a receipt reason.
+
+    ``_day0_live_submit_admission_rejection_reason`` raises a bare ``ValueError``
+    (not a typed exception class — mirrors the pre-existing strategy-floor-abort
+    style of tagging by message prefix rather than adding another exception type).
+    Returns the reason verbatim (already carries the specific gate, e.g.
+    ``DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE``) or None if this
+    exception is not a Day0 admission rejection.
+    """
+    if not isinstance(exc, ValueError):
+        return None
+    message = str(exc)
+    if message.startswith(_DAY0_ADMISSION_REJECTED_PREFIX):
+        return message
+    return None
+
+
 def _fresh_rest_then_cross_mode(
     *,
     actionable_payload: Mapping[str, Any],
@@ -15999,7 +16077,6 @@ def _day0_live_submit_admission_rejection_reason(
                 return "DAY0_SUBMIT_TIME_BIN_DEAD"
     ctx = Day0AdmissionContext(
         event_type=event_type,
-        city=_h2_city,
         metric=_h2_metric,
         settlement_source_type=settlement_source_type,
         fast_obs_supported=bool(station_id and observation_available is not None),
@@ -16022,9 +16099,6 @@ def _day0_live_submit_admission_rejection_reason(
         ),
         selected_bin_edge_distance_quanta=distance_quanta,
         edge_survives_one_bin_stress=stress_survives,
-        city_allowlist=frozenset(
-            {str(actionable_payload.get("city") or event_payload.get("city") or "")}
-        ),
         maker_only_required=not global_current_solve,
     )
     return day0_live_admission_rejection_reason(ctx)

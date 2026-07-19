@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from src.engine.event_reactor_adapter import (
     PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
     _candidate_bin_id_from_topology,
+    _day0_admission_rejection_receipt_reason,
     _day0_live_submit_admission_rejection_reason,
     _day0_selected_route_fdr_proof,
     _event_bound_strategy_key,
@@ -30,7 +32,7 @@ from src.engine.event_reactor_adapter import (
     _record_qkernel_selection_family_facts,
 )
 from src.events.candidate_binding import MarketTopologyCandidate
-from src.events.reactor import EventSubmissionReceipt
+from src.events.reactor import EventSubmissionReceipt, _is_transient_money_path_reason
 from src.contracts.execution_intent import DecisionSourceContext
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -758,6 +760,123 @@ def test_day0_submit_gate_hard_fact_recheck_receives_submit_context(monkeypatch)
     assert getattr(seen["city"], "name", "") == "Manila"
     assert seen["now"] == datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
     assert seen["world_conn"] is world_conn
+
+
+# M-13 (receipt-persistence audit 2026-07-19, docs/evidence/capital_efficiency_2026_07_19/
+# nosubmit_gates.md §5): before this fix, `_day0_live_submit_admission_rejection_reason`'s
+# ValueError("DAY0_LIVE_ADMISSION_REJECTED:<gate>") fell through to the generic
+# EDLI_LIVE_CERTIFICATE_BUILD_FAILED except-block fallback with proof_accepted=False, and
+# EdliNoSubmitReceiptLedger.insert_idempotent / _persist_terminal_no_submit_receipt both
+# require proof_accepted=True to write — so every Day0 admission-gate reject left zero trace
+# in edli_no_submit_receipts. _day0_admission_rejection_receipt_reason classifies the raise
+# distinctly (mirrors _presubmit_strategy_floor_abort_reason's existing pattern) so the caller
+# can mark it proof_accepted=True instead.
+
+
+def test_day0_admission_rejection_receipt_reason_classifies_day0_prefix() -> None:
+    assert _day0_admission_rejection_receipt_reason(
+        ValueError("DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE")
+    ) == "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE"
+    assert _day0_admission_rejection_receipt_reason(
+        ValueError("DAY0_LIVE_ADMISSION_REJECTED:DAY0_CITY_NOT_ALLOWLISTED")
+    ) == "DAY0_LIVE_ADMISSION_REJECTED:DAY0_CITY_NOT_ALLOWLISTED"
+
+
+def test_day0_admission_rejection_receipt_reason_ignores_unrelated_errors() -> None:
+    assert _day0_admission_rejection_receipt_reason(
+        ValueError("QUOTE_FEASIBILITY_BID_ASK_REQUIRED")
+    ) is None
+    assert _day0_admission_rejection_receipt_reason(
+        RuntimeError("DAY0_LIVE_ADMISSION_REJECTED:DAY0_TAKER_ENTRY_FORBIDDEN")
+    ) is None, "only ValueError carries the admission-gate raise; other exception types are not it"
+
+
+@pytest.mark.parametrize(
+    "gate",
+    (
+        "DAY0_CITY_NOT_ALLOWLISTED",  # legacy value, still a valid detail string post-M-13
+        "DAY0_METRIC_NOT_IN_STAGE",
+        "DAY0_FAST_OBS_UNSUPPORTED",
+        "DAY0_SOURCE_HEALTH_NOT_ADMISSIBLE",
+        "DAY0_QUOTE_TIME_MISSING",
+        "DAY0_QUOTE_STALE_VS_OBSERVATION",
+        "DAY0_ONE_BIN_EDGE_FRAGILE",
+        "DAY0_FINAL_LOCALDAY_NOENTRY",
+        "DAY0_TAKER_ENTRY_FORBIDDEN",
+        "DAY0_SUBMIT_TIME_BIN_DEAD",
+    ),
+)
+def test_day0_live_admission_rejected_reason_is_terminal_not_transient(gate: str) -> None:
+    """Every Day0 admission gate must classify TERMINAL so it reaches the persist
+    path instead of the fail-open UNKNOWN-base transient requeue (which would
+    silently loop the candidate forever without ever writing a receipt)."""
+    reason = f"DAY0_LIVE_ADMISSION_REJECTED:{gate}"
+    assert _is_transient_money_path_reason(reason) is False
+
+
+def test_day0_live_admission_rejected_registered_in_rejection_reason_registry() -> None:
+    from src.contracts.rejection_reasons import RejectionReason, is_registered_rejection_reason
+
+    assert is_registered_rejection_reason("DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE")
+    assert RejectionReason("DAY0_LIVE_ADMISSION_REJECTED").value == "DAY0_LIVE_ADMISSION_REJECTED"
+
+
+def test_day0_admission_rejection_persists_to_edli_no_submit_receipts(tmp_path) -> None:
+    """End-to-end regression for the M-13 fix: a receipt carrying the classified
+    Day0 admission reason with proof_accepted=True actually writes through
+    EdliNoSubmitReceiptLedger — the exact durable table the audit found empty for
+    every DAY0_* reason. proof_accepted=False (the pre-fix state) must still be
+    refused by the ledger, documenting the exact bug this closes."""
+    from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+
+    accepted_receipt = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id="event-day0-admission-1",
+        causal_snapshot_id="snapshot-day0-admission-1",
+        city="Manila",
+        target_date="2026-07-02",
+        metric="high",
+        executable_snapshot_id="exec-day0-admission-1",
+        final_intent_id="intent-day0-admission-1",
+        side_effect_status="NO_SUBMIT",
+        reason="DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE",
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="family-day0-admission-1",
+        fdr_hypothesis_count=1,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=5.0,
+        kelly_cost_basis_id="cost-basis-1",
+    )
+    ledger = EdliNoSubmitReceiptLedger(conn)
+    decision_time = datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
+
+    ledger.insert_idempotent(accepted_receipt, decision_time=decision_time)
+
+    row = conn.execute(
+        "SELECT receipt_json FROM edli_no_submit_receipts WHERE event_id = ?",
+        (accepted_receipt.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert json.loads(row[0])["reason"] == "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE"
+
+    # The pre-fix shape (proof_accepted=False) is still correctly refused — this is
+    # the exact persist-gate the generic exception wrapper used to trip on.
+    refused_receipt = dataclass_replace(
+        accepted_receipt,
+        event_id="event-day0-admission-2",
+        final_intent_id="intent-day0-admission-2",
+        proof_accepted=False,
+    )
+    with pytest.raises(ValueError, match="only accepts proof-accepted receipts"):
+        ledger.insert_idempotent(refused_receipt, decision_time=decision_time)
 
 
 @pytest.mark.parametrize(
