@@ -3653,6 +3653,7 @@ def _edli_event_reactor_cycle(
         producer_wake_event_ids=producer_wake_event_ids,
         producer_wake_families=producer_wake_families,
         urgent_day0_pending=_unowned_day0_urgent_wake_pending,
+        held_position_monitor_pending=_held_position_monitor_active.is_set,
     )
 
 

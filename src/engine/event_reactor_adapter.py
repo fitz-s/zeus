@@ -6625,6 +6625,7 @@ def event_bound_live_adapter_from_trade_conn(
     auction_capital_authority: "AuctionCapitalAuthority | None" = None,
     producer_wake_ids: tuple[str, ...] = (),
     producer_wake_published_at: str | None = None,
+    selection_cancelled: Callable[[], bool] | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -7601,6 +7602,14 @@ def event_bound_live_adapter_from_trade_conn(
             return True
 
         def _day0_selection_cancelled() -> bool:
+            if selection_cancelled is not None:
+                try:
+                    if selection_cancelled():
+                        return True
+                except Exception:  # noqa: BLE001 - cancellation is fail-soft.
+                    logging.getLogger(__name__).exception(
+                        "global selection cancellation probe failed"
+                    )
             current = reactor_urgent_wake_revision()
             return (
                 current is not None
@@ -7987,7 +7996,7 @@ def event_bound_live_adapter_from_trade_conn(
                 gamma_event_requests = 0
                 refresh_started_at = datetime.now(UTC)
                 started = _time.monotonic()
-                gamma_deadline = started + gamma_timeout
+                gamma_deadline: float | None = None
                 gamma = _global_current_gamma_client(
                     timeout_seconds=gamma_timeout,
                 )
@@ -7998,6 +8007,9 @@ def event_bound_live_adapter_from_trade_conn(
                 with contextlib.nullcontext(gamma):
 
                     def _remaining_gamma_timeout() -> float:
+                        nonlocal gamma_deadline
+                        if gamma_deadline is None:
+                            gamma_deadline = _time.monotonic() + gamma_timeout
                         remaining = gamma_deadline - _time.monotonic()
                         if remaining <= 0.0:
                             raise ValueError(

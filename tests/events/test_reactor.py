@@ -881,6 +881,10 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
             "2026-07-19T12:00:00+00:00"
         )
         assert captured["urgent_day0_pending"]() is False
+        assert captured["held_position_monitor_pending"]() is False
+        main._held_position_monitor_active.set()
+        assert captured["held_position_monitor_pending"]() is True
+        main._held_position_monitor_active.clear()
         main._day0_urgent_wake_pending.set()
         assert captured["urgent_day0_pending"]() is True
         main._day0_exit_monitor_attempts["wake-owned"] = None
@@ -888,6 +892,7 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
         urgent_identity[0] = "wake-new"
         assert captured["urgent_day0_pending"]() is True
     finally:
+        main._held_position_monitor_active.clear()
         main._day0_urgent_wake_pending.clear()
         main._day0_exit_monitor_attempts.clear()
 

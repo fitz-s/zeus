@@ -5540,6 +5540,7 @@ def run_edli_event_reactor_cycle(
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
     urgent_day0_pending: Callable[[], bool] | None = None,
+    held_position_monitor_pending: Callable[[], bool] | None = None,
 ) -> bool:
     """EDLI event-reactor cycle body (R4-b3 extraction from src/main.py::
     _edli_event_reactor_cycle, 2026-07-08). main.py's scheduler hook is now a
@@ -5559,6 +5560,11 @@ def run_edli_event_reactor_cycle(
     ``urgent_day0_pending`` is the dispatcher's cross-thread signal for a
     newly committed observation. Lower-priority producer batches consult it
     only between durable event units; the Day0 batch itself is never cancelled.
+
+    ``held_position_monitor_pending`` lets the current global selection yield
+    at its existing cancellation boundaries after the monitor claims priority.
+    No venue side effect is interrupted; the next reactor cycle re-decides from
+    fresh probability, book, position, and capital truth.
     """
     import logging as _logging
     from src.main import (
@@ -6257,6 +6263,7 @@ def run_edli_event_reactor_cycle(
                 auction_capital_authority=_auction_capital_authority,
                 producer_wake_ids=producer_wake_ids,
                 producer_wake_published_at=producer_wake_published_at,
+                selection_cancelled=held_position_monitor_pending,
             )
             if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(
