@@ -404,9 +404,14 @@ files:
   src/runtime/reactor_wake.py:
     zone: K2_runtime
     authority_role: event_reactor_wake_hint
-    why: Publishes and reads an atomic non-authoritative sidecar hint after durable forecast posterior commits so the live daemon can invoke the existing canonical reactor without waiting for its periodic recovery scan. The hint carries no market, probability, risk, or order truth; loss or corruption falls back to the existing scan.
+    why: Publishes and reads atomic non-authoritative wake hints after durable producer commits so the live daemon can invoke the existing canonical reactor without waiting for its periodic recovery scan; incremental queue reads let an in-flight forecast family distinguish a dependent update from unrelated family work. The hint carries no market, probability, risk, or order truth; loss or corruption falls back to the existing scan.
     downstream:
     - src/data/replacement_forecast_production.py
+    - src/data/substrate_observer.py
+    - src/engine/event_reactor_adapter.py
+    - src/events/reactor.py
+    - src/events/price_channel_redecision_router.py
+    - src/ingest_main.py
     - src/main.py
   src/config.py:
     zone: K2_runtime
@@ -1890,6 +1895,15 @@ files:
     why: Materializes confirmed EDLI fills into canonical position_current rows, including deterministic 68-char position ids and guarded recovery of qkernel posterior authority from certificates or EDLI event payloads.
     downstream:
     - src/state/projection.py
+  src/events/reactor.py:
+    zone: K2_runtime
+    authority_role: edli_event_reactor_runtime
+    why: Owns canonical EDLI opportunity discovery, bounded claim and processing, producer-wake preemption, and durable event finalization while routing venue side effects through injected engine and executor contracts.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/engine/global_batch_runtime.py
+    - src/events/no_submit_receipts.py
+    - src/main.py
   src/events/candidate_evaluation.py:
     zone: K3_extension
     authority_role: edli_family_candidate_evaluation

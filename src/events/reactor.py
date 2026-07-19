@@ -5379,10 +5379,88 @@ def _process_pending_cancelled(
     return urgent_wake_pending
 
 
+def _reactor_wake_cancellation_probe(
+    *,
+    producer_wake_reason: str | None,
+    producer_wake_ids: tuple[str, ...],
+    producer_wake_published_at: str | None,
+    forecast_wake_families: set[tuple[str, str, str]],
+    urgent_day0_pending: Callable[[], bool] | None,
+) -> Callable[[], bool]:
+    """Cancel only when a newer wake invalidates the current work scope."""
+
+    from src.runtime.reactor_wake import (
+        reactor_urgent_wake_revision,
+        reactor_wakes_since,
+    )
+
+    observed_revision = reactor_urgent_wake_revision()
+    owned_wake_ids = frozenset(
+        wake_id
+        for raw_wake_id in producer_wake_ids
+        if (wake_id := str(raw_wake_id or "").strip())
+    )
+    targeted_forecast = (
+        producer_wake_reason == "forecast_posterior_advanced"
+        and bool(forecast_wake_families)
+    )
+    superseded = False
+
+    def _cancelled() -> bool:
+        nonlocal observed_revision, superseded
+
+        if superseded:
+            return True
+        if urgent_day0_pending is not None and urgent_day0_pending():
+            superseded = True
+            return True
+
+        current_revision = reactor_urgent_wake_revision()
+        if current_revision is None or current_revision == observed_revision:
+            return False
+        if not targeted_forecast:
+            superseded = True
+            return True
+
+        pending_wakes = reactor_wakes_since(
+            producer_wake_published_at,
+            exclude_wake_ids=owned_wake_ids,
+        )
+        if not pending_wakes:
+            observed_revision = current_revision
+            return False
+        for wake in pending_wakes:
+            if wake.reason in {
+                "day0_extreme_event_committed",
+                "market_price_advanced",
+            }:
+                superseded = True
+                return True
+            if wake.reason != "forecast_posterior_advanced":
+                superseded = True
+                return True
+            if (
+                not wake.forecast_families
+                or set(wake.forecast_families) & forecast_wake_families
+            ):
+                superseded = True
+                return True
+
+        # The pending posterior belongs to an independent family. Leave it
+        # queued and absorb this revision so it cannot repeatedly interrupt the
+        # current family's SQLite progress callbacks.
+        observed_revision = current_revision
+        return False
+
+    return _cancelled
+
+
 def run_edli_event_reactor_cycle(
     *,
     active_lock,
     producer_wake_reason: str | None = None,
+    producer_wake_ids: tuple[str, ...] = (),
+    producer_wake_published_at: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
     urgent_day0_pending: Callable[[], bool] | None = None,
@@ -5452,15 +5530,13 @@ def run_edli_event_reactor_cycle(
         and bool(forecast_wake_families)
     )
     producer_fast_path = committed_event_wake or targeted_forecast_wake
-    from src.runtime.reactor_wake import reactor_urgent_wake_revision
-
-    maintenance_urgent_revision = reactor_urgent_wake_revision()
-
-    def _urgent_wake_pending() -> bool:
-        if urgent_day0_pending is not None and urgent_day0_pending():
-            return True
-        current = reactor_urgent_wake_revision()
-        return current is not None and current != maintenance_urgent_revision
+    _urgent_wake_pending = _reactor_wake_cancellation_probe(
+        producer_wake_reason=producer_wake_reason,
+        producer_wake_ids=producer_wake_ids,
+        producer_wake_published_at=producer_wake_published_at,
+        forecast_wake_families=forecast_wake_families,
+        urgent_day0_pending=urgent_day0_pending,
+    )
 
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return False
@@ -5714,6 +5790,12 @@ def run_edli_event_reactor_cycle(
                     ),
                     cancelled=_urgent_wake_pending,
                 )
+                if targeted_forecast_wake and _urgent_wake_pending():
+                    _log.info(
+                        "EDLI targeted forecast build superseded by a newer "
+                        "dependent producer wake"
+                    )
+                    return False
                 if targeted_forecast_wake:
                     _fsr_events = _rank_forecast_wake_events(
                         _fsr_events,

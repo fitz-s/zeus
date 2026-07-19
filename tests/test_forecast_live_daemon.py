@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-07-18
-# Lifecycle: created=2026-05-14; last_reviewed=2026-07-17; last_reused=2026-07-18
+# Last reused/audited: 2026-07-19
+# Lifecycle: created=2026-05-14; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction); a0d51d480b507f324 root-cause (ECMWF 00z ingest schedule fix — add 12z triggers, update FORECAST_LIVE_JOB_IDS).
 # Purpose: Relationship tests for the forecast-live daemon boundary — job registry, lock semantics, journaling, and source-health probe.
 # Reuse: Run when forecast_live_daemon.py job specs, run_opendata_track, or job journaling logic changes.
@@ -1244,6 +1244,64 @@ def test_reactor_wake_ack_preserves_forecast_published_after_selected(tmp_path) 
     assert read_reactor_wake(path=path) == newer
 
 
+def test_reactor_wakes_since_is_not_limited_by_coalescing_batch(tmp_path) -> None:
+    from src.runtime.reactor_wake import (
+        publish_reactor_wake,
+        reactor_wakes_since,
+    )
+
+    path = tmp_path / "wake.json"
+    for index in range(101):
+        publish_reactor_wake(
+            source="forecast",
+            reason="forecast_posterior_advanced",
+            path=path,
+            wake_id=f"wake-old-{index}",
+            published_at=datetime(
+                2026,
+                7,
+                16,
+                11,
+                0,
+                0,
+                microsecond=index * 100,
+                tzinfo=timezone.utc,
+            ),
+        )
+    selected = publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-selected",
+        published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+    equal_time = publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-equal-time",
+        published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+    newer = publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-newer",
+        published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
+    )
+
+    wakes = reactor_wakes_since(
+        selected.published_at,
+        path=path,
+        exclude_wake_ids=(selected.wake_id,),
+    )
+
+    assert {wake.wake_id for wake in wakes} == {
+        equal_time.wake_id,
+        newer.wake_id,
+    }
+
+
 def test_forecast_builder_forwards_wake_family_restriction(monkeypatch) -> None:
     import src.events.event_writer as writer_module
     import src.events.triggers.forecast_snapshot_ready as trigger_module
@@ -1320,6 +1378,8 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
     def _run_reactor(
         *,
         producer_wake_reason=None,
+        producer_wake_ids=(),
+        producer_wake_published_at=None,
         producer_wake_event_ids=(),
         producer_wake_families=(),
     ):
@@ -1754,6 +1814,8 @@ def test_day0_reactor_wake_dispatches_exit_monitor_before_reactor(monkeypatch) -
     def _run_reactor(
         *,
         producer_wake_reason=None,
+        producer_wake_ids=(),
+        producer_wake_published_at=None,
         producer_wake_event_ids=(),
         producer_wake_families=(),
     ):
@@ -2695,7 +2757,8 @@ def test_reactor_wake_is_not_consumed_when_cycle_loses_execution_race(
         lambda *,
         producer_wake_reason=None,
         producer_wake_event_ids=(),
-        producer_wake_families=(): next(outcomes),
+        producer_wake_families=(),
+        **_kwargs: next(outcomes),
     )
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-19
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -483,6 +483,150 @@ def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
     assert lock.acquired is False
 
 
+def test_targeted_forecast_wake_ignores_disjoint_family_revision(monkeypatch):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    current = reactor_wake.ReactorWake(
+        "wake-current",
+        "2026-07-19T12:00:00+00:00",
+        "forecast",
+        "forecast_posterior_advanced",
+        forecast_families=(("Paris", "2026-07-20", "high"),),
+    )
+    pending = reactor_wake.ReactorWake(
+        "wake-pending",
+        "2026-07-19T12:00:01+00:00",
+        "forecast",
+        "forecast_posterior_advanced",
+        forecast_families=(("Shanghai", "2026-07-20", "high"),),
+    )
+    revisions = iter(("base", "new", "new"))
+    reads = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _published_at, *, exclude_wake_ids=(): reads.append(
+            frozenset(exclude_wake_ids)
+        )
+        or (pending,),
+    )
+
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason="forecast_posterior_advanced",
+        producer_wake_ids=(current.wake_id,),
+        producer_wake_published_at=current.published_at,
+        forecast_wake_families=set(current.forecast_families),
+        urgent_day0_pending=None,
+    )
+
+    assert cancelled() is False
+    assert cancelled() is False
+    assert reads == [frozenset({current.wake_id})]
+
+
+def test_targeted_forecast_wake_ignores_only_older_remaining_backlog(monkeypatch):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    older = reactor_wake.ReactorWake(
+        "wake-older",
+        "2026-07-19T11:59:59+00:00",
+        "forecast",
+        "forecast_posterior_advanced",
+        forecast_families=(("Paris", "2026-07-20", "high"),),
+    )
+    revisions = iter(("base", "new"))
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _published_at, *, exclude_wake_ids=(): (),
+    )
+
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason="forecast_posterior_advanced",
+        producer_wake_ids=("wake-current",),
+        producer_wake_published_at="2026-07-19T12:00:00+00:00",
+        forecast_wake_families={("Paris", "2026-07-20", "high")},
+        urgent_day0_pending=None,
+    )
+
+    assert cancelled() is False
+
+
+@pytest.mark.parametrize(
+    "pending_reason,pending_families",
+    [
+        (
+            "forecast_posterior_advanced",
+            (("Paris", "2026-07-20", "high"),),
+        ),
+        ("day0_extreme_event_committed", ()),
+        ("market_price_advanced", ()),
+    ],
+)
+def test_targeted_forecast_wake_stops_for_dependent_or_faster_revision(
+    monkeypatch,
+    pending_reason,
+    pending_families,
+):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    pending = reactor_wake.ReactorWake(
+        "wake-pending",
+        "2026-07-19T12:00:01+00:00",
+        "producer",
+        pending_reason,
+        forecast_families=pending_families,
+    )
+    revisions = iter(("base", "new"))
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _published_at, *, exclude_wake_ids=(): (pending,),
+    )
+
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason="forecast_posterior_advanced",
+        producer_wake_ids=("wake-current",),
+        producer_wake_published_at="2026-07-19T12:00:00+00:00",
+        forecast_wake_families={("Paris", "2026-07-20", "high")},
+        urgent_day0_pending=None,
+    )
+
+    assert cancelled() is True
+
+
+def test_targeted_forecast_supersession_aborts_cycle_before_ack_boundary():
+    from src.events.reactor import run_edli_event_reactor_cycle
+
+    source = inspect.getsource(run_edli_event_reactor_cycle)
+    build = source.index("_edli_build_forecast_snapshot_events(")
+    superseded = source.index(
+        "if targeted_forecast_wake and _urgent_wake_pending():",
+        build,
+    )
+    process_pending = source.index("reactor.process_pending(", superseded)
+
+    assert build < superseded < process_pending
+
+
 def _global_batch_probe_reactor(
     store, observations, *, incomplete=False, next_claim_event=None
 ):
@@ -728,8 +872,14 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
     try:
         assert main._edli_event_reactor_cycle(
             producer_wake_reason="market_price_advanced",
+            producer_wake_ids=("wake-owned",),
+            producer_wake_published_at="2026-07-19T12:00:00+00:00",
             producer_wake_event_ids=("price-event",),
         ) is True
+        assert captured["producer_wake_ids"] == ("wake-owned",)
+        assert captured["producer_wake_published_at"] == (
+            "2026-07-19T12:00:00+00:00"
+        )
         assert captured["urgent_day0_pending"]() is False
         main._day0_urgent_wake_pending.set()
         assert captured["urgent_day0_pending"]() is True

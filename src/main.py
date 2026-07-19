@@ -3626,6 +3626,8 @@ from src.data.replacement_forecast_production import (  # noqa: E402
 def _edli_event_reactor_cycle(
     *,
     producer_wake_reason: str | None = None,
+    producer_wake_ids: tuple[str, ...] = (),
+    producer_wake_published_at: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
 ) -> bool:
@@ -3646,6 +3648,8 @@ def _edli_event_reactor_cycle(
     return run_edli_event_reactor_cycle(
         active_lock=_edli_reactor_active_lock,
         producer_wake_reason=producer_wake_reason,
+        producer_wake_ids=producer_wake_ids,
+        producer_wake_published_at=producer_wake_published_at,
         producer_wake_event_ids=producer_wake_event_ids,
         producer_wake_families=producer_wake_families,
         urgent_day0_pending=_unowned_day0_urgent_wake_pending,
@@ -4378,6 +4382,8 @@ def _edli_reactor_wake_poll_once() -> bool:
     if not substrate_refresh_wake:
         ran = _edli_event_reactor_cycle(
             producer_wake_reason=wake.reason,
+            producer_wake_ids=tuple(queued.wake_id for queued in wakes),
+            producer_wake_published_at=wake.published_at,
             producer_wake_event_ids=wake_event_ids,
             producer_wake_families=wake_families,
         )

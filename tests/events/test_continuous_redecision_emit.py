@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-19
 # Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
 #   fresh FSR-equivalent each cycle (distinct event_id) instead of deduping to the consumed FSR, so
@@ -2579,10 +2579,12 @@ def test_reactor_maintenance_is_preemptible_by_urgent_wakes():
     """Recovery scans may not retain the decision lock after alpha changes."""
 
     cycle_src = inspect.getsource(reactor.run_edli_event_reactor_cycle)
+    wake_probe_src = inspect.getsource(reactor._reactor_wake_cancellation_probe)
     prune_src = inspect.getsource(reactor._edli_prune_pending_working_set)
     forecast_src = inspect.getsource(main._edli_build_forecast_snapshot_events)
 
-    assert "reactor_urgent_wake_revision" in cycle_src
+    assert "_reactor_wake_cancellation_probe" in cycle_src
+    assert "reactor_urgent_wake_revision" in wake_probe_src
     assert "urgent_wake_pending=_urgent_wake_pending" in cycle_src
     assert "cancelled=_urgent_wake_pending" in cycle_src
     assert "cancelled=urgent_wake_pending" in prune_src

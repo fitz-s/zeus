@@ -353,6 +353,47 @@ def read_reactor_wake(
     return None
 
 
+def reactor_wakes_since(
+    published_at: str | None,
+    *,
+    path: Path | None = None,
+    exclude_wake_ids: Collection[str] = (),
+) -> tuple[ReactorWake, ...]:
+    """Return queued wakes at or after one producer wake's publication time."""
+
+    excluded = {str(wake_id) for wake_id in exclude_wake_ids}
+    cutoff = None
+    try:
+        if published_at:
+            cutoff = datetime.fromisoformat(
+                str(published_at).strip().replace("Z", "+00:00")
+            )
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=timezone.utc)
+            cutoff = cutoff.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        cutoff = None
+
+    wakes: list[ReactorWake] = []
+    for _queue_file, wake in _queued_wakes(path):
+        if wake.wake_id in excluded:
+            continue
+        if cutoff is not None:
+            try:
+                wake_time = datetime.fromisoformat(
+                    wake.published_at.replace("Z", "+00:00")
+                )
+                if wake_time.tzinfo is None:
+                    wake_time = wake_time.replace(tzinfo=timezone.utc)
+                wake_time = wake_time.astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                wake_time = None
+            if wake_time is not None and wake_time < cutoff:
+                continue
+        wakes.append(wake)
+    return tuple(wakes)
+
+
 def coalescible_reactor_wakes(
     selected: ReactorWake,
     *,
