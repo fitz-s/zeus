@@ -1869,12 +1869,14 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
         fact_join = ""
         fact_select = (
             "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
-            "NULL AS latest_fact_remaining_size, NULL AS latest_fact_observed_at"
+            "NULL AS latest_fact_remaining_size, NULL AS latest_fact_observed_at, "
+            "NULL AS latest_fact_venue_order_id"
         )
         trade_join = ""
         trade_select = (
             "NULL AS positive_trade_fact_state, NULL AS positive_trade_filled_size, "
-            "NULL AS positive_trade_fill_price, NULL AS positive_trade_observed_at"
+            "NULL AS positive_trade_fill_price, NULL AS positive_trade_observed_at, "
+            "NULL AS positive_trade_venue_order_id"
         )
         position_join = ""
         position_select = (
@@ -1904,7 +1906,8 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
         if _table_exists(conn, "main", "venue_order_facts"):
             fact_select = (
                 "lf.state AS latest_fact_state, lf.matched_size AS latest_fact_matched_size, "
-                "lf.remaining_size AS latest_fact_remaining_size, lf.observed_at AS latest_fact_observed_at"
+                "lf.remaining_size AS latest_fact_remaining_size, lf.observed_at AS latest_fact_observed_at, "
+                "lf.venue_order_id AS latest_fact_venue_order_id"
             )
             fact_join = """
               LEFT JOIN (
@@ -1931,21 +1934,24 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
                 "filled_size",
                 "fill_price",
                 "observed_at",
+                "venue_order_id",
             }
             if required_trade_columns <= trade_columns:
                 trade_select = (
                     "lft.state AS positive_trade_fact_state, "
                     "lft.filled_size AS positive_trade_filled_size, "
                     "lft.fill_price AS positive_trade_fill_price, "
-                    "lft.observed_at AS positive_trade_observed_at"
+                    "lft.observed_at AS positive_trade_observed_at, "
+                    "lft.venue_order_id AS positive_trade_venue_order_id"
                 )
                 trade_join = """
                   LEFT JOIN (
-                    SELECT command_id, state, filled_size, fill_price, observed_at
+                    SELECT command_id, venue_order_id, state, filled_size, fill_price, observed_at
                       FROM (
-                        SELECT tf.command_id, tf.state, tf.filled_size, tf.fill_price, tf.observed_at,
+                        SELECT tf.command_id, tf.venue_order_id, tf.state,
+                               tf.filled_size, tf.fill_price, tf.observed_at,
                                ROW_NUMBER() OVER (
-                                   PARTITION BY tf.command_id
+                                   PARTITION BY tf.command_id, tf.venue_order_id
                                    ORDER BY datetime(tf.observed_at) DESC, tf.rowid DESC
                                ) AS rn
                           FROM venue_trade_facts tf
@@ -1955,6 +1961,7 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
                      WHERE rn = 1
                   ) lft
                     ON lft.command_id = cmd.command_id
+                   AND lft.venue_order_id = cmd.venue_order_id
                 """
         rows = conn.execute(
             f"""
@@ -2979,15 +2986,21 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
         fact_select = (
             "NULL AS latest_fact_state, NULL AS latest_fact_observed_at, "
             "NULL AS latest_fact_matched_size, NULL AS latest_fact_remaining_size, "
-            "NULL AS latest_fact_raw_payload_json"
+            "NULL AS latest_fact_raw_payload_json, NULL AS latest_fact_venue_order_id"
         )
         trade_join = ""
         trade_select = (
             "NULL AS positive_trade_fact_state, NULL AS positive_trade_filled_size, "
-            "NULL AS positive_trade_fill_price, NULL AS positive_trade_observed_at"
+            "NULL AS positive_trade_fill_price, NULL AS positive_trade_observed_at, "
+            "NULL AS positive_trade_venue_order_id"
         )
         if _table_exists(conn, "main", "venue_order_facts"):
             fact_columns = _table_columns(conn, "main", "venue_order_facts")
+            if "venue_order_id" not in fact_columns:
+                fact_columns = set()
+        else:
+            fact_columns = set()
+        if fact_columns:
             matched_select = (
                 "vof.matched_size AS matched_size"
                 if "matched_size" in fact_columns
@@ -3007,16 +3020,18 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                 "lf.state AS latest_fact_state, lf.observed_at AS latest_fact_observed_at, "
                 "lf.matched_size AS latest_fact_matched_size, "
                 "lf.remaining_size AS latest_fact_remaining_size, "
-                "lf.raw_payload_json AS latest_fact_raw_payload_json"
+                "lf.raw_payload_json AS latest_fact_raw_payload_json, "
+                "lf.venue_order_id AS latest_fact_venue_order_id"
             )
             fact_join = """
               LEFT JOIN (
-                SELECT command_id, state, observed_at, matched_size, remaining_size, raw_payload_json
+                SELECT command_id, venue_order_id, state, observed_at,
+                       matched_size, remaining_size, raw_payload_json
                   FROM (
-                    SELECT vof.command_id, vof.state, vof.observed_at,
+                    SELECT vof.command_id, vof.venue_order_id, vof.state, vof.observed_at,
                            {matched_select}, {remaining_select}, {raw_select},
                            ROW_NUMBER() OVER (
-                               PARTITION BY vof.command_id
+                               PARTITION BY vof.command_id, vof.venue_order_id
                                ORDER BY datetime(vof.observed_at) DESC, vof.rowid DESC
                            ) AS rn
                       FROM venue_order_facts vof
@@ -3024,6 +3039,7 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                  WHERE rn = 1
               ) lf
                 ON lf.command_id = cmd.command_id
+               AND lf.venue_order_id = cmd.venue_order_id
             """.format(
                 matched_select=matched_select,
                 remaining_select=remaining_select,
@@ -3037,21 +3053,24 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                 "filled_size",
                 "fill_price",
                 "observed_at",
+                "venue_order_id",
             }
             if required_trade_columns <= trade_columns:
                 trade_select = (
                     "lft.state AS positive_trade_fact_state, "
                     "lft.filled_size AS positive_trade_filled_size, "
                     "lft.fill_price AS positive_trade_fill_price, "
-                    "lft.observed_at AS positive_trade_observed_at"
+                    "lft.observed_at AS positive_trade_observed_at, "
+                    "lft.venue_order_id AS positive_trade_venue_order_id"
                 )
                 trade_join = """
                   LEFT JOIN (
-                    SELECT command_id, state, filled_size, fill_price, observed_at
+                    SELECT command_id, venue_order_id, state, filled_size, fill_price, observed_at
                       FROM (
-                        SELECT tf.command_id, tf.state, tf.filled_size, tf.fill_price, tf.observed_at,
+                        SELECT tf.command_id, tf.venue_order_id, tf.state,
+                               tf.filled_size, tf.fill_price, tf.observed_at,
                                ROW_NUMBER() OVER (
-                                   PARTITION BY tf.command_id
+                                   PARTITION BY tf.command_id, tf.venue_order_id
                                    ORDER BY datetime(tf.observed_at) DESC, tf.rowid DESC
                                ) AS rn
                           FROM venue_trade_facts tf
@@ -3061,6 +3080,7 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                      WHERE rn = 1
                   ) lft
                     ON lft.command_id = cmd.command_id
+                   AND lft.venue_order_id = cmd.venue_order_id
                 """
         terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
         rows = conn.execute(
@@ -3228,8 +3248,17 @@ def _terminal_partial_entry_has_no_resting_remainder(item: dict[str, Any]) -> bo
     )
     filled = _decimal_float(item.get("positive_trade_filled_size"))
     requested = _decimal_float(item.get("size"))
+    command_order_id = str(item.get("venue_order_id") or "").strip().lower()
+    fact_order_id = str(
+        item.get("latest_fact_venue_order_id") or ""
+    ).strip().lower()
+    trade_order_id = str(
+        item.get("positive_trade_venue_order_id") or ""
+    ).strip().lower()
     return (
-        bool(str(item.get("venue_order_id") or "").strip())
+        bool(command_order_id)
+        and fact_order_id == command_order_id
+        and trade_order_id == command_order_id
         and str(item.get("positive_trade_fact_state") or "").upper()
         in {"MATCHED", "MINED", "CONFIRMED"}
         and matched is not None
