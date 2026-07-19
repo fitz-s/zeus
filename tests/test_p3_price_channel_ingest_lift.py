@@ -1429,6 +1429,7 @@ def test_price_channel_redecision_worker_keeps_leading_deadline_before_delayed_s
     real_thread = threading.Thread
     worker_started = threading.Event()
     release_worker = threading.Event()
+    first_batch_received = threading.Event()
     batches: list[tuple[object, ...]] = []
     batches_received = threading.Event()
     clock = {"now": 0.0}
@@ -1447,11 +1448,15 @@ def test_price_channel_redecision_worker_keeps_leading_deadline_before_delayed_s
 
     monkeypatch.setattr(router.threading, "Thread", DelayedThread)
     monkeypatch.setattr(router.time, "monotonic", lambda: clock["now"])
+    def record_batch(events) -> None:  # noqa: ANN001
+        batches.append(tuple(events))
+        if len(batches) == 1:
+            first_batch_received.set()
+        else:
+            batches_received.set()
+
     sink = router._CoalescingPriceChannelRedecisionSink(
-        lambda events: (
-            batches.append(tuple(events)),
-            batches_received.set() if len(batches) == 2 else None,
-        ),
+        record_batch,
         batch_window_seconds=0.02,
         idle_timeout_seconds=0.01,
     )
@@ -1471,6 +1476,9 @@ def test_price_channel_redecision_worker_keeps_leading_deadline_before_delayed_s
     clock["now"] = 1.0
     release_worker.set()
 
+    assert first_batch_received.wait(0.1)
+    time.sleep(0.03)
+    clock["now"] = 2.0
     assert batches_received.wait(0.1)
     assert batches == [(first,), (late,)]
 
@@ -1563,6 +1571,55 @@ def test_price_channel_redecision_worker_waits_for_close_before_restart():
     assert second_batch.wait(1.0)
     assert not overlap.is_set()
     assert worker.wait_idle(1.0)
+
+
+def test_price_channel_redecision_worker_collapses_busy_generations_after_success():
+    import threading
+
+    from src.events import price_channel_redecision_router as router
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_received = threading.Event()
+    batches: list[tuple[object, ...]] = []
+
+    def blocking_sink(events) -> None:  # noqa: ANN001
+        batches.append(tuple(events))
+        if len(batches) == 1:
+            first_started.set()
+            assert release_first.wait(1.0)
+        else:
+            second_received.set()
+
+    worker = router._CoalescingPriceChannelRedecisionSink(
+        blocking_sink,
+        batch_window_seconds=0.02,
+        idle_timeout_seconds=0.01,
+    )
+
+    def event(token: str, version: int):
+        return types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json=json.dumps({"token_id": token, "version": version}),
+        )
+
+    first = event("token-a", 1)
+    stale = event("token-a", 2)
+    other = event("token-b", 1)
+    latest = event("token-a", 3)
+    worker((first,))
+    assert first_started.wait(1.0)
+    time.sleep(0.03)
+    worker((stale,))
+    time.sleep(0.03)
+    worker((other,))
+    time.sleep(0.03)
+    worker((latest,))
+    release_first.set()
+
+    assert second_received.wait(1.0)
+    assert worker.wait_idle(1.0)
+    assert batches == [(first,), (latest, other)]
 
 
 def test_price_channel_redecision_worker_failure_requeues_latest_pending_burst(monkeypatch):

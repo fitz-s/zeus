@@ -931,6 +931,18 @@ class _CoalescingPriceChannelRedecisionSink:
                     time.sleep(delay)
                 else:
                     failures = 0
+                    with self._wake:
+                        if self._pending_batches:
+                            latest: dict[str, object] = {}
+                            for _deadline, queued in self._pending_batches:
+                                latest.update(queued)
+                            self._pending_batches.clear()
+                            self._pending_batches.append(
+                                (
+                                    time.monotonic() + self._batch_window_seconds,
+                                    latest,
+                                )
+                            )
         finally:
             close = getattr(self._sink, "close", None)
             if callable(close):
