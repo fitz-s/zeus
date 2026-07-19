@@ -101,6 +101,41 @@ def test_matched_zero_remainder_order_fact_outranks_command_size_residue() -> No
     assert reduced.matched_size == Decimal("4.99")
 
 
+def test_matched_zero_remainder_short_fill_is_terminal_partial() -> None:
+    reduced = VenueOrderTruthReducer.reduce(
+        order_facts=[
+            {"state": "MATCHED", "remaining_size": "0", "matched_size": "7"},
+        ],
+        trade_filled_size="7",
+        command_size="17.5",
+    )
+
+    assert reduced.state == "MATCHED"
+    assert reduced.proof_class == TERMINAL_PARTIAL
+    assert reduced.remaining_size == Decimal("0")
+    assert reduced.matched_size == Decimal("7")
+
+
+def test_terminal_partial_fact_prevents_short_matched_string_regression() -> None:
+    reduced = VenueOrderTruthReducer.reduce(
+        order_facts=[
+            {"state": "MATCHED", "remaining_size": "0", "matched_size": "11"},
+            {
+                "state": "PARTIALLY_MATCHED",
+                "remaining_size": "0",
+                "matched_size": "11",
+            },
+        ],
+        trade_filled_size="11",
+        command_size="15",
+    )
+
+    assert reduced.state == "PARTIALLY_MATCHED"
+    assert reduced.proof_class == TERMINAL_PARTIAL
+    assert reduced.remaining_size == Decimal("0")
+    assert reduced.matched_size == Decimal("11")
+
+
 def test_terminal_positive_zero_remainder_does_not_regress_to_later_partial() -> None:
     reduced = VenueOrderTruthReducer.reduce(
         order_facts=[

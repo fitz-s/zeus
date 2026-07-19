@@ -38,6 +38,7 @@ _TERMINAL_STATES = {
 _OPEN_STATES = {VenueOrderStatus.LIVE, VenueOrderStatus.PARTIALLY_MATCHED, "RESTING"}
 _UNKNOWN_STATES = {"UNKNOWN", "SUBMIT_UNKNOWN_SIDE_EFFECT"}
 _REVIEW_STATES = {"REVIEW_REQUIRED"}
+_FULL_FILL_RESIDUAL_TOLERANCE = Decimal("0.01")
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,19 @@ def _zero(value: Decimal | None) -> bool:
     return value is not None and value == Decimal("0")
 
 
+def _covers_command(
+    matched: Decimal,
+    command_size: Decimal | None,
+    *,
+    allow_terminal_dust: bool = False,
+) -> bool:
+    tolerance = _FULL_FILL_RESIDUAL_TOLERANCE if allow_terminal_dust else Decimal("0")
+    return (
+        command_size is not None
+        and matched + tolerance >= command_size
+    )
+
+
 class VenueOrderTruthReducer:
     """Reduce venue facts into one monotonic order-truth state."""
 
@@ -107,7 +121,14 @@ class VenueOrderTruthReducer:
             remaining = _decimal_or_none(_row_get(fact, "remaining_size"))
             matched_from_orders = max(matched_from_orders, matched)
             if state == "MATCHED" and _zero(remaining) and matched > 0:
-                terminal_fill = fact
+                if command_size_dec is None or _covers_command(
+                    matched,
+                    command_size_dec,
+                    allow_terminal_dust=True,
+                ):
+                    terminal_fill = fact
+                else:
+                    terminal_partial = fact
             elif state in _TERMINAL_STATES:
                 if state == "MATCHED" and not _zero(remaining):
                     pass
@@ -116,7 +137,10 @@ class VenueOrderTruthReducer:
                 elif _zero(remaining):
                     terminal_zero_no_fill = fact
             elif state in _OPEN_STATES:
-                latest_open = fact
+                if _zero(remaining) and matched > 0:
+                    terminal_partial = fact
+                else:
+                    latest_open = fact
             elif state in _UNKNOWN_STATES:
                 latest_unknown = fact
             elif state in _REVIEW_STATES:
@@ -128,7 +152,8 @@ class VenueOrderTruthReducer:
                 _decimal_or_none(_row_get(terminal_fill, "matched_size")) or matched
             )
             return CanonicalOrderTruth("MATCHED", Decimal("0"), terminal_matched, TERMINAL_FILLED)
-        if terminal_partial is not None:
+        if terminal_partial is not None or terminal_fill is not None:
+            terminal_partial = terminal_partial or terminal_fill
             source_state = _state(terminal_partial)
             terminal_matched = max(
                 matched,
@@ -144,7 +169,7 @@ class VenueOrderTruthReducer:
         if matched > 0:
             if command_size_dec is not None:
                 remaining = max(Decimal("0"), command_size_dec - matched)
-                if remaining == 0:
+                if _covers_command(matched, command_size_dec):
                     return CanonicalOrderTruth("MATCHED", remaining, matched, TERMINAL_FILLED)
                 return CanonicalOrderTruth("PARTIALLY_MATCHED", remaining, matched, PARTIAL_WITH_REMAINDER)
             return CanonicalOrderTruth("PARTIALLY_MATCHED", None, matched, PARTIAL_WITH_REMAINDER)

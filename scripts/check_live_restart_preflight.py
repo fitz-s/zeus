@@ -2123,9 +2123,17 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
         )
 
     local_terminal_no_fill_recoverable: list[dict[str, Any]] = []
+    local_terminal_partial_covered: list[dict[str, Any]] = []
     venue_read_commands: list[dict[str, Any]] = []
     for command in commands:
-        if _restart_relevant_entry_command_terminal_no_fill_recoverable(command):
+        if _terminal_partial_entry_has_no_resting_remainder(command):
+            local_terminal_partial_covered.append(
+                {
+                    **command,
+                    "coverage": "terminal_partial_remainder_zero",
+                }
+            )
+        elif _restart_relevant_entry_command_terminal_no_fill_recoverable(command):
             local_terminal_no_fill_recoverable.append(
                 {
                     "command_id": command.get("command_id"),
@@ -2150,13 +2158,16 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
     evidence["local_terminal_no_fill_boot_recoverable_count"] = len(
         local_terminal_no_fill_recoverable
     )
+    evidence["local_terminal_partial_non_resting_count"] = len(
+        local_terminal_partial_covered
+    )
     risky: list[dict[str, Any]] = []
     boot_recoverable: list[dict[str, Any]] = [
         recoverable
         for item in local_terminal_no_fill_recoverable
         if (recoverable := _venue_point_order_boot_recoverable(item)) is not None
     ]
-    covered: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = list(local_terminal_partial_covered)
     if not venue_read_commands:
         evidence["covered_count"] = len(covered)
         evidence["boot_recoverable"] = boot_recoverable
@@ -2164,7 +2175,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
         return CheckResult(
             "venue_point_order_truth_alignment",
             True,
-            "local terminal no-fill venue facts are boot-recoverable before live order submission",
+            "local terminal order facts prove no resting remainder",
             evidence,
         )
     try:
@@ -3094,6 +3105,14 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
     boot_recoverable: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
+        if _terminal_partial_entry_has_no_resting_remainder(item):
+            covered.append(
+                {
+                    **item,
+                    "coverage": "terminal_partial_remainder_zero",
+                }
+            )
+            continue
         if _terminal_fak_entry_has_no_resting_remainder(item):
             covered.append(
                 {
@@ -3141,13 +3160,18 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
         item.get("coverage") == "settled_fak_remainder_canceled"
         for item in covered
     )
+    terminal_partial_count = sum(
+        item.get("coverage") == "terminal_partial_remainder_zero"
+        for item in covered
+    )
     evidence["settled_fak_non_resting_count"] = settled_fak_count
+    evidence["terminal_partial_non_resting_count"] = terminal_partial_count
     return CheckResult(
         "resting_venue_command_lifecycle_alignment",
         not risky,
         (
-            "canonical settled FAK semantics prove no resting command"
-            if settled_fak_count
+            "canonical terminal order facts prove no resting command"
+            if settled_fak_count or terminal_partial_count
             else "resting venue commands are aligned with position lifecycle"
             if not boot_recoverable
             else "resting venue command conflicts are boot-recoverable"
@@ -3166,6 +3190,49 @@ def _positive_float(value: object) -> float | None:
     if parsed > 0.0:
         return parsed
     return None
+
+
+def _terminal_partial_entry_has_no_resting_remainder(item: dict[str, Any]) -> bool:
+    """Accept a short fill only when local venue and trade quantities close exactly."""
+
+    if (
+        str(item.get("intent_kind") or "").upper() != "ENTRY"
+        or str(item.get("command_state") or item.get("state") or "").upper()
+        != "PARTIAL"
+    ):
+        return False
+    fact_state = str(
+        item.get("latest_fact_state") or item.get("local_fact_state") or ""
+    ).upper()
+    if fact_state not in TERMINAL_VENUE_FACT_STATES | {
+        "PARTIAL",
+        "PARTIALLY_MATCHED",
+    }:
+        return False
+    matched = _decimal_float(
+        item.get("latest_fact_matched_size")
+        if item.get("latest_fact_matched_size") not in (None, "")
+        else item.get("local_fact_matched_size")
+    )
+    remaining = _decimal_float(
+        item.get("latest_fact_remaining_size")
+        if item.get("latest_fact_remaining_size") not in (None, "")
+        else item.get("local_fact_remaining_size")
+    )
+    filled = _decimal_float(item.get("positive_trade_filled_size"))
+    requested = _decimal_float(item.get("size"))
+    return (
+        str(item.get("positive_trade_fact_state") or "").upper()
+        in {"MATCHED", "MINED", "CONFIRMED"}
+        and matched is not None
+        and matched > 0.0
+        and remaining is not None
+        and abs(remaining) <= 1e-9
+        and filled is not None
+        and abs(filled - matched) <= 1e-6
+        and requested is not None
+        and requested - filled > 0.01
+    )
 
 
 def _terminal_fak_entry_has_no_resting_remainder(item: dict[str, Any]) -> bool:

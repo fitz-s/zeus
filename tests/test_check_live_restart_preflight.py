@@ -3994,6 +3994,100 @@ def test_venue_point_order_truth_alignment_accepts_projected_partial_match(
     assert result.evidence["risky"] == []
 
 
+def test_venue_point_order_truth_alignment_skips_terminal_short_fill_venue_read(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(
+        trade_db,
+        command_state="PARTIAL",
+        fact_state="MATCHED",
+        matched_size="7",
+    )
+    conn = sqlite3.connect(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE venue_order_facts SET remaining_size = '0' WHERE command_id = 'cmd-venue-audit'"
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT, venue_order_id TEXT, state TEXT,
+            filled_size TEXT, fill_price TEXT, observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-venue-audit', 'venue-order-1', 'CONFIRMED', '7', '0.67', ?
+        )
+        """,
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    def _unexpected_venue_reader():
+        raise AssertionError("terminal short fill must not be re-read as a resting order")
+
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", _unexpected_venue_reader)
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["venue_read_command_count"] == 0
+    assert result.evidence["local_terminal_partial_non_resting_count"] == 1
+    assert result.evidence["covered_count"] == 1
+
+
+def test_resting_alignment_treats_terminal_short_fill_as_non_resting(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_resting_command_trade_db(trade_db, phase="active", intent_kind="ENTRY")
+    conn = sqlite3.connect(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-1'")
+    conn.execute(
+        """
+        UPDATE venue_order_facts
+           SET state = 'MATCHED', matched_size = '7', remaining_size = '0'
+         WHERE command_id = 'cmd-1'
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT, venue_order_id TEXT, state TEXT,
+            filled_size TEXT, fill_price TEXT, observed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_trade_facts VALUES ('cmd-1', '0xabc', 'CONFIRMED', '7', '0.49', ?)",
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._resting_venue_command_lifecycle_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["terminal_partial_non_resting_count"] == 1
+
+
 def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_path):
     monkeypatch.delenv("ZEUS_LIVE_PREFLIGHT_STATE_DIR", raising=False)
     monkeypatch.delenv("ZEUS_STATE_DIR", raising=False)
