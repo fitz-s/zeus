@@ -7570,7 +7570,13 @@ def _global_book_metadata_conn(
                     1,
                     0,
                     1,
-                    '{"fee_rate_fraction":0}',
+                    json.dumps(
+                        {
+                            "fee_rate_fraction": 0,
+                            "source": "test_current_token_fee",
+                            "token_id": token,
+                        }
+                    ),
                     "0.01",
                     "5",
                     captured_at,
@@ -9559,6 +9565,52 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert {row["captured_at"] for row in local_metadata.values()} == {
         "2026-07-10T07:59:00+00:00"
     }
+    assert {
+        json.loads(row["fee_details_json"])["token_id"]
+        for row in local_metadata.values()
+    } == {
+        token
+        for binding in original.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    }
+    assert all(
+        json.loads(row["fee_details_json"])["token_id"] == token
+        for (_condition_id, token), row in local_metadata.items()
+    )
+
+    one_side_missing = _global_book_metadata_conn(
+        original,
+        captured_at="2026-07-10T07:59:00+00:00",
+        freshness_deadline="2026-07-10T08:00:30+00:00",
+    )
+    one_side_missing.execute(
+        "DELETE FROM executable_market_snapshot_latest "
+        "WHERE condition_id = ? AND selected_outcome_token_id = ?",
+        (
+            original.bindings[0].condition_id,
+            original.bindings[0].no_token_id,
+        ),
+    )
+    one_side_calls = []
+    one_side_metadata = {}
+    one_side_rebound = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda _slug: pytest.fail("batch Gamma path expected"),
+        get_gamma_markets=lambda condition_ids: (
+            one_side_calls.append(tuple(condition_ids)) or batch_markets
+        ),
+        trade_conn=one_side_missing,
+        checked_at_utc=_dt.datetime(
+            2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc
+        ),
+        metadata_sink=one_side_metadata,
+    )[original.family_key]
+    assert one_side_calls == [
+        tuple(binding.condition_id for binding in original.bindings)
+    ]
+    assert one_side_rebound.witness_identity == original.witness_identity
+    assert one_side_metadata == gamma_metadata
 
     stale_metadata_calls = []
     stale_metadata = {}

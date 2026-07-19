@@ -1281,7 +1281,7 @@ def bind_current_global_probability_tokens(
         return dict(probability_witnesses)
 
     local_tokens: dict[str, tuple[str, str]] = {}
-    local_metadata_by_condition: dict[str, Mapping[str, object]] = {}
+    local_metadata_by_token: dict[tuple[str, str], Mapping[str, object]] = {}
     if trade_conn is not None:
         if checked_at_utc is None or checked_at_utc.tzinfo is None:
             raise ValueError("GLOBAL_LOCAL_TOKEN_CHECK_TIME_INVALID")
@@ -1316,24 +1316,32 @@ def bind_current_global_probability_tokens(
                     f"GLOBAL_LOCAL_TOKEN_IDENTITY_AMBIGUOUS:{condition_id}"
                 )
             local_tokens[condition_id] = pair
-            local_metadata_by_condition.setdefault(condition_id, row)
+            selected = str(row.get("selected_outcome_token_id") or "").strip()
+            if selected not in pair:
+                raise ValueError(
+                    f"GLOBAL_LOCAL_SELECTED_TOKEN_IDENTITY_INVALID:{condition_id}"
+                )
+            local_metadata_by_token.setdefault((condition_id, selected), row)
 
     local_metadata_family_keys: set[str] = set()
     if metadata_sink is not None:
         for family_key, witness in work_by_family.items():
-            condition_ids = {
-                binding.condition_id for binding in witness.bindings
+            token_keys = {
+                (binding.condition_id, token_id)
+                for binding in witness.bindings
+                for token_id in (binding.yes_token_id, binding.no_token_id)
             }
-            if not condition_ids or not condition_ids.issubset(
-                local_metadata_by_condition
-            ):
+            if not token_keys or not token_keys.issubset(local_metadata_by_token):
                 continue
             local_metadata_family_keys.add(family_key)
             for binding in witness.bindings:
-                metadata = local_metadata_by_condition[binding.condition_id]
                 yes, no = local_tokens[binding.condition_id]
-                metadata_sink[(binding.condition_id, yes)] = metadata
-                metadata_sink[(binding.condition_id, no)] = metadata
+                metadata_sink[(binding.condition_id, yes)] = local_metadata_by_token[
+                    (binding.condition_id, yes)
+                ]
+                metadata_sink[(binding.condition_id, no)] = local_metadata_by_token[
+                    (binding.condition_id, no)
+                ]
 
     remote_work_by_family = {
         family_key: witness
