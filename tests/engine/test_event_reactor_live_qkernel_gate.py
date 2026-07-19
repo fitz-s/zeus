@@ -549,6 +549,161 @@ def test_day0_submit_gate_allows_maker_range_with_fresh_observation() -> None:
     assert reason is None
 
 
+# M-3 (Day0 first-principles audit 2026-07-18): `in_final_localday_noentry_window`
+# is now computed from real temporal context — Manila (Asia/Manila, UTC+8) local
+# day for target_date 2026-07-02 ends at 2026-07-02T16:00:00Z.
+
+
+def test_day0_submit_gate_blocks_entry_in_final_localday_window() -> None:
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be between 32-33°C on July 2?"
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="MAKER",
+        # 10 minutes before Manila's local-day end -- no exit runway.
+        decision_time=datetime(2026, 7, 2, 15, 50, tzinfo=timezone.utc),
+    )
+    assert reason == "DAY0_FINAL_LOCALDAY_NOENTRY"
+
+
+def test_day0_submit_gate_final_localday_window_boundary_is_inclusive() -> None:
+    # exactly 30 minutes before local-day end -> rejected (<=, not <).
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be between 32-33°C on July 2?"
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="MAKER",
+        decision_time=datetime(2026, 7, 2, 15, 30, tzinfo=timezone.utc),
+    )
+    assert reason == "DAY0_FINAL_LOCALDAY_NOENTRY"
+
+    # one minute earlier (31 minutes before end) -> not rejected on this gate.
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be between 32-33°C on July 2?"
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="MAKER",
+        decision_time=datetime(2026, 7, 2, 15, 29, tzinfo=timezone.utc),
+    )
+    assert reason is None
+
+
+def test_day0_in_final_localday_noentry_window_fails_open_without_city_or_date() -> None:
+    assert era._day0_in_final_localday_noentry_window(
+        city=None, target_date_str="2026-07-02", decision_time=datetime(2026, 7, 2, 15, 50, tzinfo=timezone.utc)
+    ) is False
+    from src.config import runtime_cities_by_name
+
+    manila = runtime_cities_by_name().get("Manila")
+    assert era._day0_in_final_localday_noentry_window(
+        city=manila, target_date_str="", decision_time=datetime(2026, 7, 2, 15, 50, tzinfo=timezone.utc)
+    ) is False
+
+
+# M-7 (Day0 first-principles audit 2026-07-18): Hong Kong (settlement_source_type
+# "hko", wu_station=None in config) is the audit's suspected silently-dead city --
+# day0_extreme_updated.observation_context_to_live_observation stamps
+# station_match_status against city.wu_station verbatim, which is empty for HKO,
+# so every HKO observation used to read MISMATCH there regardless of the true
+# station and collapse this classifier to BLOCKED.
+
+
+def _hk_action_payload(*, bin_label: str, direction: str = "buy_yes", station_match_status: str = "MATCH") -> dict[str, object]:
+    return {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "city": "Hong Kong",
+        "target_date": "2026-07-02",
+        "metric": "high",
+        "temperature_metric": "high",
+        "direction": direction,
+        "bin_label": bin_label,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": station_match_status,
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+
+
+def _hk_event_payload() -> SimpleNamespace:
+    payload = {
+        "city": "Hong Kong",
+        "target_date": "2026-07-02",
+        "metric": "high",
+        "station_id": "HKO",
+        "settlement_source_type": "hko",
+        "observation_available_at": "2026-07-02T02:06:24+00:00",
+        "rounded_value": 32,
+    }
+    return SimpleNamespace(
+        event_id="event-day0-submit-hk",
+        event_type="DAY0_EXTREME_UPDATED",
+        causal_snapshot_id="hko-fast",
+        payload_json=json.dumps(payload),
+        payload=payload,
+    )
+
+
+def test_day0_source_health_state_reaches_ok_fast_only_for_hko_city() -> None:
+    from src.config import runtime_cities_by_name
+
+    hk = runtime_cities_by_name().get("Hong Kong")
+    assert hk is not None and hk.wu_station is None and hk.settlement_source_type == "hko"
+
+    # The upstream field is (bug-consistent) MISMATCH; the real station matches.
+    payload = _hk_action_payload(bin_label="32°C", station_match_status="MISMATCH")
+    event_payload = _hk_event_payload().payload
+
+    state = era._day0_live_source_health_state(payload, event_payload=event_payload, city=hk)
+    assert state == "OK_FAST_ONLY"
+
+
+def test_day0_source_health_state_still_blocks_hko_on_real_station_mismatch() -> None:
+    from src.config import runtime_cities_by_name
+
+    hk = runtime_cities_by_name().get("Hong Kong")
+    payload = _hk_action_payload(bin_label="32°C", station_match_status="MISMATCH")
+    event_payload = dict(_hk_event_payload().payload)
+    event_payload["station_id"] = "ZZZZ"  # a genuinely wrong station
+
+    state = era._day0_live_source_health_state(payload, event_payload=event_payload, city=hk)
+    assert state == "BLOCKED"
+
+
+def test_day0_source_health_state_without_city_falls_back_to_payload_field() -> None:
+    """No city resolvable at all -- trust the payload's own field rather than
+    silently admitting or blocking on a guess."""
+    payload = _hk_action_payload(bin_label="32°C", station_match_status="MISMATCH")
+    state = era._day0_live_source_health_state(payload, event_payload=_hk_event_payload().payload, city=None)
+    assert state == "BLOCKED"
+
+
+def test_day0_submit_gate_admits_hko_candidate_despite_buggy_station_match_field() -> None:
+    """End-to-end: a Hong Kong DAY0 candidate whose upstream
+    station_match_status field reads MISMATCH (the M-7 root cause) is no
+    longer silently zeroed at the live submit seam."""
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_hk_event_payload(),
+        actionable_payload=_hk_action_payload(
+            bin_label="Will the highest temperature in Hong Kong be between 32-33°C on July 2?",
+            station_match_status="MISMATCH",
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="MAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+    assert reason is None
+
+
 def test_day0_submit_gate_blocks_bin_dead_at_submit_time(monkeypatch) -> None:
     """H-2: a bin the running extreme killed in the select→submit window is
     refused at the final seam with its own first-class reason — BEFORE the

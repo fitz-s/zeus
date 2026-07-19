@@ -36,8 +36,8 @@ class Day0AdmissionContext:
     # quote vs observation publication clock
     quote_time_utc: datetime | None
     latest_observation_available_at_utc: datetime | None
-    # window flags (computed by the caller from temporal context)
-    in_post_extreme_quiet_window: bool
+    # window flag (computed by the caller from temporal context; M-3 2026-07-18:
+    # in_post_extreme_quiet_window was removed here — see gate 6 comment below)
     in_final_localday_noentry_window: bool
     # one-bin-edge fragility
     selected_bin_edge_distance_quanta: float
@@ -86,19 +86,31 @@ def day0_live_admission_rejection_reason(ctx: Day0AdmissionContext) -> str | Non
     ):
         return "DAY0_QUOTE_STALE_VS_OBSERVATION"
 
-    # 6) inside the post-extreme transition quiet window (let the absorbing update settle first).
-    if ctx.in_post_extreme_quiet_window:
-        return "DAY0_POST_EXTREME_QUIET_WINDOW"
-
-    # 7) selected bin one rounding quantum from death and the edge does not survive a one-bin stress.
+    # 6) selected bin one rounding quantum from death and the edge does not survive a one-bin stress.
+    #
+    # M-3 (audit 2026-07-18): a former gate 6, `in_post_extreme_quiet_window`
+    # ("let the absorbing update settle before pricing"), was hardcoded False
+    # at the sole live call site and DELETED here rather than wired up.
+    # Judgment: its original intent is now covered by two gates that did not
+    # exist when it was written — the strict quote>observation ordering gate
+    # above (commit 7eb03a29a) proves the QUOTE itself was captured after the
+    # extreme's publication, and the submit-time hard-fact re-check at the
+    # live call site (H-2, commit ceb55a796) re-derives bin-aliveness against
+    # the CURRENT durable extreme at the exact submit instant — including any
+    # settlement-source revision that has already landed in the DB by then. A
+    # fixed N-minute "quiet window" would be a strictly weaker, heuristic
+    # stand-in for what the re-check already proves exactly; keeping a dead
+    # field that can never legitimately be wired to anything stronger than
+    # what gate 6/H-2 already do would just be another guard that exists,
+    # is tested in isolation, and does nothing (the audit's own §3B pattern).
     if ctx.selected_bin_edge_distance_quanta <= 1.0 and not ctx.edge_survives_one_bin_stress:
         return "DAY0_ONE_BIN_EDGE_FRAGILE"
 
-    # 8) inside the final local-day no-entry window.
+    # 7) inside the final local-day no-entry window.
     if ctx.in_final_localday_noentry_window:
         return "DAY0_FINAL_LOCALDAY_NOENTRY"
 
-    # 9) maker-only entry until the lane is calibrated (taker/auto-cross entry forbidden).
+    # 8) maker-only entry until the lane is calibrated (taker/auto-cross entry forbidden).
     if ctx.maker_only_required and ctx.execution_mode not in _MAKER_MODES:
         return "DAY0_TAKER_ENTRY_FORBIDDEN"
 

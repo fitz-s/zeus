@@ -278,6 +278,7 @@ from src.strategy.market_phase import (
     MarketPhase,
     FORECAST_ONLY_ADMIT_PHASES as _FORECAST_ONLY_ADMIT_PHASES,
     market_phase_admits,
+    settlement_day_entry_utc,
 )
 from src.strategy.live_inference.live_admission import (
     REPLACEMENT_BOOTSTRAP_MIN_DRAWS,
@@ -15608,8 +15609,42 @@ def _build_event_bound_taker_quality_proof(
     }
 
 
-def _day0_live_source_health_state(actionable_payload: Mapping[str, object]) -> str:
-    """Compact health label for the Day0 live-admission predicate."""
+def _day0_live_source_health_state(
+    actionable_payload: Mapping[str, object],
+    *,
+    event_payload: Mapping[str, object] | None = None,
+    city: Any | None = None,
+) -> str:
+    """Compact health label for the Day0 live-admission predicate.
+
+    M-7 (Day0 first-principles audit 2026-07-18): this used to collapse to
+    only OK_FAST_AND_WU/BLOCKED, leaving the policy-admissible OK_FAST_ONLY
+    state (``day0_admission.Day0AdmissionContext.allowed_health_states``
+    default already includes it) permanently unreachable. Traced root cause
+    for the audit's Hong Kong suspicion: ``station_match_status`` on the
+    payload is stamped by
+    ``day0_extreme_updated.observation_context_to_live_observation`` (its own
+    ``expected_station`` local, line ~584) against ``city.wu_station``
+    verbatim, which is ``None`` for HKO (config: `wu_station: null`,
+    `settlement_source_type: "hko"`) — so every Hong Kong observation reads
+    MISMATCH there regardless of the true HKO station, and this classifier
+    silently zeroed a healthy fast-only city to BLOCKED. Recomputed here
+    against the SAME city-aware ``_expected_station_for_city`` helper this
+    file already uses at two other call sites (correctly special-cases HKO),
+    instead of trusting the payload's field.
+
+    The richer 5-state classifier in ``day0_source_health.py``
+    (``day0_source_health()`` / ``Day0SourceFacts``) is deliberately NOT
+    called from this synchronous submit seam: its ``coverage_proof`` and
+    divergence/anomaly pause inputs are genuinely unavailable here without
+    duplicating DB assembly owned by ``day0_observation_reader.py`` /
+    ``monitor_refresh.py`` (out of this change's scope) — and a fabricated
+    ``coverage_proof=None`` would classify as UNKNOWN, which is NOT in the
+    admissible set, silently killing every city's Day0 lane instead of just
+    the one that was actually broken. Wiring is instead done by fixing this
+    classifier's own OK_FAST_ONLY/OK_FAST_AND_WU split using facts genuinely
+    available here.
+    """
 
     live_authority = str(actionable_payload.get("live_authority_status") or "").strip().lower()
     source_authorized = str(
@@ -15617,10 +15652,30 @@ def _day0_live_source_health_state(actionable_payload: Mapping[str, object]) -> 
     ).strip().upper()
     source_match = str(actionable_payload.get("source_match_status") or "").strip().upper()
     local_date = str(actionable_payload.get("local_date_status") or "").strip().upper()
-    station = str(actionable_payload.get("station_match_status") or "").strip().upper()
     metric = str(actionable_payload.get("metric_match_status") or "").strip().upper()
     rounding = str(actionable_payload.get("rounding_status") or "").strip().upper()
-    if (
+
+    if city is not None:
+        from src.events.triggers.day0_extreme_updated import (
+            _expected_station_for_city,
+            _station_matches,
+        )
+
+        station_id = str(
+            (event_payload or {}).get("station_id")
+            or actionable_payload.get("station_id")
+            or ""
+        ).strip().upper()
+        expected_station = _expected_station_for_city(city)
+        station = (
+            "MATCH"
+            if expected_station and _station_matches(station_id, expected_station)
+            else "MISMATCH"
+        )
+    else:
+        station = str(actionable_payload.get("station_match_status") or "").strip().upper()
+
+    core_match = (
         live_authority == "live"
         and source_authorized == "AUTHORIZED"
         and source_match == "MATCH"
@@ -15628,9 +15683,29 @@ def _day0_live_source_health_state(actionable_payload: Mapping[str, object]) -> 
         and station == "MATCH"
         and metric == "MATCH"
         and rounding == "MATCH"
-    ):
+    )
+    if not core_match:
+        return "BLOCKED"
+
+    settlement_source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+    if not settlement_source_type:
+        settlement_source_type = str(
+            (event_payload or {}).get("settlement_source_type")
+            or (event_payload or {}).get("source_type")
+            or (event_payload or {}).get("settlement_source")
+            or ""
+        ).strip().lower()
+    from src.data.day0_source_health import (
+        METAR_NATIVE_SOURCE_TYPES as _METAR_NATIVE_HEALTH_SOURCE_TYPES,
+    )
+
+    if not settlement_source_type or settlement_source_type in _METAR_NATIVE_HEALTH_SOURCE_TYPES:
+        # Default to the stricter WU-lane label when the source type cannot be
+        # established at all (fail toward the pre-existing behavior).
         return "OK_FAST_AND_WU"
-    return "BLOCKED"
+    # A non-METAR-native city (hko/noaa/cwa) has no WU lane to begin with; a
+    # fully-matched native observation is the fast lane alone, not BLOCKED.
+    return "OK_FAST_ONLY"
 
 
 def _day0_bin_stress_verdict(
@@ -15695,6 +15770,50 @@ def _day0_bin_stress_verdict(
     if metric == "low" and high is not None and stressed > float(high) + 1e-9:
         return max(0.0, float(observed) - float(high)), True
     return float("inf"), True
+
+
+# M-3 (Day0 first-principles audit 2026-07-18): a new entry this close to the
+# city-local end of the target day has no exit runway before settlement.
+# Module constant, deliberately not a settings knob (per task scoping).
+_DAY0_FINAL_LOCALDAY_NOENTRY_MINUTES = 30
+
+
+def _day0_in_final_localday_noentry_window(
+    *,
+    city: Any | None,
+    target_date_str: str,
+    decision_time: datetime,
+) -> bool:
+    """Whether ``decision_time`` is within the final N minutes of the city-local
+    target day.
+
+    Reuses ``settlement_day_entry_utc`` — the SAME city-local-midnight function
+    this module already imports from ``src.strategy.market_phase`` for
+    ``MarketPhase`` — evaluated at ``target_date + 1`` to get the city-local
+    END of the target day. Audit M-4 counts five independent
+    reimplementations of this local-day boundary already; this deliberately
+    reuses the existing import rather than adding a sixth.
+    """
+
+    if city is None or not target_date_str:
+        return False
+    try:
+        target_local_date = date.fromisoformat(str(target_date_str)[:10])
+    except ValueError:
+        return False
+    city_timezone = str(getattr(city, "timezone", "") or "")
+    if not city_timezone:
+        return False
+    try:
+        local_day_end_utc = settlement_day_entry_utc(
+            target_local_date=target_local_date + timedelta(days=1),
+            city_timezone=city_timezone,
+        )
+    except Exception:  # noqa: BLE001 — bad tz name etc.; fail open (no gate)
+        return False
+    decision_utc = decision_time.astimezone(UTC) if decision_time.tzinfo else decision_time.replace(tzinfo=UTC)
+    remaining = local_day_end_utc - decision_utc
+    return remaining <= timedelta(minutes=_DAY0_FINAL_LOCALDAY_NOENTRY_MINUTES)
 
 
 def _day0_live_submit_admission_rejection_reason(
@@ -15802,12 +15921,23 @@ def _day0_live_submit_admission_rejection_reason(
         metric=_h2_metric,
         settlement_source_type=settlement_source_type,
         fast_obs_supported=bool(station_id and observation_available is not None),
-        source_health_state=_day0_live_source_health_state(actionable_payload),
+        source_health_state=_day0_live_source_health_state(
+            actionable_payload,
+            event_payload=event_payload,
+            city=_h2_city_obj,
+        ),
         execution_mode=str(order_mode or "").strip().lower(),
         quote_time_utc=quote_time,
         latest_observation_available_at_utc=observation_available,
-        in_post_extreme_quiet_window=False,
-        in_final_localday_noentry_window=False,
+        in_final_localday_noentry_window=_day0_in_final_localday_noentry_window(
+            city=_h2_city_obj,
+            target_date_str=str(
+                actionable_payload.get("target_date")
+                or event_payload.get("target_date")
+                or ""
+            ),
+            decision_time=decision_time,
+        ),
         selected_bin_edge_distance_quanta=distance_quanta,
         edge_survives_one_bin_stress=stress_survives,
         city_allowlist=frozenset(

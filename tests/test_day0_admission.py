@@ -1,6 +1,12 @@
 # Created: 2026-06-17
 # Authority basis: operator delta-package v2 (real_upgrade #3) — Day0 live admission circuit breakers.
-"""Contract tests for day0_live_admission_rejection_reason (9 gates + admit + bypass)."""
+"""Contract tests for day0_live_admission_rejection_reason (8 gates + admit + bypass).
+
+M-3 (Day0 first-principles audit 2026-07-18): `in_post_extreme_quiet_window`
+(former gate 6) was deleted — see the commit body and day0_admission.py's gate
+6 comment for why it was judged redundant with the strict quote>observation
+ordering gate + the H-2 submit-time hard-fact re-check.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -19,7 +25,7 @@ def _ctx(**kw) -> Day0AdmissionContext:
         settlement_source_type="wu_icao", fast_obs_supported=True,
         source_health_state="OK_FAST_AND_WU", execution_mode="maker",
         quote_time_utc=T, latest_observation_available_at_utc=T - timedelta(minutes=5),
-        in_post_extreme_quiet_window=False, in_final_localday_noentry_window=False,
+        in_final_localday_noentry_window=False,
         selected_bin_edge_distance_quanta=3.0, edge_survives_one_bin_stress=True,
         city_allowlist=frozenset({"Chicago"}),
     )
@@ -76,10 +82,6 @@ def test_quote_equal_to_observation_rejects_strict_ordering() -> None:
     assert day0_live_admission_rejection_reason(equal) == "DAY0_QUOTE_STALE_VS_OBSERVATION"
     newer = _ctx(quote_time_utc=T, latest_observation_available_at_utc=T - timedelta(seconds=1))
     assert day0_live_admission_rejection_reason(newer) is None
-
-
-def test_post_extreme_quiet_window() -> None:
-    assert day0_live_admission_rejection_reason(_ctx(in_post_extreme_quiet_window=True)) == "DAY0_POST_EXTREME_QUIET_WINDOW"
 
 
 def test_one_bin_edge_fragile() -> None:
