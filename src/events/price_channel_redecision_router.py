@@ -44,6 +44,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 logger = logging.getLogger("zeus.price_channel_redecision_router")
@@ -780,13 +781,27 @@ def _edli_price_channel_redecision_sink(
 class _CoalescingPriceChannelRedecisionSink:
     """Keep decision routing off the WS receive loop and retain latest per token."""
 
-    def __init__(self, sink, *, idle_timeout_seconds: float = 0.25) -> None:  # noqa: ANN001
+    def __init__(
+        self,
+        sink,
+        *,
+        batch_window_seconds: float = 0.25,
+        idle_timeout_seconds: float | None = None,
+    ) -> None:  # noqa: ANN001
         self._sink = sink
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
-        self._pending: dict[str, object] = {}
+        self._pending_batches: deque[tuple[float, dict[str, object]]] = deque()
         self._running = False
-        self._idle_timeout_seconds = max(0.001, float(idle_timeout_seconds))
+        self._batch_window_seconds = max(0.001, float(batch_window_seconds))
+        self._idle_timeout_seconds = max(
+            0.001,
+            float(
+                batch_window_seconds
+                if idle_timeout_seconds is None
+                else idle_timeout_seconds
+            ),
+        )
         self._idle = threading.Event()
         self._idle.set()
 
@@ -798,37 +813,83 @@ class _CoalescingPriceChannelRedecisionSink:
     def __call__(self, events) -> None:  # noqa: ANN001
         start = False
         with self._wake:
+            pending: dict[str, object] | None = None
+            now = time.monotonic()
             for event in events or ():
                 key = self._event_key(event)
                 if key is not None:
-                    self._pending[key] = event
-            if self._pending:
+                    if pending is None:
+                        if (
+                            not self._pending_batches
+                            or now >= self._pending_batches[-1][0]
+                        ):
+                            pending = {}
+                            self._pending_batches.append(
+                                (now + self._batch_window_seconds, pending)
+                            )
+                        else:
+                            pending = self._pending_batches[-1][1]
+                    pending[key] = event
+            if self._pending_batches:
                 self._idle.clear()
-            if self._pending and not self._running:
+            if self._pending_batches and not self._running:
                 self._running = True
                 start = True
-            elif self._pending:
+            elif self._pending_batches:
                 self._wake.notify()
         if start:
+            self._start_worker()
+
+    def _start_worker(self, *, retry_start: bool = True) -> None:
+        try:
             threading.Thread(
                 target=self._drain,
                 name="price-channel-redecision",
                 daemon=True,
             ).start()
+        except Exception:  # noqa: BLE001 - retain durable routing work for next notify
+            with self._wake:
+                pending_count = sum(
+                    len(pending) for _deadline, pending in self._pending_batches
+                )
+                if self._pending_batches:
+                    self._idle.clear()
+                else:
+                    self._running = False
+                    self._idle.set()
+            logger.exception(
+                "price-channel redecision worker failed to start; pending=%d",
+                pending_count,
+            )
+            if pending_count and retry_start:
+                self._start_worker(retry_start=False)
+                return
+            with self._wake:
+                self._running = False
+                if self._pending_batches:
+                    self._idle.clear()
+                else:
+                    self._idle.set()
 
     def _drain(self) -> None:
         failures = 0
         try:
             while True:
                 with self._wake:
-                    if not self._pending:
+                    if not self._pending_batches:
                         self._idle.set()
                         self._wake.wait(timeout=self._idle_timeout_seconds)
-                        if not self._pending:
-                            self._running = False
+                        if not self._pending_batches:
                             return
-                    batch = tuple(self._pending.values())
-                    self._pending.clear()
+                    # A leading-edge window joins the price burst that has already
+                    # arrived without letting each later event postpone the batch.
+                    deadline, pending = self._pending_batches[0]
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        self._wake.wait(timeout=remaining)
+                        continue
+                    _deadline, pending = self._pending_batches.popleft()
+                    batch = tuple(pending.values())
                     self._idle.clear()
                 try:
                     self._sink(batch)
@@ -839,17 +900,30 @@ class _CoalescingPriceChannelRedecisionSink:
                         with contextlib.suppress(Exception):
                             close()
                     with self._lock:
-                        for event in batch:
-                            key = self._event_key(event)
-                            if key is not None:
-                                self._pending.setdefault(key, event)
+                        newer_keys = {
+                            key
+                            for _deadline, queued in self._pending_batches
+                            for key in queued
+                        }
+                        retry_pending = {
+                            key: event
+                            for key, event in pending.items()
+                            if key not in newer_keys
+                        }
+                        if retry_pending:
+                            self._pending_batches.appendleft(
+                                (time.monotonic(), retry_pending)
+                            )
+                        pending_count = sum(
+                            len(queued) for _deadline, queued in self._pending_batches
+                        )
                     delay = min(30.0, float(2 ** min(failures - 1, 5)))
                     logger.warning(
                         "price-channel redecision worker failed; retry_after_seconds=%.1f "
                         "batch=%d pending=%d: %s: %s",
                         delay,
                         len(batch),
-                        len(self._pending),
+                        pending_count,
                         type(exc).__name__,
                         exc,
                         exc_info=True,
@@ -860,7 +934,20 @@ class _CoalescingPriceChannelRedecisionSink:
         finally:
             close = getattr(self._sink, "close", None)
             if callable(close):
-                close()
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - worker state must still recover
+                    logger.exception("price-channel redecision worker close failed")
+            restart = False
+            with self._wake:
+                if self._pending_batches:
+                    self._idle.clear()
+                    restart = True
+                else:
+                    self._running = False
+                    self._idle.set()
+            if restart:
+                self._start_worker()
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         return self._idle.wait(timeout)

@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-17 (price-channel durable-event reactor wake)
+# Last reused or audited: 2026-07-19 (price-channel durable-event reactor wake)
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -1371,6 +1371,239 @@ def test_price_channel_redecision_worker_reuses_reads_across_quote_burst(monkeyp
     assert opened == ["world", "trade", "forecasts"]
     assert all_closed.wait(1.0)
     assert closed == ["forecasts", "trade", "world"]
+
+
+def test_price_channel_redecision_worker_batches_fast_burst_at_fixed_leading_edge():
+    import threading
+
+    from src.events import price_channel_redecision_router as router
+
+    batches: list[tuple[object, ...]] = []
+    first_batch = threading.Event()
+
+    def synchronous_sink(events) -> None:  # noqa: ANN001
+        batches.append(tuple(events))
+        first_batch.set()
+
+    worker = router._CoalescingPriceChannelRedecisionSink(
+        synchronous_sink,
+        batch_window_seconds=0.05,
+        idle_timeout_seconds=0.01,
+    )
+
+    def event(token: str, version: int):
+        return types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json=json.dumps({"token_id": token, "version": version}),
+        )
+
+    first = event("token-a", 1)
+    latest = event("token-a", 2)
+    other = event("token-b", 1)
+    started_at = time.perf_counter()
+    worker((first,))
+    worker((latest, other))
+
+    assert time.perf_counter() - started_at < 0.1
+    assert first_batch.wait(1.0)
+    assert worker.wait_idle(1.0)
+    assert batches == [(latest, other)]
+
+    after_window = event("token-c", 1)
+    worker((after_window,))
+    deadline = time.monotonic() + 1.0
+    while len(batches) < 2:
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+    assert worker.wait_idle(1.0)
+    assert batches == [(latest, other), (after_window,)]
+
+
+def test_price_channel_redecision_worker_keeps_leading_deadline_before_delayed_start(
+    monkeypatch,
+):
+    import threading
+
+    from src.events import price_channel_redecision_router as router
+
+    real_thread = threading.Thread
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    batches: list[tuple[object, ...]] = []
+    batches_received = threading.Event()
+    clock = {"now": 0.0}
+
+    class DelayedThread:
+        def __init__(self, *, target, **_kwargs) -> None:  # noqa: ANN001
+            self._target = target
+
+        def start(self) -> None:
+            def run() -> None:
+                worker_started.set()
+                assert release_worker.wait(1.0)
+                self._target()
+
+            real_thread(target=run, daemon=True).start()
+
+    monkeypatch.setattr(router.threading, "Thread", DelayedThread)
+    monkeypatch.setattr(router.time, "monotonic", lambda: clock["now"])
+    sink = router._CoalescingPriceChannelRedecisionSink(
+        lambda events: (
+            batches.append(tuple(events)),
+            batches_received.set() if len(batches) == 2 else None,
+        ),
+        batch_window_seconds=0.02,
+        idle_timeout_seconds=0.01,
+    )
+    first = types.SimpleNamespace(
+        event_type="BOOK_SNAPSHOT",
+        payload_json=json.dumps({"token_id": "token-a", "version": 1}),
+    )
+    late = types.SimpleNamespace(
+        event_type="BOOK_SNAPSHOT",
+        payload_json=json.dumps({"token_id": "token-b", "version": 2}),
+    )
+
+    sink((first,))
+    assert worker_started.wait(1.0)
+    clock["now"] = 0.04
+    sink((late,))
+    clock["now"] = 1.0
+    release_worker.set()
+
+    assert batches_received.wait(0.1)
+    assert batches == [(first,), (late,)]
+
+
+def test_price_channel_redecision_worker_recovers_after_thread_start_failure(monkeypatch):
+    import threading
+
+    from src.events import price_channel_redecision_router as router
+
+    real_thread = threading.Thread
+    starts = {"count": 0}
+    batches: list[tuple[object, ...]] = []
+
+    class FlakyThread:
+        def __init__(self, *, target, **_kwargs) -> None:  # noqa: ANN001
+            self._target = target
+
+        def start(self) -> None:
+            starts["count"] += 1
+            if starts["count"] == 1:
+                raise RuntimeError("thread start failed")
+            real_thread(target=self._target, daemon=True).start()
+
+    monkeypatch.setattr(router.threading, "Thread", FlakyThread)
+    worker = router._CoalescingPriceChannelRedecisionSink(
+        lambda events: batches.append(tuple(events)),
+        batch_window_seconds=0.01,
+        idle_timeout_seconds=0.01,
+    )
+
+    def event(version: int):
+        return types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json=json.dumps({"token_id": "token-a", "version": version}),
+        )
+
+    first = event(1)
+    worker((first,))
+
+    assert worker.wait_idle(1.0)
+    assert starts["count"] == 2
+    assert batches == [(first,)]
+
+
+def test_price_channel_redecision_worker_waits_for_close_before_restart():
+    import threading
+
+    from src.events import price_channel_redecision_router as router
+
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_finished = threading.Event()
+    second_batch = threading.Event()
+    overlap = threading.Event()
+    calls = {"count": 0, "closes": 0}
+
+    class ClosingSink:
+        def __call__(self, _events) -> None:  # noqa: ANN001
+            calls["count"] += 1
+            if calls["count"] == 2:
+                if not close_finished.is_set():
+                    overlap.set()
+                second_batch.set()
+
+        def close(self) -> None:
+            calls["closes"] += 1
+            if calls["closes"] == 1:
+                close_started.set()
+                assert release_close.wait(1.0)
+                close_finished.set()
+
+    worker = router._CoalescingPriceChannelRedecisionSink(
+        ClosingSink(),
+        batch_window_seconds=0.01,
+        idle_timeout_seconds=0.01,
+    )
+
+    def event(token: str):
+        return types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json=json.dumps({"token_id": token}),
+        )
+
+    worker((event("token-a"),))
+    assert close_started.wait(1.0)
+    worker((event("token-b"),))
+    assert not second_batch.wait(0.05)
+    release_close.set()
+
+    assert second_batch.wait(1.0)
+    assert not overlap.is_set()
+    assert worker.wait_idle(1.0)
+
+
+def test_price_channel_redecision_worker_failure_requeues_latest_pending_burst(monkeypatch):
+    import threading
+
+    from src.events import price_channel_redecision_router as router
+
+    started = threading.Event()
+    release = threading.Event()
+    batches: list[tuple[object, ...]] = []
+
+    def retrying_sink(events) -> None:  # noqa: ANN001
+        batch = tuple(events)
+        batches.append(batch)
+        if len(batches) == 1:
+            started.set()
+            assert release.wait(1.0)
+            raise RuntimeError("transient sink failure")
+
+    monkeypatch.setattr(router.time, "sleep", lambda _seconds: None)
+    worker = router._CoalescingPriceChannelRedecisionSink(
+        retrying_sink,
+        batch_window_seconds=0.01,
+        idle_timeout_seconds=0.01,
+    )
+
+    def event(version: int):
+        return types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json=json.dumps({"token_id": "token-a", "version": version}),
+        )
+
+    first = event(1)
+    latest = event(2)
+    worker((first,))
+    assert started.wait(1.0)
+    worker((latest,))
+    release.set()
+
+    assert worker.wait_idle(1.0)
+    assert batches == [(first,), (latest,)]
 
 
 def test_price_channel_redecision_worker_reopens_reads_after_failure(monkeypatch):
