@@ -380,7 +380,9 @@ class RiskAllocator:
         if self.kill_switch_reason(governor_state):
             return "NO_TRADE"
         # Venue heartbeat owns resting-order leases only. Immediate orders do
-        # not depend on that lease and remain available through a lost keeper.
+        # not depend on that lease and remain available for held-position
+        # reduction through a missing or degraded keeper snapshot. New-entry
+        # blocking is enforced separately by reduce_only_mode_active().
         if governor_state.heartbeat_health is not HeartbeatHealth.HEALTHY:
             return "TAKER"
         if _snapshot_depth_micro(snapshot) < self.cap_policy.taker_min_depth_micro:
@@ -400,6 +402,15 @@ class RiskAllocator:
 
     def reduce_only_mode_active(self, governor_state: GovernorState) -> bool:
         if governor_state.kill_switch_armed:
+            return True
+        # Missing current venue-liveness truth blocks new risk.  UNCONFIGURED
+        # is bootstrap/configuration absence; STARTING has no successful lease
+        # witness yet; LOST includes expired external keeper snapshots.
+        if governor_state.heartbeat_health in {
+            HeartbeatHealth.UNCONFIGURED,
+            HeartbeatHealth.STARTING,
+            HeartbeatHealth.LOST,
+        }:
             return True
         # M5 reconcile-required (src.control.ws_gap_guard) is an independent
         # WS-recovery latch: proof that no fills were missed during a user-

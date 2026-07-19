@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-18; last_reused=2026-07-18
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-19
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -835,6 +835,36 @@ def test_lost_state_blocks_GTC_and_GTD_placement():
     assert supervisor.gate_for_order_type("GTD") is False
 
 
+def test_custom_supervisor_healthy_status_cannot_bypass_provider_gate_veto():
+    class CustomSupervisor:
+        def __init__(self):
+            self.status_calls = 0
+            self.gate_calls = 0
+
+        def status(self):
+            self.status_calls += 1
+            return HeartbeatStatus(
+                health=HeartbeatHealth.HEALTHY,
+                last_success_at=datetime.now(timezone.utc),
+                consecutive_failures=0,
+                heartbeat_id="custom",
+                cadence_seconds=5,
+            )
+
+        def gate_for_order_type(self, order_type):
+            self.gate_calls += 1
+            return False
+
+    supervisor = CustomSupervisor()
+    configure_global_supervisor(supervisor)
+
+    with pytest.raises(HeartbeatNotHealthy):
+        heartbeat_supervisor_module.assert_heartbeat_allows_order_type("GTC")
+
+    assert supervisor.status_calls == 1
+    assert supervisor.gate_calls == 1
+
+
 def test_lost_state_allows_FOK_FAK_immediate_only():
     supervisor = HeartbeatSupervisor(FakeHeartbeatAdapter([]), cadence_seconds=5)
     supervisor.record_failure("miss-1")
@@ -846,7 +876,7 @@ def test_lost_state_allows_FOK_FAK_immediate_only():
     assert supervisor.gate_for_order_type("FAK") is True
 
 
-def test_lost_summary_and_pre_submit_authority_expose_immediate_only():
+def test_lost_summary_blocks_new_entry_but_preserves_immediate_exit_type():
     from src.engine.cycle_runner import _discovery_gates_allow_entries
     from src.events.reactor import _edli_heartbeat_authority_summary
     from src.observability.status_summary import _heartbeat_component
@@ -859,16 +889,16 @@ def test_lost_summary_and_pre_submit_authority_expose_immediate_only():
 
     payload = heartbeat_supervisor_module.summary()
 
-    assert payload["entry"]["allow_submit"] is True
+    assert payload["entry"]["allow_submit"] is False
     assert payload["entry"]["resting_allow_submit"] is False
-    assert payload["entry"]["immediate_allow_submit"] is True
+    assert payload["entry"]["immediate_allow_submit"] is False
     assert payload["entry"]["allowed_order_types"] == ["FOK", "FAK"]
     assert _edli_heartbeat_authority_summary("GTC")["allow_submit"] is False
     assert _edli_heartbeat_authority_summary("FOK")["allow_submit"] is True
-    assert _heartbeat_component(payload)["allowed"] is True
+    assert _heartbeat_component(payload)["allowed"] is False
     assert _heartbeat_component(payload, order_type="FAK")["allowed"] is True
     assert _heartbeat_component(payload, order_type="GTC")["allowed"] is False
-    assert _discovery_gates_allow_entries(
+    assert not _discovery_gates_allow_entries(
         risk_level=RiskLevel.GREEN,
         heartbeat_status=payload,
         ws_gap_status={"entry": {"allow_submit": True}},
@@ -885,7 +915,7 @@ def test_lost_summary_and_pre_submit_authority_expose_immediate_only():
 
 
 def test_executor_blocks_gtc_before_command_persistence_when_heartbeat_lost(monkeypatch):
-    from src.execution.executor import _live_order
+    from src.execution.executor import _assert_heartbeat_allows_submit, _live_order
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -897,10 +927,18 @@ def test_executor_blocks_gtc_before_command_persistence_when_heartbeat_lost(monk
     supervisor.record_failure("miss-2")
     configure_global_supervisor(supervisor)
 
+    with pytest.raises(HeartbeatNotHealthy):
+        _assert_heartbeat_allows_submit("GTC")
     with patch("src.data.polymarket_client.PolymarketClient") as client_cls:
-        with pytest.raises(HeartbeatNotHealthy):
-            _live_order("heartbeat-trade", _intent(), shares=10.0, conn=conn, decision_id="decision-heartbeat")
+        result = _live_order(
+            "heartbeat-trade",
+            _intent(),
+            shares=10.0,
+            conn=conn,
+            decision_id="decision-heartbeat",
+        )
 
+    assert result.status == "rejected"
     assert client_cls.call_count == 0
     assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
     conn.close()
@@ -1097,6 +1135,50 @@ def test_external_heartbeat_supervisor_requires_fresh_healthy_status(tmp_path):
     assert supervisor.gate_for_order_type(OrderType.GTC) is False
     assert supervisor.status().health is HeartbeatHealth.LOST
     assert "stale" in (supervisor.status().last_error or "")
+
+
+def test_external_mode_cold_singleton_reads_fresh_keeper_without_false_lost(
+    tmp_path,
+    monkeypatch,
+):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    write_heartbeat_keeper_status(
+        HeartbeatStatus(
+            health=HeartbeatHealth.HEALTHY,
+            last_success_at=datetime.now(timezone.utc),
+            consecutive_failures=0,
+            heartbeat_id="keeper-id",
+            cadence_seconds=5,
+        ),
+        path=status_path,
+    )
+    monkeypatch.setenv("ZEUS_VENUE_HEARTBEAT_MODE", "external")
+    monkeypatch.setattr(
+        heartbeat_supervisor_module,
+        "heartbeat_keeper_status_path",
+        lambda: status_path,
+    )
+    configure_global_supervisor(None)
+
+    try:
+        status = heartbeat_supervisor_module.current_status()
+        payload = heartbeat_supervisor_module.summary()
+        supervisor = heartbeat_supervisor_module.get_global_supervisor()
+    finally:
+        configure_global_supervisor(None)
+
+    assert isinstance(supervisor, ExternalHeartbeatSupervisor)
+    assert status.health is HeartbeatHealth.HEALTHY
+    assert status.status_reason == "ok"
+    assert status.source == "zeus-venue-heartbeat"
+    assert status.written_at is not None
+    assert status.age_seconds is not None and status.age_seconds >= 0
+    assert payload["health"] == "HEALTHY"
+    assert payload["status_reason"] == "ok"
+    assert payload["source"] == "zeus-venue-heartbeat"
+    assert payload["written_at"] is not None
+    assert payload["age_seconds"] is not None
+    assert payload["entry"]["allow_submit"] is True
 
 
 def test_external_heartbeat_supervisor_blocks_healthy_status_during_lease_gap(tmp_path):

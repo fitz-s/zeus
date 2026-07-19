@@ -94,11 +94,15 @@ def _assert_cutover_allows_submit(intent_kind) -> dict:
     return _capability_component("cutover_guard", intent_kind=str(getattr(intent_kind, "value", intent_kind)))
 
 
-def _assert_heartbeat_allows_submit(order_type: str = "GTC") -> dict:
+def _assert_heartbeat_allows_submit(
+    order_type: str = "GTC",
+    *,
+    reduce_only: bool = False,
+) -> dict:
     """Fail before command persistence or SDK contact when heartbeat is unhealthy."""
     from src.control.heartbeat_supervisor import assert_heartbeat_allows_order_type
 
-    assert_heartbeat_allows_order_type(order_type)
+    assert_heartbeat_allows_order_type(order_type, reduce_only=reduce_only)
     return _capability_component("heartbeat_supervisor", order_type=order_type)
 
 
@@ -5724,7 +5728,10 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
-        heartbeat_component = _assert_heartbeat_allows_submit(order_type)
+        heartbeat_component = _assert_heartbeat_allows_submit(
+            order_type,
+            reduce_only=True,
+        )
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
 
         # -------------------------------------------------------------------

@@ -57,6 +57,7 @@ _HEARTBEAT_LAST_TRANSPORT_RESET_REASON: str | None = None
 
 
 class HeartbeatHealth(str, Enum):
+    UNCONFIGURED = "UNCONFIGURED"
     STARTING = "STARTING"
     HEALTHY = "HEALTHY"
     DEGRADED = "DEGRADED"
@@ -88,6 +89,10 @@ class HeartbeatStatus:
     consecutive_successes: int = 0
     lease_continuous_since: Optional[datetime] = None
     lease_gap_suspected_until: Optional[datetime] = None
+    source: str = "in_process_supervisor"
+    status_reason: str = "unknown"
+    written_at: Optional[datetime] = None
+    age_seconds: Optional[float] = None
 
     def resting_order_safe(self, *, now: Optional[datetime] = None) -> bool:
         if self.health is not HeartbeatHealth.HEALTHY:
@@ -121,8 +126,23 @@ class HeartbeatStatus:
                 if self.lease_gap_suspected_until
                 else None
             ),
+            "source": self.source,
+            "status_reason": self.status_reason,
+            "written_at": self.written_at.isoformat() if self.written_at else None,
+            "age_seconds": self.age_seconds,
             "resting_order_safe": self.resting_order_safe(),
         }
+
+
+def _status_reason(health: HeartbeatHealth) -> str:
+    return {
+        HeartbeatHealth.UNCONFIGURED: "configuration_missing",
+        HeartbeatHealth.STARTING: "heartbeat_starting",
+        HeartbeatHealth.HEALTHY: "ok",
+        HeartbeatHealth.DEGRADED: "venue_degraded",
+        HeartbeatHealth.LOST: "venue_lost",
+        HeartbeatHealth.DISABLED_FOR_NON_RESTING_ONLY: "non_resting_only",
+    }[health]
 
 
 def _normalize_order_type(order_type: str | OrderType | None) -> str:
@@ -894,9 +914,10 @@ def write_heartbeat_keeper_status(
     payload = {
         "schema_version": 2,
         "owner": owner,
-        "written_at": now.isoformat(),
         "transport_diagnostics": heartbeat_transport_diagnostics(),
         **status.to_dict(),
+        "source": owner,
+        "written_at": now.isoformat(),
     }
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True) + "\n")
@@ -966,6 +987,8 @@ class ExternalHeartbeatSupervisor:
                 heartbeat_id="external",
                 cadence_seconds=self._cadence_seconds,
                 last_error=f"external heartbeat status missing: {self._status_path}",
+                source="external_keeper_status",
+                status_reason="heartbeat_snapshot_missing",
             )
         except (OSError, json.JSONDecodeError) as exc:
             return HeartbeatStatus(
@@ -975,6 +998,8 @@ class ExternalHeartbeatSupervisor:
                 heartbeat_id="external",
                 cadence_seconds=self._cadence_seconds,
                 last_error=f"external heartbeat status unreadable: {exc}",
+                source="external_keeper_status",
+                status_reason="heartbeat_snapshot_unreadable",
             )
 
         written_at = _parse_utc(payload.get("written_at"))
@@ -984,6 +1009,11 @@ class ExternalHeartbeatSupervisor:
         lease_continuous_since = _parse_utc(payload.get("lease_continuous_since"))
         lease_gap_suspected_until = _parse_utc(payload.get("lease_gap_suspected_until"))
         consecutive_successes = int(payload.get("consecutive_successes") or 0)
+        source = str(
+            payload.get("source")
+            or payload.get("owner")
+            or "external_keeper_status"
+        )
 
         if written_at is None:
             return HeartbeatStatus(
@@ -998,6 +1028,8 @@ class ExternalHeartbeatSupervisor:
                 consecutive_successes=consecutive_successes,
                 lease_continuous_since=lease_continuous_since,
                 lease_gap_suspected_until=lease_gap_suspected_until,
+                source=source,
+                status_reason="heartbeat_snapshot_missing_written_at",
             )
         age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
         cadence_seconds = int(payload.get("cadence_seconds") or self._cadence_seconds)
@@ -1017,6 +1049,10 @@ class ExternalHeartbeatSupervisor:
                 consecutive_successes=consecutive_successes,
                 lease_continuous_since=lease_continuous_since,
                 lease_gap_suspected_until=lease_gap_suspected_until,
+                source=source,
+                status_reason="heartbeat_snapshot_expired",
+                written_at=written_at,
+                age_seconds=age_seconds,
             )
         raw_health = str(payload.get("health") or "").upper()
         try:
@@ -1035,12 +1071,21 @@ class ExternalHeartbeatSupervisor:
             consecutive_successes=consecutive_successes,
             lease_continuous_since=lease_continuous_since,
             lease_gap_suspected_until=lease_gap_suspected_until,
+            source=source,
+            status_reason=_status_reason(health),
+            written_at=written_at,
+            age_seconds=age_seconds,
         )
 
-    def gate_for_order_type(self, order_type: str | OrderType | None) -> bool:
+    def gate_for_order_type(
+        self,
+        order_type: str | OrderType | None,
+        *,
+        status: HeartbeatStatus | None = None,
+    ) -> bool:
         if not heartbeat_required_for(order_type):
             return True
-        return self.status().resting_order_safe()
+        return (status or self.status()).resting_order_safe()
 
 
 class HeartbeatSupervisor:
@@ -1202,6 +1247,12 @@ class HeartbeatSupervisor:
         )
 
     def status(self) -> HeartbeatStatus:
+        written_at = datetime.now(timezone.utc)
+        age_seconds = (
+            max(0.0, (written_at - self._last_success_at).total_seconds())
+            if self._last_success_at is not None
+            else None
+        )
         return HeartbeatStatus(
             health=self._health,
             last_success_at=self._last_success_at,
@@ -1214,68 +1265,140 @@ class HeartbeatSupervisor:
             consecutive_successes=self._consecutive_successes,
             lease_continuous_since=self._lease_continuous_since,
             lease_gap_suspected_until=self._lease_gap_suspected_until,
+            source="in_process_supervisor",
+            status_reason=_status_reason(self._health),
+            written_at=written_at,
+            age_seconds=age_seconds,
         )
 
-    def gate_for_order_type(self, order_type: str | OrderType | None) -> bool:
+    def gate_for_order_type(
+        self,
+        order_type: str | OrderType | None,
+        *,
+        status: HeartbeatStatus | None = None,
+    ) -> bool:
         if not heartbeat_required_for(order_type):
             return True
-        return self.status().resting_order_safe()
+        return (status or self.status()).resting_order_safe()
 
 
 _GLOBAL_SUPERVISOR: Optional[Any] = None
+_GLOBAL_SUPERVISOR_LOCK = threading.Lock()
 
 
 def configure_global_supervisor(supervisor: Optional[Any]) -> None:
     global _GLOBAL_SUPERVISOR
-    _GLOBAL_SUPERVISOR = supervisor
+    with _GLOBAL_SUPERVISOR_LOCK:
+        _GLOBAL_SUPERVISOR = supervisor
 
 
 def get_global_supervisor() -> Optional[Any]:
     return _GLOBAL_SUPERVISOR
 
 
-def current_status() -> HeartbeatStatus:
-    supervisor = get_global_supervisor()
+def _runtime_supervisor() -> Optional[Any]:
+    """Resolve the process singleton before any status or governor read."""
+
+    global _GLOBAL_SUPERVISOR
+    supervisor = _GLOBAL_SUPERVISOR
+    mode = os.environ.get("ZEUS_VENUE_HEARTBEAT_MODE", "internal").strip().lower()
+    if supervisor is not None or mode != "external":
+        return supervisor
+    with _GLOBAL_SUPERVISOR_LOCK:
+        if _GLOBAL_SUPERVISOR is None:
+            _GLOBAL_SUPERVISOR = ExternalHeartbeatSupervisor()
+        return _GLOBAL_SUPERVISOR
+
+
+def _status_snapshot() -> tuple[Optional[Any], HeartbeatStatus]:
+    supervisor = _runtime_supervisor()
     if supervisor is None:
-        return HeartbeatStatus(
-            health=HeartbeatHealth.LOST,
+        return None, HeartbeatStatus(
+            health=HeartbeatHealth.UNCONFIGURED,
             last_success_at=None,
             consecutive_failures=0,
             heartbeat_id="unconfigured",
             cadence_seconds=heartbeat_cadence_seconds_from_env(),
             last_error="heartbeat supervisor not configured",
+            source="process_singleton",
+            status_reason="configuration_missing",
         )
-    return supervisor.status()
+    return supervisor, supervisor.status()
 
 
-def assert_heartbeat_allows_order_type(order_type: str | OrderType | None = OrderType.GTC) -> None:
+def _provider_gate_allows(
+    supervisor: Optional[Any],
+    order_type: str,
+    status: HeartbeatStatus,
+) -> bool:
+    if supervisor is None:
+        return False
+    gate = getattr(supervisor, "gate_for_order_type", None)
+    if gate is None:
+        return False
+    try:
+        parameters = inspect.signature(gate).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "status" in parameters:
+        return bool(gate(order_type, status=status))
+    return bool(gate(order_type))
+
+
+def current_status() -> HeartbeatStatus:
+    return _status_snapshot()[1]
+
+
+def assert_heartbeat_allows_order_type(
+    order_type: str | OrderType | None = OrderType.GTC,
+    *,
+    reduce_only: bool = False,
+) -> None:
     normalized = _normalize_order_type(order_type)
-    if not heartbeat_required_for(normalized):
-        return
-    supervisor = get_global_supervisor()
-    status = current_status()
-    allowed = supervisor.gate_for_order_type(normalized) if supervisor is not None else False
+    supervisor, status = _status_snapshot()
+    immediate = not heartbeat_required_for(normalized)
+    current_snapshot = status.health in {
+        HeartbeatHealth.HEALTHY,
+        HeartbeatHealth.DEGRADED,
+        HeartbeatHealth.DISABLED_FOR_NON_RESTING_ONLY,
+    }
+    provider_allowed = (
+        _provider_gate_allows(supervisor, normalized, status)
+        if supervisor is not None
+        else immediate and reduce_only
+    )
+    allowed = provider_allowed and (
+        immediate and reduce_only
+        or immediate and current_snapshot
+        or status.resting_order_safe()
+    )
     if not allowed:
         raise HeartbeatNotHealthy(f"heartbeat={status.health.value}; order_type={normalized}; {status.last_error or ''}")
 
 
 def summary() -> dict[str, Any]:
-    status = current_status()
-    supervisor = get_global_supervisor()
-    resting_allowed = (
-        supervisor.gate_for_order_type(OrderType.GTC)
-        if supervisor is not None
-        else False
+    supervisor, status = _status_snapshot()
+    resting_allowed = status.resting_order_safe() and _provider_gate_allows(
+        supervisor,
+        OrderType.GTC.value,
+        status,
     )
+    current_snapshot = status.health in {
+        HeartbeatHealth.HEALTHY,
+        HeartbeatHealth.DEGRADED,
+        HeartbeatHealth.DISABLED_FOR_NON_RESTING_ONLY,
+    }
+    # Immediate order types remain valid for held-position reduction even when
+    # entry is blocked for missing current heartbeat truth.
     allowed_order_types = [OrderType.FOK.value, OrderType.FAK.value]
     if resting_allowed:
         allowed_order_types = [order_type.value for order_type in OrderType]
     payload = status.to_dict()
     payload["entry"] = {
-        "allow_submit": bool(allowed_order_types),
+        "allow_submit": current_snapshot,
         "allowed_order_types": allowed_order_types,
         "resting_allow_submit": resting_allowed,
-        "immediate_allow_submit": True,
+        "immediate_allow_submit": current_snapshot,
         "required_order_types": sorted(_RESTING_ORDER_TYPES),
     }
     if not resting_allowed:

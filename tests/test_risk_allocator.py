@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import sqlite3
 import threading
 from dataclasses import replace
@@ -19,7 +20,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.control.heartbeat_supervisor import HeartbeatHealth, HeartbeatStatus
+from src.control.heartbeat_supervisor import (
+    ExternalHeartbeatSupervisor,
+    HeartbeatHealth,
+    HeartbeatNotHealthy,
+    HeartbeatStatus,
+    configure_global_supervisor,
+    current_status,
+    write_heartbeat_keeper_status,
+)
 from src.contracts import Direction, EdgeContext, EntryMethod, ExecutionIntent, DecisionSourceContext
 from src.contracts.slippage_bps import SlippageBps
 from src.execution.executor import create_execution_intent, create_exit_order_intent, execute_exit_order, execute_intent
@@ -158,7 +167,9 @@ def _patch_submit_guards(monkeypatch, captured_order_types: list[str]) -> None:
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type",
-        lambda order_type=None: captured_order_types.append(str(order_type or "GTC").upper()),
+        lambda order_type=None, **kwargs: captured_order_types.append(
+            str(order_type or "GTC").upper()
+        ),
     )
     monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
@@ -219,7 +230,7 @@ def test_current_entry_capacity_exposes_same_remaining_envelope_as_submit_gate()
         clear_global_allocator()
 
 
-def test_auction_capital_snapshot_excludes_transient_actuation_health():
+def test_auction_capital_snapshot_excludes_health_but_current_entry_stays_blocked():
     allocator = RiskAllocator(
         CapPolicy(max_per_market_micro=150_000_000),
         [
@@ -246,12 +257,14 @@ def test_auction_capital_snapshot_excludes_transient_actuation_health():
         resolution_window="day0",
         correlation_key="corr-1",
     ) == Decimal("50")
-    assert current_global_entry_capacity_usd(
-        market_id="m1",
-        event_id="e1",
-        resolution_window="day0",
-        correlation_key="corr-1",
-    ) == Decimal("50")
+    with pytest.raises(AllocationDenied) as current_exc:
+        current_global_entry_capacity_usd(
+            market_id="m1",
+            event_id="e1",
+            resolution_window="day0",
+            correlation_key="corr-1",
+        )
+    assert current_exc.value.decision.reason == "reduce_only_mode_active"
 
     clear_global_allocator()
 
@@ -484,15 +497,121 @@ def test_heartbeat_degraded_switches_to_FOK_FAK_only():
     assert not allocator.reduce_only_mode_active(state)
 
 
-def test_heartbeat_lost_isolated_to_resting_order_types():
+def test_heartbeat_lost_blocks_new_risk_in_reduce_only_mode():
     allocator = RiskAllocator()
     state = _state(heartbeat_health=HeartbeatHealth.LOST)
 
     assert allocator.maker_or_taker(SimpleNamespace(orderbook_depth_micro=100_000_000), state) == "TAKER"
     assert allocator.allowed_order_types(state) == ("FOK", "FAK")
-    assert allocator.can_allocate(_intent(size=1), state).allowed
-    assert not allocator.reduce_only_mode_active(state)
+    assert not allocator.can_allocate(_intent(size=1), state).allowed
+    assert allocator.reduce_only_mode_active(state)
     assert allocator.kill_switch_reason(state) is None
+
+
+def test_expired_external_snapshot_remains_lost_and_reduce_only(tmp_path):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    write_heartbeat_keeper_status(
+        HeartbeatStatus(
+            health=HeartbeatHealth.HEALTHY,
+            last_success_at=datetime.now(timezone.utc),
+            consecutive_failures=0,
+            heartbeat_id="keeper-id",
+            cadence_seconds=5,
+        ),
+        path=status_path,
+    )
+    payload = json.loads(status_path.read_text())
+    payload["written_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=9)
+    ).isoformat()
+    status_path.write_text(json.dumps(payload))
+
+    status = ExternalHeartbeatSupervisor(
+        status_path=status_path,
+        max_age_seconds=8,
+        cadence_seconds=5,
+    ).status()
+    state = PortfolioGovernor().update_state({}, status, {}, 0, 0)
+    allocator = RiskAllocator()
+
+    assert status.health is HeartbeatHealth.LOST
+    assert status.status_reason == "heartbeat_snapshot_expired"
+    assert status.written_at is not None
+    assert status.age_seconds is not None and status.age_seconds >= 8
+    assert allocator.reduce_only_mode_active(state)
+    assert not allocator.can_allocate(_intent(size=1), state).allowed
+
+
+def test_submit_rechecks_current_heartbeat_after_healthy_allocator_snapshot(
+    tmp_path,
+):
+    from src.execution.executor import (
+        _assert_heartbeat_allows_submit,
+        _assert_risk_allocator_allows_exit_submit,
+        _assert_risk_allocator_allows_submit,
+    )
+
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    write_heartbeat_keeper_status(
+        HeartbeatStatus(
+            health=HeartbeatHealth.HEALTHY,
+            last_success_at=datetime.now(timezone.utc),
+            consecutive_failures=0,
+            heartbeat_id="keeper-id",
+            cadence_seconds=5,
+        ),
+        path=status_path,
+    )
+    payload = json.loads(status_path.read_text())
+    payload["written_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=9)
+    ).isoformat()
+    status_path.write_text(json.dumps(payload))
+
+    configure_global_allocator(
+        RiskAllocator(),
+        _state(heartbeat_health=HeartbeatHealth.HEALTHY),
+    )
+    configure_global_supervisor(
+        ExternalHeartbeatSupervisor(
+            status_path=status_path,
+            max_age_seconds=8,
+            cadence_seconds=5,
+        )
+    )
+    try:
+        assert _assert_risk_allocator_allows_submit(_intent(size=1)).allowed
+        with pytest.raises(HeartbeatNotHealthy):
+            _assert_heartbeat_allows_submit("FOK")
+
+        assert _assert_risk_allocator_allows_exit_submit().allowed
+        exit_component = _assert_heartbeat_allows_submit(
+            "FAK",
+            reduce_only=True,
+        )
+    finally:
+        configure_global_supervisor(None)
+        clear_global_allocator()
+
+    assert exit_component["allowed"] is True
+
+
+def test_unconfigured_heartbeat_is_typed_and_cannot_become_green(monkeypatch):
+    monkeypatch.setenv("ZEUS_VENUE_HEARTBEAT_MODE", "internal")
+    configure_global_supervisor(None)
+    try:
+        status = current_status()
+        state = PortfolioGovernor().update_state({}, status, {}, 0, 0)
+    finally:
+        configure_global_supervisor(None)
+
+    assert status.health is HeartbeatHealth.UNCONFIGURED
+    assert status.status_reason == "configuration_missing"
+    assert status.source == "process_singleton"
+    assert status.written_at is None
+    assert status.age_seconds is None
+    assert state.heartbeat_health is HeartbeatHealth.UNCONFIGURED
+    assert RiskAllocator().reduce_only_mode_active(state)
 
 
 def test_reduce_only_not_tripped_by_subthreshold_ws_gap_alone():
@@ -651,20 +770,21 @@ def test_global_allocator_defaults_fail_closed_until_cycle_refresh():
     }
 
 
-def test_executor_pre_submit_allocator_allows_immediate_entry_when_heartbeat_lost():
+def test_executor_pre_submit_allocator_blocks_entry_when_heartbeat_lost():
     from src.execution.executor import _assert_risk_allocator_allows_submit
 
     configure_global_allocator(RiskAllocator(), _state(heartbeat_health=HeartbeatHealth.LOST))
 
     try:
-        decision = _assert_risk_allocator_allows_submit(_intent(size=1))
+        with pytest.raises(AllocationDenied) as submit_exc:
+            _assert_risk_allocator_allows_submit(_intent(size=1))
         order_type = select_global_order_type(
             SimpleNamespace(orderbook_depth_micro=100_000_000)
         )
     finally:
         clear_global_allocator()
 
-    assert decision.allowed
+    assert submit_exc.value.decision.reason == "reduce_only_mode_active"
     assert order_type == "FOK"
 
 
