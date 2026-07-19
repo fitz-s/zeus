@@ -6405,6 +6405,86 @@ def test_global_book_epoch_delta_preserves_earliest_expiry():
     ) is None
 
 
+def test_global_book_epoch_cache_delta_retains_unrelated_families():
+    at = _dt.datetime.now(_dt.timezone.utc)
+
+    def probability(family, marker):
+        return SimpleNamespace(
+            family_key=family,
+            witness_identity=f"probability-{marker}",
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{family}",
+                    condition_id=f"condition-{family}",
+                    yes_token_id=f"yes-{family}",
+                    no_token_id=f"no-{family}",
+                ),
+            ),
+        )
+
+    def epoch(markers, captured_at):
+        states = tuple(
+            (
+                family,
+                f"bin-{family}",
+                f"condition-{family}",
+                side,
+                f"{side.lower()}-{family}",
+                "EXECUTABLE",
+                f"hash-{marker}-{side}",
+                f"event-{family}",
+                f"market-{family}",
+            )
+            for family, marker in markers.items()
+            for side in ("YES", "NO")
+        )
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=states,
+            captured_at_utc=captured_at,
+            max_age=_dt.timedelta(seconds=180),
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=captured_at,
+            ),
+        )
+
+    cached_probabilities = {
+        "family-a": probability("family-a", "a1"),
+        "family-b": probability("family-b", "b1"),
+    }
+    refreshed_probabilities = {
+        "family-a": probability("family-a", "a2"),
+    }
+    merged_probabilities, merged_epoch = (
+        era._merge_global_book_epoch_cache_delta(
+            epoch({"family-a": "a1", "family-b": "b1"}, at),
+            cached_probabilities,
+            refreshed_probabilities,
+            epoch({"family-a": "a2"}, at + _dt.timedelta(seconds=1)),
+            frozenset({"family-a"}),
+            checked_at=at + _dt.timedelta(seconds=1),
+        )
+    )
+    scoped_epoch = era._scope_global_book_epoch(
+        merged_epoch,
+        refreshed_probabilities,
+    )
+
+    assert set(merged_probabilities) == {"family-a", "family-b"}
+    assert merged_probabilities["family-a"].witness_identity == "probability-a2"
+    assert merged_probabilities["family-b"].witness_identity == "probability-b1"
+    assert {
+        row[0]: row[6]
+        for row in merged_epoch.asset_states
+        if row[3] == "YES"
+    } == {
+        "family-a": "hash-a2-YES",
+        "family-b": "hash-b1-YES",
+    }
+    assert {row[0] for row in scoped_epoch.asset_states} == {"family-a"}
+
+
 def test_global_book_epoch_cache_rejects_expired_delta(monkeypatch):
     conn = sqlite3.connect(":memory:")
     monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)

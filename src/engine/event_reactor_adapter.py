@@ -1613,6 +1613,39 @@ def _merge_global_book_epoch_delta(
     )
 
 
+def _merge_global_book_epoch_cache_delta(
+    cached_epoch: object,
+    cached_probabilities: Mapping[str, object],
+    refreshed_probabilities: Mapping[str, object],
+    delta_epoch: object,
+    family_keys: frozenset[str],
+    *,
+    checked_at: datetime,
+    allow_topology_change: bool = False,
+) -> tuple[dict[str, object], object]:
+    """Replace refreshed families while retaining unrelated fresh cache state."""
+
+    if not family_keys or not family_keys.issubset(refreshed_probabilities):
+        raise ValueError("GLOBAL_BOOK_DELTA_FAMILY_COVERAGE_CHANGED")
+    merged_epoch = _merge_global_book_epoch_delta(
+        cached_epoch,
+        delta_epoch,
+        family_keys,
+        allow_topology_change=allow_topology_change,
+    )
+    current_identity = getattr(merged_epoch, "current_identity", None)
+    if not callable(current_identity) or current_identity(checked_at) is None:
+        raise ValueError("GLOBAL_BOOK_DELTA_BASE_EXPIRED")
+    merged_probabilities = dict(cached_probabilities)
+    merged_probabilities.update(
+        {
+            family_key: refreshed_probabilities[family_key]
+            for family_key in family_keys
+        }
+    )
+    return merged_probabilities, merged_epoch
+
+
 def _scope_global_book_epoch(
     epoch: object,
     family_keys: Iterable[str],
@@ -8852,30 +8885,21 @@ def event_bound_live_adapter_from_trade_conn(
                     return probabilities, None
                 try:
                     cached_probabilities = _cached_global_book_probabilities(cached)
-                    removed_family_keys = (
-                        frozenset(cached_probabilities).difference(
-                            bound_probabilities
+                    if cached_probabilities is None:
+                        raise ValueError("GLOBAL_BOOK_DELTA_CACHE_IDENTITY_CHANGED")
+                    merged_probabilities, merged_epoch = (
+                        _merge_global_book_epoch_cache_delta(
+                            cached,
+                            cached_probabilities,
+                            bound_probabilities,
+                            delta_epoch,
+                            eligible_refresh_family_keys,
+                            checked_at=datetime.now(UTC),
+                            allow_topology_change=(
+                                cache_after_reason == "hit_mutable_topology"
+                            ),
                         )
-                        if cached_probabilities is not None
-                        else frozenset()
                     )
-                    merge_family_keys = eligible_refresh_family_keys.union(
-                        removed_family_keys
-                    )
-                    merged_epoch = _merge_global_book_epoch_delta(
-                        cached,
-                        delta_epoch,
-                        merge_family_keys,
-                        allow_topology_change=(
-                            cache_after_reason == "hit_mutable_topology"
-                        ),
-                    )
-                    if (
-                        merged_epoch.current_identity(datetime.now(UTC))
-                        is None
-                    ):
-                        raise ValueError("GLOBAL_BOOK_DELTA_BASE_EXPIRED")
-                    merged_probabilities = dict(bound_probabilities)
                     cache_store_status = _store_global_book_epoch(
                         trade_conn,
                         merged_probabilities,
@@ -8897,7 +8921,10 @@ def event_bound_live_adapter_from_trade_conn(
                         len(merged_probabilities),
                         len(merged_epoch.assets),
                     )
-                    return merged_probabilities, merged_epoch
+                    return bound_probabilities, _scope_global_book_epoch(
+                        merged_epoch,
+                        bound_probabilities,
+                    )
                 except (TypeError, ValueError) as exc:
                     logging.getLogger(__name__).warning(
                         "global book epoch delta rejected; refreshing full "
