@@ -4193,6 +4193,82 @@ def test_global_book_projection_reserves_fetch_timeout_before_mixed_prefetch():
     )
 
 
+def test_global_book_projection_hint_interrupts_slow_sqlite_and_releases_connection(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "trade.db"
+    trade = sqlite3.connect(db_path)
+    trade.execute("CREATE TABLE projection_seed (value INTEGER)")
+    trade.commit()
+    monkeypatch.setattr(
+        era,
+        "_global_book_projection_read_connection",
+        lambda: sqlite3.connect(db_path),
+    )
+
+    def slow_projection(conn, *_args, **_kwargs):
+        conn.execute(
+            """
+            WITH RECURSIVE count(n) AS (
+                VALUES(0)
+                UNION ALL
+                SELECT n + 1 FROM count WHERE n < 100000000
+            )
+            SELECT SUM(n) FROM count
+            """
+        ).fetchone()
+        return ({"token": {"asset_id": "token"}}, _dt.datetime.now(_dt.timezone.utc))
+
+    monkeypatch.setattr(era, "_projected_global_books", slow_projection)
+    started = time.monotonic()
+    projected = era._projected_global_book_hint(
+        trade,
+        ("token",),
+        checked_at=_dt.datetime.now(_dt.timezone.utc),
+        max_age=_dt.timedelta(minutes=3),
+        budget_seconds=0.02,
+    )
+
+    assert projected is None
+    assert time.monotonic() - started < 0.5
+    assert trade.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_global_book_projection_hint_bounds_python_work(monkeypatch, tmp_path):
+    deadline = time.monotonic() + 0.5
+    while era._GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert era._GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT is False
+    db_path = tmp_path / "trade.db"
+    trade = sqlite3.connect(db_path)
+    trade.execute("CREATE TABLE projection_seed (value INTEGER)")
+    trade.commit()
+    monkeypatch.setattr(
+        era,
+        "_global_book_projection_read_connection",
+        lambda: sqlite3.connect(db_path),
+    )
+
+    def slow_projection(*_args, **_kwargs):
+        time.sleep(0.08)
+        return ({"token": {"asset_id": "token"}}, _dt.datetime.now(_dt.timezone.utc))
+
+    monkeypatch.setattr(era, "_projected_global_books", slow_projection)
+    started = time.monotonic()
+    projected = era._projected_global_book_hint(
+        trade,
+        ("token",),
+        checked_at=_dt.datetime.now(_dt.timezone.utc),
+        max_age=_dt.timedelta(minutes=3),
+        budget_seconds=0.02,
+    )
+
+    assert projected is None
+    assert time.monotonic() - started < 0.06
+    assert trade.execute("SELECT 1").fetchone() == (1,)
+
+
 @pytest.mark.parametrize(
     "projection_mode",
     ["survives", "expires_after_fetch", "insufficient_headroom"],
@@ -4305,6 +4381,11 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     )
     assert projected is not None
     assert set(projected[0]) == {"yes-token-a"}
+    monkeypatch.setattr(
+        era,
+        "_projected_global_book_hint",
+        lambda *_args, **_kwargs: projected,
+    )
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
@@ -6066,7 +6147,7 @@ def test_exact_token_refresh_keeps_returned_and_cached_book_scope_aligned(
             1,
         )
 
-    monkeypatch.setattr(era, "_projected_global_book_rows", fake_projected)
+    monkeypatch.setattr(era, "_projected_global_book_rows_hint", fake_projected)
     monkeypatch.setattr(
         universe,
         "refresh_current_global_book_epoch_tokens",

@@ -162,9 +162,15 @@ from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Callable, get_args
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, get_args
 
 import numpy as np
+
+
+_GLOBAL_BOOK_PROJECTION_HINT_BUDGET_SECONDS = 0.25
+_GLOBAL_BOOK_PROJECTION_HINT_LOCK = threading.Lock()
+_GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT = False
+_ProjectionHintT = TypeVar("_ProjectionHintT")
 
 from src.contracts.day0_observation_context import BoundClassification, classify_bound
 from src.contracts.execution_intent import ExecutableCostBasis
@@ -2017,6 +2023,177 @@ def _projected_global_books(
     return (
         {token: raw_book for token, (raw_book, _, _) in rows.items()},
         min(captured_at for _, captured_at, _ in rows.values()),
+    )
+
+
+def _global_book_projection_read_connection() -> sqlite3.Connection:
+    from src.state.db import get_trade_connection_read_only
+
+    return get_trade_connection_read_only()
+
+
+def _bounded_projected_global_book_hint(
+    trade_conn: sqlite3.Connection,
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+    loader: Callable[..., _ProjectionHintT | None],
+    budget_seconds: float = _GLOBAL_BOOK_PROJECTION_HINT_BUDGET_SECONDS,
+) -> _ProjectionHintT | None:
+    """Read a local projection off-lane without delaying fresh CLOB proof.
+
+    Projection only saves public book I/O; it is not executable authority.  A
+    slow canonical-DB read must therefore lose to the current Gamma + fresh
+    CLOB path.  The worker owns an independent read-only connection so the
+    caller's wall-clock deadline also bounds Python row decoding after SQL.
+    """
+
+    if budget_seconds <= 0.0:
+        return None
+    started = _time.monotonic()
+    deadline = started + budget_seconds
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    if namespace is None or not namespace.startswith("file:"):
+        return None
+
+    global _GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT
+    with _GLOBAL_BOOK_PROJECTION_HINT_LOCK:
+        if _GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT:
+            logging.getLogger(__name__).info(
+                "global book projection hint skipped: previous_read_in_flight"
+            )
+            return None
+        _GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT = True
+
+    done = threading.Event()
+    result: dict[str, object] = {}
+    token_tuple = tuple(dict.fromkeys(str(token) for token in tokens))
+
+    def read_projection() -> None:
+        global _GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT
+        conn = None
+        timer = None
+        deadline_fired = threading.Event()
+
+        def interrupt() -> None:
+            deadline_fired.set()
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.interrupt()
+
+        def interrupt_on_progress() -> int:
+            return 1 if _time.monotonic() >= deadline else 0
+
+        try:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0.0:
+                return
+            conn = _global_book_projection_read_connection()
+            if _global_book_epoch_cache_namespace(conn) != namespace:
+                return
+            conn.execute(
+                f"PRAGMA busy_timeout = {max(1, min(int(remaining * 1000), 50))}"
+            )
+            conn.set_progress_handler(interrupt_on_progress, 1_000)
+            timer = threading.Timer(max(0.0, deadline - _time.monotonic()), interrupt)
+            timer.daemon = True
+            timer.start()
+            value = loader(
+                conn,
+                token_tuple,
+                checked_at=checked_at,
+                max_age=max_age,
+            )
+            if not deadline_fired.is_set() and _time.monotonic() < deadline:
+                result["value"] = value
+        except Exception as exc:  # noqa: BLE001 - optional hint fails to CLOB.
+            result["error"] = exc
+        finally:
+            if timer is not None:
+                timer.cancel()
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.set_progress_handler(None, 0)
+                with contextlib.suppress(Exception):
+                    conn.close()
+            with _GLOBAL_BOOK_PROJECTION_HINT_LOCK:
+                _GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT = False
+            done.set()
+
+    worker = threading.Thread(
+        target=read_projection,
+        name="global-book-projection-hint",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except RuntimeError as exc:
+        with _GLOBAL_BOOK_PROJECTION_HINT_LOCK:
+            _GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT = False
+        logging.getLogger(__name__).info(
+            "global book projection hint unavailable: worker_start=%s",
+            exc,
+        )
+        return None
+    finished = done.wait(timeout=max(0.0, deadline - _time.monotonic()))
+    elapsed = _time.monotonic() - started
+    if not finished or elapsed >= budget_seconds:
+        logging.getLogger(__name__).info(
+            "global book projection hint abandoned: elapsed_s=%.3f budget_s=%.3f",
+            elapsed,
+            budget_seconds,
+        )
+        return None
+    error = result.get("error")
+    if error is not None:
+        logging.getLogger(__name__).info(
+            "global book projection hint unavailable: elapsed_s=%.3f error=%s",
+            elapsed,
+            error,
+        )
+        return None
+    logging.getLogger(__name__).info(
+        "global book projection hint completed: elapsed_s=%.3f budget_s=%.3f",
+        elapsed,
+        budget_seconds,
+    )
+    return result.get("value")  # type: ignore[return-value]
+
+
+def _projected_global_book_hint(
+    trade_conn: sqlite3.Connection,
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+    budget_seconds: float = _GLOBAL_BOOK_PROJECTION_HINT_BUDGET_SECONDS,
+) -> tuple[dict[str, Mapping[str, object]], datetime] | None:
+    return _bounded_projected_global_book_hint(
+        trade_conn,
+        tokens,
+        checked_at=checked_at,
+        max_age=max_age,
+        loader=_projected_global_books,
+        budget_seconds=budget_seconds,
+    )
+
+
+def _projected_global_book_rows_hint(
+    trade_conn: sqlite3.Connection,
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+    budget_seconds: float = _GLOBAL_BOOK_PROJECTION_HINT_BUDGET_SECONDS,
+) -> dict[str, tuple[Mapping[str, object], datetime, str]] | None:
+    return _bounded_projected_global_book_hint(
+        trade_conn,
+        tokens,
+        checked_at=checked_at,
+        max_age=max_age,
+        loader=_projected_global_book_rows,
+        budget_seconds=budget_seconds,
     )
 
 
@@ -7752,7 +7929,7 @@ def event_bound_live_adapter_from_trade_conn(
                 captured_at = captured_at or datetime.now(UTC)
                 fetch_started = _time.monotonic()
                 if not projection_checked:
-                    projected = _projected_global_books(
+                    projected = _projected_global_book_hint(
                         trade_conn,
                         tokens,
                         checked_at=captured_at,
@@ -8155,7 +8332,7 @@ def event_bound_live_adapter_from_trade_conn(
                         for family_key in eligible_refresh_family_keys
                         for token in state_tokens_by_family.get(family_key, ())
                     )
-                    projected_rows = _projected_global_book_rows(
+                    projected_rows = _projected_global_book_rows_hint(
                         trade_conn,
                         projection_tokens,
                         checked_at=cache_checked_at,
@@ -8422,7 +8599,7 @@ def event_bound_live_adapter_from_trade_conn(
                 if projection_tokens is None:
                     projection_tokens = prefetch_token_hint
                 projected = (
-                    _projected_global_books(
+                    _projected_global_book_hint(
                         trade_conn,
                         projection_tokens,
                         checked_at=projection_at,

@@ -2241,6 +2241,7 @@ def process_current_global_batch(
                     )
                 return current_execution(candidate, selection_at)
 
+            selection_compute_started = time.monotonic()
             selected = select_prepared_global_auction(
                 prepared_for_selection,
                 selection_epoch_identity=attempt_selection_epoch_identity,
@@ -2268,12 +2269,18 @@ def process_current_global_batch(
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 cancelled=selection_cancelled,
             )
+            _LOG.info(
+                "global auction selection compute completed: elapsed_s=%.3f families=%d",
+                time.monotonic() - selection_compute_started,
+                len(prepared_for_selection),
+            )
             if (
                 selected.decision.candidate is None
                 and selected.decision.no_trade_reason
                 == "GLOBAL_SELECTION_CANCELLED"
             ):
                 return selected
+            receipt_store_started = time.monotonic()
             _store_global_auction_receipt(
                 trade_conn,
                 selected=selected,
@@ -2329,11 +2336,20 @@ def process_current_global_batch(
                     else None
                 ),
             )
+            _LOG.info(
+                "global auction receipt store completed: elapsed_s=%.3f",
+                time.monotonic() - receipt_store_started,
+            )
             if isinstance(trade_conn, sqlite3.Connection):
                 # The selection receipt is the durable boundary before JIT
                 # preflight. End its implicit write transaction before any
                 # network work so quote ingestion can use the TRADE WAL writer.
+                receipt_commit_started = time.monotonic()
                 trade_conn.commit()
+                _LOG.info(
+                    "global auction receipt commit completed: elapsed_s=%.3f",
+                    time.monotonic() - receipt_commit_started,
+                )
             return selected
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
