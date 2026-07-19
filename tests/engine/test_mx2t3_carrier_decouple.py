@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-17; last_reviewed=2026-07-13; last_reused=2026-07-13
+# Lifecycle: created=2026-06-17; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Prove replacement forecast carriers do not fall back to legacy ensemble authority.
 # Reuse: Re-audit readiness-to-posterior binding before changing replacement FSR selection.
 # Authority basis: operator single-truth law + residual_legacy_sources.md (GATE-1 carrier
@@ -136,6 +136,36 @@ def _posteriors_only_conn() -> sqlite3.Connection:
 
 def _family():
     return SimpleNamespace(city="Tokyo", metric="high", target_date="2026-06-19", family_id="fam-1")
+
+
+def _indexed_raw_model_conn() -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:")
+    con.execute(
+        """CREATE TABLE raw_model_forecasts (
+            endpoint TEXT, model TEXT, city TEXT, target_date TEXT, metric TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL
+        )"""
+    )
+    con.execute(
+        """CREATE INDEX idx_raw_model_forecasts_endpoint_family_cycle_members
+           ON raw_model_forecasts(
+               endpoint, city, target_date, metric, source_cycle_time,
+               source_available_at, model
+           )"""
+    )
+    con.executemany(
+        "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?)",
+        (
+            ("single_runs", "a", "Tokyo", "2026-06-19", "high", "2026-06-17T00:00:00+00:00", "2026-06-17T01:00:00+00:00", 30.0),
+            ("single_runs", "a", "Tokyo", "2026-06-19", "high", "2026-06-17T06:00:00+00:00", "2026-06-17T06:30:00+00:00", 31.0),
+            ("single_runs", "b", "Tokyo", "2026-06-19", "high", "2026-06-17T00:00:00+00:00", "2026-06-17T01:00:00+00:00", 29.0),
+            ("single_runs", "c", "Tokyo", "2026-06-19", "high", "2026-06-17T00:00:00+00:00", "2026-06-17T01:00:00+00:00", 32.0),
+            ("hourly", "wrong-endpoint", "Tokyo", "2026-06-19", "high", "2026-06-18T00:00:00+00:00", "2026-06-17T02:00:00+00:00", 99.0),
+            ("single_runs", "null-latest", "Tokyo", "2026-06-19", "high", "2026-06-18T00:00:00+00:00", "2026-06-17T02:00:00+00:00", None),
+            ("single_runs", "future", "Tokyo", "2026-06-19", "high", "2026-06-18T00:00:00+00:00", "2026-06-17T13:00:00+00:00", 98.0),
+        ),
+    )
+    return con
 
 
 # ---------------------------------------------------------------------------
@@ -419,3 +449,45 @@ def test_gate2_day0_seed_members_from_raw_model_forecasts():
     assert len(seed) == 5
     # Native unit is C for Tokyo, so values are the raw °C members.
     assert min(seed) == pytest.approx(29.8) and max(seed) == pytest.approx(31.2)
+
+
+def test_gate2_day0_seed_uses_bounded_production_index_queries():
+    con = _indexed_raw_model_conn()
+    statements: list[str] = []
+    con.set_trace_callback(statements.append)
+    city = SimpleNamespace(timezone="Asia/Tokyo", settlement_unit="C")
+    with mock.patch.object(adapter, "runtime_cities_by_name", return_value={"Tokyo": city}):
+        seed = adapter._day0_seed_members_multimodel(
+            con, family=_family(), decision_time=_DT,
+        )
+    con.set_trace_callback(None)
+
+    assert sorted(seed or ()) == [29.0, 31.0, 32.0]
+    raw_queries = [
+        statement
+        for statement in statements
+        if "FROM raw_model_forecasts" in statement
+    ]
+    assert len(raw_queries) == 2
+    assert all("date(source_cycle_time)" not in statement for statement in raw_queries)
+    assert all("endpoint = 'single_runs'" in statement for statement in raw_queries)
+    latest_query = next(
+        statement
+        for statement in raw_queries
+        if "ORDER BY source_cycle_time DESC" in statement
+    )
+    member_query = next(
+        statement
+        for statement in raw_queries
+        if "SELECT model, source_cycle_time, forecast_value_c" in statement
+    )
+    assert "source_cycle_time >= '2026-06-17'" in member_query
+    assert "source_cycle_time < '2026-06-18'" in member_query
+    for query in (latest_query, member_query):
+        plan = con.execute("EXPLAIN QUERY PLAN " + query).fetchall()
+        details = [str(row[3]) for row in plan]
+        assert any(
+            "idx_raw_model_forecasts_endpoint_family_cycle_members" in detail
+            for detail in details
+        )
+        assert all("TEMP B-TREE" not in detail for detail in details)

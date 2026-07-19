@@ -29435,6 +29435,84 @@ def _canonical_probability_and_fdr_proof(
 _SPINE_RMF_SNAPSHOT_ID_PREFIX = "rmf-"
 
 
+def _raw_model_cycle_window(cycle_date: str) -> tuple[str, str] | None:
+    try:
+        start = date.fromisoformat(str(cycle_date)[:10])
+    except (TypeError, ValueError):
+        return None
+    return start.isoformat(), (start + timedelta(days=1)).isoformat()
+
+
+def _raw_model_members_for_cycle(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    decision_time: datetime,
+    cycle_date: str,
+) -> dict[str, float]:
+    """Return the latest valid value per model from one indexed UTC cycle day."""
+
+    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
+    if table_ref is None:
+        return {}
+    columns = _table_ref_columns(conn, table_ref)
+    required = {
+        "model",
+        "city",
+        "metric",
+        "target_date",
+        "source_cycle_time",
+        "forecast_value_c",
+    }
+    bounds = _raw_model_cycle_window(cycle_date)
+    if not required.issubset(columns) or bounds is None:
+        return {}
+    cycle_start, cycle_end = bounds
+    predicates = [
+        "city = ?",
+        "target_date = ?",
+        "metric = ?",
+        "source_cycle_time >= ?",
+        "source_cycle_time < ?",
+        "forecast_value_c IS NOT NULL",
+    ]
+    params: list[object] = [
+        family.city,
+        family.target_date,
+        family.metric,
+        cycle_start,
+        cycle_end,
+    ]
+    if "endpoint" in columns:
+        predicates.insert(0, "endpoint = ?")
+        params.insert(0, "single_runs")
+    if "source_available_at" in columns:
+        predicates.append("source_available_at <= ?")
+        params.append(decision_time.astimezone(UTC).isoformat())
+    cur = conn.execute(
+        f"""
+        SELECT model, source_cycle_time, forecast_value_c
+        FROM {table_ref}
+        WHERE {' AND '.join(predicates)}
+        """,
+        tuple(params),
+    )
+    latest: dict[str, tuple[str, float]] = {}
+    for model, source_cycle_time, value_c in cur.fetchall():
+        if model is None or source_cycle_time is None or value_c is None:
+            continue
+        try:
+            name = str(model)
+            captured = str(source_cycle_time)
+            value = float(value_c)
+        except (TypeError, ValueError):
+            continue
+        prior = latest.get(name)
+        if prior is None or captured >= prior[0]:
+            latest[name] = (captured, value)
+    return {model: value for model, (_captured, value) in latest.items()}
+
+
 def _latest_raw_model_cycle_for_family(
     conn: sqlite3.Connection,
     *,
@@ -29443,7 +29521,9 @@ def _latest_raw_model_cycle_for_family(
 ) -> str | None:
     """B2 causal-cycle fallback (mx2t3 carrier-decouple): the latest
     ``raw_model_forecasts.source_cycle_time`` DATE for ``(city, metric, target_date)`` with
-    ``source_available_at <= decision_time``.
+    ``source_available_at <= decision_time``. The lookup orders the indexed raw timestamp
+    directly and slices its date in Python; wrapping the column in SQL ``date()`` turns this
+    hot lookup into a history scan.
 
     Used only when neither the neutral ``rmf-...`` id nor a legacy ensemble pin yields a
     cycle (in-flight pre-cutover ids). Queries the SAME ``raw_model_forecasts`` table the
@@ -29455,16 +29535,36 @@ def _latest_raw_model_cycle_for_family(
     if table_ref is None:
         return None
     columns = _table_ref_columns(conn, table_ref)
-    if not {"city", "metric", "target_date", "source_cycle_time"}.issubset(columns):
+    if not {
+        "city",
+        "metric",
+        "target_date",
+        "source_cycle_time",
+        "forecast_value_c",
+    }.issubset(columns):
         return None
-    predicates = ["city = ?", "metric = ?", "target_date = ?"]
-    params: list[object] = [family.city, family.metric, family.target_date]
+    predicates = [
+        "city = ?",
+        "target_date = ?",
+        "metric = ?",
+        "forecast_value_c IS NOT NULL",
+    ]
+    params: list[object] = [family.city, family.target_date, family.metric]
+    if "endpoint" in columns:
+        predicates.insert(0, "endpoint = ?")
+        params.insert(0, "single_runs")
     if "source_available_at" in columns:
         predicates.append("source_available_at <= ?")
         params.append(decision_time.astimezone(UTC).isoformat())
     try:
         row = conn.execute(
-            f"SELECT MAX(date(source_cycle_time)) FROM {table_ref} WHERE {' AND '.join(predicates)}",
+            f"""
+            SELECT source_cycle_time
+            FROM {table_ref}
+            WHERE {' AND '.join(predicates)}
+            ORDER BY source_cycle_time DESC
+            LIMIT 1
+            """,
             tuple(params),
         ).fetchone()
     except Exception:  # noqa: BLE001 — never fault the hot path; fail closed upstream
@@ -29557,49 +29657,18 @@ def _spine_multimodel_members_for_event(
     if len(causal_cycle_date) != 10:
         return None
 
-    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
-    if table_ref is None:
-        return None
-    columns = _table_ref_columns(conn, table_ref)
-    required = {"model", "city", "metric", "target_date", "source_cycle_time", "forecast_value_c"}
-    if not required.issubset(columns):
-        return None
-
     # City-native settlement unit (°F for F-settled cities, °C otherwise) — the SAME
     # authority the replay/build_family_spine keys on (city.settlement_unit). The stashed
     # members must be NATIVE (the ensemble path was native; keep native).
     _city_obj = runtime_cities_by_name().get(str(family.city))
     unit = str(getattr(_city_obj, "settlement_unit", "C") or "C")
 
-    predicates = [
-        "city = ?",
-        "metric = ?",
-        "target_date = ?",
-        "date(source_cycle_time) = ?",
-    ]
-    params: list[object] = [family.city, family.metric, family.target_date, causal_cycle_date]
-    if "source_available_at" in columns:
-        predicates.append("source_available_at <= ?")
-        params.append(decision_time.astimezone(UTC).isoformat())
-    cur = conn.execute(
-        f"""
-        SELECT model, source_cycle_time, forecast_value_c
-        FROM {table_ref}
-        WHERE {' AND '.join(predicates)}
-        ORDER BY model, source_cycle_time
-        """,
-        tuple(params),
+    best = _raw_model_members_for_cycle(
+        conn,
+        family=family,
+        decision_time=decision_time,
+        cycle_date=causal_cycle_date,
     )
-    # Latest cycle per model wins (rows ordered ascending by source_cycle_time) — the
-    # identical reduction fresh_members_at_cycle performs.
-    best: dict[str, float] = {}
-    for model, _sct, val_c in cur.fetchall():
-        if model is None or val_c is None:
-            continue
-        try:
-            best[str(model)] = float(val_c)
-        except (TypeError, ValueError):
-            continue
     if len(best) < 3:  # replay's len(members_raw) < 3 fail-closed guard
         return None
 
@@ -30071,47 +30140,24 @@ def _day0_seed_members_multimodel(
 
     FAIL-CLOSED: returns ``None`` (→ caller keeps the legacy ensemble seed) when the table is
     absent, the latest cycle cannot be established, or fewer than 3 members survive. Read-only;
-    one indexed query; never widens or fabricates.
+    bounded indexed lookups; never widens or fabricates.
     """
     cycle_date = _latest_raw_model_cycle_for_family(
         conn, family=family, decision_time=decision_time
     )
     if not cycle_date:
         return None
-    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
-    if table_ref is None:
-        return None
-    columns = _table_ref_columns(conn, table_ref)
-    required = {"model", "city", "metric", "target_date", "source_cycle_time", "forecast_value_c"}
-    if not required.issubset(columns):
-        return None
     _city_obj = runtime_cities_by_name().get(str(family.city))
     unit = str(getattr(_city_obj, "settlement_unit", "C") or "C")
-    predicates = ["city = ?", "metric = ?", "target_date = ?", "date(source_cycle_time) = ?"]
-    params: list[object] = [family.city, family.metric, family.target_date, cycle_date]
-    if "source_available_at" in columns:
-        predicates.append("source_available_at <= ?")
-        params.append(decision_time.astimezone(UTC).isoformat())
     try:
-        cur = conn.execute(
-            f"""
-            SELECT model, source_cycle_time, forecast_value_c
-            FROM {table_ref}
-            WHERE {' AND '.join(predicates)}
-            ORDER BY model, source_cycle_time
-            """,
-            tuple(params),
+        best = _raw_model_members_for_cycle(
+            conn,
+            family=family,
+            decision_time=decision_time,
+            cycle_date=cycle_date,
         )
     except Exception:  # noqa: BLE001 — never fault the hot path; caller keeps legacy seed
         return None
-    best: dict[str, float] = {}
-    for model, _sct, val_c in cur.fetchall():
-        if model is None or val_c is None:
-            continue
-        try:
-            best[str(model)] = float(val_c)
-        except (TypeError, ValueError):
-            continue
     if len(best) < 3:
         return None
 

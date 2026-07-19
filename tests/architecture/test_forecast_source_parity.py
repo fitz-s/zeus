@@ -1,5 +1,5 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-06-16
+# Last reused or audited: 2026-07-19
 # Authority basis: docs/evidence/qkernel_rebuild/spine_source_impact_and_residuals_2026-06-16.md
 #   §4.3 "Add a source-parity antibody" + the spine source-divergence fix (9ee1936148:
 #   _spine_multimodel_members_for_event sourcing raw_model_forecasts) + AGENTS.md
@@ -53,14 +53,18 @@ def test_entry_spine_producer_reads_raw_model_forecasts() -> None:
         "(the raw_model_forecasts accessor) — not source the ensemble envelope."
     )
 
-    # The accessor itself reads raw_model_forecasts for the member values.
+    # The accessor dispatches the single shared raw-model reader. Keeping the SQL in
+    # one helper prevents the forecast and Day0 lanes from drifting apart.
     accessor_src = inspect.getsource(era._spine_multimodel_members_for_event)
-    assert '_authority_table_ref(conn, "raw_model_forecasts")' in accessor_src, (
-        "_spine_multimodel_members_for_event must resolve the raw_model_forecasts table "
-        "as its member-envelope source."
+    assert "_raw_model_members_for_cycle(" in accessor_src, (
+        "_spine_multimodel_members_for_event must call the shared raw-model reader."
     )
-    assert "forecast_value_c" in accessor_src, (
-        "the accessor must SELECT the per-model forecast_value_c (raw_model_forecasts), "
+    reader_src = inspect.getsource(era._raw_model_members_for_cycle)
+    assert '_authority_table_ref(conn, "raw_model_forecasts")' in reader_src, (
+        "the shared member reader must resolve raw_model_forecasts as its source."
+    )
+    assert "forecast_value_c" in reader_src, (
+        "the reader must SELECT the per-model forecast_value_c (raw_model_forecasts), "
         "the multi-model deterministic member values."
     )
     # The ensemble members_json must NOT be a VALUE source in the accessor. It may be
@@ -69,14 +73,14 @@ def test_entry_spine_producer_reads_raw_model_forecasts() -> None:
     # read (`row.members_json` Attribute, or a `members_json` column in a SELECT string)
     # from a prose mention in the docstring (a plain Constant): assert no Attribute access
     # and no SELECT-string column named members_json.
-    tree = ast.parse(accessor_src)
+    tree = ast.parse(accessor_src + "\n" + reader_src)
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "members_json":
             raise AssertionError(
                 "_spine_multimodel_members_for_event reads `.members_json` — the ensemble "
                 "envelope must NOT be a member-value source (cold-center regression)."
             )
-    sql = _select_strings(accessor_src)
+    sql = _select_strings(reader_src)
     assert "members_json" not in sql, (
         "no SELECT statement in the accessor may read ensemble members_json."
     )
