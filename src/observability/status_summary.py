@@ -234,6 +234,12 @@ def _write_cycle_status(
         "business_cycle" if not status["process"]["pulse_only"] else "auxiliary_pulse"
     )
     if not refresh_runtime:
+        _project_cycle_risk(
+            status,
+            cycle_summary,
+            require_explicit=True,
+            refreshed_by_pulse=False,
+        )
         # Preserve the last verified top-level freshness instant.  This write
         # publishes only the completed cycle; it must not make retained DB-derived
         # portfolio/execution/control fields appear newly refreshed.
@@ -269,7 +275,14 @@ def _write_cycle_status(
     _refresh_current_open_entry_orders_for_status(status)
     if minimal_refresh_ok:
         _refresh_control_status_for_pulse(status)
-        _refresh_pulse_infrastructure_status(status, cycle_summary)
+        _refresh_pulse_infrastructure_status(
+            status,
+            status.get("cycle"),
+            risk_level_refreshed_by_pulse=bool(
+                isinstance(cycle_summary, dict)
+                and str(cycle_summary.get("risk_level") or "").strip()
+            ),
+        )
         status["timestamp"] = generated_at
         # Freshness-contract bridge: release-gate / EDLI-stage readiness checks
         # read a canonical top-level freshness key (generated_at|updated_at|
@@ -339,6 +352,56 @@ def _pulse_only_summary(surface: str) -> dict:
         "pulse_only": True,
         "surface": surface,
     }
+
+
+def _project_cycle_risk(
+    status: dict,
+    cycle_summary: dict | None,
+    *,
+    require_explicit: bool,
+    refreshed_by_pulse: bool,
+) -> str | None:
+    """Project cycle-carried RiskGuard truth without reading its DB."""
+
+    cycle = cycle_summary if isinstance(cycle_summary, dict) else {}
+    cycle_risk_level = str(cycle.get("risk_level") or "").strip().upper()
+    if require_explicit and not cycle_risk_level:
+        return None
+
+    risk = status.setdefault("risk", {})
+    if not isinstance(risk, dict):
+        risk = {}
+        status["risk"] = risk
+    prior_risk_details = (
+        risk.get("details") if isinstance(risk.get("details"), dict) else {}
+    )
+    prior_risk_level = str(
+        risk.get("level") or risk.get("riskguard_level") or ""
+    ).strip().upper()
+    observed_risk_level = cycle_risk_level or prior_risk_level or "UNKNOWN"
+    risk_level_source = (
+        "cycle_summary"
+        if cycle_risk_level
+        else "previous_full_status"
+        if prior_risk_level
+        else "unavailable"
+    )
+    risk["level"] = observed_risk_level
+    risk["riskguard_level"] = observed_risk_level
+    risk["level_source"] = risk_level_source
+    risk["level_refreshed_by_cycle_pulse"] = bool(
+        cycle_risk_level and refreshed_by_pulse
+    )
+    risk_details = _pulse_only_summary("riskguard")
+    risk_details["level_source"] = risk_level_source
+    if prior_risk_details.get("status"):
+        risk_details["previous_status"] = prior_risk_details["status"]
+    if prior_risk_details.get("previous_full_risk_checked_at"):
+        risk_details["previous_full_risk_checked_at"] = prior_risk_details[
+            "previous_full_risk_checked_at"
+        ]
+    risk["details"] = risk_details
+    return cycle_risk_level or None
 
 
 def _check_armed_live_no_submit_receipts(
@@ -421,7 +484,12 @@ def _check_armed_live_no_submit_receipts(
     return not recent_submit_receipt
 
 
-def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | None) -> None:
+def _refresh_pulse_infrastructure_status(
+    status: dict,
+    cycle_summary: dict | None,
+    *,
+    risk_level_refreshed_by_pulse: bool = False,
+) -> None:
     """Recompute infrastructure truth for the surfaces a cycle pulse refreshes.
 
     ``write_cycle_pulse`` intentionally avoids the full read model, so it must
@@ -464,38 +532,17 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
     except Exception as _exc:  # noqa: BLE001 - armed-live check must never break the pulse
         logger.warning("armed_live submit-receipt check failed (non-fatal): %s", _exc)
 
-    risk = status.setdefault("risk", {})
-    if not isinstance(risk, dict):
-        risk = {}
-        status["risk"] = risk
-    prior_risk_details = risk.get("details") if isinstance(risk.get("details"), dict) else {}
-    cycle_risk_level = str(cycle.get("risk_level") or "").strip().upper()
-    prior_risk_level = str(risk.get("level") or risk.get("riskguard_level") or "").strip().upper()
-    observed_risk_level = cycle_risk_level or prior_risk_level or "UNKNOWN"
-    risk_level_source = (
-        "cycle_summary"
-        if cycle_risk_level
-        else "previous_full_status"
-        if prior_risk_level
-        else "unavailable"
+    cycle_risk_level = _project_cycle_risk(
+        status,
+        cycle,
+        require_explicit=False,
+        refreshed_by_pulse=risk_level_refreshed_by_pulse,
     )
-    risk["level"] = observed_risk_level
-    risk["riskguard_level"] = observed_risk_level
-    risk["level_source"] = risk_level_source
-    risk["level_refreshed_by_cycle_pulse"] = bool(cycle_risk_level)
-    risk_details = _pulse_only_summary("riskguard")
-    risk_details["level_source"] = risk_level_source
-    if prior_risk_details.get("status"):
-        risk_details["previous_status"] = prior_risk_details["status"]
-    if prior_risk_details.get("previous_full_risk_checked_at"):
-        risk_details["previous_full_risk_checked_at"] = prior_risk_details[
-            "previous_full_risk_checked_at"
-        ]
-    risk["details"] = risk_details
+    risk = status["risk"]
     risk["consistency_check"] = {
         "ok": not consistency_issues,
         "issues": consistency_issues,
-        "cycle_risk_level": cycle_risk_level or None,
+        "cycle_risk_level": cycle_risk_level,
         "scope": "cycle_pulse",
     }
     risk["infrastructure_level"] = "RED" if consistency_issues else "GREEN"

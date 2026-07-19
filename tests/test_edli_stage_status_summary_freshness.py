@@ -1,11 +1,11 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-05-31
+# Last reused/audited: 2026-07-19
 # Authority basis: fix/edli-stage-readiness-2026-05-31 — EDLI-mode release-gate
 #   status_summary freshness surface. ROOT: EDLI event-driven modes never call
 #   run_cycle(), so write_cycle_pulse (the status_summary writer) was silent and
 #   the gate's _fresh() found no recognized top-level timestamp key.
 #
-# Lifecycle: created=2026-05-31; last_reviewed=2026-05-31; last_reused=never
+# Lifecycle: created=2026-05-31; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Prove write_cycle_pulse emits a gate-canonical freshness key so the
 #   EDLI-mode live-release gate reads a fresh pulse as fresh (cross-module relationship test).
 # Reuse: Verify status_summary.STATUS_PATH still points at a writable path and
@@ -38,6 +38,39 @@ def _redirect_status_path(tmp_path, monkeypatch):
     target = tmp_path / "status_summary.json"
     monkeypatch.setattr(status_summary, "STATUS_PATH", target, raising=True)
     return target
+
+
+def _stub_cycle_pulse_runtime_refresh(monkeypatch):
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_minimal_runtime_read_model_for_status",
+        lambda _status: True,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_get_execution_capability_status",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_current_open_entry_orders_for_status",
+        lambda _status: None,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_control_status_for_pulse",
+        lambda _status: None,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_check_armed_live_no_submit_receipts",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "annotate_truth_payload",
+        lambda payload, _path, **_kwargs: payload,
+    )
 
 
 def test_write_cycle_pulse_emits_gate_recognized_freshness_key(tmp_path, monkeypatch):
@@ -99,6 +132,11 @@ def test_cycle_result_skips_db_refresh_and_preserves_verified_freshness(
                 "timestamp": verified_at,
                 "portfolio": {"open_positions": 3},
                 "execution_capability": {"live_action_authorized": True},
+                "risk": {
+                    "level": "RED",
+                    "riskguard_level": "RED",
+                    "level_source": "previous_full_status",
+                },
             }
         )
     )
@@ -128,6 +166,7 @@ def test_cycle_result_skips_db_refresh_and_preserves_verified_freshness(
             "completed_at": "2026-07-18T00:00:01+00:00",
             "candidates": 12,
             "submit_attempts": 1,
+            "risk_level": "GREEN",
         }
     )
 
@@ -136,8 +175,84 @@ def test_cycle_result_skips_db_refresh_and_preserves_verified_freshness(
     assert payload["cycle"]["submit_attempts"] == 1
     assert payload["portfolio"] == {"open_positions": 3}
     assert payload["execution_capability"] == {"live_action_authorized": True}
+    assert payload["risk"]["level"] == "GREEN"
+    assert payload["risk"]["riskguard_level"] == "GREEN"
+    assert payload["risk"]["level_source"] == "cycle_summary"
+    assert payload["risk"]["level_refreshed_by_cycle_pulse"] is False
     assert payload["generated_at"] == verified_at
     assert payload["timestamp"] == verified_at
+
+
+def test_cycle_result_risk_survives_auxiliary_pulse(tmp_path, monkeypatch):
+    """A pulse projects the merged business-cycle risk, not its auxiliary payload."""
+
+    target = _redirect_status_path(tmp_path, monkeypatch)
+    target.write_text(
+        json.dumps(
+            {
+                "risk": {
+                    "level": "RED",
+                    "riskguard_level": "RED",
+                    "level_source": "previous_full_status",
+                }
+            }
+        )
+    )
+    _stub_cycle_pulse_runtime_refresh(monkeypatch)
+
+    write_cycle_result(
+        {
+            "mode": "edli_event_reactor",
+            "completed_at": "2026-07-18T00:00:01+00:00",
+            "candidates": 12,
+            "submit_attempts": 1,
+            "risk_level": "GREEN",
+        }
+    )
+    write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
+
+    payload = json.loads(target.read_text())
+    assert payload["cycle"]["risk_level"] == "GREEN"
+    assert payload["cycle"]["last_auxiliary_pulse"] == {
+        "mode": "heartbeat_pulse",
+        "heartbeat": True,
+    }
+    assert payload["risk"]["level"] == "GREEN"
+    assert payload["risk"]["riskguard_level"] == "GREEN"
+    assert payload["risk"]["level_source"] == "cycle_summary"
+    assert payload["risk"]["level_refreshed_by_cycle_pulse"] is False
+
+
+def test_cycle_result_without_risk_preserves_prior_projection(tmp_path, monkeypatch):
+    """A result without risk authority cannot overwrite the prior projection."""
+
+    target = _redirect_status_path(tmp_path, monkeypatch)
+    prior_risk = {
+        "level": "RED",
+        "riskguard_level": "RED",
+        "level_source": "previous_full_status",
+        "details": {"status": "previous_full_status"},
+    }
+    target.write_text(json.dumps({"risk": prior_risk}))
+
+    def _unexpected_refresh(*_args, **_kwargs):
+        raise AssertionError("cycle-result write entered DB-derived refresh")
+
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_minimal_runtime_read_model_for_status",
+        _unexpected_refresh,
+    )
+
+    write_cycle_result(
+        {
+            "mode": "edli_event_reactor",
+            "completed_at": "2026-07-18T00:00:01+00:00",
+            "candidates": 0,
+        }
+    )
+
+    assert json.loads(target.read_text())["risk"] == prior_risk
 
 
 def test_cycle_pulse_refreshes_control_pause_truth(tmp_path, monkeypatch):
