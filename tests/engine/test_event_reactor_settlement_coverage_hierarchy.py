@@ -318,8 +318,290 @@ class TestDedup:
             [{"condition_id": claims[0]["condition_id"], "range_low": 31.0, "range_high": 31.0, "range_label": "31C"}]
         )
         monkeypatch.setattr("src.state.db.get_world_connection_read_only", lambda: world_conn)
+        monkeypatch.setattr(
+            "src.state.db.get_trade_connection_read_only",
+            lambda: (_ for _ in ()).throw(RuntimeError("no trades DB in this test")),
+        )
         obs = era._hierarchy_observations_all(
             forecast_conn=forecast_conn, topology_conn=topology_conn,
             coverage_cache=None, fail_closed_on_fault=True,
         )
         assert len(obs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Prerequisite #2 (docs/evidence/capital_efficiency_2026_07_19/highq_overconfidence.md
+# Sec 5): _hierarchy_observations_all ALSO ingests entered-position walk-forward
+# outcomes from position_current (zeus_trades.db), which carry real canonical
+# strategy_key -- the only thing that lets Levels 1-3 ever engage.
+# ---------------------------------------------------------------------------
+
+
+def _position_row(
+    *,
+    idx: int,
+    city: str = "Singapore",
+    metric: str = "high",
+    day: int,
+    q_raw: float,
+    direction: str = "buy_no",
+    strategy_key: str = "opening_inertia",
+    entry_method: str = "ens_member_counting",
+    phase: str = "settled",
+    bin_label: str = "Will the highest temperature in Singapore be 31C",
+    condition_id: str | None = None,
+) -> dict:
+    return {
+        "position_id": f"pos-{city}-{idx}",
+        "phase": phase,
+        "city": city,
+        "metric": metric,
+        "target_date": f"2026-05-{day:02d}",
+        "condition_id": condition_id or f"pos-cond-{city}-{idx}",
+        "bin_label": f"{bin_label} on May {day}?",
+        "direction": direction,
+        "strategy_key": strategy_key,
+        "p_posterior": q_raw,
+        "entry_method": entry_method,
+        "updated_at": f"2026-05-{day:02d}T20:00:00+00:00",
+    }
+
+
+def _trade_conn_with_positions(positions: list[dict]) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            city TEXT,
+            temperature_metric TEXT,
+            target_date TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            strategy_key TEXT,
+            p_posterior REAL,
+            entry_method TEXT,
+            condition_id TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    for p in positions:
+        conn.execute(
+            "INSERT INTO position_current (position_id, phase, city, temperature_metric, "
+            "target_date, bin_label, direction, strategy_key, p_posterior, entry_method, "
+            "condition_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                p["position_id"], p["phase"], p["city"], p["metric"], p["target_date"],
+                p["bin_label"], p["direction"], p["strategy_key"], p["p_posterior"],
+                p["entry_method"], p["condition_id"], p["updated_at"],
+            ),
+        )
+    conn.commit()
+    return conn
+
+
+class TestPositionClaimsWalkForward:
+    def test_settled_position_enters_pool_with_real_strategy_key(self, flag_on, monkeypatch):
+        pos = _position_row(idx=0, city="Singapore", day=1, q_raw=0.86, strategy_key="opening_inertia")
+        world_conn = _world_conn_with_claims([])
+        trade_conn = _trade_conn_with_positions([pos])
+        forecast_conn = _forecast_conn_with_settlements(
+            [{
+                "city": "Singapore", "metric": "high", "target_date": "2026-05-01",
+                "settlement_value": 25.0, "settlement_unit": "C",
+                "created_at": "2026-05-01T22:00:00+00:00",
+            }]
+        )
+        topology_conn = _topology_conn_with_bins(
+            [{"condition_id": pos["condition_id"], "range_low": 31.0, "range_high": 31.0, "range_label": "31C"}]
+        )
+        monkeypatch.setattr("src.state.db.get_world_connection_read_only", lambda: world_conn)
+        monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: trade_conn)
+
+        obs = era._hierarchy_observations_all(
+            forecast_conn=forecast_conn, topology_conn=topology_conn,
+            coverage_cache=None, fail_closed_on_fault=True,
+        )
+        assert len(obs) == 1
+        o = obs[0]
+        assert o.strategy_key == "opening_inertia"
+        assert o.q_raw == pytest.approx(0.86)
+        assert o.settlement_time == "2026-05-01T22:00:00+00:00"
+
+    def test_walk_forward_cutoff_applies_to_position_sourced_observation(self, flag_on, monkeypatch):
+        pos = _position_row(idx=0, city="Singapore", day=1, q_raw=0.86)
+        world_conn = _world_conn_with_claims([])
+        trade_conn = _trade_conn_with_positions([pos])
+        settled_at = "2026-05-01T22:00:00+00:00"
+        forecast_conn = _forecast_conn_with_settlements(
+            [{
+                "city": "Singapore", "metric": "high", "target_date": "2026-05-01",
+                "settlement_value": 25.0, "settlement_unit": "C",
+                "created_at": settled_at,
+            }]
+        )
+        topology_conn = _topology_conn_with_bins(
+            [{"condition_id": pos["condition_id"], "range_low": 31.0, "range_high": 31.0, "range_label": "31C"}]
+        )
+        monkeypatch.setattr("src.state.db.get_world_connection_read_only", lambda: world_conn)
+        monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: trade_conn)
+
+        obs = era._hierarchy_observations_all(
+            forecast_conn=forecast_conn, topology_conn=topology_conn,
+            coverage_cache=None, fail_closed_on_fault=True,
+        )
+        from src.calibration.settlement_coverage_hierarchy import filter_observations_prefix
+
+        # A decision strictly BEFORE the settlement finalized must not see it.
+        assert filter_observations_prefix(obs, "2026-05-01T21:00:00+00:00") == []
+        # A decision strictly AFTER must.
+        assert len(filter_observations_prefix(obs, "2026-05-02T00:00:00+00:00")) == 1
+
+    def test_chain_only_reconciliation_entry_method_excluded(self, flag_on, monkeypatch):
+        # Foreign co-trading position -- no Zeus decision evidence behind it
+        # (exclusion precedent: src/riskguard/riskguard.py:1095).
+        foreign = _position_row(
+            idx=0, city="Singapore", day=1, q_raw=0.86,
+            entry_method="chain_only_reconciliation", condition_id="cond-foreign",
+        )
+        genuine = _position_row(
+            idx=1, city="Singapore", day=2, q_raw=0.87,
+            entry_method="ens_member_counting", condition_id="cond-genuine",
+        )
+        world_conn = _world_conn_with_claims([])
+        trade_conn = _trade_conn_with_positions([foreign, genuine])
+        forecast_conn = _forecast_conn_with_settlements(
+            [
+                {
+                    "city": "Singapore", "metric": "high", "target_date": "2026-05-01",
+                    "settlement_value": 25.0, "settlement_unit": "C",
+                    "created_at": "2026-05-01T22:00:00+00:00",
+                },
+                {
+                    "city": "Singapore", "metric": "high", "target_date": "2026-05-02",
+                    "settlement_value": 25.0, "settlement_unit": "C",
+                    "created_at": "2026-05-02T22:00:00+00:00",
+                },
+            ]
+        )
+        topology_conn = _topology_conn_with_bins(
+            [
+                {"condition_id": "cond-foreign", "range_low": 31.0, "range_high": 31.0, "range_label": "31C"},
+                {"condition_id": "cond-genuine", "range_low": 31.0, "range_high": 31.0, "range_label": "31C"},
+            ]
+        )
+        monkeypatch.setattr("src.state.db.get_world_connection_read_only", lambda: world_conn)
+        monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: trade_conn)
+
+        obs = era._hierarchy_observations_all(
+            forecast_conn=forecast_conn, topology_conn=topology_conn,
+            coverage_cache=None, fail_closed_on_fault=True,
+        )
+        assert len(obs) == 1
+        assert obs[0].condition_or_market_id == "cond-genuine"
+
+    def test_trades_db_unavailable_receipt_pool_unaffected(self, flag_on, monkeypatch):
+        # add-data-must-never-block-serving: a structural fault opening the
+        # trades DB must not affect the receipt-only pool at all.
+        claims = [_claim(idx=0, city="Singapore", day=1, q_raw=0.84)]
+        world_conn = _world_conn_with_claims(claims)
+        forecast_conn = _forecast_conn_with_settlements(
+            [{
+                "city": "Singapore", "metric": "high", "target_date": "2026-05-01",
+                "settlement_value": 25.0, "settlement_unit": "C",
+                "created_at": "2026-05-01T18:00:00+00:00",
+            }]
+        )
+        topology_conn = _topology_conn_with_bins(
+            [{"condition_id": "cond-Singapore-0", "range_low": 31.0, "range_high": 31.0, "range_label": "31C"}]
+        )
+        monkeypatch.setattr("src.state.db.get_world_connection_read_only", lambda: world_conn)
+
+        def _boom():
+            raise RuntimeError("trades DB unreachable in this runtime")
+
+        monkeypatch.setattr("src.state.db.get_trade_connection_read_only", _boom)
+
+        obs = era._hierarchy_observations_all(
+            forecast_conn=forecast_conn, topology_conn=topology_conn,
+            coverage_cache=None, fail_closed_on_fault=True,
+        )
+        assert len(obs) == 1
+        assert obs[0].condition_or_market_id == "cond-Singapore-0"
+        assert obs[0].q_raw == pytest.approx(0.84)
+
+    def test_merged_pool_licenses_a_level_that_receipts_alone_leave_insufficient(
+        self, flag_on, monkeypatch
+    ):
+        # Receipts NEVER carry strategy_key (fix-spec finding) -- Level 1
+        # STRATEGY_BUCKET can therefore never fire from receipts alone. Once
+        # entered-position claims (real canonical strategy_key) are merged in,
+        # the same query licenses/unlicenses at Level 1.
+        from src.calibration.settlement_coverage_hierarchy import hierarchical_coverage_check
+
+        cities = ["Singapore", "Tokyo", "Jakarta", "Beijing", "Ankara", "Auckland"]
+        positions, settlements, bins = [], [], []
+        for i in range(32):
+            city = cities[i % len(cities)]
+            day = (i % 28) + 1
+            positions.append(
+                _position_row(
+                    idx=i, city=city, day=day, q_raw=0.86, direction="buy_no",
+                    strategy_key="opening_inertia",
+                )
+            )
+            won = i < 20  # 20/32 wins
+            settlement_value = 31.0 if not won else 25.0
+            settlements.append({
+                "city": city, "metric": "high", "target_date": f"2026-05-{day:02d}",
+                "settlement_value": settlement_value, "settlement_unit": "C",
+                "created_at": f"2026-05-{day:02d}T18:00:00+00:00",
+            })
+            bins.append({
+                "condition_id": positions[-1]["condition_id"],
+                "range_low": 31.0, "range_high": 31.0, "range_label": "31C",
+            })
+
+        forecast_conn = _forecast_conn_with_settlements(settlements)
+        topology_conn = _topology_conn_with_bins(bins)
+        # Each call to _hierarchy_observations_all CLOSES the world/trade
+        # connections it opens -- give each invocation a fresh connection
+        # rather than reusing one across the before/after calls below.
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: _world_conn_with_claims([]),
+        )
+
+        query_kwargs = dict(
+            city="Manila", metric="high", band_template="Will the highest temperature in Manila be 31C",
+            direction="buy_no", strategy_key="opening_inertia", q_raw=0.86, q_lcb_raw=0.82,
+        )
+
+        # BEFORE: no trades DB -> receipts-only (empty) pool -> INSUFFICIENT_DATA.
+        monkeypatch.setattr(
+            "src.state.db.get_trade_connection_read_only",
+            lambda: (_ for _ in ()).throw(RuntimeError("no trades DB")),
+        )
+        obs_before = era._hierarchy_observations_all(
+            forecast_conn=forecast_conn, topology_conn=topology_conn,
+            coverage_cache=None, fail_closed_on_fault=True,
+        )
+        pair_before = hierarchical_coverage_check(observations=obs_before, **query_kwargs)
+        assert pair_before.status == "INSUFFICIENT_DATA"
+        assert pair_before.level is None
+
+        # AFTER: entered-position claims merged in -> Level 1 STRATEGY_BUCKET engages.
+        monkeypatch.setattr(
+            "src.state.db.get_trade_connection_read_only",
+            lambda: _trade_conn_with_positions(positions),
+        )
+        obs_after = era._hierarchy_observations_all(
+            forecast_conn=forecast_conn, topology_conn=topology_conn,
+            coverage_cache=None, fail_closed_on_fault=True,
+        )
+        pair_after = hierarchical_coverage_check(observations=obs_after, **query_kwargs)
+        assert pair_after.status != "INSUFFICIENT_DATA"
+        assert pair_after.level == "STRATEGY_BUCKET"
+        assert pair_after.n >= 30

@@ -33169,6 +33169,98 @@ def _maybe_apply_settlement_coverage_to_lcb(
 # ---------------------------------------------------------------------------
 
 
+def _position_hierarchy_claims() -> list[dict[str, Any]]:
+    """Entered-position walk-forward claims from ``position_current`` (zeus_trades.db).
+
+    ADD-DATA to the F1 observation pool: entered positions (unlike no-submit
+    receipts) carry a real canonical ``strategy_key``, which is the only thing
+    that lets Levels 1-3 (STRATEGY_BUCKET / STRATEGY_SUPERBUCKET / CROSS_STRATEGY
+    / GLOBAL) ever engage (see docs/evidence/capital_efficiency_2026_07_19/
+    highq_overconfidence.md Sec 5). Scoped to ``phase IN ('settled',
+    'economically_closed')`` -- the same settled/economically_closed universe
+    the fix-spec investigation itself measured (report Sec 1a/4).
+
+    Excludes ``entry_method = 'chain_only_reconciliation'`` rows: those are
+    foreign co-trading positions discovered from on-chain balance with NO Zeus
+    decision evidence behind them (exclusion-predicate precedent:
+    src/riskguard/riskguard.py:1095, which excludes the same class from
+    loss-eligibility for the identical reason).
+
+    FAIL-SOFT ALWAYS (add-data-must-never-block-serving law): any structural
+    fault here -- trades DB unreachable, table/columns missing, whatever --
+    returns an EMPTY list and never raises, regardless of the caller's
+    ``fail_closed_on_fault``. The receipt-only pool must keep working
+    unchanged when this source is unavailable.
+    """
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        trade_conn = get_trade_connection_read_only()
+    except Exception:
+        return []
+    try:
+        try:
+            rows = trade_conn.execute(
+                "SELECT condition_id, city, temperature_metric, target_date, "
+                "bin_label, direction, strategy_key, p_posterior, updated_at "
+                "FROM position_current "
+                "WHERE phase IN ('settled', 'economically_closed') "
+                "AND p_posterior IS NOT NULL AND p_posterior > 0 "
+                "AND condition_id IS NOT NULL AND condition_id != '' "
+                "AND (entry_method IS NULL OR entry_method != 'chain_only_reconciliation') "
+                "ORDER BY updated_at ASC"
+            ).fetchall()
+        except Exception:
+            return []
+    except Exception:
+        return []
+    finally:
+        try:
+            trade_conn.close()
+        except Exception:
+            pass
+
+    from src.calibration.settlement_coverage_hierarchy import canonicalize_strategy_key
+
+    claims: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            (
+                condition_id, city, metric, target_date, bin_label, direction,
+                strategy_key, p_posterior, updated_at,
+            ) = row
+        except (TypeError, ValueError):
+            continue
+        city_s = str(city or "")
+        metric_s = str(metric or "").lower()
+        target_date_s = str(target_date or "")
+        direction_s = str(direction or "")
+        condition_id_s = str(condition_id or "")
+        band_template = _coverage_band_template(bin_label)
+        if not (city_s and metric_s and target_date_s and band_template and direction_s and condition_id_s):
+            continue
+        try:
+            q_raw_value = float(p_posterior)
+        except (TypeError, ValueError):
+            continue
+        if not (0.0 <= q_raw_value <= 1.0):
+            continue
+        claims.append(
+            {
+                "city": city_s,
+                "metric": metric_s,
+                "target_date": target_date_s,
+                "condition_id": condition_id_s,
+                "band_template": band_template,
+                "direction": direction_s,
+                "q_raw": q_raw_value,
+                "strategy_key": canonicalize_strategy_key(strategy_key),
+                "created_at": str(updated_at or ""),
+            }
+        )
+    return claims
+
+
 def _hierarchy_observations_all(
     *,
     forecast_conn: sqlite3.Connection,
@@ -33183,6 +33275,10 @@ def _hierarchy_observations_all(
     ``q_live_raw`` column when present -- post-wiring rows -- else the legacy
     ``q_live`` column, which IS the raw claim on pre-wiring / flag-off rows by
     construction) + ``strategy_key`` (canonicalized) from ``receipt_json``.
+    ALSO reads entered-position walk-forward outcomes from ``position_current``
+    (zeus_trades.db) via ``_position_hierarchy_claims`` -- fail-soft, ADD-DATA,
+    the only source with real canonical ``strategy_key`` diversity (see that
+    function's docstring). Both claim streams are graded and pooled together.
     Grades each claim against ``settlement_outcomes`` (VERIFIED authority ONLY)
     via the D1 keystone ``grade_receipt`` -- the historical claim's Bin is
     reconstructed from ``market_events`` by ``condition_id`` (mirrors
@@ -33191,9 +33287,12 @@ def _hierarchy_observations_all(
 
     FAIL-CLOSED (``fail_closed_on_fault=True``, the default -- this feeds a live
     sizing decision): a structural read/schema fault on ANY of the three
-    authorities (world.db receipts, settlement_outcomes, market_events) raises
-    ``QLCB_COVERAGE_AUTHORITY_FAULT`` and PROPAGATES, exactly mirroring K3's
-    ``_settlement_coverage_observations``. A genuinely thin/absent history (the
+    RECEIPT-PATH authorities (world.db receipts, settlement_outcomes,
+    market_events) raises ``QLCB_COVERAGE_AUTHORITY_FAULT`` and PROPAGATES,
+    exactly mirroring K3's ``_settlement_coverage_observations`` -- UNCHANGED
+    from before this pool was extended. The entered-position claim source is
+    always fail-soft regardless of this flag (see
+    ``_position_hierarchy_claims``). A genuinely thin/absent history (the
     queries SUCCEED but match nothing) returns an EMPTY list -- INSUFFICIENT_DATA
     downstream, non-blocking (RULE 1: absence of history is never proof of
     overconfidence).
@@ -33289,6 +33388,13 @@ def _hierarchy_observations_all(
                 "created_at": str(created_at or ""),
             }
         )
+
+    # ADD-DATA: entered-position walk-forward claims (real strategy_key
+    # diversity). Always fail-soft (see _position_hierarchy_claims docstring)
+    # -- never affects the receipt path above, which has already succeeded or
+    # already raised by this point.
+    claims.extend(_position_hierarchy_claims())
+
     if not claims:
         return []
 
