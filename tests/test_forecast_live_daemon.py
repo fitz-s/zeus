@@ -226,7 +226,7 @@ def test_replacement_materialize_poll_bounds_pending_seed_work(monkeypatch, tmp_
     )
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(False, 3, 3)]
+    assert calls == [(False, 1, 1)]
 
 
 def test_replacement_materialize_poll_prioritizes_requests_over_seeds(
@@ -257,7 +257,7 @@ def test_replacement_materialize_poll_prioritizes_requests_over_seeds(
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(False, 3, 0)]
+    assert calls == [(False, 1, 0)]
 
 
 def test_replacement_materialize_pending_queue_preempts_due_discovery(
@@ -286,7 +286,36 @@ def test_replacement_materialize_pending_queue_preempts_due_discovery(
     )
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(False, 3, 3)]
+    assert calls == [(False, 1, 1)]
+
+
+def test_replacement_materialize_poll_reaps_inflight_work(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_production as production
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = _materialization_queue_cfg(tmp_path)
+    batch_dir = Path(cfg["inflight_dir"]) / "claim"
+    batch_dir.mkdir(parents=True)
+    (batch_dir / "request.json").write_text("{}\n", encoding="utf-8")
+    calls: list[tuple[bool, int | None, int | None]] = []
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_materialize_job",
+        lambda *, discover=True, limit=None, seed_limit=None: calls.append(
+            (discover, limit, seed_limit)
+        ),
+    )
+
+    daemon._replacement_forecast_materialize_poll_job()
+
+    assert calls == [(False, 1, 0)]
 
 
 def test_replacement_discovery_runs_outside_materialization_queue(monkeypatch, tmp_path) -> None:
@@ -416,6 +445,10 @@ def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> 
     assert fn is daemon._replacement_forecast_materialize_poll_job
     assert trigger == "interval"
     assert kwargs["seconds"] == 1
+    assert (
+        kwargs["max_instances"]
+        == daemon.REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES
+    )
     assert "minutes" not in kwargs
     discovery_fn, discovery_trigger, discovery_kwargs = next(
         job
@@ -445,6 +478,7 @@ def test_replacement_materialize_queue_poll_defaults_to_one_second(monkeypatch) 
 def _materialization_queue_cfg(tmp_path) -> dict[str, object]:
     return {
         "request_dir": tmp_path / "requests",
+        "inflight_dir": tmp_path / "inflight",
         "processed_dir": tmp_path / "processed",
         "failed_dir": tmp_path / "failed",
         "seed_dir": tmp_path / "seeds",

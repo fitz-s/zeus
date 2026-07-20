@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-11
+# Last reused or audited: 2026-07-20
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -170,6 +170,35 @@ def test_tradeable_posterior_with_fresh_readiness_is_covered(tmp_path) -> None:
     _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
     _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
     assert _seed_already_covered(forecast_db=db_path, seed=_seed()) is True
+
+
+def test_coverage_gate_preserves_indexed_computed_at_order(
+    tmp_path, monkeypatch
+) -> None:
+    import src.state.db as state_db
+
+    db_path = _db(tmp_path)
+    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
+    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
+    trace: list[str] = []
+
+    def _connect(path, **_kwargs):
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.set_trace_callback(trace.append)
+        return conn
+
+    monkeypatch.setattr(state_db, "_connect", _connect)
+
+    assert _seed_already_covered(forecast_db=db_path, seed=_seed()) is True
+    posterior_query = next(
+        statement
+        for statement in trace
+        if "FROM forecast_posteriors" in statement
+        and "dependency_source_run_ids_json" in statement
+    )
+    assert "ORDER BY computed_at DESC" in posterior_query
+    assert "datetime(computed_at)" not in posterior_query
 
 
 def test_newer_posterior_without_matching_readiness_is_not_covered(tmp_path) -> None:

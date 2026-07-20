@@ -35,7 +35,9 @@ test_trust_policy:
     tests/test_bayes_precision_fusion_download.py: {created: "2026-06-08", last_used: "2026-07-17", note: "BPF raw capture batching, injected pre-request quota authority, exact committed-family reporting, deadline-bound persistence, LIVE writer priority, and chunk durability."}
     tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-07-19", note: "BPF source-clock capture coverage, typed HTTP terminal/conditional outcomes, reserved quota priority, per-commit family notification, fixpoint, quota cooldown, and held-family-first target ordering."}
     tests/data/test_fusion_upgrade_trigger.py: {created: "2026-06-11", last_used: "2026-07-17", note: "Fusion upgrade detects both provider-family growth and exact persisted source-row revision changes without repeated no-op materialization."}
-    tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-07-15", note: "Current active-family coverage and seedability, including automatic reseed when a shaped posterior carries an older probability-semantics revision."}
+    tests/data/test_previous_runs_substitution.py: {created: "2026-06-11", last_used: "2026-07-20", note: "Previous-runs substitution and replacement materialization queue contracts, including bounded per-family subprocess concurrency and timeout isolation."}
+    tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-07-20", note: "Current active-family coverage and seedability, including automatic reseed when a shaped posterior carries an older probability-semantics revision and indexed ISO timestamp ordering."}
+    tests/test_forecast_live_daemon_boot_schema.py: {created: "2026-07-20", last_used: "2026-07-20", note: "Forecast daemon fast boot requires live indexes to belong to their active tables; legacy tables cannot satisfy the gate by retaining a matching global index name."}
     tests/test_replacement_forecast_materializer_cycle_policy.py: {created: "2026-06-10", last_used: "2026-07-15", note: "Shared replacement cycle and probability-semantics policy; the current revision is part of tradeable-grade coverage and materialization identity."}
     tests/engine/test_position_belief_authority.py: {created: "2026-06-12", last_used: "2026-07-20", note: "Held-position belief reads the same replacement authority as entry, excludes future-computed rows at causal replay cuts, and refuses old current-evidence probability semantics."}
     tests/execution/test_venue_sync_contract.py: {created: "2026-06-11", last_used: "2026-07-15", note: "Three-phase command-recovery DB/venue synchronization antibodies, including default canonical WORLD+TRADE blocking flocks and live-tick opt-in nonblocking flock plus zero SQLite busy timeout."}
@@ -563,7 +565,7 @@ test_trust_policy:
     tests/test_job_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_source_run_coverage_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_source_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
-    tests/test_readiness_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_readiness_state_schema.py: {created: "2026-05-02", last_used: "2026-07-20", note: "Readiness schema preserves verdict semantics and repairs canonical indexes stranded on a renamed legacy table; current-family latest reads use an ordered active-table index."}
     tests/test_market_topology_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_forecast_source_registry.py: {created: "2026-04-27", last_used: "2026-07-17", note: "Forecast-source registry gates, provenance stamping, and shared quota reservation at the Open-Meteo fallback boundary."}
     tests/test_tigge_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}

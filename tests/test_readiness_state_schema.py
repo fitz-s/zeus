@@ -1,5 +1,5 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-02
+# Last reused/audited: 2026-07-20
 # Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b readiness-state contract.
 
 from __future__ import annotations
@@ -10,7 +10,12 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from src.state.db import _migrate_readiness_state_status_checks, init_schema
+from src.state.db import (
+    _READINESS_STATE_INDEX_SQL,
+    _create_readiness_state,
+    _migrate_readiness_state_status_checks,
+    init_schema,
+)
 from src.state.readiness_repo import get_entry_readiness, get_readiness_state, write_readiness_state
 
 
@@ -79,6 +84,54 @@ def test_readiness_state_schema_creates_entry_scope_columns() -> None:
         "condition_id",
         "status",
     } <= columns
+
+
+def test_readiness_state_latest_scope_query_uses_active_covering_order() -> None:
+    conn = _conn()
+
+    plan = [
+        str(row["detail"])
+        for row in conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT dependency_json, status
+              FROM readiness_state
+             WHERE strategy_key = ?
+               AND city = ?
+               AND target_local_date = ?
+               AND temperature_metric = ?
+             ORDER BY computed_at DESC, readiness_id DESC
+             LIMIT 1
+            """,
+            ("replacement", "London", "2026-07-20", "high"),
+        ).fetchall()
+    ]
+
+    assert any("idx_readiness_state_strategy_family_latest" in detail for detail in plan)
+    assert all("TEMP B-TREE" not in detail for detail in plan)
+
+
+def test_readiness_state_schema_reclaims_indexes_from_renamed_legacy_table() -> None:
+    conn = _conn()
+    write_readiness_state(conn, **_ready_kwargs())
+    conn.execute("ALTER TABLE readiness_state RENAME TO readiness_state_legacy")
+
+    _create_readiness_state(conn)
+
+    owners = {
+        str(row["name"]): str(row["tbl_name"])
+        for row in conn.execute(
+            "SELECT name, tbl_name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    assert {
+        index_name: owners[index_name]
+        for index_name in _READINESS_STATE_INDEX_SQL
+    } == {
+        index_name: "readiness_state"
+        for index_name in _READINESS_STATE_INDEX_SQL
+    }
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state_legacy").fetchone()[0] == 1
 
 
 def test_readiness_repo_round_trips_live_eligible_verdict() -> None:

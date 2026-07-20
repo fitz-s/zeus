@@ -1307,7 +1307,7 @@ def _latest_readiness_bound_posterior_id(
             ]
         )
     params: list[object] = [SOURCE_ID, city, target_date, temperature_metric]
-    order = "datetime(computed_at) DESC, readiness_id DESC" if "computed_at" in columns else "rowid DESC"
+    order = "computed_at DESC, readiness_id DESC" if "computed_at" in columns else "rowid DESC"
     selected = "dependency_json" + (", status" if "status" in columns else "")
     row = conn.execute(
         f"""
@@ -1380,7 +1380,7 @@ def _latest_readiness_bound_posterior_ids(
     )
     status_select = "r.status" if "status" in columns else "NULL AS status"
     order = (
-        "datetime(r.computed_at) DESC, r.readiness_id DESC"
+        "r.computed_at DESC, r.readiness_id DESC"
         if "computed_at" in columns
         else "r.rowid DESC"
     )
@@ -1507,7 +1507,7 @@ def _covering_posterior_input_lag_reason(
           FROM forecast_posteriors p
          WHERE {' AND '.join(predicates)}
            {posterior_tradeable_grade_clause}
-         ORDER BY datetime(p.computed_at) DESC, p.posterior_id DESC
+         ORDER BY p.computed_at DESC, p.posterior_id DESC
          LIMIT 1
         """,
         tuple(params),

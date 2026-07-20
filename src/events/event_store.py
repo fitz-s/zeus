@@ -3286,24 +3286,24 @@ def _rank_pending_rows_python(
     return [(item["event"], int(item["attempt_count"])) for item in ranked]
 
 
-def _is_forecast_decision_lane_item(item: dict) -> bool:
+def _decision_lane_for_item(item: dict) -> str:
     event = item["event"]
     event_type = getattr(event, "event_type", "")
     if event_type == "EDLI_REDECISION_PENDING":
-        return True
-    return event_type == "FORECAST_SNAPSHOT_READY" and int(item.get("tier", 99)) <= 1
+        return "redecision"
+    if event_type == "FORECAST_SNAPSHOT_READY" and int(item.get("tier", 99)) <= 1:
+        return "source"
+    return "rest"
 
 
 def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
-    """Keep the forecast/redecision lane visible under a Day0 Tier-0 flood.
+    """Bound starvation across redecision, source-fact, and other live lanes.
 
-    Reactor-level interleave only works if the fetched page already contains both
-    lanes. Live can run with a work limit near one event while hundreds of current
-    Day0 observations sit ahead of FSR rows, so the fairness boundary must be the
-    store's final claim order, before ``limit`` is applied. If a forecast or
-    redecision row exists, it takes the first slot; otherwise a one-event budget
-    still gives the whole cycle to Day0 and the entry/redecision lane remains
-    invisible.
+    A continuous price stream can fill every Tier-0 slot and leave a newly
+    available forecast outside the fetched work page. Conversely, a forecast
+    backlog must not delay order-management or held-position redecision. Preserve
+    each lane's ranked order, lead with redecision, then weave current forecast
+    source facts and Day0/other work before ``limit`` is applied.
     """
 
     # Stale processing recovery remains the absolute first lane. A globally
@@ -3318,21 +3318,18 @@ def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
     ]
     fixed_ids = {item["event"].event_id for item in fixed}
     records = [item for item in records if item["event"].event_id not in fixed_ids]
-    forecast = [item for item in records if _is_forecast_decision_lane_item(item)]
-    if not forecast:
-        return fixed + records
-    rest = [item for item in records if not _is_forecast_decision_lane_item(item)]
-    if not rest:
-        return fixed + records
+    lanes = {
+        lane: [item for item in records if _decision_lane_for_item(item) == lane]
+        for lane in ("redecision", "source", "rest")
+    }
     out: list[dict] = []
-    i = j = 0
-    while i < len(forecast) or j < len(rest):
-        if i < len(forecast):
-            out.append(forecast[i])
-            i += 1
-        if j < len(rest):
-            out.append(rest[j])
-            j += 1
+    offsets = {lane: 0 for lane in lanes}
+    while len(out) < len(records):
+        for lane, items in lanes.items():
+            offset = offsets[lane]
+            if offset < len(items):
+                out.append(items[offset])
+                offsets[lane] = offset + 1
     return fixed + out
 
 

@@ -235,6 +235,8 @@ def test_current_evidence_shape_converts_native_fahrenheit_members() -> None:
     conn = _conn()
     req = _request()
     _seed_current_ens(conn, request=req, members_unit="degF")
+    trace: list[str] = []
+    conn.set_trace_callback(trace.append)
 
     shape = mod._read_current_evidence_shape(
         conn,
@@ -248,6 +250,27 @@ def test_current_evidence_shape_converts_native_fahrenheit_members() -> None:
     assert shape is not None
     assert shape.members_c[0] == pytest.approx(23.5)
     assert shape.members_c[-1] == pytest.approx(24.5)
+    selects = [sql for sql in trace if "FROM ensemble_snapshots" in sql]
+    assert len(selects) == 1
+    assert "lower(city)" not in selects[0].lower()
+
+
+def test_current_evidence_shape_keeps_case_insensitive_legacy_fallback() -> None:
+    conn = _conn()
+    req = _request()
+    _seed_current_ens(conn, request=req)
+    conn.execute("UPDATE ensemble_snapshots SET city = 'PARIS'")
+
+    shape = mod._read_current_evidence_shape(
+        conn,
+        req,
+        metric="high",
+        provider_values_c={"ecmwf_ifs": 24.0, "icon_global": 25.0},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        center_c=24.5,
+    )
+
+    assert shape is not None
 
 
 def _seed_current_ens_at_cycle(conn, *, request, ens_cycle_time: datetime) -> None:

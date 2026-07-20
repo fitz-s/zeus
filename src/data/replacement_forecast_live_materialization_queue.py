@@ -8,6 +8,8 @@ import logging
 import os
 import subprocess
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,6 +36,10 @@ from src.data.replacement_forecast_seed_discovery import (
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 240.0
+DEFAULT_MATERIALIZATION_MAX_WORKERS = 4
+MATERIALIZATION_INFLIGHT_DIR_NAME = "inflight"
+_CLAIM_METADATA_NAME = "_claim.json"
+_STALE_CLAIM_GRACE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,23 @@ class _PendingMaterialization:
     request_payload: Mapping[str, object] | None
     marker_path: Path | None
     attempt_fingerprint: str | None
+
+
+@dataclass(frozen=True)
+class _MaterializationQueueClaim:
+    request_path: Path
+    batch_path: Path | None
+    processed_path: Path
+    failed_path: Path
+    claimed_count: int
+    skipped_count: int
+    inflight_deferred_count: int
+    processed_files: tuple[str, ...]
+    failed_files: tuple[str, ...]
+    seed_processed_files: tuple[str, ...]
+    seed_failed_files: tuple[str, ...]
+    seed_reasons: tuple[str, ...]
+    discovery_report: ReplacementForecastSeedDiscoveryReport | None
 
 
 def _materialization_subprocess_timeout_seconds() -> float:
@@ -164,26 +187,35 @@ def _timeout_result(
     )
 
 
-def _parse_batch_results(
-    stdout: str | bytes | None,
-) -> tuple[dict[Path, subprocess.CompletedProcess[str]], list[str]]:
-    if isinstance(stdout, bytes):
-        stdout = stdout.decode(errors="replace")
-    parsed: dict[Path, subprocess.CompletedProcess[str]] = {}
-    protocol_errors: list[str] = []
-    for line in (stdout or "").splitlines():
-        try:
-            payload = json.loads(line)
-            input_json = Path(str(payload["input_json"]))
-            parsed[input_json] = subprocess.CompletedProcess(
-                args=list(_materialization_command(input_json)),
-                returncode=int(payload["returncode"]),
-                stdout=str(payload.get("stdout") or ""),
-                stderr=str(payload.get("stderr") or ""),
-            )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            protocol_errors.append(f"{exc.__class__.__name__}: {exc}")
-    return parsed, protocol_errors
+def _materialization_error_result(
+    command: Sequence[str],
+    exc: Exception,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=list(command),
+        returncode=2,
+        stdout="",
+        stderr=json.dumps(
+            {
+                "status": "ERROR",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
+def _run_materialization_item(
+    item: _PendingMaterialization,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return _run_command(item.command)
+    except subprocess.TimeoutExpired as exc:
+        return _timeout_result(item.command, exc)
+    except Exception as exc:
+        return _materialization_error_result(item.command, exc)
 
 
 def _run_materialization_batch(
@@ -191,48 +223,20 @@ def _run_materialization_batch(
 ) -> dict[Path, subprocess.CompletedProcess[str]]:
     if not pending:
         return {}
-    command = (
-        sys.executable,
-        str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_live.py"),
-        "--batch-input-json",
-        *(str(item.input_json) for item in pending),
-        "--commit",
-    )
-    try:
-        batch = _run_command(command)
-    except subprocess.TimeoutExpired as exc:
-        parsed, _ = _parse_batch_results(exc.stdout)
-        for item in pending:
-            parsed.setdefault(
-                item.input_json,
-                _timeout_result(item.command, exc),
-            )
-        return parsed
-    parsed, protocol_errors = _parse_batch_results(batch.stdout)
-    for item in pending:
-        if item.input_json not in parsed:
-            error_type = (
-                "MaterializationBatchProcessError"
-                if batch.returncode != 0
-                else "MaterializationBatchProtocolError"
-            )
-            parsed[item.input_json] = subprocess.CompletedProcess(
-                args=list(item.command),
-                returncode=int(batch.returncode) if batch.returncode != 0 else 2,
-                stdout="",
-                stderr=json.dumps(
-                    {
-                        "status": "ERROR",
-                        "error_type": error_type,
-                        "error": "batch result missing for request",
-                        "details": protocol_errors,
-                        "batch_stderr": batch.stderr,
-                    },
-                    sort_keys=True,
-                )
-                + "\n",
-            )
-    return parsed
+    completed: dict[Path, subprocess.CompletedProcess[str]] = {}
+    workers = min(DEFAULT_MATERIALIZATION_MAX_WORKERS, len(pending))
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="replacement-materialize",
+    ) as executor:
+        futures = {
+            executor.submit(_run_materialization_item, item): item
+            for item in pending
+        }
+        for future in as_completed(futures):
+            item = futures[future]
+            completed[item.input_json] = future.result()
+    return completed
 
 
 _LOG = logging.getLogger("zeus.replacement_live_materialization_queue")
@@ -278,8 +282,8 @@ def _committed_posterior_wake_status(
 
 
 def _receipt_name(path: Path) -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{path.stem}.{stamp}{path.suffix}"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"{path.stem}.{stamp}.pid{os.getpid()}{path.suffix}"
 
 
 def _move_request(path: Path, destination_dir: Path) -> Path:
@@ -454,7 +458,7 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
               {tradeable_grade_clause}
               AND json_extract(dependency_source_run_ids_json, '$.baseline_b0') = ?
               AND json_extract(dependency_source_run_ids_json, '$.openmeteo_ifs9_anchor') = ?
-            ORDER BY datetime(computed_at) DESC, posterior_id DESC
+            ORDER BY computed_at DESC, posterior_id DESC
             LIMIT 1
             """,
             (SOURCE_ID, city, target_date, metric, baseline_source_run_id, openmeteo_source_run_id),
@@ -1203,6 +1207,125 @@ def _coalesce_superseded_materialization_requests(
     return tuple(remaining), tuple(superseded)
 
 
+def _claim_request_files(batch_path: Path) -> tuple[Path, ...]:
+    return tuple(
+        path
+        for path in batch_path.glob("*.json")
+        if path.is_file() and path.name != _CLAIM_METADATA_NAME
+    )
+
+
+def _claim_age_seconds(batch_path: Path) -> float:
+    claimed_at: datetime | None = None
+    try:
+        payload = json.loads(
+            (batch_path / _CLAIM_METADATA_NAME).read_text(encoding="utf-8")
+        )
+        claimed_at = _parse_utc_iso(payload.get("claimed_at"))
+    except (AttributeError, OSError, json.JSONDecodeError):
+        pass
+    if claimed_at is not None:
+        return max(
+            0.0,
+            (datetime.now(timezone.utc) - claimed_at).total_seconds(),
+        )
+    try:
+        return max(0.0, time.time() - batch_path.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
+def _restore_claimed_request(path: Path, request_path: Path, batch_name: str) -> Path:
+    request_path.mkdir(parents=True, exist_ok=True)
+    target = request_path / path.name
+    if target.exists():
+        target = request_path / f"{path.stem}.recovered-{batch_name}{path.suffix}"
+    os.replace(path, target)
+    return target
+
+
+def _remove_empty_claim_batch(batch_path: Path) -> None:
+    if _claim_request_files(batch_path):
+        return
+    try:
+        (batch_path / _CLAIM_METADATA_NAME).unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        batch_path.rmdir()
+    except OSError:
+        pass
+
+
+def _recover_stale_claims(
+    *,
+    request_path: Path,
+    inflight_path: Path,
+) -> tuple[frozenset[tuple[str, ...]], int]:
+    active_keys: set[tuple[str, ...]] = set()
+    recovered = 0
+    stale_after = (
+        _materialization_subprocess_timeout_seconds()
+        + _STALE_CLAIM_GRACE_SECONDS
+    )
+    if not inflight_path.exists():
+        return frozenset(), 0
+    for batch_path in sorted(path for path in inflight_path.iterdir() if path.is_dir()):
+        request_files = _claim_request_files(batch_path)
+        if not request_files:
+            _remove_empty_claim_batch(batch_path)
+            continue
+        if _claim_age_seconds(batch_path) >= stale_after:
+            for path in request_files:
+                _restore_claimed_request(path, request_path, batch_path.name)
+                recovered += 1
+            _remove_empty_claim_batch(batch_path)
+            continue
+        for path in request_files:
+            payload = _load_request_payload_for_coalescing(path)
+            key = _request_semantic_key(payload) if payload is not None else None
+            if key is not None:
+                active_keys.add(key)
+    return frozenset(active_keys), recovered
+
+
+def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path:
+    inflight_path.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    batch_path = inflight_path / f"{stamp}.pid{os.getpid()}"
+    suffix = 0
+    while batch_path.exists():
+        suffix += 1
+        batch_path = inflight_path / f"{stamp}.pid{os.getpid()}.{suffix}"
+    batch_path.mkdir()
+    metadata_path = batch_path / _CLAIM_METADATA_NAME
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "claimed_at": datetime.now(timezone.utc).isoformat(),
+                "owner_pid": os.getpid(),
+                "request_names": [path.name for path in request_files],
+            },
+            sort_keys=True,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for source in request_files:
+            claimed = batch_path / source.name
+            os.replace(source, claimed)
+            moved.append((claimed, source))
+    except Exception:
+        for claimed, source in reversed(moved):
+            if claimed.exists() and not source.exists():
+                os.replace(claimed, source)
+        _remove_empty_claim_batch(batch_path)
+        raise
+    return batch_path
+
+
 def _prepare_seed_requests(
     *,
     seed_dir: Path | str | None,
@@ -1354,85 +1477,32 @@ def _prepare_seed_requests(
     return processed, failed, reasons
 
 
-def process_replacement_forecast_live_materialization_queue(
-    *,
-    request_dir: Path | str,
-    processed_dir: Path | str,
-    failed_dir: Path | str,
-    seed_dir: Path | str | None = None,
-    seed_processed_dir: Path | str | None = None,
-    seed_failed_dir: Path | str | None = None,
-    forecast_db: Path | str | None = None,
-    raw_manifest_dir: Path | str | None = None,
-    seed_discovery_limit: int | None = None,
-    seed_limit: int | None = None,
-    limit: int = 10,
-    runner: Runner | None = None,
-    discover: bool = True,
-) -> ReplacementForecastLiveMaterializationQueueReport:
-    """Process local materialization request JSON files.
-
-    The queue consumes already-prepared local request files. It does not discover
-    markets, submit orders, edit current facts, or write settlement/trade tables.
-    Each request is handed to the same CLI used by manual dry runs so the
-    precision guard, product identity, and forecast-class schema rules stay in
-    one path.
-    """
-
-    request_path = Path(request_dir)
-    processed_path = Path(processed_dir)
-    failed_path = Path(failed_dir)
-    if limit <= 0:
-        raise ValueError("limit must be positive")
-    with _queue_lock(request_path.parent / ".materialization_queue.lock") as lock_acquired:
-        if not lock_acquired:
-            return ReplacementForecastLiveMaterializationQueueReport(
-                status="LOCKED",
-                request_dir=str(request_path),
-                processed_dir=str(processed_path),
-                failed_dir=str(failed_path),
-                processed_count=0,
-                failed_count=0,
-                skipped_count=0,
-                reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED",),
-            )
-        return _process_replacement_forecast_live_materialization_queue_locked(
-            request_path=request_path,
-            processed_path=processed_path,
-            failed_path=failed_path,
-            seed_dir=seed_dir,
-            seed_processed_dir=seed_processed_dir,
-            seed_failed_dir=seed_failed_dir,
-            forecast_db=forecast_db,
-            raw_manifest_dir=raw_manifest_dir,
-            seed_discovery_limit=seed_discovery_limit,
-            seed_limit=seed_limit,
-            limit=limit,
-            runner=runner,
-            discover=discover,
-        )
-
-
-def _process_replacement_forecast_live_materialization_queue_locked(
+def _claim_replacement_forecast_live_materialization_queue_locked(
     *,
     request_path: Path,
     processed_path: Path,
     failed_path: Path,
-    seed_dir: Path | str | None = None,
-    seed_processed_dir: Path | str | None = None,
-    seed_failed_dir: Path | str | None = None,
-    forecast_db: Path | str | None = None,
-    raw_manifest_dir: Path | str | None = None,
-    seed_discovery_limit: int | None = None,
-    seed_limit: int | None = None,
-    limit: int = 10,
-    runner: Runner | None = None,
-    discover: bool = True,
-) -> ReplacementForecastLiveMaterializationQueueReport:
+    seed_dir: Path | str | None,
+    seed_processed_dir: Path | str | None,
+    seed_failed_dir: Path | str | None,
+    forecast_db: Path | str | None,
+    raw_manifest_dir: Path | str | None,
+    seed_discovery_limit: int | None,
+    seed_limit: int | None,
+    limit: int,
+    discover: bool,
+) -> _MaterializationQueueClaim:
+    inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
+    active_keys, recovered_count = _recover_stale_claims(
+        request_path=request_path,
+        inflight_path=inflight_path,
+    )
     discovery_report: ReplacementForecastSeedDiscoveryReport | None = None
     if discover and raw_manifest_dir is not None:
         if seed_dir is None:
-            raise ValueError("seed_dir is required when forecast_db/raw_manifest_dir discovery is configured")
+            raise ValueError(
+                "seed_dir is required when forecast_db/raw_manifest_dir discovery is configured"
+            )
         if forecast_db is None:
             raise ValueError("forecast_db and raw_manifest_dir must be configured together")
         discovery_report = discover_replacement_forecast_materialization_seeds(
@@ -1457,6 +1527,223 @@ def _process_replacement_forecast_live_materialization_queue_locked(
         seed_processed, seed_failed, seed_reasons = [], [], [
             "REPLACEMENT_LIVE_MATERIALIZATION_SEED_DEFERRED_FOR_REQUESTS"
         ]
+    if recovered_count:
+        seed_reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_STALE_CLAIM_RECOVERED")
+
+    request_files = (
+        tuple(path for path in request_path.glob("*.json") if path.is_file())
+        if request_path.exists()
+        else ()
+    )
+    if not request_files:
+        return _MaterializationQueueClaim(
+            request_path=request_path,
+            batch_path=None,
+            processed_path=processed_path,
+            failed_path=failed_path,
+            claimed_count=0,
+            skipped_count=0,
+            inflight_deferred_count=0,
+            processed_files=(),
+            failed_files=(),
+            seed_processed_files=tuple(seed_processed),
+            seed_failed_files=tuple(seed_failed),
+            seed_reasons=tuple(seed_reasons),
+            discovery_report=discovery_report,
+        )
+
+    priority = _cycle_advance_seed_priority_map(forecast_db, request_files)
+    requests = tuple(
+        sorted(
+            request_files,
+            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+        )
+    )
+    requests, superseded = _coalesce_superseded_materialization_requests(
+        requests,
+        processed_path=processed_path,
+    )
+    claimable: list[Path] = []
+    inflight_deferred = 0
+    for path in requests:
+        payload = _load_request_payload_for_coalescing(path)
+        key = _request_semantic_key(payload) if payload is not None else None
+        if key is not None and key in active_keys:
+            inflight_deferred += 1
+        else:
+            claimable.append(path)
+    selected = tuple(claimable[:limit])
+    batch_path = (
+        _new_claim_batch(inflight_path, selected)
+        if selected
+        else None
+    )
+    return _MaterializationQueueClaim(
+        request_path=request_path,
+        batch_path=batch_path,
+        processed_path=processed_path,
+        failed_path=failed_path,
+        claimed_count=len(selected),
+        skipped_count=inflight_deferred + max(len(claimable) - limit, 0),
+        inflight_deferred_count=inflight_deferred,
+        processed_files=tuple(superseded),
+        failed_files=(),
+        seed_processed_files=tuple(seed_processed),
+        seed_failed_files=tuple(seed_failed),
+        seed_reasons=tuple(seed_reasons),
+        discovery_report=discovery_report,
+    )
+
+
+def _claim_only_report(
+    claim: _MaterializationQueueClaim,
+) -> ReplacementForecastLiveMaterializationQueueReport:
+    processed = len(claim.processed_files)
+    failed = len(claim.failed_files)
+    reasons = list(claim.seed_reasons)
+    if claim.inflight_deferred_count:
+        reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_INFLIGHT")
+    if claim.skipped_count > claim.inflight_deferred_count:
+        reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LIMIT_REACHED")
+    if processed or failed:
+        reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED")
+        if processed:
+            reasons.append(
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE"
+            )
+    else:
+        reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY")
+    return ReplacementForecastLiveMaterializationQueueReport(
+        status="FAILED" if failed else ("PROCESSED" if processed else "NO_REQUESTS"),
+        request_dir=str(claim.request_path),
+        processed_dir=str(claim.processed_path),
+        failed_dir=str(claim.failed_path),
+        processed_count=processed,
+        failed_count=failed,
+        skipped_count=claim.skipped_count,
+        seed_processed_count=len(claim.seed_processed_files),
+        seed_failed_count=len(claim.seed_failed_files),
+        seed_discovery_report=claim.discovery_report,
+        processed_files=claim.processed_files,
+        failed_files=claim.failed_files,
+        seed_processed_files=claim.seed_processed_files,
+        seed_failed_files=claim.seed_failed_files,
+        reason_codes=tuple(dict.fromkeys(reasons)),
+    )
+
+
+def process_replacement_forecast_live_materialization_queue(
+    *,
+    request_dir: Path | str,
+    processed_dir: Path | str,
+    failed_dir: Path | str,
+    seed_dir: Path | str | None = None,
+    seed_processed_dir: Path | str | None = None,
+    seed_failed_dir: Path | str | None = None,
+    forecast_db: Path | str | None = None,
+    raw_manifest_dir: Path | str | None = None,
+    seed_discovery_limit: int | None = None,
+    seed_limit: int | None = None,
+    limit: int = 10,
+    runner: Runner | None = None,
+    discover: bool = True,
+) -> ReplacementForecastLiveMaterializationQueueReport:
+    """Process local materialization request JSON files.
+
+    The queue consumes already-prepared local request files. It does not discover
+    markets, submit orders, edit current facts, or write settlement/trade tables.
+    Each request is handed to the same CLI used by manual dry runs so the
+    precision guard, product identity, and forecast-class schema rules stay in
+    one path. The queue lock covers only seed preparation, deduplication, and an
+    atomic move into a recoverable inflight batch; family compute runs outside it.
+    """
+
+    request_path = Path(request_dir)
+    processed_path = Path(processed_dir)
+    failed_path = Path(failed_dir)
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    with _queue_lock(request_path.parent / ".materialization_queue.lock") as lock_acquired:
+        if not lock_acquired:
+            return ReplacementForecastLiveMaterializationQueueReport(
+                status="LOCKED",
+                request_dir=str(request_path),
+                processed_dir=str(processed_path),
+                failed_dir=str(failed_path),
+                processed_count=0,
+                failed_count=0,
+                skipped_count=0,
+                reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED",),
+            )
+        claim = _claim_replacement_forecast_live_materialization_queue_locked(
+            request_path=request_path,
+            processed_path=processed_path,
+            failed_path=failed_path,
+            seed_dir=seed_dir,
+            seed_processed_dir=seed_processed_dir,
+            seed_failed_dir=seed_failed_dir,
+            forecast_db=forecast_db,
+            raw_manifest_dir=raw_manifest_dir,
+            seed_discovery_limit=seed_discovery_limit,
+            seed_limit=seed_limit,
+            limit=limit,
+            discover=discover,
+        )
+    if claim.batch_path is None:
+        return _claim_only_report(claim)
+    try:
+        batch_report = _process_claimed_materialization_batch(
+            request_path=claim.batch_path,
+            processed_path=processed_path,
+            failed_path=failed_path,
+            forecast_db=forecast_db,
+            limit=claim.claimed_count,
+            runner=runner,
+            marker_dir=request_path.parent / "blocked_attempts",
+        )
+    finally:
+        _remove_empty_claim_batch(claim.batch_path)
+
+    reasons = [*claim.seed_reasons, *batch_report.reason_codes]
+    if claim.inflight_deferred_count:
+        reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_INFLIGHT")
+    if claim.skipped_count > claim.inflight_deferred_count:
+        reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LIMIT_REACHED")
+    if claim.processed_files:
+        reasons.append(
+            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE"
+        )
+    return ReplacementForecastLiveMaterializationQueueReport(
+        status=batch_report.status,
+        request_dir=str(request_path),
+        processed_dir=str(processed_path),
+        failed_dir=str(failed_path),
+        processed_count=len(claim.processed_files) + batch_report.processed_count,
+        failed_count=len(claim.failed_files) + batch_report.failed_count,
+        skipped_count=claim.skipped_count + batch_report.skipped_count,
+        seed_processed_count=len(claim.seed_processed_files),
+        seed_failed_count=len(claim.seed_failed_files),
+        committed_posterior_count=batch_report.committed_posterior_count,
+        reactor_wake_published_count=batch_report.reactor_wake_published_count,
+        seed_discovery_report=claim.discovery_report,
+        processed_files=claim.processed_files + batch_report.processed_files,
+        failed_files=claim.failed_files + batch_report.failed_files,
+        seed_processed_files=claim.seed_processed_files,
+        seed_failed_files=claim.seed_failed_files,
+        reason_codes=tuple(dict.fromkeys(reasons)),
+    )
+
+
+def _process_claimed_materialization_batch(
+    *,
+    request_path: Path,
+    processed_path: Path,
+    failed_path: Path,
+    forecast_db: Path | str | None = None,
+    limit: int = 10,
+    runner: Runner | None = None,
+    marker_dir: Path | None = None,
+) -> ReplacementForecastLiveMaterializationQueueReport:
     if not request_path.exists():
         return ReplacementForecastLiveMaterializationQueueReport(
             status="NO_REQUESTS",
@@ -1466,16 +1753,9 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             processed_count=0,
             failed_count=0,
             skipped_count=0,
-            seed_processed_count=len(seed_processed),
-            seed_failed_count=len(seed_failed),
-            seed_discovery_report=discovery_report,
-            processed_files=(),
-            failed_files=(),
-            seed_processed_files=tuple(seed_processed),
-            seed_failed_files=tuple(seed_failed),
-            reason_codes=tuple(seed_reasons + ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_ABSENT"]),
+            reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_ABSENT",),
         )
-    request_files = tuple(path for path in request_path.glob("*.json") if path.is_file())
+    request_files = _claim_request_files(request_path)
     if not request_files:
         return ReplacementForecastLiveMaterializationQueueReport(
             status="NO_REQUESTS",
@@ -1485,14 +1765,7 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             processed_count=0,
             failed_count=0,
             skipped_count=0,
-            seed_processed_count=len(seed_processed),
-            seed_failed_count=len(seed_failed),
-            seed_discovery_report=discovery_report,
-            processed_files=(),
-            failed_files=(),
-            seed_processed_files=tuple(seed_processed),
-            seed_failed_files=tuple(seed_failed),
-            reason_codes=tuple(seed_reasons + ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY"]),
+            reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY",),
         )
     priority = _cycle_advance_seed_priority_map(forecast_db, request_files)
     requests = tuple(
@@ -1511,7 +1784,7 @@ def _process_replacement_forecast_live_materialization_queue_locked(
     failed: list[str] = []
     unchanged_blocked: list[str] = []
     pending: list[_PendingMaterialization] = []
-    marker_dir = request_path.parent / "blocked_attempts"
+    marker_dir = marker_dir or request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
         # POISON-PILL GATE: validate the request schema before spawning the materializer
         # subprocess. An invalid file (scout stub, malformed JSON, missing required keys)
@@ -1638,7 +1911,7 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             failed.append(str(moved))
 
     status = "FAILED" if failed else "PROCESSED"
-    reasons = [*seed_reasons, "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED"]
+    reasons = ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED"]
     if superseded:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE")
     if unchanged_blocked:
@@ -1658,14 +1931,9 @@ def _process_replacement_forecast_live_materialization_queue_locked(
         processed_count=len(processed),
         failed_count=len(failed),
         skipped_count=skipped,
-        seed_processed_count=len(seed_processed),
-        seed_failed_count=len(seed_failed),
         committed_posterior_count=committed_posterior_count,
         reactor_wake_published_count=reactor_wake_published_count,
-        seed_discovery_report=discovery_report,
         processed_files=tuple(processed),
         failed_files=tuple(failed),
-        seed_processed_files=tuple(seed_processed),
-        seed_failed_files=tuple(seed_failed),
         reason_codes=tuple(reasons),
     )

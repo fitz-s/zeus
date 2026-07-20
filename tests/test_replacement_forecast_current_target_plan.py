@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-15
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07; last_reused=2026-07-01
+# Last reused/audited: 2026-07-20
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
 # Authority basis: Replacement forecast coverage must bind to the live baseline source_run, not stale city/date rows.
@@ -176,6 +176,7 @@ def test_readiness_bound_posterior_ids_are_selected_in_one_batch() -> None:
         ("London", "2026-07-18", "high"): -1,
     }
     assert sum("WITH requested(" in statement for statement in statements) == 1
+    assert all("datetime(r.computed_at)" not in statement for statement in statements)
     conn.close()
 
 
@@ -1187,6 +1188,8 @@ def test_current_target_plan_uses_typed_readiness_scope_when_available(
         "json_extract(r.provenance_json, '$.city')" not in statement
         for statement in readiness_sql
     )
+    assert all("datetime(r.computed_at)" not in statement for statement in readiness_sql)
+    assert all("datetime(p.computed_at)" not in statement for statement in statements)
 
 
 def test_current_target_plan_orders_nearest_market_date_first(tmp_path) -> None:

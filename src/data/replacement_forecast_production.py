@@ -288,6 +288,7 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
             return RUNTIME_ROOT / path
         return PROJECT_ROOT / path
 
+    request_dir = _rooted_path(cfg.get("request_dir"), base_dir / "requests")
     return {
         "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),
         "seed_processed_dir": _rooted_path(cfg.get("seed_processed_dir"), base_dir / "seed_processed"),
@@ -295,7 +296,12 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "forecast_db": _rooted_path(forecast_db),
         "raw_manifest_dir": _rooted_path(raw_manifest_dir),
         "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),
-        "request_dir": _rooted_path(cfg.get("request_dir"), base_dir / "requests"),
+        "request_dir": request_dir,
+        "inflight_dir": (
+            request_dir.parent / "inflight"
+            if request_dir is not None
+            else base_dir / "inflight"
+        ),
         "processed_dir": _rooted_path(cfg.get("processed_dir"), base_dir / "processed"),
         "failed_dir": _rooted_path(cfg.get("failed_dir"), base_dir / "failed"),
         "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),

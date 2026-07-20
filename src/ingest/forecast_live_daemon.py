@@ -85,7 +85,19 @@ _FORECAST_BOOT_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
             "endpoint",
         }
     ),
-    "readiness_state": frozenset({"strategy_key", "status", "dependency_json", "provenance_json"}),
+    "readiness_state": frozenset(
+        {
+            "readiness_id",
+            "strategy_key",
+            "city",
+            "target_local_date",
+            "temperature_metric",
+            "status",
+            "computed_at",
+            "dependency_json",
+            "provenance_json",
+        }
+    ),
     "source_run_coverage": frozenset(
         {"source_run_id", "source_id", "city", "target_local_date", "temperature_metric"}
     ),
@@ -93,11 +105,15 @@ _FORECAST_BOOT_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
     "cycle_advance_enqueues": frozenset({"seed_file", "held_position", "enqueued_at"}),
 }
 
+_FORECAST_BOOT_REQUIRED_INDEX_TABLES: dict[str, str] = {
+    "idx_forecast_posteriors_live_family_cycle": "forecast_posteriors",
+    "idx_raw_model_forecasts_endpoint_family_cycle_members": "raw_model_forecasts",
+    "idx_readiness_state_entry_scope": "readiness_state",
+    "idx_readiness_state_status_expiry": "readiness_state",
+    "idx_readiness_state_strategy_family_latest": "readiness_state",
+}
 _FORECAST_BOOT_REQUIRED_INDEXES: frozenset[str] = frozenset(
-    {
-        "idx_forecast_posteriors_live_family_cycle",
-        "idx_raw_model_forecasts_endpoint_family_cycle_members",
-    }
+    _FORECAST_BOOT_REQUIRED_INDEX_TABLES
 )
 
 FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"       # 00z trigger
@@ -122,6 +138,7 @@ REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_cat
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
+REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES = 4
 # SEPARATE lane for the heavy download (publish-time cron + boot catch-up). The download
 # runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
 # 400-retries on short-range models). On a SHARED max_workers=1 lane it serialized AHEAD of
@@ -266,13 +283,16 @@ def _forecast_boot_schema_ready(conn: Any) -> bool:
                 return False
             if "trade_authority_status" in columns:
                 return False
-        indexes = {
-            str(row[0])
+        index_tables = {
+            str(row[0]): str(row[1])
             for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index'"
+                "SELECT name, tbl_name FROM sqlite_master WHERE type='index'"
             ).fetchall()
         }
-        if not _FORECAST_BOOT_REQUIRED_INDEXES.issubset(indexes):
+        if any(
+            index_tables.get(index_name) != table_name
+            for index_name, table_name in _FORECAST_BOOT_REQUIRED_INDEX_TABLES.items()
+        ):
             return False
     except Exception:
         return False
@@ -1105,6 +1125,16 @@ def _replacement_forecast_queue_pending(
     return path.exists() and next(path.glob("*.json"), None) is not None
 
 
+def _replacement_forecast_inflight_pending(cfg: dict[str, object]) -> bool:
+    configured = cfg.get("inflight_dir")
+    path = (
+        Path(str(configured))
+        if configured not in (None, "")
+        else Path(str(cfg["request_dir"])).parent / "inflight"
+    )
+    return path.exists() and next(path.glob("*/*.json"), None) is not None
+
+
 def _replacement_forecast_discovery_revision(
     cfg: dict[str, object],
 ) -> tuple[object, ...] | None:
@@ -1167,18 +1197,24 @@ def _replacement_forecast_materialize_poll_job() -> None:
     cfg = _replacement_forecast_live_materialization_queue_config()
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
-    batch_limit = int(cfg["poll_batch_limit"])
+    inflight_pending = _replacement_forecast_inflight_pending(cfg)
     if requests_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=batch_limit,
+            limit=1,
             seed_limit=0,
         )
     elif seeds_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=batch_limit,
-            seed_limit=batch_limit,
+            limit=1,
+            seed_limit=1,
+        )
+    elif inflight_pending:
+        _replacement_forecast_materialize_job(
+            discover=False,
+            limit=1,
+            seed_limit=0,
         )
 
 
@@ -1304,7 +1340,7 @@ def _register_replacement_forecast_production_jobs(
         seconds=materialize_poll_seconds,
         id=REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
         executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
-        max_instances=1,
+        max_instances=REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES,
         coalesce=True,
         misfire_grace_time=120,
     )
@@ -1374,7 +1410,9 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
         # (and starve) the light materialize that refreshes readiness — see
         # REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE.
         return {
-            REPLACEMENT_FORECAST_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
+            REPLACEMENT_FORECAST_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(
+                max_workers=REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES
+            ),
             REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
         }
 

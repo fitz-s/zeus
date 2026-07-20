@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-07-16
+# Last reused or audited: 2026-07-20
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -38,6 +38,10 @@ from pathlib import Path
 
 import pytest
 
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    TRADEABLE_GRADE_QLCB_BASIS,
+)
 from src.data.replacement_current_value_serving import (
     PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
     read_current_instrument_values,
@@ -421,13 +425,17 @@ def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_p
         conn.executescript(
             """
             CREATE TABLE forecast_posteriors (
+                posterior_id INTEGER PRIMARY KEY,
                 source_id TEXT,
                 runtime_layer TEXT,
                 city TEXT,
                 target_date TEXT,
                 temperature_metric TEXT,
                 training_allowed INTEGER,
-                dependency_source_run_ids_json TEXT
+                dependency_source_run_ids_json TEXT,
+                source_cycle_time TEXT,
+                computed_at TEXT,
+                provenance_json TEXT
             );
             CREATE TABLE readiness_state (
                 strategy_key TEXT,
@@ -439,11 +447,26 @@ def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_p
         )
         conn.execute(
             """
-            INSERT INTO forecast_posteriors VALUES (?, 'live', 'Beijing', '2026-06-12', 'high', 0, ?)
+            INSERT INTO forecast_posteriors VALUES (
+                1, ?, 'live', 'Beijing', '2026-06-12', 'high', 0, ?,
+                '2026-06-11T12:00:00+00:00',
+                '2026-06-11T15:00:00+00:00',
+                ?
+            )
             """,
             (
                 queue_mod.SOURCE_ID,
                 json.dumps({"baseline_b0": "b0-run", "openmeteo_ifs9_anchor": "old-om-run"}),
+                json.dumps(
+                    {
+                        "q_lcb_basis": TRADEABLE_GRADE_QLCB_BASIS,
+                        "bayes_precision_fusion": {
+                            "current_evidence_shape": {
+                                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            }
+                        },
+                    }
+                ),
             ),
         )
         conn.execute(
@@ -1007,9 +1030,11 @@ def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_pat
     assert superseded[0]["superseded_by"] == newer_path.name
 
 
-def test_materialization_queue_batches_default_runner_once_per_cycle(
+def test_materialization_queue_runs_default_requests_in_bounded_parallel(
     tmp_path, monkeypatch
 ) -> None:
+    import threading
+
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     request_dir = tmp_path / "requests"
@@ -1028,58 +1053,295 @@ def test_materialization_queue_batches_default_runner_once_per_cycle(
         "bins": [{"bin_id": "30C"}],
     }
     paths = []
-    for city in ("Shanghai", "Paris"):
+    for city in ("Shanghai", "Paris", "Tokyo", "London", "Madrid", "Taipei"):
         path = request_dir / f"{city}.2026-07-02.high.json"
         path.write_text(json.dumps({**base_request, "city": city}), encoding="utf-8")
         paths.append(path)
     calls: list[list[str]] = []
+    calls_lock = threading.Lock()
+    worker_limit_reached = threading.Event()
+    active = 0
+    max_active = 0
 
-    def _batch_runner(argv):
+    def _parallel_runner(argv):
+        nonlocal active, max_active
         command = list(argv)
-        calls.append(command)
-        start = command.index("--batch-input-json") + 1
-        end = command.index("--commit")
-        input_paths = command[start:end]
-        stdout = "\n".join(
-            json.dumps(
-                {
-                    "input_json": input_path,
-                    "returncode": 0,
-                    "stdout": (
-                        '{"status":"READY","reason_codes":[],"committed":true,'
-                        '"posterior_id":42,"reactor_wake_published":true}\n'
-                    ),
-                    "stderr": "",
-                }
-            )
-            for input_path in input_paths
+        with calls_lock:
+            calls.append(command)
+            active += 1
+            max_active = max(max_active, active)
+            if active == queue_mod.DEFAULT_MATERIALIZATION_MAX_WORKERS:
+                worker_limit_reached.set()
+        assert worker_limit_reached.wait(timeout=1.0)
+        with calls_lock:
+            active -= 1
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                '{"status":"READY","reason_codes":[],"committed":true,'
+                '"posterior_id":42,"reactor_wake_published":true}\n'
+            ),
+            stderr="",
         )
-        return subprocess.CompletedProcess(command, 0, stdout=stdout + "\n", stderr="")
 
-    monkeypatch.setattr(queue_mod, "_run_command", _batch_runner)
+    monkeypatch.setattr(queue_mod, "_run_command", _parallel_runner)
     report = queue_mod.process_replacement_forecast_live_materialization_queue(
         request_dir=request_dir,
         processed_dir=processed_dir,
         failed_dir=failed_dir,
         forecast_db=tmp_path / "forecasts.db",
         raw_manifest_dir=None,
-        limit=2,
+        limit=len(paths),
     )
 
     assert report.status == "PROCESSED"
-    assert report.processed_count == 2
+    assert report.processed_count == len(paths)
     assert report.failed_count == 0
-    assert report.committed_posterior_count == 2
-    assert report.reactor_wake_published_count == 2
-    assert len(calls) == 1
-    assert "--batch-input-json" in calls[0]
-    assert "--init-schema" not in calls[0]
-    assert set(calls[0][calls[0].index("--batch-input-json") + 1 : -1]) == {
-        str(path) for path in paths
+    assert report.committed_posterior_count == len(paths)
+    assert report.reactor_wake_published_count == len(paths)
+    assert len(calls) == len(paths)
+    assert max_active == queue_mod.DEFAULT_MATERIALIZATION_MAX_WORKERS
+    assert all("--input-json" in command for command in calls)
+    assert all("--batch-input-json" not in command for command in calls)
+    assert all("--init-schema" not in command for command in calls)
+    claimed_inputs = {
+        Path(command[command.index("--input-json") + 1]) for command in calls
+    }
+    assert {path.name for path in claimed_inputs} == {path.name for path in paths}
+    assert {path.parent.parent.name for path in claimed_inputs} == {
+        queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME
     }
 
 
-def test_materialization_batch_timeout_keeps_completed_request_committed(
+def test_materialization_queue_releases_lock_before_family_compute(
+    tmp_path,
+) -> None:
+    import threading
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request = {
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    for city in ("A", "B"):
+        (request_dir / f"{city}.json").write_text(
+            json.dumps({**request, "city": city}),
+            encoding="utf-8",
+        )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    reports = []
+
+    def _runner(argv):
+        input_path = Path(argv[argv.index("--input-json") + 1])
+        if input_path.name == "A.json":
+            first_started.set()
+            assert release_first.wait(timeout=2.0)
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr="")
+
+    thread = threading.Thread(
+        target=lambda: reports.append(
+            queue_mod.process_replacement_forecast_live_materialization_queue(
+                request_dir=request_dir,
+                processed_dir=processed_dir,
+                failed_dir=failed_dir,
+                forecast_db=tmp_path / "forecasts.db",
+                limit=1,
+                runner=_runner,
+            )
+        )
+    )
+    thread.start()
+    assert first_started.wait(timeout=2.0)
+    assert not (tmp_path / ".materialization_queue.lock").exists()
+
+    second = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=_runner,
+    )
+    release_first.set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert second.status == "PROCESSED"
+    assert second.processed_count == 1
+    assert reports[0].processed_count == 1
+    assert not tuple(request_dir.glob("*.json"))
+
+
+def test_materialization_queue_defers_same_family_while_inflight(tmp_path) -> None:
+    import threading
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request = {
+        "city": "Tokyo",
+        "target_date": "2026-07-20",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-19T12:00:00+00:00",
+        "computed_at": "2026-07-19T23:00:00+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "35C"}],
+    }
+    first = request_dir / "Tokyo.first.json"
+    first.write_text(json.dumps(request), encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def _runner(argv):
+        calls.append(Path(argv[argv.index("--input-json") + 1]).name)
+        started.set()
+        assert release.wait(timeout=2.0)
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr="")
+
+    thread = threading.Thread(
+        target=lambda: queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=tmp_path / "forecasts.db",
+            limit=1,
+            runner=_runner,
+        )
+    )
+    thread.start()
+    assert started.wait(timeout=2.0)
+    duplicate = request_dir / "Tokyo.newer.json"
+    duplicate.write_text(
+        json.dumps({**request, "computed_at": "2026-07-19T23:00:01+00:00"}),
+        encoding="utf-8",
+    )
+
+    deferred = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=lambda _argv: pytest.fail("same family must not run twice"),
+    )
+    release.set()
+    thread.join(timeout=2.0)
+
+    assert deferred.status == "NO_REQUESTS"
+    assert deferred.skipped_count == 1
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_INFLIGHT" in deferred.reason_codes
+    assert duplicate.exists()
+    assert calls == [first.name]
+
+
+def test_materialization_queue_recovers_only_stale_inflight_claim(tmp_path, monkeypatch) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    batch_dir = tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME / "stale"
+    batch_dir.mkdir(parents=True)
+    request = {
+        "city": "Paris",
+        "target_date": "2026-07-20",
+        "temperature_metric": "low",
+        "source_cycle_time": "2026-07-19T12:00:00+00:00",
+        "computed_at": "2026-07-19T23:00:00+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "14C"}],
+    }
+    (batch_dir / "Paris.json").write_text(json.dumps(request), encoding="utf-8")
+    (batch_dir / queue_mod._CLAIM_METADATA_NAME).write_text(
+        json.dumps({"claimed_at": "2000-01-01T00:00:00+00:00", "owner_pid": 1}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_materialization_subprocess_timeout_seconds",
+        lambda: 1.0,
+    )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=lambda argv: subprocess.CompletedProcess(
+            list(argv), 0, stdout="ok\n", stderr=""
+        ),
+    )
+
+    assert report.status == "PROCESSED"
+    assert report.processed_count == 1
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_STALE_CLAIM_RECOVERED" in report.reason_codes
+    assert not batch_dir.exists()
+
+
+def test_materialization_queue_preserves_claim_when_runner_crashes(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Madrid",
+        "target_date": "2026-07-20",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-19T12:00:00+00:00",
+        "computed_at": "2026-07-19T23:00:00+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "35C"}],
+    }
+    (request_dir / "Madrid.json").write_text(json.dumps(request), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="runner crashed"):
+        queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=tmp_path / "processed",
+            failed_dir=tmp_path / "failed",
+            forecast_db=tmp_path / "forecasts.db",
+            limit=1,
+            runner=lambda _argv: (_ for _ in ()).throw(RuntimeError("runner crashed")),
+        )
+
+    batches = tuple(
+        (tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME).iterdir()
+    )
+    assert len(batches) == 1
+    assert (batches[0] / queue_mod._CLAIM_METADATA_NAME).exists()
+    assert (batches[0] / "Madrid.json").exists()
+    assert not (tmp_path / ".materialization_queue.lock").exists()
+
+
+def test_materialization_timeout_isolated_to_its_own_request(
     tmp_path, monkeypatch
 ) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
@@ -1105,25 +1367,27 @@ def test_materialization_batch_timeout_keeps_completed_request_committed(
             encoding="utf-8",
         )
 
-    def _timeout_after_first(argv):
+    def _timeout_one_request(argv):
         command = list(argv)
-        first = command[command.index("--batch-input-json") + 1]
-        completed = json.dumps(
-            {
-                "input_json": first,
-                "returncode": 0,
-                "stdout": '{"status":"READY","reason_codes":[]}\n',
-                "stderr": "",
-            }
-        )
-        raise subprocess.TimeoutExpired(
-            cmd=command,
-            timeout=1.5,
-            output=completed + "\n",
+        input_path = command[command.index("--input-json") + 1]
+        if Path(input_path).name == "B.json":
+            raise subprocess.TimeoutExpired(
+                cmd=command,
+                timeout=1.5,
+                output="",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                '{"status":"READY","reason_codes":[],"committed":true,'
+                '"posterior_id":42,"reactor_wake_published":true}\n'
+            ),
             stderr="",
         )
 
-    monkeypatch.setattr(queue_mod, "_run_command", _timeout_after_first)
+    monkeypatch.setattr(queue_mod, "_run_command", _timeout_one_request)
     report = queue_mod.process_replacement_forecast_live_materialization_queue(
         request_dir=request_dir,
         processed_dir=processed_dir,
@@ -1136,7 +1400,10 @@ def test_materialization_batch_timeout_keeps_completed_request_committed(
     assert report.status == "FAILED"
     assert report.processed_count == 1
     assert report.failed_count == 1
+    assert report.committed_posterior_count == 1
+    assert report.reactor_wake_published_count == 1
     failed_request = Path(report.failed_files[0])
+    assert failed_request.name.startswith("B.")
     sidecar = json.loads(
         failed_request.with_suffix(failed_request.suffix + ".receipt.json").read_text()
     )

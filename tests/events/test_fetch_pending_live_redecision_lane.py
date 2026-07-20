@@ -1,5 +1,5 @@
 # Created: 2026-06-16
-# Last audited: 2026-06-16
+# Last audited: 2026-07-20
 # Authority basis: rest-pull, terminal-no-fill, held-position, and price-screen
 #   continuations all use the same EDLI_REDECISION_PENDING live lane. Regular FSR
 #   stays Tier 1; live redecision stays Tier 0.
@@ -16,6 +16,7 @@ Asserted on the ORDER fetch_pending returns, never a re-implementation of the SQ
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from src.config import runtime_cities_by_name
@@ -246,6 +247,61 @@ def test_continuous_redecision_jumps_ordinary_fsr_backlog():
         "a screen-admitted EDLI_REDECISION_PENDING row must not be stuck behind "
         "ordinary FSR discovery when the cycle budget reaches only one event"
     )
+
+
+def test_market_price_flood_cannot_hide_new_forecast_source_facts():
+    """A continuous price wake is live work, but it cannot consume every slot.
+
+    Forecast updates start a new probability regime with a short alpha clock. A
+    price-event flood must retain the first redecision slot while exposing source
+    facts in the same bounded work page.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+
+    cities = _REAL_CITIES[:28]
+    assert len(cities) == 28
+    for rank, city in enumerate(cities[:24]):
+        event = _continuous_redecision(
+            city,
+            f"snap-price-{rank}",
+            available_at=f"2026-06-16T11:{rank:02d}:00+00:00",
+            received_at=f"2026-06-16T11:{rank:02d}:30+00:00",
+        )
+        payload = json.loads(event.payload_json)
+        payload["redecision_origin"] = "market_price"
+        store.insert_or_ignore(
+            make_opportunity_event(
+                event_type=event.event_type,
+                entity_key=event.entity_key,
+                source="market_channel_price:test",
+                observed_at=event.observed_at,
+                available_at=event.available_at,
+                received_at=event.received_at,
+                causal_snapshot_id=event.causal_snapshot_id,
+                payload=payload,
+                priority=event.priority,
+            )
+        )
+    for rank, city in enumerate(cities[24:]):
+        store.insert_or_ignore(
+            _tradeable_fsr(
+                city,
+                f"snap-source-{rank}",
+                available_at=f"2026-06-16T10:{rank:02d}:00+00:00",
+                received_at=f"2026-06-16T10:{rank:02d}:30+00:00",
+            )
+        )
+
+    claimed = store.fetch_pending(decision_time=_DECISION_TIME, limit=8)
+    claimed_types = [event.event_type for event in claimed]
+
+    assert claimed_types[:2] == [
+        "EDLI_REDECISION_PENDING",
+        "FORECAST_SNAPSHOT_READY",
+    ]
+    assert claimed_types.count("EDLI_REDECISION_PENDING") == 4
+    assert claimed_types.count("FORECAST_SNAPSHOT_READY") == 4
 
 
 def test_requeued_continuous_redecision_jumps_tier0_backlog():

@@ -625,13 +625,29 @@ def _day0_remaining_center_delta_c(
     must leave serving byte-identical.
     """
     try:
+        params = (
+            request.city,
+            _date_text(request.target_date),
+            computed_at_utc.isoformat(),
+        )
         row = conn.execute(
             "SELECT vector_id, timezone_name, times_json, temps_c_json "
             "FROM day0_hourly_vectors "
-            "WHERE model = 'ecmwf_ifs' AND lower(city) = lower(?) AND target_date = ? "
+            "WHERE model = 'ecmwf_ifs' AND city = ? AND target_date = ? "
             "AND captured_at <= ? ORDER BY captured_at DESC LIMIT 1",
-            (request.city, _date_text(request.target_date), computed_at_utc.isoformat()),
+            params,
         ).fetchone()
+        if row is None:
+            # Canonical requests and vectors share the configured city spelling,
+            # so the indexed exact seek is the hot path. Keep a compatibility
+            # fallback for old rows whose only mismatch is case.
+            row = conn.execute(
+                "SELECT vector_id, timezone_name, times_json, temps_c_json "
+                "FROM day0_hourly_vectors "
+                "WHERE model = 'ecmwf_ifs' AND lower(city) = lower(?) AND target_date = ? "
+                "AND captured_at <= ? ORDER BY captured_at DESC LIMIT 1",
+                params,
+            ).fetchone()
         if row is None:
             return 0.0, None, None
         vector_id = str(row[0])
@@ -1676,14 +1692,21 @@ def _read_current_evidence_shape(
             carrier_cycle_dt
             - timedelta(hours=replacement_source_cycle_max_age_hours())
         ).isoformat()
-        row = conn.execute(
-            """
+        params = (
+            request.city,
+            _date_text(request.target_date),
+            metric,
+            carrier_cycle,
+            min_evidence_cycle,
+            decision_at,
+        )
+        query = """
             SELECT snapshot_id, members_json,
                    COALESCE(source_cycle_time, issue_time) AS evidence_cycle,
                    COALESCE(source_available_at, available_at) AS evidence_available_at,
                    members_unit
             FROM ensemble_snapshots
-            WHERE lower(city) = lower(?)
+            WHERE {city_predicate}
               AND target_date = ?
               AND temperature_metric = ?
               AND source_id = 'ecmwf_open_data'
@@ -1700,16 +1723,19 @@ def _read_current_evidence_shape(
                      COALESCE(source_available_at, available_at) DESC,
                      snapshot_id DESC
             LIMIT 1
-            """,
-            (
-                request.city,
-                _date_text(request.target_date),
-                metric,
-                carrier_cycle,
-                min_evidence_cycle,
-                decision_at,
-            ),
+            """
+        row = conn.execute(
+            query.format(city_predicate="city = ?"),
+            params,
         ).fetchone()
+        if row is None:
+            # ``lower(city)`` disables the live composite city index on the
+            # multi-million-row snapshot table. Canonical identity uses the exact
+            # seek; retain case-insensitive compatibility only after a miss.
+            row = conn.execute(
+                query.format(city_predicate="lower(city) = lower(?)"),
+                params,
+            ).fetchone()
         if row is None:
             return None
         # Boundary-quarantined members are persisted as null (leakage law: their boundary

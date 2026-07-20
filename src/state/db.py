@@ -4160,6 +4160,44 @@ def _create_source_run_coverage(conn: sqlite3.Connection) -> None:
     """)
 
 
+_READINESS_STATE_INDEX_SQL: dict[str, str] = {
+    "idx_readiness_state_entry_scope": """
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_entry_scope
+            ON readiness_state(city_id, city_timezone, target_local_date,
+                               temperature_metric, strategy_key,
+                               market_family, condition_id)
+    """,
+    "idx_readiness_state_status_expiry": """
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_status_expiry
+            ON readiness_state(status, expires_at)
+    """,
+    "idx_readiness_state_strategy_family_latest": """
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_strategy_family_latest
+            ON readiness_state(strategy_key, city, target_local_date,
+                               temperature_metric, computed_at DESC,
+                               readiness_id DESC)
+    """,
+}
+
+
+def _ensure_readiness_state_indexes(conn: sqlite3.Connection) -> None:
+    """Put canonical readiness indexes on the active table.
+
+    SQLite index names are database-global. Historical migrations retained a
+    renamed readiness table whose indexes still occupied the canonical names,
+    so ``CREATE INDEX IF NOT EXISTS`` silently left the active table unindexed.
+    """
+
+    for index_name, create_sql in _READINESS_STATE_INDEX_SQL.items():
+        row = conn.execute(
+            "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?",
+            (index_name,),
+        ).fetchone()
+        if row is not None and str(row[0]) != "readiness_state":
+            conn.execute(f'DROP INDEX "{index_name}"')
+        conn.execute(create_sql)
+
+
 def _create_readiness_state(conn: sqlite3.Connection) -> None:
     """Create readiness_state table + indexes. Idempotent forecast authority table."""
     conn.execute("""
@@ -4203,16 +4241,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
             )
         )
     """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_readiness_state_entry_scope
-            ON readiness_state(city_id, city_timezone, target_local_date,
-                               temperature_metric, strategy_key,
-                               market_family, condition_id)
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_readiness_state_status_expiry
-            ON readiness_state(status, expires_at)
-    """)
+    _ensure_readiness_state_indexes(conn)
 
 
 _FORECAST_TABLES = (
@@ -4588,7 +4617,10 @@ def _migrate_readiness_state_status_checks(conn: sqlite3.Connection) -> None:
     """
 
     sql = _table_create_sql(conn, "readiness_state")
-    if not sql or "DEGRADED_LOG_ONLY" not in sql:
+    if not sql:
+        return
+    if "DEGRADED_LOG_ONLY" not in sql:
+        _ensure_readiness_state_indexes(conn)
         return
     stale_rows = conn.execute(
         """
@@ -4670,20 +4702,7 @@ def _migrate_readiness_state_status_checks(conn: sqlite3.Connection) -> None:
         )
     conn.execute("DROP TABLE readiness_state")
     conn.execute("ALTER TABLE readiness_state_status_migrated RENAME TO readiness_state")
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_readiness_state_entry_scope
-            ON readiness_state(city_id, city_timezone, target_local_date,
-                               temperature_metric, strategy_key,
-                               market_family, condition_id)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_readiness_state_status_expiry
-            ON readiness_state(status, expires_at)
-        """
-    )
+    _ensure_readiness_state_indexes(conn)
 
 
 def _table_create_sql(conn: sqlite3.Connection, table_name: str) -> str | None:
@@ -6441,14 +6460,13 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # per dispatch: "DO NOT migrate data. DO NOT touch state/*.db."
 
 
-_FORECASTS_LIVE_REQUIRED_INDEXES: frozenset[str] = frozenset(
-    {
-        "idx_forecast_posteriors_live_family_cycle",
-        "idx_raw_model_forecasts_endpoint_family_cycle_members",
-    }
-)
-
-
+_FORECASTS_LIVE_REQUIRED_INDEX_TABLES: dict[str, str] = {
+    "idx_forecast_posteriors_live_family_cycle": "forecast_posteriors",
+    "idx_raw_model_forecasts_endpoint_family_cycle_members": "raw_model_forecasts",
+    "idx_readiness_state_entry_scope": "readiness_state",
+    "idx_readiness_state_status_expiry": "readiness_state",
+    "idx_readiness_state_strategy_family_latest": "readiness_state",
+}
 def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
     """Assert the forecasts DB has live-required schema surfaces.
 
@@ -6458,16 +6476,20 @@ def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
     ``init_schema_forecasts`` on the forecast ingest daemon.
     """
 
-    indexes = {
-        str(row[0])
+    index_tables = {
+        str(row[0]): str(row[1])
         for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
+            "SELECT name, tbl_name FROM sqlite_master WHERE type='index'"
         ).fetchall()
     }
-    missing_indexes = sorted(_FORECASTS_LIVE_REQUIRED_INDEXES - indexes)
+    missing_indexes = sorted(
+        index_name
+        for index_name, table_name in _FORECASTS_LIVE_REQUIRED_INDEX_TABLES.items()
+        if index_tables.get(index_name) != table_name
+    )
     if missing_indexes:
         raise RuntimeError(
-            "forecasts DB missing live-required indexes: "
+            "forecasts DB missing or misbound live-required indexes: "
             f"{missing_indexes}; run init_schema_forecasts before live trading"
         )
 

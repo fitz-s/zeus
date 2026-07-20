@@ -1,5 +1,5 @@
 # Created: 2026-07-18
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-20
 # Authority basis: docs/evidence/upstream_physical_2026_07_17/day0_mechanism_first_principles_audit.md §7
 #   (post-peak served P(new extreme beyond obs) 0.314 vs realized 0.070, 4.50x; LOW eve 0.409 vs 0.000)
 #   + day0_percity_diurnal_timing.md; docs/operations/current/plans/upstream_data_physical_2026-07-17.md
@@ -197,6 +197,21 @@ def test_city_match_is_case_insensitive() -> None:
     )
     assert vector_id == "v-test"
     assert delta > 0.0
+
+
+def test_canonical_city_uses_one_indexable_vector_seek() -> None:
+    conn = _vector_conn()
+    _insert_vector(conn)
+    trace: list[str] = []
+    conn.set_trace_callback(trace.append)
+
+    _day0_remaining_center_delta_c(
+        conn, _stub_request(), metric="high", computed_at_utc=_utc(15)
+    )
+
+    selects = [sql for sql in trace if "FROM day0_hourly_vectors" in sql]
+    assert len(selects) == 1
+    assert "lower(city)" not in selects[0].lower()
 
 
 def test_all_remaining_null_fails_open() -> None:
