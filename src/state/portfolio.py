@@ -3002,7 +3002,7 @@ def load_portfolio(
         chain_only_facts=chain_only_facts,
         authority="canonical_db",
         authority_scope=(
-            "runtime_exposure" if target_families is not None else "full_portfolio"
+            "runtime_exposure" if open_positions_only else "full_portfolio"
         ),
     )
 

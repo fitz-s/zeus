@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-20
 # Authority basis: midstream verdict v2; finite-evidence single-q global SELL ownership
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -272,6 +272,36 @@ def test_targeted_monitor_scopes_canonical_projection_to_runtime_exposure():
     ]
     assert len(projection_reads) == 1
     assert "WHERE position_id IN ('target-held')" in projection_reads[0]
+
+
+def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
+    monkeypatch,
+    tmp_path,
+):
+    """A periodic full-held monitor must still scope projection reads to open IDs."""
+    from src.state import db as db_module
+    from src.state import portfolio as portfolio_module
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    monkeypatch.setattr(
+        db_module,
+        "get_trade_connection_with_world",
+        lambda **_kwargs: conn,
+    )
+    monkeypatch.setattr(
+        db_module,
+        "query_portfolio_loader_view",
+        lambda *_args, **_kwargs: {"status": "ok", "positions": []},
+    )
+
+    portfolio = portfolio_module.load_portfolio(
+        tmp_path / "positions-live.json",
+        open_positions_only=True,
+    )
+
+    assert portfolio.authority == "canonical_db"
+    assert portfolio.authority_scope == "runtime_exposure"
 
 
 def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monkeypatch):
