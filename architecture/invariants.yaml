@@ -946,30 +946,31 @@ invariants:
     zones: [K0_frozen_kernel, K2_runtime, live_venue_submit]
     statement: >
       Every live BUY or SELL venue submission, including entry, reduce-only
-      exit, single-order, and batch paths, must have a finite unit price
-      strictly inside (0, 1). Zero, one, NaN, and infinities are rejected before
-      SDK contact. This binary-contract domain applies symmetrically to BUY and
-      SELL; current snapshot tick alignment/range, minimum size, identity,
-      tradeability, fee/depth, and economic authorization remain cumulative
-      requirements.
+      exit, single-order, and batch paths, must have a finite unit price inside
+      inclusive [0.05, 0.95]. Anything below 0.05 or above 0.95 is rejected at
+      command persistence, the canonical envelope, and an independent final SDK
+      boundary. This band applies symmetrically to BUY and SELL; current snapshot
+      tick alignment/range, minimum size, identity, tradeability, fee/depth, and
+      economic authorization remain cumulative requirements and cannot waive it.
     why: >
-      A fixed 0.05/0.95 band conflated nominal price with probability quality,
-      blocked tick-legal binary claims, and treated BUY and reduce-only SELL
-      differently at the tails. The envelope owns only the primitive binary
-      price domain; robust delta-log-wealth/EV, Kelly, fees, depth, and current
-      executable truth decide whether a legal price is economically actionable.
+      The Paris, Seoul, and Hong Kong incidents prove that upper-layer economic
+      authorization is not an absolute live safety boundary. Defense in depth
+      prevents a future helper rewrite or alternate submit route from silently
+      restoring extreme-price execution.
     enforced_by:
       tests:
-        - tests/test_v2_adapter.py::test_live_submit_unit_price_domain_is_side_symmetric
-        - tests/test_v2_adapter.py::test_live_submit_rejects_non_binary_price_before_sdk_contact
-        - tests/test_v2_adapter.py::TestSubmitBatch::test_non_binary_price_rejects_entire_batch_before_sdk_contact
-        - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_non_binary_price_before_persistence
+        - tests/test_v2_adapter.py::test_live_submit_unit_price_band_is_inclusive
+        - tests/test_v2_adapter.py::test_live_submit_rejects_out_of_band_price_before_sdk_contact
+        - tests/test_v2_adapter.py::test_adapter_sdk_boundary_rejects_even_if_envelope_guard_is_bypassed
+        - tests/test_v2_adapter.py::TestSubmitBatch::test_out_of_band_price_rejects_entire_batch_before_sdk_contact
+        - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_out_of_band_price_before_persistence
+        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand
       negative_constraints: []
     capability_tags: [live_venue_submit, venue_adapter, execution_price]
     relationship_tests:
       - tests/test_v2_adapter.py
       - tests/test_executor.py
-    basis: operator first-principles live venue price directive 2026-07-18
+    basis: operator absolute unit-price directives 2026-07-13, 2026-07-18, and 2026-07-19; Paris 35C, Seoul 25C, and Hong Kong 27C incidents
     added: 2026-07-15
 
   - id: INV-44
