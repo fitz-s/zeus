@@ -13787,6 +13787,32 @@ class TestRecoveryResolutionTable:
         }
         assert reconcile_terminal_order_facts(conn)["scanned"] == 0
 
+    def test_cancel_pending_malformed_partial_fact_has_no_terminal_authority(
+        self,
+        conn,
+    ):
+        """Malformed payload text cannot crash or authorize cancel completion."""
+        _insert(conn, size=10.0, price=0.50)
+        _seed_pending_entry_projection(conn)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+        _append_order_fact(
+            conn,
+            state="PARTIALLY_MATCHED",
+            matched_size="0",
+            remaining_size="0",
+            raw_payload_json="{malformed",
+        )
+
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        assert reconcile_terminal_order_facts(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "CANCEL_PENDING"
+
     def test_cancelled_terminal_order_fact_with_matched_size_recovers_entry_projection(
         self,
         conn,

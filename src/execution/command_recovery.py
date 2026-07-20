@@ -1559,6 +1559,7 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
                     cmd.state = 'CANCEL_PENDING'
                     AND fact.state = 'PARTIALLY_MATCHED'
                     AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
+                    AND json_valid(fact.raw_payload_json)
                     AND json_extract(fact.raw_payload_json, '$.proof_class')
                         = 'terminal_partial_order_fact'
                     AND json_extract(
@@ -18769,6 +18770,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_terminal_order_facts,
             "terminal_order_facts",
         )
+
+    if scope in {"restart_preflight", "live_tick"}:
         _db_pass(
             "completed_partial_order_facts",
             reconcile_completed_partial_order_facts,
