@@ -151,7 +151,6 @@ def test_day0_absorbing_no_at_999_is_blocked_before_selection():
         bin=Bin(low=25.0, high=25.0, unit="C", label="25°C"),
     )
     family = types.SimpleNamespace(
-        family_id="Shanghai:2026-06-18:low",
         candidates=(candidate,),
         city="Shanghai",
         target_date="2026-06-18",
