@@ -24,7 +24,7 @@ import time
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -4346,6 +4346,15 @@ def _evaluate_high_yes_edge_missed_surface_python(
         ),
         **buy_yes_suppression,
     }
+    candidate_evidence_issue = str(
+        auction_candidate_evidence.get("issue") or ""
+    )
+    if candidate_evidence_issue:
+        return {
+            "ok": False,
+            "issue": candidate_evidence_issue,
+            **detail,
+        }
     if detail["entries_paused"]:
         return {"ok": True, "issue": None, **detail}
     if missing_fsr:
@@ -5065,6 +5074,162 @@ def _count_times_at_or_after(times: tuple[str, ...], cutoff: str) -> int:
     return sum(1 for observed_at in times if str(observed_at or "") >= cutoff)
 
 
+_GLOBAL_AUCTION_RECEIPT_MODES = (
+    "global_single_order_auction",
+    "global_single_order_auction_delta",
+    "global_single_order_auction_duplicate",
+)
+
+
+def _decode_global_auction_candidate_payload(
+    summary: Mapping[str, object],
+) -> tuple[dict[str, object], bytes]:
+    compressed = base64.b64decode(
+        str(summary["candidate_evaluations_zlib_b64"]),
+        validate=True,
+    )
+    if len(compressed) > 2_000_000:
+        raise ValueError("COMPRESSED_PAYLOAD_TOO_LARGE")
+    raw = zlib.decompress(compressed)
+    if len(raw) > 10_000_000:
+        raise ValueError("PAYLOAD_TOO_LARGE")
+    if hashlib.sha256(raw).hexdigest() != str(
+        summary["candidate_evaluations_sha256"]
+    ):
+        raise ValueError("HASH_MISMATCH")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("PAYLOAD_SHAPE")
+    return payload, raw
+
+
+def _global_auction_reference_summary(
+    conn: object,
+    *,
+    row_id: int,
+    mode: str,
+    receipt_hash: str,
+    component_sha256: str,
+) -> Mapping[str, object]:
+    if mode not in _GLOBAL_AUCTION_RECEIPT_MODES:
+        raise ValueError("REFERENCE_MODE")
+    row = conn.execute(
+        "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+        (row_id,),
+    ).fetchone()
+    if row is None or str(row["mode"] or "") != mode:
+        raise ValueError("REFERENCE_ROW")
+    artifact = json.loads(str(row["artifact_json"] or ""))
+    summary = artifact["summary"]
+    if (
+        str(summary.get("receipt_hash") or "") != receipt_hash
+        or str(summary.get("candidate_evaluations_sha256") or "")
+        != component_sha256
+        or "candidate_evaluations_zlib_b64" not in summary
+    ):
+        raise ValueError("REFERENCE_IDENTITY")
+    return summary
+
+
+def _current_global_auction_candidate_payload(
+    conn: object,
+    summary: Mapping[str, object],
+) -> dict[str, object]:
+    field = "candidate_evaluations_zlib_b64"
+    if field in summary:
+        return _decode_global_auction_candidate_payload(summary)[0]
+
+    delta_field = "candidate_evaluations_delta_zlib_b64"
+    if delta_field in summary:
+        if summary.get("candidate_evaluations_delta_encoding") != (
+            "zlib+base64+canonical-json-object-delta-v1"
+        ):
+            raise ValueError("DELTA_ENCODING")
+        base_row_id = int(summary["candidate_evaluations_base_decision_log_id"])
+        base_receipt_hash = str(
+            summary["candidate_evaluations_base_receipt_hash"]
+        )
+        base_mode = str(summary.get("candidate_evaluations_base_mode") or "")
+        if not base_mode:
+            if (
+                int(summary.get("payload_reference_decision_log_id") or 0)
+                != base_row_id
+                or str(summary.get("payload_reference_receipt_hash") or "")
+                != base_receipt_hash
+            ):
+                raise ValueError("DELTA_BASE_MODE_MISSING")
+            base_mode = str(summary.get("payload_reference_mode") or "")
+        base_summary = _global_auction_reference_summary(
+            conn,
+            row_id=base_row_id,
+            mode=base_mode,
+            receipt_hash=base_receipt_hash,
+            component_sha256=str(summary["candidate_evaluations_base_sha256"]),
+        )
+        if base_summary.get("candidate_evaluation_encoding") != summary.get(
+            "candidate_evaluation_encoding"
+        ):
+            raise ValueError("DELTA_BASE_ENCODING")
+        base = _decode_global_auction_candidate_payload(base_summary)[0]
+        compressed = base64.b64decode(str(summary[delta_field]), validate=True)
+        if len(compressed) > 2_000_000:
+            raise ValueError("DELTA_COMPRESSED_PAYLOAD_TOO_LARGE")
+        delta_raw = zlib.decompress(compressed)
+        if len(delta_raw) > 10_000_000:
+            raise ValueError("DELTA_PAYLOAD_TOO_LARGE")
+        if hashlib.sha256(delta_raw).hexdigest() != str(
+            summary["candidate_evaluations_delta_sha256"]
+        ):
+            raise ValueError("DELTA_HASH_MISMATCH")
+        delta = json.loads(delta_raw)
+        replacements = delta.get("replacements", {})
+        if not isinstance(replacements, dict):
+            raise ValueError("DELTA_PAYLOAD_SHAPE")
+        payload = dict(base)
+        for key in delta.get("removed_keys", ()):
+            payload.pop(str(key), None)
+        payload.update((str(key), value) for key, value in replacements.items())
+        raw = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if hashlib.sha256(raw).hexdigest() != str(
+            summary["candidate_evaluations_sha256"]
+        ):
+            raise ValueError("DELTA_RECONSTRUCTION_HASH_MISMATCH")
+        return payload
+
+    if field not in set(summary.get("payload_reference_fields", ())):
+        raise ValueError("PAYLOAD_REFERENCE_MISSING")
+    references = summary.get("payload_reference_components", {})
+    component = references.get(field, {}) if isinstance(references, dict) else {}
+    if component:
+        row_id = int(component["decision_log_id"])
+        mode = str(component["mode"])
+        receipt_hash = str(component["receipt_hash"])
+        component_sha256 = str(component["sha256"])
+    else:
+        row_id = int(summary["payload_reference_decision_log_id"])
+        mode = str(summary["payload_reference_mode"])
+        receipt_hash = str(summary["payload_reference_receipt_hash"])
+        component_sha256 = str(summary["candidate_evaluations_sha256"])
+    if component_sha256 != str(summary["candidate_evaluations_sha256"]):
+        raise ValueError("PAYLOAD_REFERENCE_HASH_MISMATCH")
+    reference_summary = _global_auction_reference_summary(
+        conn,
+        row_id=row_id,
+        mode=mode,
+        receipt_hash=receipt_hash,
+        component_sha256=component_sha256,
+    )
+    if reference_summary.get("candidate_evaluation_encoding") != summary.get(
+        "candidate_evaluation_encoding"
+    ):
+        raise ValueError("PAYLOAD_REFERENCE_ENCODING")
+    return _decode_global_auction_candidate_payload(reference_summary)[0]
+
+
 def _latest_global_auction_candidate_counts(
     conn: object,
     *,
@@ -5082,14 +5247,14 @@ def _latest_global_auction_candidate_counts(
         }
     row = conn.execute(
         """
-        SELECT id, artifact_json, timestamp
+        SELECT id, mode, artifact_json, timestamp
           FROM decision_log
-         WHERE mode = 'global_single_order_auction'
+         WHERE mode IN (?, ?, ?)
            AND timestamp >= ?
          ORDER BY id DESC
          LIMIT 1
         """,
-        (cutoff,),
+        (*_GLOBAL_AUCTION_RECEIPT_MODES, cutoff),
     ).fetchone()
     if row is None:
         return {}, {}, {
@@ -5124,20 +5289,7 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v8",
         }:
             return invalid("ENCODING")
-        compressed = base64.b64decode(
-            str(summary["candidate_evaluations_zlib_b64"]),
-            validate=True,
-        )
-        if len(compressed) > 2_000_000:
-            return invalid("COMPRESSED_PAYLOAD_TOO_LARGE")
-        raw = zlib.decompress(compressed)
-        if len(raw) > 10_000_000:
-            return invalid("PAYLOAD_TOO_LARGE")
-        if hashlib.sha256(raw).hexdigest() != str(
-            summary["candidate_evaluations_sha256"]
-        ):
-            return invalid("HASH_MISMATCH")
-        payload = json.loads(raw)
+        payload = _current_global_auction_candidate_payload(conn, summary)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError, zlib.error) as exc:
         return invalid(type(exc).__name__)
 

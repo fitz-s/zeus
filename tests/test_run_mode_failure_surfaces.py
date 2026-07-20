@@ -4379,6 +4379,263 @@ def test_high_yes_edge_accepts_current_global_auction_candidate(
     assert evidence["yes_condition_count"] == 1
 
 
+def test_high_yes_edge_reconstructs_latest_global_auction_candidate_delta(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v8",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        base_artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        base_summary = base_artifact["summary"]
+        base_summary["receipt_hash"] = "base-receipt-hash"
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(base_artifact),),
+        )
+        base_payload = json.loads(
+            zlib.decompress(
+                base64.b64decode(
+                    base_summary["candidate_evaluations_zlib_b64"]
+                )
+            )
+        )
+        current_payload = {
+            **base_payload,
+            "rejected_groups": [
+                {
+                    **base_payload["rejected_groups"][0],
+                    "reason": "NON_POSITIVE_ROBUST_OBJECTIVE",
+                }
+            ],
+        }
+        current_raw = json.dumps(
+            current_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        delta = {
+            "removed_keys": [],
+            "replacements": {
+                "rejected_groups": current_payload["rejected_groups"]
+            },
+        }
+        delta_raw = json.dumps(
+            delta,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        current_summary = {
+            **base_summary,
+            "decision_at_utc": datetime.now(timezone.utc).isoformat(),
+            "receipt_hash": "current-receipt-hash",
+            "candidate_evaluations_sha256": hashlib.sha256(
+                current_raw
+            ).hexdigest(),
+            "candidate_evaluations_delta_encoding": (
+                "zlib+base64+canonical-json-object-delta-v1"
+            ),
+            "candidate_evaluations_delta_sha256": hashlib.sha256(
+                delta_raw
+            ).hexdigest(),
+            "candidate_evaluations_delta_zlib_b64": base64.b64encode(
+                zlib.compress(delta_raw)
+            ).decode(),
+            "candidate_evaluations_base_decision_log_id": 1,
+            "candidate_evaluations_base_mode": (
+                "global_single_order_auction"
+            ),
+            "candidate_evaluations_base_receipt_hash": "base-receipt-hash",
+            "candidate_evaluations_base_sha256": base_summary[
+                "candidate_evaluations_sha256"
+            ],
+            "payload_reference_decision_log_id": 1,
+            "payload_reference_mode": "global_single_order_auction",
+            "payload_reference_receipt_hash": "base-receipt-hash",
+        }
+        current_summary.pop("candidate_evaluations_base_mode")
+        current_summary.pop("candidate_evaluations_zlib_b64")
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO decision_log VALUES (?, ?, ?, ?)",
+            (
+                2,
+                "global_single_order_auction_delta",
+                json.dumps({"summary": current_summary}),
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert surface["ok"] is True
+    evidence = surface["global_auction_candidate_evidence"]
+    assert evidence["issue"] is None
+    assert evidence["receipt_id"] == 2
+    assert evidence["candidate_evaluation_count"] == 1
+    assert evidence["yes_condition_count"] == 1
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        inline_summary = dict(current_summary)
+        for key in tuple(inline_summary):
+            if key.startswith("candidate_evaluations_delta_") or key.startswith(
+                "candidate_evaluations_base_"
+            ):
+                inline_summary.pop(key)
+        inline_summary.update(
+            {
+                "receipt_hash": "inline-receipt-hash",
+                "candidate_evaluations_zlib_b64": base64.b64encode(
+                    zlib.compress(current_raw)
+                ).decode(),
+            }
+        )
+        referenced_summary = dict(inline_summary)
+        referenced_summary.pop("candidate_evaluations_zlib_b64")
+        referenced_summary.update(
+            {
+                "receipt_hash": "referenced-receipt-hash",
+                "payload_reference_fields": [
+                    "candidate_evaluations_zlib_b64"
+                ],
+                "payload_reference_components": {
+                    "candidate_evaluations_zlib_b64": {
+                        "decision_log_id": 3,
+                        "mode": "global_single_order_auction_delta",
+                        "receipt_hash": "inline-receipt-hash",
+                        "sha256": inline_summary[
+                            "candidate_evaluations_sha256"
+                        ],
+                    }
+                },
+            }
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        conn.executemany(
+            "INSERT INTO decision_log VALUES (?, ?, ?, ?)",
+            (
+                (
+                    3,
+                    "global_single_order_auction_delta",
+                    json.dumps({"summary": inline_summary}),
+                    now,
+                ),
+                (
+                    4,
+                    "global_single_order_auction_duplicate",
+                    json.dumps({"summary": referenced_summary}),
+                    now,
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    referenced_surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+    referenced_evidence = referenced_surface[
+        "global_auction_candidate_evidence"
+    ]
+    assert referenced_surface["ok"] is True
+    assert referenced_evidence["issue"] is None
+    assert referenced_evidence["receipt_id"] == 4
+    assert referenced_evidence["yes_condition_count"] == 1
+
+    corrupt_summary = json.loads(json.dumps(referenced_summary))
+    corrupt_summary["payload_reference_components"][
+        "candidate_evaluations_zlib_b64"
+    ]["receipt_hash"] = "wrong-reference-receipt-hash"
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "INSERT INTO decision_log VALUES (?, ?, ?, ?)",
+            (
+                5,
+                "global_single_order_auction_duplicate",
+                json.dumps({"summary": corrupt_summary}),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    corrupt_surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+    assert corrupt_surface["ok"] is False
+    assert corrupt_surface["issue"].startswith(
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:"
+    )
+    assert corrupt_surface["global_auction_candidate_evidence"][
+        "receipt_id"
+    ] == 5
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        inline_artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 3"
+            ).fetchone()[0]
+        )
+        inline_artifact["summary"]["receipt_hash"] = "tampered-anchor"
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 3",
+            (json.dumps(inline_artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    tampered_surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+    assert tampered_surface["global_auction_candidate_evidence"][
+        "issue"
+    ] == "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:ValueError"
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DELETE FROM decision_log WHERE id = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    orphan_surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+    assert orphan_surface["global_auction_candidate_evidence"][
+        "issue"
+    ] == "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:ValueError"
+
+
 def test_high_yes_edge_ignores_stale_executable_quote(
     tmp_path: Path,
 ) -> None:

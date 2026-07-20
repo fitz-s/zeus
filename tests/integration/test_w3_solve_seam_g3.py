@@ -1031,6 +1031,22 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         )
         """
     )
+    families = tuple(f"family-{index}" for index in range(48))
+    evaluations = tuple(
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id=f"candidate-{index}-{side.lower()}",
+            family_key=family_key,
+            bin_id=f"bin-{index}",
+            condition_id=f"condition-{index}",
+            side=side,
+            token_id=f"token-{index}-{side.lower()}",
+            action="BUY",
+            status="REJECTED",
+            rejection_reason="NO_ASK",
+        )
+        for index, family_key in enumerate(families)
+        for side in ("YES", "NO")
+    )
     decision = GlobalSingleOrderDecision(
         candidate=None,
         shares=Decimal("0"),
@@ -1039,35 +1055,26 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         robust_ev_usd=0.0,
         capital_efficiency=0.0,
         no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
-        rejection_reasons={},
-        candidate_evaluations=(),
-        candidate_input_count=0,
+        rejection_reasons={row.candidate_id: "NO_ASK" for row in evaluations},
+        candidate_evaluations=evaluations,
+        candidate_input_count=len(evaluations),
     )
     selected = SimpleNamespace(decision=decision)
     at = _dt.datetime(2026, 7, 17, 6, 0, tzinfo=_dt.timezone.utc)
-    book_states = (
+    book_states = tuple(
         (
-            "family-empty",
-            "20C",
-            "condition-empty",
-            "YES",
-            "yes-empty",
-            "NO_ASK",
-            "book-empty-yes",
-            "event-empty",
-            "gamma-empty",
-        ),
-        (
-            "family-empty",
-            "20C",
-            "condition-empty",
-            "NO",
-            "no-empty",
-            "VENUE_NOT_EXECUTABLE",
-            "metadata-empty-no",
-            "event-empty",
-            "gamma-empty",
-        ),
+            family_key,
+            f"bin-{index}",
+            f"condition-{index}",
+            side,
+            f"token-{index}-{side.lower()}",
+            "EXECUTABLE",
+            f"book-{index}-{side.lower()}",
+            f"event-{index}",
+            f"gamma-{index}",
+        )
+        for index, family_key in enumerate(families)
+        for side in ("YES", "NO")
     )
 
     def store(
@@ -1082,12 +1089,15 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
             selection_epoch_identity=f"epoch-{suffix}",
             selection_cut_at_utc=at,
             decision_at_utc=at + _dt.timedelta(seconds=1),
-            probability_manifest=(("family-empty", f"q-{suffix}"),),
+            probability_manifest=tuple(
+                (family_key, f"q-{suffix}-{index}")
+                for index, family_key in enumerate(families)
+            ),
             full_scope_identity="full-scope-empty-current",
-            full_scope_family_keys=("family-empty",),
+            full_scope_family_keys=families,
             probability_ineligible_by_family={},
             book_epoch_identity=f"book-{suffix}",
-            book_asset_count=1,
+            book_asset_count=len(families),
             book_asset_states=current_book_states,
             wealth_witness=SimpleNamespace(
                 witness_identity=f"wealth-{suffix}",
@@ -1101,6 +1111,10 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         return row_id
 
     full_row_id = store(suffix="first")
+    conn.commit()
+    conn.close()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     duplicate_row_id = store(suffix="second")
     rows = conn.execute(
         "SELECT id, mode, artifact_json FROM decision_log ORDER BY id"
@@ -1118,8 +1132,9 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     assert duplicate_summary["payload_reference_receipt_hash"] == (
         full_summary["receipt_hash"]
     )
-    assert duplicate_summary["probability_manifest"] == [
-        ["family-empty", "q-second"]
+    assert duplicate_summary["probability_manifest"][0] == [
+        "family-0",
+        "q-second-0",
     ]
     assert duplicate_summary["wealth_witness_identity"] == "wealth-second"
     for field in global_batch_runtime._GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS:
@@ -1129,10 +1144,25 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
 
     changed_book_states = (
         (*book_states[0][:6], "book-new-yes", *book_states[0][7:]),
-        book_states[1],
+        *book_states[1:],
+    )
+    changed_evaluations = (
+        replace(evaluations[0], rejection_reason="VENUE_NOT_EXECUTABLE"),
+        *evaluations[1:],
+    )
+    changed_selected = SimpleNamespace(
+        decision=replace(
+            decision,
+            rejection_reasons={
+                **decision.rejection_reasons,
+                evaluations[0].candidate_id: "VENUE_NOT_EXECUTABLE",
+            },
+            candidate_evaluations=changed_evaluations,
+        )
     )
     delta_row_id = store(
         suffix="book-changed",
+        current_selected=changed_selected,
         current_book_states=changed_book_states,
     )
     delta_row = conn.execute(
@@ -1140,10 +1170,9 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         (delta_row_id,),
     ).fetchone()
     delta_summary = json.loads(delta_row["artifact_json"])["summary"]
-    assert delta_row["mode"] == "global_single_order_auction_duplicate"
+    assert delta_row["mode"] == "global_single_order_auction_delta"
     assert delta_summary["payload_reference_fields"] == [
         "buy_minimum_marketable_repairs_zlib_b64",
-        "candidate_evaluations_zlib_b64",
         "holding_auction_coverage_zlib_b64",
     ]
     assert delta_summary["book_native_side_base_decision_log_id"] == full_row_id
@@ -1179,15 +1208,131 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
     assert hashlib.sha256(reconstructed_json).hexdigest() == (
         delta_summary["book_native_side_states_sha256"]
     )
+    candidate_delta = json.loads(
+        zlib.decompress(
+            base64.b64decode(
+                delta_summary["candidate_evaluations_delta_zlib_b64"]
+            )
+        )
+    )
+    base_candidates = json.loads(
+        zlib.decompress(
+            base64.b64decode(full_summary["candidate_evaluations_zlib_b64"])
+        )
+    )
+    reconstructed_candidates = global_batch_runtime._apply_json_object_delta(
+        base_candidates,
+        candidate_delta,
+    )
+    assert hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(reconstructed_candidates)
+    ).hexdigest() == delta_summary["candidate_evaluations_sha256"]
+    assert delta_summary["selection_epoch_identity"] == "epoch-book-changed"
+    assert delta_summary["book_epoch_identity"] == "book-book-changed"
+    assert delta_summary["wealth_witness_identity"] == "wealth-book-changed"
+    assert len(delta_row["artifact_json"]) < len(rows[0]["artifact_json"])
     assert len(delta_summary["book_native_side_delta_zlib_b64"]) < len(
         full_summary["book_native_side_states_zlib_b64"]
     )
 
+    refreshed_book_states = tuple(
+        (*row[:6], f"book-refreshed-{index}", *row[7:])
+        for index, row in enumerate(book_states)
+    )
+    refreshed_book_id = store(
+        suffix="book-full-refresh",
+        current_selected=changed_selected,
+        current_book_states=refreshed_book_states,
+    )
+    refreshed_book_row = conn.execute(
+        "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+        (refreshed_book_id,),
+    ).fetchone()
+    refreshed_book_summary = json.loads(
+        refreshed_book_row["artifact_json"]
+    )["summary"]
+    assert refreshed_book_row["mode"] == "global_single_order_auction_delta"
+    assert "book_native_side_states_zlib_b64" in refreshed_book_summary
+
+    next_book_states = (
+        (
+            *refreshed_book_states[0][:6],
+            "book-refreshed-next",
+            *refreshed_book_states[0][7:],
+        ),
+        *refreshed_book_states[1:],
+    )
+    next_book_id = store(
+        suffix="book-next",
+        current_selected=changed_selected,
+        current_book_states=next_book_states,
+    )
+    next_book_summary = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (next_book_id,),
+        ).fetchone()["artifact_json"]
+    )["summary"]
+    assert next_book_summary["book_native_side_base_decision_log_id"] == (
+        refreshed_book_id
+    )
+    assert next_book_summary["book_native_side_base_mode"] == (
+        "global_single_order_auction_delta"
+    )
+    assert next_book_summary["book_native_side_base_receipt_hash"] == (
+        refreshed_book_summary["receipt_hash"]
+    )
+
+    refreshed_book_artifact = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (refreshed_book_id,),
+        ).fetchone()["artifact_json"]
+    )
+    refreshed_book_artifact["summary"]["receipt_hash"] = "tampered-anchor"
+    conn.execute(
+        "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+        (json.dumps(refreshed_book_artifact), refreshed_book_id),
+    )
+    tampered_anchor_recovery_id = store(
+        suffix="tampered-anchor-recovery",
+        current_selected=changed_selected,
+        current_book_states=next_book_states,
+    )
+    assert conn.execute(
+        "SELECT mode FROM decision_log WHERE id = ?",
+        (tampered_anchor_recovery_id,),
+    ).fetchone()["mode"] == "global_single_order_auction"
+
+    connection_key = global_batch_runtime._decision_log_connection_key(conn)
+    global_batch_runtime._GLOBAL_AUCTION_PAYLOAD_REFS.pop(connection_key, None)
+    restart_anchor_id = store(
+        suffix="restart-anchor",
+        current_selected=changed_selected,
+        current_book_states=next_book_states,
+    )
+    assert conn.execute(
+        "SELECT mode FROM decision_log WHERE id = ?",
+        (restart_anchor_id,),
+    ).fetchone()["mode"] == "global_single_order_auction"
+
+    conn.execute("DELETE FROM decision_log WHERE id = ?", (restart_anchor_id,))
+    deleted_anchor_recovery_id = store(
+        suffix="deleted-anchor-recovery",
+        current_selected=changed_selected,
+        current_book_states=next_book_states,
+    )
+    assert conn.execute(
+        "SELECT mode FROM decision_log WHERE id = ?",
+        (deleted_anchor_recovery_id,),
+    ).fetchone()["mode"] == "global_single_order_auction"
+
     winner = SimpleNamespace(
         decision=SimpleNamespace(
             candidate=SimpleNamespace(candidate_id="winner"),
-            candidate_evaluations=(),
-            candidate_input_count=0,
+            candidate_evaluations=evaluations,
+            candidate_input_count=len(evaluations),
+            rejection_reasons=decision.rejection_reasons,
             no_trade_reason=None,
         )
     )
@@ -1197,6 +1342,155 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(tmp_path
         (winner_row_id,),
     ).fetchone()["mode"]
     assert winner_mode == "global_single_order_auction"
+    conn.close()
+
+
+def test_global_auction_holding_delta_reconstructs_current_epoch_exactly():
+    base = [
+        {
+            "position_id": "position-a",
+            "decision_at_utc": "2026-07-20 00:00:00+00:00",
+            "book_epoch_identity": "book-a",
+            "probability_witness_identity": "q-a",
+            "status": "EVALUATED",
+        },
+        {
+            "position_id": "position-b",
+            "decision_at_utc": "2026-07-20 00:00:00+00:00",
+            "book_epoch_identity": "book-a",
+            "probability_witness_identity": "q-b",
+            "status": "EVALUATED",
+        },
+    ]
+    current = [
+        {
+            **base[0],
+            "decision_at_utc": "2026-07-20 00:00:02+00:00",
+            "book_epoch_identity": "book-b",
+            "probability_witness_identity": "q-a-current",
+        },
+        {
+            **base[1],
+            "decision_at_utc": "2026-07-20 00:00:02+00:00",
+            "book_epoch_identity": "book-b",
+        },
+    ]
+    current_sha = hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(current)
+    ).hexdigest()
+    receipt = global_batch_runtime._keyed_object_list_delta_receipt(
+        prefix="holding_auction_coverage",
+        key_field="position_id",
+        base_rows=base,
+        current_rows=current,
+        expected_sha256=current_sha,
+    )
+    encoded = zlib.decompress(
+        base64.b64decode(
+            receipt["holding_auction_coverage_delta_zlib_b64"]
+        )
+    )
+    assert hashlib.sha256(encoded).hexdigest() == receipt[
+        "holding_auction_coverage_delta_sha256"
+    ]
+    reconstructed = global_batch_runtime._apply_keyed_object_list_delta(
+        base,
+        json.loads(encoded),
+    )
+    assert reconstructed == current
+    assert hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(reconstructed)
+    ).hexdigest() == current_sha
+
+
+def test_global_auction_payload_cache_rejects_rolled_back_row_id_reuse(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(global_batch_runtime, "_GLOBAL_AUCTION_PAYLOAD_REFS", {})
+    db_path = tmp_path / "rollback-reuse.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            env TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    at = _dt.datetime(2026, 7, 20, 1, 0, tzinfo=_dt.timezone.utc)
+    selected = SimpleNamespace(
+        decision=GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            rejection_reasons={},
+            candidate_evaluations=(),
+            candidate_input_count=0,
+        )
+    )
+
+    def store(suffix: str) -> int:
+        row_id = global_batch_runtime._store_global_auction_receipt(
+            conn,
+            selected=selected,
+            selection_epoch_identity=f"epoch-{suffix}",
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            probability_manifest=(),
+            full_scope_identity="scope-empty",
+            full_scope_family_keys=(),
+            probability_ineligible_by_family={},
+            book_epoch_identity=f"book-{suffix}",
+            book_asset_count=None,
+            book_asset_states=(),
+            wealth_witness=SimpleNamespace(
+                witness_identity=f"wealth-{suffix}",
+                economic_identity="wealth-current",
+            ),
+            fractional_kelly_multiplier=Decimal("0.25"),
+        )
+        assert row_id is not None
+        return row_id
+
+    rolled_back_id = store("rolled-back")
+    conn.rollback()
+    conn.execute(
+        "INSERT INTO decision_log VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            rolled_back_id,
+            "global_single_order_auction",
+            at.isoformat(),
+            at.isoformat(),
+            json.dumps({"summary": {"receipt_hash": "replacement-row"}}),
+            at.isoformat(),
+            "live",
+        ),
+    )
+    conn.commit()
+
+    current_id = store("current")
+    current_mode = conn.execute(
+        "SELECT mode FROM decision_log WHERE id = ?",
+        (current_id,),
+    ).fetchone()["mode"]
+    assert current_mode == "global_single_order_auction"
+    assert current_id != rolled_back_id
+    current_ref = global_batch_runtime._GLOBAL_AUCTION_PAYLOAD_REFS[
+        str(db_path)
+    ]
+    assert current_ref.candidate.row_id == current_id
     conn.close()
 
 

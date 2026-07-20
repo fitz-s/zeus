@@ -20,6 +20,7 @@ from typing import Callable, Mapping, Sequence
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.engine.global_auction_universe import (
+    CurrentGlobalAuctionScope,
     CurrentGlobalBookEpoch,
     current_global_book_epoch_identity,
     current_global_auction_scope_from_events,
@@ -60,10 +61,27 @@ class _CurrentHoldingWitness:
 
 UTC = timezone.utc
 _LOG = logging.getLogger(__name__)
-_GLOBAL_AUCTION_PAYLOAD_REFS: dict[
-    str,
-    tuple[str, int, str, str, tuple[tuple[str, ...], ...]],
-] = {}
+
+
+@dataclass(frozen=True)
+class _GlobalAuctionComponentRef:
+    row_id: int
+    mode: str
+    receipt_hash: str
+    encoding: str
+    sha256: str
+    payload: object
+
+
+@dataclass(frozen=True)
+class _GlobalAuctionPayloadRef:
+    candidate: _GlobalAuctionComponentRef
+    repair: _GlobalAuctionComponentRef
+    holding: _GlobalAuctionComponentRef
+    book: _GlobalAuctionComponentRef
+
+
+_GLOBAL_AUCTION_PAYLOAD_REFS: dict[str, _GlobalAuctionPayloadRef] = {}
 _GLOBAL_AUCTION_PAYLOAD_REFS_LOCK = threading.Lock()
 _GLOBAL_HOLDING_COVERAGE_LOCK = threading.Lock()
 _GLOBAL_HOLDING_COVERAGE_BY_POSITION: dict[
@@ -912,6 +930,147 @@ def _book_native_side_delta_receipt(
     }
 
 
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _apply_json_object_delta(
+    base: Mapping[str, object],
+    delta: Mapping[str, object],
+) -> dict[str, object]:
+    result = dict(base)
+    for key in delta.get("removed_keys", ()):
+        result.pop(str(key), None)
+    replacements = delta.get("replacements", {})
+    if not isinstance(replacements, Mapping):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_OBJECT_DELTA_INVALID")
+    result.update((str(key), value) for key, value in replacements.items())
+    return result
+
+
+def _json_object_delta_receipt(
+    *,
+    prefix: str,
+    base: Mapping[str, object],
+    current: Mapping[str, object],
+    expected_sha256: str,
+) -> dict[str, object]:
+    delta = {
+        "removed_keys": sorted(key for key in base if key not in current),
+        "replacements": {
+            key: current[key]
+            for key in sorted(current)
+            if key not in base or base[key] != current[key]
+        },
+    }
+    reconstructed = _apply_json_object_delta(base, delta)
+    if hashlib.sha256(_canonical_json_bytes(reconstructed)).hexdigest() != str(
+        expected_sha256
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_OBJECT_DELTA_HASH_MISMATCH")
+    encoded = _canonical_json_bytes(delta)
+    return {
+        f"{prefix}_delta_encoding": "zlib+base64+canonical-json-object-delta-v1",
+        f"{prefix}_delta_sha256": hashlib.sha256(encoded).hexdigest(),
+        f"{prefix}_delta_zlib_b64": base64.b64encode(
+            zlib.compress(encoded, level=9)
+        ).decode("ascii"),
+        f"{prefix}_delta_removed_key_count": len(delta["removed_keys"]),
+        f"{prefix}_delta_replacement_count": len(delta["replacements"]),
+    }
+
+
+def _apply_keyed_object_list_delta(
+    base_rows: Sequence[Mapping[str, object]],
+    delta: Mapping[str, object],
+) -> list[dict[str, object]]:
+    key_field = str(delta.get("key_field") or "")
+    if not key_field:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_INVALID")
+    rows = {str(row[key_field]): dict(row) for row in base_rows}
+    if len(rows) != len(base_rows):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_KEY_DUPLICATE")
+    for key in delta.get("removed_keys", ()):
+        rows.pop(str(key), None)
+    patches = delta.get("patches", ())
+    if not isinstance(patches, Sequence):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_INVALID")
+    for patch in patches:
+        if not isinstance(patch, Mapping):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_INVALID")
+        key = str(patch.get("key") or "")
+        if not key:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_INVALID")
+        row = dict(rows.get(key, {key_field: key}))
+        for field in patch.get("removed_fields", ()):
+            row.pop(str(field), None)
+        replacements = patch.get("replacements", {})
+        if not isinstance(replacements, Mapping):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_INVALID")
+        row.update((str(field), value) for field, value in replacements.items())
+        if str(row.get(key_field) or "") != key:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_KEY_CHANGED")
+        rows[key] = row
+    return [rows[key] for key in sorted(rows)]
+
+
+def _keyed_object_list_delta_receipt(
+    *,
+    prefix: str,
+    key_field: str,
+    base_rows: Sequence[Mapping[str, object]],
+    current_rows: Sequence[Mapping[str, object]],
+    expected_sha256: str,
+) -> dict[str, object]:
+    base = {str(row[key_field]): dict(row) for row in base_rows}
+    current = {str(row[key_field]): dict(row) for row in current_rows}
+    if len(base) != len(base_rows) or len(current) != len(current_rows):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_KEY_DUPLICATE")
+    patches = []
+    for key in sorted(current):
+        old = base.get(key, {})
+        row = current[key]
+        replacements = {
+            field: row[field]
+            for field in sorted(row)
+            if field not in old or old[field] != row[field]
+        }
+        removed_fields = sorted(field for field in old if field not in row)
+        if replacements or removed_fields:
+            patches.append(
+                {
+                    "key": key,
+                    "removed_fields": removed_fields,
+                    "replacements": replacements,
+                }
+            )
+    delta = {
+        "key_field": key_field,
+        "removed_keys": sorted(key for key in base if key not in current),
+        "patches": patches,
+    }
+    reconstructed = _apply_keyed_object_list_delta(base_rows, delta)
+    if hashlib.sha256(_canonical_json_bytes(reconstructed)).hexdigest() != str(
+        expected_sha256
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_KEYED_DELTA_HASH_MISMATCH")
+    encoded = _canonical_json_bytes(delta)
+    return {
+        f"{prefix}_delta_encoding": "zlib+base64+keyed-canonical-json-delta-v1",
+        f"{prefix}_delta_sha256": hashlib.sha256(encoded).hexdigest(),
+        f"{prefix}_delta_zlib_b64": base64.b64encode(
+            zlib.compress(encoded, level=9)
+        ).decode("ascii"),
+        f"{prefix}_delta_removed_key_count": len(delta["removed_keys"]),
+        f"{prefix}_delta_patch_count": len(delta["patches"]),
+    }
+
+
 def _decision_log_connection_key(conn: sqlite3.Connection) -> str:
     try:
         rows = conn.execute("PRAGMA database_list").fetchall()
@@ -982,22 +1141,88 @@ def _stored_global_auction_payload_ref(
     conn: sqlite3.Connection,
     *,
     connection_key: str,
-    decision_payload_identity: str,
-) -> tuple[int, str, str, tuple[tuple[str, ...], ...]] | None:
+) -> _GlobalAuctionPayloadRef | None:
     ref = _GLOBAL_AUCTION_PAYLOAD_REFS.get(connection_key)
-    if ref is None or ref[0] != decision_payload_identity:
+    if ref is None:
         return None
-    row_id, receipt_hash, book_hash, book_rows = ref[1:]
-    row = conn.execute(
-        """
-        SELECT 1
-          FROM decision_log
-         WHERE id = ?
-           AND mode = 'global_single_order_auction'
-        """,
-        (row_id,),
-    ).fetchone()
-    return (row_id, receipt_hash, book_hash, book_rows) if row is not None else None
+    components = (
+        (
+            ref.candidate,
+            "candidate_evaluations_zlib_b64",
+            "candidate_evaluation_encoding",
+            "candidate_evaluations_sha256",
+        ),
+        (
+            ref.repair,
+            "buy_minimum_marketable_repairs_zlib_b64",
+            "buy_minimum_marketable_repair_encoding",
+            "buy_minimum_marketable_repairs_sha256",
+        ),
+        (
+            ref.holding,
+            "holding_auction_coverage_zlib_b64",
+            "holding_auction_coverage_encoding",
+            "holding_auction_coverage_sha256",
+        ),
+        (
+            ref.book,
+            "book_native_side_states_zlib_b64",
+            "book_native_side_encoding",
+            "book_native_side_states_sha256",
+        ),
+    )
+    components_by_row: dict[
+        int,
+        list[tuple[_GlobalAuctionComponentRef, str, str, str]],
+    ] = {}
+    for component in components:
+        components_by_row.setdefault(component[0].row_id, []).append(component)
+    for row_id, row_components in components_by_row.items():
+        row = conn.execute(
+            "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+        if row is None or any(
+            str(row[0]) != component.mode
+            for component, _, _, _ in row_components
+        ):
+            return None
+        try:
+            artifact = json.loads(str(row[1] or ""))
+            summary = artifact["summary"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, zlib.error):
+            return None
+        if not isinstance(summary, Mapping):
+            return None
+        for component, payload_field, encoding_field, sha256_field in row_components:
+            try:
+                compressed = base64.b64decode(
+                    str(summary[payload_field]),
+                    validate=True,
+                )
+                if len(compressed) > 2_000_000:
+                    return None
+                raw = zlib.decompress(compressed)
+                if len(raw) > 10_000_000:
+                    return None
+                json.loads(raw)
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                zlib.error,
+            ):
+                return None
+            if (
+                str(summary.get("receipt_hash") or "")
+                != component.receipt_hash
+                or str(summary.get(encoding_field) or "") != component.encoding
+                or str(summary.get(sha256_field) or "") != component.sha256
+                or hashlib.sha256(raw).hexdigest() != component.sha256
+            ):
+                return None
+    return ref
 
 
 def _store_global_auction_receipt(
@@ -1485,90 +1710,303 @@ def _store_global_auction_receipt(
             _stored_global_auction_payload_ref(
                 conn,
                 connection_key=connection_key,
-                decision_payload_identity=decision_payload_identity,
             )
             if winner is None
             else None
         )
         if payload_ref is not None:
-            (
-                reference_row_id,
-                reference_receipt_hash,
-                reference_book_hash,
-                reference_book_rows,
-            ) = payload_ref
             compact_receipt = {
                 key: value
                 for key, value in receipt.items()
                 if key not in _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
             }
-            reference_fields = [
-                "buy_minimum_marketable_repairs_zlib_b64",
-                "candidate_evaluations_zlib_b64",
-                "holding_auction_coverage_zlib_b64",
-            ]
-            book_delta_bytes = 0
-            if receipt["book_native_side_states_sha256"] == reference_book_hash:
-                reference_fields.append("book_native_side_states_zlib_b64")
+            reference_fields: list[str] = []
+            reference_components: dict[str, dict[str, object]] = {}
+            base_refs: dict[int, _GlobalAuctionComponentRef] = {}
+            inline_fields: set[str] = set()
+
+            candidate_field = "candidate_evaluations_zlib_b64"
+            candidate_ref = payload_ref.candidate
+            candidate_identity = (
+                str(receipt["candidate_evaluation_encoding"]),
+                str(receipt["candidate_evaluations_sha256"]),
+            )
+            if candidate_identity == (
+                candidate_ref.encoding,
+                candidate_ref.sha256,
+            ):
+                reference_fields.append(candidate_field)
+                reference_components[candidate_field] = {
+                    "decision_log_id": candidate_ref.row_id,
+                    "mode": candidate_ref.mode,
+                    "receipt_hash": candidate_ref.receipt_hash,
+                    "sha256": candidate_ref.sha256,
+                }
+                base_refs[candidate_ref.row_id] = candidate_ref
+            elif candidate_identity[0] == candidate_ref.encoding and isinstance(
+                candidate_ref.payload,
+                Mapping,
+            ):
+                candidate_delta = _json_object_delta_receipt(
+                    prefix="candidate_evaluations",
+                    base=candidate_ref.payload,
+                    current=compact_evaluations,
+                    expected_sha256=candidate_identity[1],
+                )
+                candidate_delta_bytes = len(
+                    str(candidate_delta["candidate_evaluations_delta_zlib_b64"])
+                )
+                candidate_full_bytes = len(str(receipt[candidate_field]))
+                if candidate_delta_bytes * 2 < candidate_full_bytes:
+                    compact_receipt.update(candidate_delta)
+                    compact_receipt.update(
+                        {
+                            "candidate_evaluations_base_decision_log_id": candidate_ref.row_id,
+                            "candidate_evaluations_base_mode": candidate_ref.mode,
+                            "candidate_evaluations_base_receipt_hash": candidate_ref.receipt_hash,
+                            "candidate_evaluations_base_sha256": candidate_ref.sha256,
+                        }
+                    )
+                    base_refs[candidate_ref.row_id] = candidate_ref
+                else:
+                    compact_receipt[candidate_field] = receipt[candidate_field]
+                    inline_fields.add(candidate_field)
             else:
+                compact_receipt[candidate_field] = receipt[candidate_field]
+                inline_fields.add(candidate_field)
+
+            repair_field = "buy_minimum_marketable_repairs_zlib_b64"
+            repair_ref = payload_ref.repair
+            repair_identity = (
+                str(receipt["buy_minimum_marketable_repair_encoding"]),
+                str(receipt["buy_minimum_marketable_repairs_sha256"]),
+            )
+            if repair_identity == (
+                repair_ref.encoding,
+                repair_ref.sha256,
+            ):
+                reference_fields.append(repair_field)
+                reference_components[repair_field] = {
+                    "decision_log_id": repair_ref.row_id,
+                    "mode": repair_ref.mode,
+                    "receipt_hash": repair_ref.receipt_hash,
+                    "sha256": repair_ref.sha256,
+                }
+                base_refs[repair_ref.row_id] = repair_ref
+            else:
+                compact_receipt[repair_field] = receipt[repair_field]
+                inline_fields.add(repair_field)
+
+            holding_field = "holding_auction_coverage_zlib_b64"
+            holding_ref = payload_ref.holding
+            holding_identity = (
+                str(receipt["holding_auction_coverage_encoding"]),
+                str(receipt["holding_auction_coverage_sha256"]),
+            )
+            if holding_identity == (
+                holding_ref.encoding,
+                holding_ref.sha256,
+            ):
+                reference_fields.append(holding_field)
+                reference_components[holding_field] = {
+                    "decision_log_id": holding_ref.row_id,
+                    "mode": holding_ref.mode,
+                    "receipt_hash": holding_ref.receipt_hash,
+                    "sha256": holding_ref.sha256,
+                }
+                base_refs[holding_ref.row_id] = holding_ref
+            elif holding_identity[0] == holding_ref.encoding and isinstance(
+                holding_ref.payload,
+                Sequence,
+            ):
+                holding_delta = _keyed_object_list_delta_receipt(
+                    prefix="holding_auction_coverage",
+                    key_field="position_id",
+                    base_rows=holding_ref.payload,
+                    current_rows=holding_coverage_rows,
+                    expected_sha256=holding_identity[1],
+                )
+                holding_delta_bytes = len(
+                    str(holding_delta["holding_auction_coverage_delta_zlib_b64"])
+                )
+                holding_full_bytes = len(str(receipt[holding_field]))
+                if holding_delta_bytes * 2 < holding_full_bytes:
+                    compact_receipt.update(holding_delta)
+                    compact_receipt.update(
+                        {
+                            "holding_auction_coverage_base_decision_log_id": holding_ref.row_id,
+                            "holding_auction_coverage_base_mode": holding_ref.mode,
+                            "holding_auction_coverage_base_receipt_hash": holding_ref.receipt_hash,
+                            "holding_auction_coverage_base_sha256": holding_ref.sha256,
+                        }
+                    )
+                    base_refs[holding_ref.row_id] = holding_ref
+                else:
+                    compact_receipt[holding_field] = receipt[holding_field]
+                    inline_fields.add(holding_field)
+            else:
+                compact_receipt[holding_field] = receipt[holding_field]
+                inline_fields.add(holding_field)
+
+            book_field = "book_native_side_states_zlib_b64"
+            book_ref = payload_ref.book
+            book_identity = (
+                str(receipt["book_native_side_encoding"]),
+                str(receipt["book_native_side_states_sha256"]),
+            )
+            if book_identity == (
+                book_ref.encoding,
+                book_ref.sha256,
+            ):
+                reference_fields.append(book_field)
+                reference_components[book_field] = {
+                    "decision_log_id": book_ref.row_id,
+                    "mode": book_ref.mode,
+                    "receipt_hash": book_ref.receipt_hash,
+                    "sha256": book_ref.sha256,
+                }
+                base_refs[book_ref.row_id] = book_ref
+            elif book_identity[0] == book_ref.encoding and isinstance(
+                book_ref.payload,
+                Sequence,
+            ):
                 book_delta = _book_native_side_delta_receipt(
-                    base_rows=reference_book_rows,
+                    base_rows=book_ref.payload,
                     current_rows=current_book_rows,
                 )
                 delta_b64 = str(book_delta["book_native_side_delta_zlib_b64"])
-                full_book_b64 = str(receipt["book_native_side_states_zlib_b64"])
-                if len(delta_b64) < len(full_book_b64):
+                full_book_b64 = str(receipt[book_field])
+                if len(delta_b64) * 2 < len(full_book_b64):
                     compact_receipt.update(book_delta)
                     compact_receipt.update(
                         {
-                            "book_native_side_base_decision_log_id": reference_row_id,
-                            "book_native_side_base_receipt_hash": reference_receipt_hash,
-                            "book_native_side_base_states_sha256": reference_book_hash,
+                            "book_native_side_base_decision_log_id": book_ref.row_id,
+                            "book_native_side_base_mode": book_ref.mode,
+                            "book_native_side_base_receipt_hash": book_ref.receipt_hash,
+                            "book_native_side_base_states_sha256": book_ref.sha256,
                         }
                     )
-                    book_delta_bytes = len(delta_b64)
+                    base_refs[book_ref.row_id] = book_ref
                 else:
-                    compact_receipt["book_native_side_states_zlib_b64"] = full_book_b64
-                    book_delta_bytes = len(full_book_b64)
+                    compact_receipt[book_field] = full_book_b64
+                    inline_fields.add(book_field)
+            else:
+                compact_receipt[book_field] = receipt[book_field]
+                inline_fields.add(book_field)
+
             compact_receipt.update(
                 {
                     "payload_compacted": True,
                     "payload_identity": payload_identity,
                     "decision_payload_identity": decision_payload_identity,
-                    "payload_reference_decision_log_id": reference_row_id,
-                    "payload_reference_mode": "global_single_order_auction",
                     "payload_reference_fields": sorted(reference_fields),
-                    "payload_reference_receipt_hash": reference_receipt_hash,
+                    "payload_reference_components": reference_components,
                 }
             )
-            row_id = store_artifact(
-                conn,
-                CycleArtifact(
-                    mode="global_single_order_auction_duplicate",
-                    started_at=selection_cut_at_utc.isoformat(),
-                    completed_at=decision_at_utc.isoformat(),
-                    skipped_reason=str(
-                        getattr(decision, "no_trade_reason", "") or ""
+            if len(base_refs) == 1:
+                common_ref = next(iter(base_refs.values()))
+                compact_receipt.pop("payload_reference_components", None)
+                compact_receipt.update(
+                    {
+                        "payload_reference_decision_log_id": common_ref.row_id,
+                        "payload_reference_mode": common_ref.mode,
+                        "payload_reference_receipt_hash": common_ref.receipt_hash,
+                    }
+                )
+            full_bytes = len(_canonical_json_bytes(receipt))
+            compact_bytes = len(_canonical_json_bytes(compact_receipt))
+            if compact_bytes < full_bytes:
+                exact_heavy_reference = set(reference_fields) == set(
+                    _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
+                )
+                mode = (
+                    "global_single_order_auction_duplicate"
+                    if exact_heavy_reference
+                    else "global_single_order_auction_delta"
+                )
+                row_id = store_artifact(
+                    conn,
+                    CycleArtifact(
+                        mode=mode,
+                        started_at=selection_cut_at_utc.isoformat(),
+                        completed_at=decision_at_utc.isoformat(),
+                        skipped_reason=str(
+                            getattr(decision, "no_trade_reason", "") or ""
+                        ),
+                        summary=compact_receipt,
                     ),
-                    summary=compact_receipt,
-                ),
-            )
-            if row_id is None:
-                raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")
-            saved_bytes = sum(
-                len(str(receipt.get(field) or ""))
-                for field in _GLOBAL_AUCTION_HEAVY_RECEIPT_FIELDS
-            ) - book_delta_bytes
+                )
+                if row_id is None:
+                    raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")
+                current_receipt_hash = str(receipt["receipt_hash"])
+
+                def component_ref(
+                    *,
+                    field: str,
+                    previous: _GlobalAuctionComponentRef,
+                    encoding: str,
+                    sha256: str,
+                    payload: object,
+                ) -> _GlobalAuctionComponentRef:
+                    if field not in inline_fields:
+                        return previous
+                    return _GlobalAuctionComponentRef(
+                        row_id=row_id,
+                        mode=mode,
+                        receipt_hash=current_receipt_hash,
+                        encoding=encoding,
+                        sha256=sha256,
+                        payload=payload,
+                    )
+
+                _GLOBAL_AUCTION_PAYLOAD_REFS[connection_key] = (
+                    _GlobalAuctionPayloadRef(
+                        candidate=component_ref(
+                            field=candidate_field,
+                            previous=candidate_ref,
+                            encoding=candidate_identity[0],
+                            sha256=candidate_identity[1],
+                            payload=compact_evaluations,
+                        ),
+                        repair=component_ref(
+                            field=repair_field,
+                            previous=repair_ref,
+                            encoding=repair_identity[0],
+                            sha256=repair_identity[1],
+                            payload=buy_minimum_repair_rows,
+                        ),
+                        holding=component_ref(
+                            field=holding_field,
+                            previous=holding_ref,
+                            encoding=holding_identity[0],
+                            sha256=holding_identity[1],
+                            payload=holding_coverage_rows,
+                        ),
+                        book=component_ref(
+                            field=book_field,
+                            previous=book_ref,
+                            encoding=book_identity[0],
+                            sha256=book_identity[1],
+                            payload=current_book_rows,
+                        ),
+                    )
+                )
+                _LOG.info(
+                    "global auction receipt delta persisted: row_id=%s "
+                    "reference_row_ids=%s payload_identity=%s saved_json_bytes=%d",
+                    row_id,
+                    sorted(base_refs),
+                    payload_identity,
+                    full_bytes - compact_bytes,
+                )
+                return row_id
             _LOG.info(
-                "global auction receipt payload reused: row_id=%s reference_row_id=%s "
-                "payload_identity=%s saved_json_bytes=%d book_delta=%s",
-                row_id,
-                reference_row_id,
-                payload_identity,
-                saved_bytes,
-                "book_native_side_delta_zlib_b64" in compact_receipt,
+                "global auction receipt full anchor refreshed: reference_row_ids=%s "
+                "full_json_bytes=%d compact_json_bytes=%d",
+                sorted(base_refs),
+                full_bytes,
+                compact_bytes,
             )
-            return row_id
 
         row_id = store_artifact(
             conn,
@@ -1583,12 +2021,45 @@ def _store_global_auction_receipt(
             ),
         )
         if row_id is not None:
-            _GLOBAL_AUCTION_PAYLOAD_REFS[connection_key] = (
-                decision_payload_identity,
-                row_id,
-                str(receipt["receipt_hash"]),
-                str(receipt["book_native_side_states_sha256"]),
-                current_book_rows,
+            mode = "global_single_order_auction"
+            current_receipt_hash = str(receipt["receipt_hash"])
+            _GLOBAL_AUCTION_PAYLOAD_REFS[connection_key] = _GlobalAuctionPayloadRef(
+                candidate=_GlobalAuctionComponentRef(
+                    row_id=row_id,
+                    mode=mode,
+                    receipt_hash=current_receipt_hash,
+                    encoding=str(receipt["candidate_evaluation_encoding"]),
+                    sha256=str(receipt["candidate_evaluations_sha256"]),
+                    payload=compact_evaluations,
+                ),
+                repair=_GlobalAuctionComponentRef(
+                    row_id=row_id,
+                    mode=mode,
+                    receipt_hash=current_receipt_hash,
+                    encoding=str(
+                        receipt["buy_minimum_marketable_repair_encoding"]
+                    ),
+                    sha256=str(
+                        receipt["buy_minimum_marketable_repairs_sha256"]
+                    ),
+                    payload=buy_minimum_repair_rows,
+                ),
+                holding=_GlobalAuctionComponentRef(
+                    row_id=row_id,
+                    mode=mode,
+                    receipt_hash=current_receipt_hash,
+                    encoding=str(receipt["holding_auction_coverage_encoding"]),
+                    sha256=str(receipt["holding_auction_coverage_sha256"]),
+                    payload=holding_coverage_rows,
+                ),
+                book=_GlobalAuctionComponentRef(
+                    row_id=row_id,
+                    mode=mode,
+                    receipt_hash=current_receipt_hash,
+                    encoding=str(receipt["book_native_side_encoding"]),
+                    sha256=str(receipt["book_native_side_states_sha256"]),
+                    payload=current_book_rows,
+                ),
             )
     if row_id is None:
         raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")
