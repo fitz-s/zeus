@@ -1,7 +1,7 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-07-20
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causal fixed-lead history; previous-runs
-#   for gridded models; positive-lead named-station single-runs exception with availability cutoff;
+#   for gridded models; positive-lead named-station single-runs exception with local-day cutoff;
 #   run_time != source_available_at), §5 (walk-forward, no same-day leak), §7 antibodies
 #   ("top-K-uses-target-truth (walk-forward only)", "previous-runs-for-live-decision",
 #   "C/F unit mix (settlement-unit residual)"); CONTINUITY_AND_WIRING.md §4 step 4 + IRON
@@ -234,7 +234,7 @@ def test_station_day0_single_runs_do_not_train_without_issue_time_alignment() ->
     assert hist == {}
 
 
-def test_station_positive_lead_rejects_post_target_availability() -> None:
+def test_station_positive_lead_rejects_after_local_day_start() -> None:
     from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
 
     conn = _conn()
@@ -242,7 +242,9 @@ def test_station_positive_lead_rejects_post_target_availability() -> None:
         conn, model="cwa_township", city="Taipei", target_date="2026-04-01",
         metric="high", forecast_value_c=30.0, endpoint="single_runs", lead_days=1,
         source_cycle_time="2026-03-31T12:00:00+00:00",
-        source_available_at="2026-04-01T01:00:00+00:00",
+        # Taipei local 2026-04-01 starts at 2026-03-31T16:00Z. This issue is still
+        # March 31 in UTC but is already four hours into the target local day.
+        source_available_at="2026-03-31T20:00:00+00:00",
     )
     _insert_settlement(
         conn, city="Taipei", target_date="2026-04-01", metric="high",

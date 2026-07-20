@@ -34,14 +34,41 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date
+from datetime import date, datetime, time, timezone
 from typing import Mapping, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.data.bayes_precision_fusion_capture import ModelHistory
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_history_provider")
 
-_SINGLE_RUNS_HISTORY_MODELS = frozenset({"cwa_township", "hko_fnd"})
+_STATION_SINGLE_RUNS_HISTORY_TIMEZONES = {
+    "cwa_township": {"Taipei": "Asia/Taipei"},
+    "hko_fnd": {"Hong Kong": "Asia/Hong_Kong"},
+}
+
+
+def _station_target_start_utc(model: str, city: str, target_date: str) -> datetime | None:
+    timezone_name = _STATION_SINGLE_RUNS_HISTORY_TIMEZONES.get(model, {}).get(city)
+    if timezone_name is None:
+        return None
+    try:
+        local_start = datetime.combine(
+            date.fromisoformat(target_date), time.min, tzinfo=ZoneInfo(timezone_name)
+        )
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return None
+    return local_start.astimezone(timezone.utc)
+
+
+def _parse_available_at_utc(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _settlement_to_celsius(value: float, unit: str | None) -> float:
@@ -198,11 +225,12 @@ class BayesPrecisionFusionHistoryProvider:
         # decision time; this provider has only a decision date and cannot align time-of-day causally.
         # Positive-lead station rows also require pre-target source availability.
         _has_prev = {str(r["model"]) for r in rows if str(r["endpoint"]) == "previous_runs"}
-        _single_fallback = (
-            _SINGLE_RUNS_HISTORY_MODELS.intersection(str(model) for model in models)
+        _single_fallback = {
+            str(model)
+            for model in models
             if int(lead_days) > 0
-            else frozenset()
-        )
+            and city in _STATION_SINGLE_RUNS_HISTORY_TIMEZONES.get(str(model), {})
+        }
         per_model_fc: dict[str, list[float]] = {}
         per_model_settle_c: dict[str, list[float]] = {}
         per_model_dates: dict[str, list[str]] = {}
@@ -228,7 +256,9 @@ class BayesPrecisionFusionHistoryProvider:
                 if endpoint != "single_runs":
                     continue
                 available = str(row["source_available_at"] or "")
-                if not available or available >= f"{target_date}T00:00:00":
+                available_at = _parse_available_at_utc(available)
+                target_start = _station_target_start_utc(model, city, target_date)
+                if available_at is None or target_start is None or available_at >= target_start:
                     continue
                 by_date = _station_latest.setdefault(model, {})
                 prior = by_date.get(target_date)
