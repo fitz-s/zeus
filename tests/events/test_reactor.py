@@ -565,6 +565,55 @@ def test_targeted_forecast_wake_ignores_only_older_remaining_backlog(monkeypatch
 
 
 @pytest.mark.parametrize(
+    "producer_reason,producer_families",
+    [
+        ("market_price_advanced", set()),
+        (
+            "forecast_posterior_advanced",
+            {("Paris", "2026-07-20", "high")},
+        ),
+    ],
+)
+def test_reactor_wake_probe_ignores_book_substrate_refresh(
+    monkeypatch,
+    producer_reason,
+    producer_families,
+):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    pending = reactor_wake.ReactorWake(
+        "wake-substrate",
+        "2026-07-19T12:00:01+00:00",
+        "substrate_observer",
+        "money_path_substrate_refreshed",
+        forecast_families=(("Paris", "2026-07-20", "high"),),
+    )
+    revisions = iter(("base", "new", "new"))
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _published_at, *, exclude_wake_ids=(): (pending,),
+    )
+
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason=producer_reason,
+        producer_wake_ids=("wake-current",),
+        producer_wake_published_at="2026-07-19T12:00:00+00:00",
+        forecast_wake_families=producer_families,
+        urgent_day0_pending=None,
+    )
+
+    assert cancelled() is False
+    assert cancelled() is False
+
+
+@pytest.mark.parametrize(
     "pending_reason,pending_families",
     [
         (

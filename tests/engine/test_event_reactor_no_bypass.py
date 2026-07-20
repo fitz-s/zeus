@@ -5059,6 +5059,11 @@ def test_global_batch_wake_supersession_is_scoped_to_invalidated_truth():
         delta_scope_family_keys=scope,
     )
     assert not _global_batch_wakes_supersede(
+        (wake("money_path_substrate_refreshed", (paris,)),),
+        day0_urgent_batch=False,
+        delta_scope_family_keys=scope,
+    )
+    assert not _global_batch_wakes_supersede(
         (wake("forecast_posterior_advanced", (shanghai,)),),
         day0_urgent_batch=False,
         delta_scope_family_keys=scope,

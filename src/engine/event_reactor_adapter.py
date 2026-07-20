@@ -1447,9 +1447,14 @@ def _global_batch_wakes_supersede(
 
     for wake in wakes:
         reason = str(getattr(wake, "reason", "") or "")
-        if reason == "market_price_advanced":
+        if reason in {
+            "market_price_advanced",
+            "money_path_substrate_refreshed",
+        }:
             # Selection crosses an exact JIT book preflight. A changed selected
             # curve is overlaid and the auction reruns before any venue effect.
+            # The substrate observer is another book-cache producer, not a new
+            # probability fact; its wake therefore has the same authority here.
             continue
         if day0_urgent_batch and reason == "forecast_posterior_advanced":
             # Current-day physical authority dominates a forecast refresh.

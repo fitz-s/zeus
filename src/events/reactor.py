@@ -5691,10 +5691,6 @@ def _reactor_wake_cancellation_probe(
         current_revision = reactor_urgent_wake_revision()
         if current_revision is None or current_revision == observed_revision:
             return False
-        if not targeted_forecast:
-            superseded = True
-            return True
-
         pending_wakes = reactor_wakes_since(
             producer_wake_published_at,
             exclude_wake_ids=owned_wake_ids,
@@ -5703,6 +5699,15 @@ def _reactor_wake_cancellation_probe(
             observed_revision = current_revision
             return False
         for wake in pending_wakes:
+            if wake.reason == "money_path_substrate_refreshed":
+                # A substrate wake only says that cached executable books moved
+                # forward. The global auction independently rebinds current books
+                # at its JIT fence, so restarting the whole decision cannot make
+                # that evidence fresher and can starve a hot price stream.
+                continue
+            if not targeted_forecast:
+                superseded = True
+                return True
             if wake.reason in {
                 "day0_extreme_event_committed",
                 "market_price_advanced",
@@ -5719,9 +5724,9 @@ def _reactor_wake_cancellation_probe(
                 superseded = True
                 return True
 
-        # The pending posterior belongs to an independent family. Leave it
-        # queued and absorb this revision so it cannot repeatedly interrupt the
-        # current family's SQLite progress callbacks.
+        # Every pending wake was either a book-substrate refresh or a posterior
+        # for an independent family. Leave it queued and absorb this revision so
+        # it cannot repeatedly interrupt the current SQLite progress callbacks.
         observed_revision = current_revision
         return False
 
