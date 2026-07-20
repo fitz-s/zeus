@@ -13278,9 +13278,13 @@ def test_day0_existing_canonical_event_repairs_after_active_chain_correction(tmp
         day0_entered_at=replay_position.day0_entered_at,
         previous_phase="active",
         deps=types.SimpleNamespace(logger=logging.getLogger(__name__)),
-    ) is False
+    ) is True
 
-    assert _raw_position_event_rows(conn, position_id) == before_events
+    after_events = _raw_position_event_rows(conn, position_id)
+    assert after_events[:-1] == before_events
+    assert after_events[-1]["event_type"] == "DAY0_WINDOW_ENTERED"
+    assert after_events[-1]["sequence_no"] == 3
+    assert len({event["event_id"] for event in after_events}) == len(after_events)
     repaired_phase = conn.execute(
         "SELECT phase FROM position_current WHERE position_id = ?",
         (position_id,),

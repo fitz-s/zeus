@@ -3130,9 +3130,9 @@ def _emit_day0_window_entered_canonical_if_available(
     PENDING_FEATURE (test_day0_transition_emits_durable_lifecycle_event).
 
     Returns True only when this call appends a new DAY0_WINDOW_ENTERED event.
-    If the event already exists and only position_current projection needs to
-    be refreshed, returns False so monitor replay paths can distinguish an
-    idempotent repair from a new lifecycle transition.
+    A later ACTIVE event starts a new canonical re-entry epoch; a later
+    DAY0_WINDOW event only repairs the projection. Pending-exit and terminal
+    truth remain absorbing.
     """
     if conn is None:
         return False
@@ -3177,10 +3177,11 @@ def _emit_day0_window_entered_canonical_if_available(
                     f"canonical event {latest_type or '<missing>'}/{latest_phase_after or '<missing>'}; "
                     "refusing to project day0_window over newer lifecycle truth"
                 )
-            projection = build_position_current_projection(pos)
-            projection["phase"] = LifecyclePhase.DAY0_WINDOW.value
-            upsert_position_current(conn, projection)
-            return False
+            if latest_phase_after == LifecyclePhase.DAY0_WINDOW.value:
+                projection = build_position_current_projection(pos)
+                projection["phase"] = LifecyclePhase.DAY0_WINDOW.value
+                upsert_position_current(conn, projection)
+                return False
         # Query next sequence_no for this position (same pattern as
         # fill_tracker._mark_entry_filled at src/execution/fill_tracker.py:156).
         # Position may already have POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED /
@@ -3199,6 +3200,7 @@ def _emit_day0_window_entered_canonical_if_available(
             phase_after=LifecyclePhase.DAY0_WINDOW.value,
             previous_phase=previous_phase,
             source_module="src.engine.cycle_runtime",
+            event_identity_suffix=str(next_seq) if existing_day0 is not None else None,
         )
         append_many_and_project(conn, events, projection)
     except RuntimeError as exc:

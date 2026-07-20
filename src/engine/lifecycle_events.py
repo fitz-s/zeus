@@ -507,6 +507,7 @@ def build_day0_window_entered_canonical_write(
     phase_after: str = DAY0_WINDOW,
     previous_phase: str = ACTIVE,
     source_module: str = "src.engine.cycle_runtime",
+    event_identity_suffix: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Day0-canonical-event feature slice (2026-04-24): emit a canonical
     DAY0_WINDOW_ENTERED event when cycle_runtime transitions a position from
@@ -565,6 +566,9 @@ def build_day0_window_entered_canonical_write(
 
     trade_id = str(getattr(position, "trade_id"))
     slug = "day0_window_entered"
+    identity_slug = (
+        f"{slug}:{event_identity_suffix}" if event_identity_suffix else slug
+    )
 
     payload: dict[str, Any] = {
         "city": getattr(position, "city", ""),
@@ -581,7 +585,7 @@ def build_day0_window_entered_canonical_write(
     }
 
     event = {
-        "event_id": f"{trade_id}:{slug}",
+        "event_id": f"{trade_id}:{identity_slug}",
         "position_id": trade_id,
         "event_version": 1,
         "sequence_no": sequence_no,
@@ -595,7 +599,7 @@ def build_day0_window_entered_canonical_write(
         "order_id": _nullable(getattr(position, "order_id", "")),
         "command_id": None,
         "caused_by": None,
-        "idempotency_key": f"{trade_id}:{slug}",
+        "idempotency_key": f"{trade_id}:{identity_slug}",
         "venue_status": _nullable(getattr(position, "order_status", "")),
         "source_module": source_module,
         "env": _position_env(position),

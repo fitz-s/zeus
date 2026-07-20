@@ -21,6 +21,7 @@ allowed_files:
   - src/data/polymarket_client.py
   - src/engine/cycle_runner.py
   - src/engine/cycle_runtime.py
+  - src/engine/lifecycle_events.py
   - src/execution/executor.py
   - src/state/venue_command_repo.py
   - src/venue/polymarket_v2_adapter.py
