@@ -189,10 +189,12 @@ Durable trading rules:
 
 - Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks.
 - Every live venue BUY or SELL, including entry, reduce-only exit, single-order,
-  and batch paths, must have a finite unit price strictly inside `(0, 1)`.
-  Current tick/range, minimum size, identity, tradeability, fees, depth, robust
-  delta-log-wealth/EV, and Kelly remain cumulative requirements. Nominal price
-  is not a probability-quality proxy and must not create an arbitrary tail gate.
+  and batch paths, must have a finite unit price inside inclusive `[0.05, 0.95]`.
+  Anything below `0.05` or above `0.95` is rejected at command persistence,
+  the submission envelope, and an independent final SDK boundary. Current
+  tick/range, minimum size, identity, tradeability, fees, depth, robust
+  delta-log-wealth/EV, and Kelly remain cumulative requirements; none may waive
+  this absolute band. Only a later direct operator instruction may change it.
 - Live may act; backtest may evaluate — and only against verified settlement joins, never mixed regimes. Shadow modes are extirpated (operator directive 2026-06-12); do not reintroduce one as a staging tier.
 - Settlement values flow through `SettlementSemantics`.
 - DB commits precede derived JSON/report exports.
