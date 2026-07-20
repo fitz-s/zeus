@@ -4776,6 +4776,20 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
         bids = []
     if not isinstance(asks, list):
         asks = []
+
+    def _conservative_top(field: str) -> list[dict[str, str]]:
+        try:
+            price = Decimal(str(row.get(field)))
+        except (InvalidOperation, TypeError, ValueError):
+            return []
+        if not price.is_finite() or not Decimal("0") < price < Decimal("1"):
+            return []
+        return [{"price": str(price), "size": "1"}]
+
+    if not bids:
+        bids = _conservative_top("best_bid_before")
+    if not asks:
+        asks = _conservative_top("best_ask_before")
     if not asks:
         return None
     gamma_market_raw = outcome.get("gamma_market_raw")
@@ -4797,20 +4811,24 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
     neg_risk = _boolish_market_field(outcome, "neg_risk", "negRisk", "negative_risk")
     if neg_risk is None:
         neg_risk = _boolish_market_field(gamma_market_raw, "neg_risk", "negRisk", "negative_risk")
-    if tick_size is None or min_order_size is None or neg_risk is None:
-        return None
-    try:
-        tick_dec = Decimal(str(tick_size))
-        min_order_dec = Decimal(str(min_order_size))
-    except (InvalidOperation, TypeError, ValueError):
-        return None
-    if not tick_dec.is_finite() or tick_dec <= Decimal("0"):
-        return None
-    if not min_order_dec.is_finite() or min_order_dec <= Decimal("0"):
-        return None
-    book["tick_size"] = str(tick_dec)
-    book["min_order_size"] = str(min_order_dec)
-    book["neg_risk"] = bool(neg_risk)
+    if tick_size is not None:
+        try:
+            tick_dec = Decimal(str(tick_size))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not tick_dec.is_finite() or tick_dec <= Decimal("0"):
+            return None
+        book["tick_size"] = str(tick_dec)
+    if min_order_size is not None:
+        try:
+            min_order_dec = Decimal(str(min_order_size))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not min_order_dec.is_finite() or min_order_dec <= Decimal("0"):
+            return None
+        book["min_order_size"] = str(min_order_dec)
+    if neg_risk is not None:
+        book["neg_risk"] = bool(neg_risk)
     return book
 
 

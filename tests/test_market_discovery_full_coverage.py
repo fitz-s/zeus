@@ -2431,7 +2431,7 @@ def test_small_full_family_refresh_fills_missing_books_from_direct_clob(monkeypa
     assert summary["inserted"] == 2
     assert summary["prefetch_missing_skipped"] == 0
     assert summary["direct_clob_prefetch_skipped"] == 0
-    assert summary["direct_clob_prefetch_small_family_enabled"] == 1
+    assert summary["direct_clob_prefetch_small_family_enabled"] == 0
 
 
 def test_large_full_family_refresh_fills_priority_books_from_direct_clob(monkeypatch):
@@ -2803,7 +2803,7 @@ def test_small_priority_refresh_defers_without_per_token_book_reads(monkeypatch)
     assert summary["attempted"] == 0
     assert summary["inserted"] == 0
     assert summary["prefetch_missing_skipped"] == 2
-    assert summary["direct_clob_prefetch_small_family_enabled"] == 0
+    assert summary["direct_clob_prefetch_small_family_enabled"] == 1
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
@@ -2867,8 +2867,8 @@ def test_priority_refresh_captures_partial_batch_misses_as_identity(monkeypatch)
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
-def test_urgent_full_family_capture_breadth_covers_price_pairs(monkeypatch):
-    """Urgent Day0/redecision families need fresh price pairs across many cities."""
+def test_urgent_full_family_capture_keeps_one_family_complete_under_tight_cap(monkeypatch):
+    """A candidate cap must not split one urgent MECE family across ticks."""
 
     monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "8")
     conn = _make_in_memory_trade_db()
@@ -2900,11 +2900,11 @@ def test_urgent_full_family_capture_breadth_covers_price_pairs(monkeypatch):
             max_outcomes=0,
         )
 
-    assert summary["selected_executable_snapshot_count"] == 8
-    assert summary["selected_executable_city_count"] == 4
+    assert summary["selected_executable_snapshot_count"] == 10
+    assert summary["selected_executable_city_count"] == 1
     assert summary["urgent_refresh_family_count"] == 4
-    assert summary["selected_urgent_refresh_city_count"] == 4
-    assert {row[0] for row in captured} == {"Austin", "Boston", "Chicago", "Denver"}
+    assert summary["selected_urgent_refresh_city_count"] == 1
+    assert {row[0] for row in captured} == {"Austin"}
     assert all(direction in {"buy_yes", "buy_no"} for *_rest, direction in captured)
 
 
