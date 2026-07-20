@@ -1749,6 +1749,8 @@ def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
             continue
         item = dict(row)
         item["event_id"] = event_id
+        if _entry_command_fill_is_absorbed_by_position_truth(item):
+            continue
         item["boot_auto_cancelable_invalid_pending_entry"] = (
             _restart_relevant_entry_command_boot_auto_cancelable(item)
         )
@@ -1817,6 +1819,29 @@ def _restart_relevant_entry_command_has_positive_exposure(command: dict[str, Any
         and _decimal_zero_or_missing(command.get("position_cost_basis_usd"))
         and _decimal_zero_or_missing(command.get("position_chain_shares"))
     )
+
+
+def _entry_command_fill_is_absorbed_by_position_truth(
+    command: dict[str, Any],
+) -> bool:
+    """Return true when this command can no longer create entry side effects."""
+
+    if str(command.get("state") or "").upper() != "PARTIAL":
+        return False
+    if str(command.get("position_phase") or "") == "pending_entry":
+        return False
+    if not _restart_relevant_entry_command_has_positive_exposure(command):
+        return False
+    if str(command.get("latest_fact_state") or "").upper() not in {
+        "MATCHED",
+        "FILLED",
+    }:
+        return False
+    if not _decimal_zero_or_missing(command.get("latest_fact_remaining_size")):
+        return False
+    if str(command.get("positive_trade_fact_state") or "").upper() != "CONFIRMED":
+        return False
+    return _positive_float(command.get("positive_trade_filled_size")) is not None
 
 
 def _restart_relevant_entry_command_invalid_open_authority_recoverable(

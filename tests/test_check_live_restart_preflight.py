@@ -1110,6 +1110,36 @@ def test_live_actionable_certificate_semantics_ignores_submit_rejected_command(
     assert result.evidence["historical_risky_count"] == 1
 
 
+def test_confirmed_filled_entry_with_no_remainder_is_historical_after_projection() -> None:
+    command = {
+        "state": "PARTIAL",
+        "position_phase": "day0_window",
+        "position_shares": 42.4,
+        "position_cost_basis_usd": 2.28,
+        "position_chain_shares": 42.4,
+        "latest_fact_state": "MATCHED",
+        "latest_fact_matched_size": "11",
+        "latest_fact_remaining_size": "0",
+        "positive_trade_fact_state": "CONFIRMED",
+        "positive_trade_filled_size": "11",
+        "positive_trade_fill_price": "0.058",
+    }
+
+    assert preflight._entry_command_fill_is_absorbed_by_position_truth(command) is True
+    assert preflight._entry_command_fill_is_absorbed_by_position_truth(
+        {**command, "latest_fact_remaining_size": "0.01"}
+    ) is False
+    assert preflight._entry_command_fill_is_absorbed_by_position_truth(
+        {**command, "positive_trade_fact_state": "MATCHED"}
+    ) is False
+    assert preflight._entry_command_fill_is_absorbed_by_position_truth(
+        {**command, "position_phase": "pending_entry"}
+    ) is False
+    assert preflight._entry_command_fill_is_absorbed_by_position_truth(
+        {**command, "state": "REVIEW_REQUIRED"}
+    ) is False
+
+
 def test_live_actionable_certificate_semantics_blocks_referenced_qkernel_mismatch(
     monkeypatch, tmp_path
 ):
