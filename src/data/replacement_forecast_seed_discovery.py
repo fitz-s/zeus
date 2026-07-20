@@ -194,7 +194,9 @@ def _day0_observed_extreme_seed_payload(
             return None
         return {
             "day0_observed_extreme_c": float(observed_c),
-            "day0_observed_extreme_source": str(fact.get("source") or "unknown"),
+            "day0_observed_extreme_source": str(
+                fact.get("observation_source") or fact.get("source") or "unknown"
+            ),
             "day0_observed_extreme_observation_time": observation_time,
             "day0_observed_extreme_sample_count": sample_count,
             "day0_observed_extreme_unit": unit,

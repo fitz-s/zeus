@@ -28382,7 +28382,10 @@ def _global_day0_execution_payload(
     from src.data.replacement_forecast_current_target_plan import (
         _latest_authorized_day0_fact,
     )
-    from src.events.day0_authority import assert_live_day0_payload_authority
+    from src.events.day0_authority import (
+        assert_live_day0_payload_authority,
+        day0_evidence_finality,
+    )
 
     carrier = _payload(event)
     assert_live_day0_payload_authority(carrier)
@@ -28449,6 +28452,9 @@ def _global_day0_execution_payload(
 
     station_id = str(fact.get("station_id") or "").strip().upper()
     observation_source = str(fact.get("observation_source") or "").strip()
+    evidence_finality = day0_evidence_finality(
+        {"settlement_source": observation_source}
+    )
     city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
     if city is None:
         raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
@@ -28482,6 +28488,7 @@ def _global_day0_execution_payload(
         "station_id": station_id,
         "settlement_source": observation_source,
         "settlement_unit": unit,
+        "evidence_finality": evidence_finality,
     }
     if posterior_id not in (None, ""):
         try:
@@ -28505,6 +28512,7 @@ def _global_day0_execution_payload(
         "station_id": station_id,
         "settlement_source": observation_source,
         "settlement_unit": unit,
+        "evidence_finality": evidence_finality,
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",
         "station_match_status": "MATCH",
@@ -28717,6 +28725,14 @@ def _day0_deterministic_bin_payoffs(
     payload: Mapping[str, object],
 ) -> tuple[tuple[str, int], ...]:
     """Return only bin payoffs proved pathwise by the current running extreme."""
+
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
+
+    if day0_evidence_finality(payload) not in DAY0_ABSORBING_FINALITIES:
+        return ()
 
     from src.execution.day0_hard_fact_exit import hard_fact_bin_verdict
 
@@ -32076,7 +32092,16 @@ def _make_day0_bootstrap_sampler(
         members = members[np.isfinite(members)]
         if members.size == 0:
             raise ValueError("no finite members for day0 bootstrap")
-        rounded = _optional_float(payload.get("rounded_value"))
+        from src.events.day0_authority import (
+            DAY0_ABSORBING_FINALITIES,
+            day0_evidence_finality,
+        )
+
+        rounded = (
+            _optional_float(payload.get("rounded_value"))
+            if day0_evidence_finality(payload) in DAY0_ABSORBING_FINALITIES
+            else None
+        )
         metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
         if metric not in {"high", "low"}:
             raise ValueError(f"unsupported day0 metric for bootstrap: {metric!r}")
@@ -34463,6 +34488,13 @@ def _day0_absorbing_mask(*, payload: dict[str, object], family) -> "np.ndarray":
         raise ValueError("Day0 event missing rounded_value")
     metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
     mask = np.ones(len(family.candidates), dtype=float)
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
+
+    if day0_evidence_finality(payload) not in DAY0_ABSORBING_FINALITIES:
+        return mask
     for index, candidate in enumerate(family.candidates):
         bin_value = candidate.bin
         if metric == "high":
@@ -34837,7 +34869,15 @@ def _day0_remaining_day_members(
             world_conn=world_conn,
         )
         rounded = _optional_float(payload.get("rounded_value"))
-        if rounded is not None:
+        from src.events.day0_authority import (
+            DAY0_ABSORBING_FINALITIES,
+            day0_evidence_finality,
+        )
+
+        if (
+            rounded is not None
+            and day0_evidence_finality(payload) in DAY0_ABSORBING_FINALITIES
+        ):
             values = (
                 np.maximum(values, float(rounded))
                 if metric == "high"
@@ -34884,6 +34924,14 @@ def _apply_day0_mask_to_generated_probabilities(
         raise ValueError("Day0 event missing rounded_value")
     metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
     is_remaining_day_q_source = str(payload.get("_edli_q_source") or "") == "day0_remaining_day"
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
+
+    is_absorbing_evidence = (
+        day0_evidence_finality(payload) in DAY0_ABSORBING_FINALITIES
+    )
     mask: list[float] = []
     absorbing_yes: list[bool] = []
     absorbing_no: list[bool] = []
@@ -34891,7 +34939,9 @@ def _apply_day0_mask_to_generated_probabilities(
         bin_value = candidate.bin
         is_absorbing_yes = False
         is_absorbing_no = False
-        if metric == "high":
+        if not is_absorbing_evidence:
+            mask.append(1.0)
+        elif metric == "high":
             if bin_value.high is not None and rounded > float(bin_value.high):
                 is_absorbing_no = True
                 mask.append(0.0)
@@ -34925,7 +34975,7 @@ def _apply_day0_mask_to_generated_probabilities(
     # unparseable obs time or unknown city => maximum margin / conservative budget.
     staleness_uncertain: list[bool] = [False] * len(list(family.candidates))
     _obs_age_min = _budget_min = _margin = None  # audit fields (PR#404 P1 lcb-transform)
-    if _day0_stale_obs_boundary_guard_enabled():
+    if is_absorbing_evidence and _day0_stale_obs_boundary_guard_enabled():
         from src.signal.day0_obs_latency import (
             stale_extreme_uncertainty_margin,
             staleness_budget_minutes,

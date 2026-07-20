@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.events.event_writer import EventWriter
+from src.events.day0_authority import day0_evidence_finality
 from src.events.triggers.day0_extreme_updated import (
     Day0ExtremeUpdatedTrigger,
     authority_row_to_observation,
@@ -150,6 +151,38 @@ def test_day0_event_uses_observation_available_at():
     )
     assert event.available_at == "2026-05-24T18:07:00+00:00"
     assert sem.calls == [74.2]
+    assert json.loads(event.payload_json)["evidence_finality"] == (
+        "MONOTONE_SETTLEMENT_BOUND"
+    )
+
+
+def test_hko_intraday_event_is_explicitly_provisional():
+    event = build_day0_extreme_updated_event(
+        observation=_observation(
+            city="Hong Kong",
+            settlement_source="hko_hourly_accumulator",
+            station_id="HKO",
+            raw_value=29.7,
+            high_so_far=29.7,
+        ),
+        settlement_semantics=FakeSettlementSemantics(29),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        received_at="2026-05-24T18:08:00+00:00",
+    )
+
+    assert json.loads(event.payload_json)["evidence_finality"] == (
+        "PROVISIONAL_CURRENT_SNAPSHOT"
+    )
+    assert day0_evidence_finality(
+        {
+            "settlement_source": "hko_hourly_accumulator",
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+        }
+    ) == "PROVISIONAL_CURRENT_SNAPSHOT"
+    assert day0_evidence_finality(
+        {"settlement_source": "hko_hourly_accumulator_projection_v2"}
+    ) == "PROVISIONAL_CURRENT_SNAPSHOT"
+    assert day0_evidence_finality({}) == "UNKNOWN"
 
 
 def test_observation_available_at_future_blocks():

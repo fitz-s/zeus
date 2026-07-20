@@ -39,6 +39,56 @@ DAY0_OBSERVATION_HARD_FACT_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
 DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
 DAY0_OBSERVED_BOUNDARY_GUARD_BASIS = "DAY0_OBSERVED_BOUNDARY"
 DAY0_REMAINING_DAY_LCB_TOLERANCE = 1e-6
+DAY0_PROVISIONAL_CURRENT_SNAPSHOT = "PROVISIONAL_CURRENT_SNAPSHOT"
+DAY0_MONOTONE_SETTLEMENT_BOUND = "MONOTONE_SETTLEMENT_BOUND"
+DAY0_FINAL_DAILY_SETTLEMENT = "FINAL_DAILY_SETTLEMENT"
+DAY0_UNKNOWN_FINALITY = "UNKNOWN"
+DAY0_ABSORBING_FINALITIES = frozenset(
+    {DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_FINAL_DAILY_SETTLEMENT}
+)
+
+
+def day0_evidence_finality(payload: Mapping[str, object]) -> str:
+    """Classify current observation evidence without conflating source and finality."""
+
+    declared = str(payload.get("evidence_finality") or "").strip().upper()
+    source = str(
+        payload.get("settlement_source")
+        or payload.get("observation_source")
+        or payload.get("source")
+        or ""
+    ).strip().lower()
+    # Source-impossible rules outrank a declaration carried by an old or
+    # contaminated payload. HKO explicitly revises intraday snapshots.
+    if source.startswith("hko_hourly_accumulator"):
+        return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    if source == "hko_daily_api" or source.startswith("hko_daily_api_"):
+        return DAY0_FINAL_DAILY_SETTLEMENT
+    monotone_source = (
+        source == "wu"
+        or source.startswith("wu_")
+        or source.startswith("ogimet_metar_")
+        or source in {"aviationweather_metar", "same_station_fast_tail"}
+        or source.startswith("observation_prints:wu")
+        or source.startswith("observation_prints:ogimet_metar_")
+        or source.startswith("observation_prints:aviationweather_metar")
+    )
+    if not monotone_source:
+        return DAY0_UNKNOWN_FINALITY
+    if declared == DAY0_PROVISIONAL_CURRENT_SNAPSHOT:
+        return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    return DAY0_MONOTONE_SETTLEMENT_BOUND
+
+
+def assert_absorbing_day0_payload_authority(
+    payload: Mapping[str, object],
+) -> None:
+    """Require both live observation authority and logically absorbing evidence."""
+
+    assert_live_day0_payload_authority(payload)
+    finality = day0_evidence_finality(payload)
+    if finality not in DAY0_ABSORBING_FINALITIES:
+        raise Day0AuthorityError(f"day0 evidence is not absorbing:{finality}")
 
 
 def normalize_day0_live_authority_status(value: object, *, default: str = "UNKNOWN") -> str:
@@ -620,7 +670,7 @@ def _assert_deterministic_bin_payoff_authority(
         observation = payload
     if not isinstance(observation, Mapping):
         raise Day0AuthorityError("deterministic_current_observation missing")
-    assert_live_day0_payload_authority(observation)
+    assert_absorbing_day0_payload_authority(observation)
     binding = observation.get("_edli_global_day0_binding")
     if not isinstance(binding, Mapping):
         raise Day0AuthorityError("deterministic_day0_binding missing")

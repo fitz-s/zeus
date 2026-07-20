@@ -11,7 +11,10 @@ from zoneinfo import ZoneInfo
 
 from src.config import runtime_cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.events.day0_authority import normalize_day0_live_authority_status
+from src.events.day0_authority import (
+    day0_evidence_finality,
+    normalize_day0_live_authority_status,
+)
 from src.events.event_priority import day0_emit_priority
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, OpportunityEvent, make_day0_extreme_updated_event
@@ -81,6 +84,7 @@ def build_day0_extreme_updated_event(
         live_authority_status=normalize_day0_live_authority_status(
             observation.get("live_authority_status"),
         ),
+        evidence_finality=day0_evidence_finality(observation),
         metar_margin_units_applied=observation.get("metar_margin_units_applied"),
     )
     entity_key = "|".join((payload.city, payload.target_date, payload.metric, payload.station_id))

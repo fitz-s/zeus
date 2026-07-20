@@ -540,6 +540,25 @@ def _day0_observed_extreme_c(request: ReplacementForecastMaterializeRequest) -> 
     return number
 
 
+def _day0_absorbing_observed_extreme_c(
+    request: ReplacementForecastMaterializeRequest,
+) -> float | None:
+    """Return only an observation that can logically truncate payoff support."""
+
+    value = _day0_observed_extreme_c(request)
+    if value is None:
+        return None
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
+
+    finality = day0_evidence_finality(
+        {"settlement_source": request.day0_observed_extreme_source}
+    )
+    return value if finality in DAY0_ABSORBING_FINALITIES else None
+
+
 def _target_local_day_has_started(
     request: ReplacementForecastMaterializeRequest,
     *,
@@ -3932,7 +3951,9 @@ def _compute_posterior_payload(
             # across the family (fail-loud if mixed).
             _rounding_rule = _family_rounding_rule(request.bins)
             _day0_obs_extreme_c = (
-                _day0_observed_extreme_c(request) if _target_local_day_has_started(request) else None
+                _day0_absorbing_observed_extreme_c(request)
+                if _target_local_day_has_started(request)
+                else None
             )
             # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
             # AVAILABILITY, not a global flag (edli_settlement_sigma_floor_enabled / _required
@@ -4419,7 +4440,15 @@ def _compute_posterior_payload(
         "settlement_step_c": float(request.settlement_step_c),
     }
     _posterior_day0_observed_extreme_c = (
-        _day0_observed_extreme_c(request) if _target_local_day_has_started(request) else None
+        _day0_absorbing_observed_extreme_c(request)
+        if _target_local_day_has_started(request)
+        else None
+    )
+    _posterior_day0_provisional_extreme_c = (
+        _day0_observed_extreme_c(request)
+        if _target_local_day_has_started(request)
+        and _posterior_day0_observed_extreme_c is None
+        else None
     )
     if _posterior_day0_observed_extreme_c is not None:
         posterior_config.update(
@@ -4434,6 +4463,17 @@ def _compute_posterior_payload(
                 ),
             }
         )
+    elif _posterior_day0_provisional_extreme_c is not None:
+        posterior_config["day0_provisional_observation"] = {
+            "observed_extreme_c": float(_posterior_day0_provisional_extreme_c),
+            "source": str(request.day0_observed_extreme_source or ""),
+            "observation_time": (
+                None
+                if request.day0_observed_extreme_observation_time is None
+                else str(request.day0_observed_extreme_observation_time)
+            ),
+            "support_truncation": False,
+        }
     if bayes_precision_fusion_override is not None:
         # F6: the FUSED product gets its OWN EMOS cell identity (product + resolution_mix_hash +
         # model_set_hash + lead_bucket) so it never reuses the single-anchor EMOS cell. The fused
@@ -4702,6 +4742,21 @@ def _compute_posterior_payload(
             provenance_payload["day0_remaining_center_delta_c"] = float(_day0_center_delta_c)
             provenance_payload["day0_remaining_vector_id"] = _day0_center_vector_id
             provenance_payload["day0_remaining_hours"] = _day0_center_hours_remaining
+    elif _posterior_day0_provisional_extreme_c is not None:
+        provenance_payload["day0_provisional_observation"] = {
+            "active": True,
+            "metric": metric,
+            "observed_extreme_c": float(_posterior_day0_provisional_extreme_c),
+            "source": request.day0_observed_extreme_source,
+            "observation_time": (
+                None
+                if request.day0_observed_extreme_observation_time is None
+                else str(request.day0_observed_extreme_observation_time)
+            ),
+            "sample_count": request.day0_observed_extreme_sample_count,
+            "unit": request.day0_observed_extreme_unit,
+            "support_truncation": False,
+        }
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
     # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
     # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.

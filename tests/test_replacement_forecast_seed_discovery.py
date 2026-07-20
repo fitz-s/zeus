@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +20,7 @@ from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest,
 from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOURCE_ID
 from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
 from src.data.replacement_forecast_seed_discovery import (
+    _day0_observed_extreme_seed_payload,
     _load_manifest_files,
     _load_manifests,
     _manifest_allows_target_date,
@@ -27,6 +28,7 @@ from src.data.replacement_forecast_seed_discovery import (
     _seed_target_sort_key,
     discover_replacement_forecast_materialization_seeds,
 )
+import src.data.replacement_forecast_seed_discovery as seed_discovery
 
 
 def test_seed_target_sort_keeps_day0_retries_from_starving_pre_settlement_q() -> None:
@@ -50,6 +52,41 @@ def test_seed_target_sort_keeps_day0_retries_from_starving_pre_settlement_q() ->
     )
 
     assert ordered == [future, day0_held]
+
+
+def test_hko_seed_preserves_provisional_provider_source(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setitem(
+        seed_discovery.cities_by_name,
+        "Hong Kong",
+        SimpleNamespace(settlement_unit="C"),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "get_world_connection_read_only",
+        lambda: conn,
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: {
+            "observed_extreme_native": 29.7,
+            "observation_time": "2026-07-20T07:20:00+00:00",
+            "sample_count": 1,
+            "source": "durable_observation_instants",
+            "observation_source": "hko_hourly_accumulator",
+        },
+    )
+
+    payload = _day0_observed_extreme_seed_payload(
+        city="Hong Kong",
+        target_date="2026-07-20",
+        metric="high",
+        computed_at=datetime(2026, 7, 20, 7, 30, tzinfo=timezone.utc),
+    )
+
+    assert payload is not None
+    assert payload["day0_observed_extreme_source"] == "hko_hourly_accumulator"
 
 
 def _write_file(path: Path, payload: object) -> Path:
@@ -1088,7 +1125,7 @@ def test_seed_discovery_seeds_day0_when_canonical_observed_extreme_exists(
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
     assert seed["city"] == "NYC"
     assert seed["day0_observed_extreme_c"] == (77.0 - 32.0) * 5.0 / 9.0
-    assert seed["day0_observed_extreme_source"] == "durable_observation_instants"
+    assert seed["day0_observed_extreme_source"] == "wu_icao_history"
     assert seed["day0_observed_extreme_observation_time"] == "2026-06-08T05:00:00+00:00"
     assert seed["day0_observed_extreme_sample_count"] == 1
     assert seed["day0_observed_extreme_unit"] == "F"

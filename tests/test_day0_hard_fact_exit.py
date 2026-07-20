@@ -403,10 +403,12 @@ class TestVerdictMatrix:
 # ===========================================================================
 
 class TestSourceDiscipline:
-    def test_hko_contract_routes_to_hko_current_extrema(self, monkeypatch):
+    def test_hko_provisional_current_extrema_abstain_from_hard_fact(self, monkeypatch):
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit._hko_rounded_extremes",
-            lambda city, target_date, now: (29.0, 25.0),
+            lambda city, target_date, now: (_ for _ in ()).throw(
+                AssertionError("provisional HKO must not enter the hard-fact seam")
+            ),
         )
 
         effective, source = settlement_grade_effective_extreme(
@@ -416,8 +418,195 @@ class TestSourceDiscipline:
             now=NOW,
         )
 
-        assert effective == pytest.approx(29.0)
-        assert source == "hko_hourly_accumulator"
+        assert effective is None
+        assert source == ""
+
+    def test_hko_provisional_snapshot_cannot_create_exact_yes_or_no(self):
+        from src.engine import event_reactor_adapter as era
+
+        candidates = tuple(
+            SimpleNamespace(
+                condition_id=f"condition-{value}",
+                bin=SimpleNamespace(
+                    low=float(value),
+                    high=float(value),
+                    unit="C",
+                ),
+            )
+            for value in (28, 29)
+        ) + (
+            SimpleNamespace(
+                condition_id="condition-30-plus",
+                bin=SimpleNamespace(low=30.0, high=None, unit="C"),
+            ),
+        )
+        family = SimpleNamespace(metric="high", city="Hong Kong", candidates=candidates)
+        payload = {
+            "metric": "high",
+            "rounded_value": 30.0,
+            "settlement_source": "hko_hourly_accumulator",
+            # A contaminated old payload must not override the source-impossible
+            # rule with its own absorbing declaration.
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+            "_edli_q_source": "day0_remaining_day",
+        }
+        q = {
+            "condition-28": 0.2,
+            "condition-29": 0.3,
+            "condition-30-plus": 0.5,
+        }
+        lcb = {
+            ("condition-28", "buy_yes"): 0.1,
+            ("condition-28", "buy_no"): 0.7,
+            ("condition-29", "buy_yes"): 0.2,
+            ("condition-29", "buy_no"): 0.6,
+            ("condition-30-plus", "buy_yes"): 0.4,
+            ("condition-30-plus", "buy_no"): 0.4,
+        }
+
+        assert era._day0_absorbing_mask(payload=payload, family=family).tolist() == [
+            1.0,
+            1.0,
+            1.0,
+        ]
+        assert era._day0_deterministic_bin_payoffs(
+            omega=SimpleNamespace(
+                bins=tuple(SimpleNamespace(bin_id=str(i)) for i in range(3))
+            ),
+            family=family,
+            payload=payload,
+        ) == ()
+        assert era._day0_absorbing_exact_probability_components(
+            omega=SimpleNamespace(bins=(object(), object(), object())),
+            family=family,
+            payload=payload,
+        ) is None
+
+        masked_q, masked_lcb = era._apply_day0_mask_to_generated_probabilities(
+            payload=payload,
+            family=family,
+            q_by_condition=q,
+            lcb_by_condition=lcb,
+            decision_time=NOW,
+        )
+
+        from src.calibration.qlcb_provenance import _qlcb_float
+
+        assert masked_q == pytest.approx(q)
+        assert _qlcb_float(masked_lcb[("condition-28", "buy_no")]) == pytest.approx(0.7)
+        assert _qlcb_float(masked_lcb[("condition-29", "buy_no")]) == pytest.approx(0.6)
+        assert payload["_edli_day0_lcb_transform"]["absorbing_no_conditions"] == []
+
+    def test_hko_legacy_monitor_fallback_abstains_from_support_clamp(self):
+        from src.engine import monitor_refresh
+
+        position = _position(
+            city="Hong Kong",
+            p_posterior=0.42,
+            selected_method="legacy_day0",
+        )
+        probability, validations = monitor_refresh._refresh_day0_observation(
+            position=position,
+            current_p_market=0.5,
+            conn=None,
+            city=_hong_kong(),
+            target_d=datetime(2026, 7, 20, tzinfo=UTC).date(),
+        )
+
+        assert probability == pytest.approx(0.42)
+        assert "hko_provisional_snapshot_not_absorbing" in validations
+        assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+
+    def test_hko_reseed_uses_latest_correction_not_cross_time_max(self, monkeypatch):
+        from src.engine import monitor_refresh
+
+        city = _hong_kong()
+        monkeypatch.setitem(monitor_refresh.cities_by_name, "Hong Kong", city)
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_city_supports_executable_day0_observation",
+            lambda _city: True,
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_is_position_target_local_day",
+            lambda *_args, **_kwargs: True,
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_day0_observation_source_rejection_reason",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_fetch_day0_observation",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                high_so_far=29.7,
+                low_so_far=25.7,
+                observation_time="2026-07-20T08:00:00+00:00",
+                source="hko_hourly_accumulator",
+                sample_count=1,
+            ),
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_day0_observed_extreme_from_canonical_surface",
+            lambda **_kwargs: (
+                30.0,
+                "2026-07-20T07:00:00+00:00",
+                "hko_hourly_accumulator",
+                1,
+            ),
+        )
+
+        payload = monitor_refresh._day0_observed_extreme_reseed_payload(
+            city="Hong Kong",
+            target_date="2026-07-20",
+            metric="high",
+        )
+
+        assert payload["day0_observed_extreme_c"] == pytest.approx(29.7)
+        assert payload["day0_observed_extreme_source"] == "hko_hourly_accumulator"
+
+    def test_wu_canonical_only_reseed_preserves_absorbing_source(self, monkeypatch):
+        from src.engine import monitor_refresh
+
+        city = _paris()
+        monkeypatch.setitem(monitor_refresh.cities_by_name, "Paris", city)
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_city_supports_executable_day0_observation",
+            lambda _city: True,
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_is_position_target_local_day",
+            lambda *_args, **_kwargs: True,
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_fetch_day0_observation",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_day0_observed_extreme_from_canonical_surface",
+            lambda **_kwargs: (
+                35.0,
+                "2026-07-20T15:00:00+00:00",
+                "wu_icao_history",
+                8,
+            ),
+        )
+
+        payload = monitor_refresh._day0_observed_extreme_reseed_payload(
+            city="Paris",
+            target_date="2026-07-20",
+            metric="high",
+        )
+
+        assert payload["day0_observed_extreme_c"] == pytest.approx(35.0)
+        assert payload["day0_observed_extreme_source"] == "wu_icao_history"
 
     def test_hko_current_extrema_rejects_cross_family_source(self, monkeypatch):
         monkeypatch.setattr(

@@ -751,6 +751,65 @@ def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch:
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 26.0
 
 
+def test_materializer_hko_provisional_observation_does_not_truncate_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    request = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=26.0,
+        day0_observed_extreme_source="hko_hourly_accumulator",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=12,
+    )
+    result = materialize_replacement_forecast_live(
+        conn,
+        request,
+    )
+
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT q_json, q_lcb_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    q = json.loads(row["q_json"])
+    q_lcb = json.loads(row["q_lcb_json"])
+    provenance = json.loads(row["provenance_json"])
+    assert q["cool"] > 0.0
+    assert q_lcb["cool"] > 0.0
+    assert provenance["q_shape"] == "fused_normal_direct"
+    assert "day0_conditioning" not in provenance
+    assert provenance["day0_provisional_observation"] == {
+        "active": True,
+        "metric": "high",
+        "observed_extreme_c": 26.0,
+        "source": "hko_hourly_accumulator",
+        "observation_time": _dt(17, 55).isoformat(),
+        "sample_count": 12,
+        "unit": "C",
+        "support_truncation": False,
+    }
+
+    revised = materialize_replacement_forecast_live(
+        conn,
+        replace(
+            request,
+            computed_at=_dt(18, 10),
+            day0_observed_extreme_c=25.7,
+            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+        ),
+    )
+    assert revised.ok is True
+    assert revised.posterior_id != result.posterior_id
+    hashes = conn.execute(
+        "SELECT posterior_config_hash FROM forecast_posteriors WHERE posterior_id IN (?, ?)",
+        (result.posterior_id, revised.posterior_id),
+    ).fetchall()
+    assert len({row["posterior_config_hash"] for row in hashes}) == 2
+
+
 def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -782,7 +841,7 @@ def test_materializer_day0_allows_post_localday_observation_to_cover_elapsed_hou
         computed_at=datetime(2026, 6, 7, 17, tzinfo=UTC),
         expires_at=datetime(2026, 6, 8, 0, tzinfo=UTC),
         day0_observed_extreme_c=32.0,
-        day0_observed_extreme_source="durable_observation_instants",
+        day0_observed_extreme_source="wu_icao_history",
         day0_observed_extreme_observation_time=datetime(2026, 6, 7, 15, 0, tzinfo=UTC).isoformat(),
         day0_observed_extreme_sample_count=24,
     )

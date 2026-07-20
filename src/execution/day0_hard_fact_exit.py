@@ -624,9 +624,10 @@ def settlement_grade_effective_extreme(
 
     Current evidence is routed by ``settlement_source_type``. WU contracts may
     compose WU live/durable bucket facts with calibrated same-station METAR.
-    HKO contracts consume only HKO's official cumulative extrema; the diagnostic
-    current temperature and WU/METAR families are not substitutes. None when no
-    matching source is available.
+    HKO intraday cumulative extrema are provider-correct but provisional and may
+    be revised. They are probability evidence, not a pathwise payoff fact, so
+    this hard-fact seam abstains until the final daily HKO product is available.
+    None is returned when no logically absorbing source is available.
 
     ``world_conn`` is threaded from the monitoring-phase composite connection so
     the METAR kill-memo recovery (cold-start path) does not open an independent
@@ -640,9 +641,6 @@ def settlement_grade_effective_extreme(
     if not durable_only and source_type == "wu_icao":
         current_high, current_low = _wu_rounded_extremes(city, target_date, now=now)
         current_source = "wu_api"
-    elif not durable_only and source_type == "hko":
-        current_high, current_low = _hko_rounded_extremes(city, target_date, now=now)
-        current_source = "hko_hourly_accumulator"
 
     durable_high = durable_low = None
     durable_source = ""

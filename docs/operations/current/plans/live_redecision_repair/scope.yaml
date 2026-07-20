@@ -29,11 +29,14 @@ allowed_files:
   - src/engine/lifecycle_events.py
   - src/engine/cycle_runtime.py
   - src/engine/monitor_refresh.py
+  - src/engine/event_reactor_adapter.py
   - src/engine/position_belief.py
   - src/engine/qkernel_spine_bridge.py
   - src/engine/replacement_forecast_hook_factory.py
   - src/engine/replacement_forecast_reactor_hook.py
   - src/events/triggers/day0_extreme_updated.py
+  - src/events/day0_authority.py
+  - src/events/opportunity_event.py
   - src/events/event_store.py
   - src/data/replacement_forecast_bundle_reader.py
   - src/data/day0_observation_reader.py
@@ -76,6 +79,7 @@ allowed_files:
   - tests/test_replacement_forecast_switch_decision.py
   - tests/test_backfill_scripts_match_live_config.py
   - tests/test_day0_hard_fact_exit.py
+  - tests/engine/test_day0_canonical_observed_extreme_fallback.py
   - tests/test_day0_observation_reader.py
   - tests/events/test_day0_extreme_updated_trigger.py
   - tests/events/test_archive_day0_events_swept.py

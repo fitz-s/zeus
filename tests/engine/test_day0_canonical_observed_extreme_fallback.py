@@ -1,5 +1,5 @@
 # Created: 2026-06-23
-# Last audited: 2026-06-23
+# Last reused/audited: 2026-07-19
 # Authority basis: docs/evidence/same_day_exit_blindness/2026-06-23_toronto_total_loss.md
 #   (Toronto NO@24 -98.94% total loss) + consult REQ-20260623-174044-18fe71. Fix (B): the canonical
 #   world.observation_instants WU-hourly surface is the AUTHORITATIVE settlement-grade day0 observed
@@ -17,6 +17,7 @@ settlement-grade world.observation_instants surface (the same source the hard-fa
 returning the observation version for downstream observation-version idempotency."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -31,7 +32,7 @@ _COLS = (
     "training_allowed", "source_role", "provenance_json",
 )
 
-_HKO_BASIS = '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}'
+_HKO_BASIS = "hko_since_midnight_extrema_1min_mean"
 
 
 def _obs_conn(rows: list[tuple]) -> sqlite3.Connection:
@@ -39,6 +40,7 @@ def _obs_conn(rows: list[tuple]) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE observation_instants ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "city TEXT, target_date TEXT, local_timestamp TEXT, utc_timestamp TEXT, "
         "running_max REAL, running_min REAL, authority TEXT, causality_status TEXT, "
         "source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT, "
@@ -50,7 +52,18 @@ def _obs_conn(rows: list[tuple]) -> sqlite3.Connection:
             normalized_rows.append(row)
             continue
         source = str(row[8] if len(row) > 8 else "")
-        provenance = _HKO_BASIS if source == "hko_hourly_accumulator" else "{}"
+        provenance = (
+            json.dumps(
+                {
+                    "observation_basis": _HKO_BASIS,
+                    "official_running_high_c": row[4],
+                    "official_running_low_c": row[5],
+                },
+                sort_keys=True,
+            )
+            if source == "hko_hourly_accumulator"
+            else "{}"
+        )
         if len(row) == len(_COLS) - 1:
             normalized_rows.append((*row, provenance))
             continue
@@ -81,9 +94,10 @@ def test_canonical_reader_returns_running_max_and_observation_version():
         now=_NOW, world_conn=conn,
     )
     assert out is not None
-    extreme, obs_time, n_rows = out
+    extreme, obs_time, source, n_rows = out
     assert extreme == 24.0
     assert obs_time == "2026-06-23T21:00:00+00:00"
+    assert source == "wu_icao_history"
     assert n_rows == 2
 
 
@@ -114,9 +128,10 @@ def test_canonical_reader_low_metric_uses_running_min():
         now=datetime(2026, 6, 19, 23, 0, 0, tzinfo=UTC), world_conn=conn,
     )
     assert out is not None
-    extreme, obs_time, n_rows = out
+    extreme, obs_time, source, n_rows = out
     assert extreme == 16.0
     assert obs_time == "2026-06-19T13:00:00+00:00"
+    assert source == "wu_icao_history"
 
 
 def test_canonical_reader_accepts_hko_hourly_accumulator_for_hong_kong_low():
@@ -137,9 +152,10 @@ def test_canonical_reader_accepts_hko_hourly_accumulator_for_hong_kong_low():
     )
 
     assert out is not None
-    extreme, obs_time, n_rows = out
+    extreme, obs_time, source, n_rows = out
     assert extreme == 27.0
     assert obs_time == "2026-06-25T23:00Z"
+    assert source == "hko_hourly_accumulator"
     assert n_rows == 2
 
 
@@ -195,7 +211,7 @@ def test_canonical_reader_excludes_future_observations_after_now():
         now=datetime(2026, 6, 23, 18, 0, 0, tzinfo=UTC), world_conn=conn,
     )
     assert out is not None
-    extreme, obs_time, _ = out
+    extreme, obs_time, _, _ = out
     assert extreme == 22.0  # the 26.0 @ 00:00 next-day stamp is after now=18:00, excluded
     assert obs_time == "2026-06-23T17:00:00+00:00"
 
@@ -214,27 +230,27 @@ def test_canonical_reader_none_when_no_eligible_rows():
 # canonical is the settlement-grade hard bound; a live reading may only IMPROVE the
 # absorbing extreme (raise the high / lower the low), never UNDERCUT it. A stale/lower live
 # value must NOT suppress the canonical surface and materialize a fresh-but-wrong belief.
-# live tuple = (native, observation_time, source, sample_count); canonical = (native, time, n).
+# live/canonical tuple = (native, observation_time, source, sample_count).
 # ---------------------------------------------------------------------------
 def test_compose_stale_lower_live_does_not_undercut_canonical_high():
     """THE BLOCKER: live high-so-far 23 @ 22:00 must NOT override canonical running_max 24 @ 21:00."""
     composed = monitor_refresh._compose_day0_observed_extreme(
         live=(23.0, "2026-06-23T22:00:00+00:00", "wu_live", 5),
-        canonical=(24.0, "2026-06-23T21:00:00+00:00", 2),
+        canonical=(24.0, "2026-06-23T21:00:00+00:00", "wu_icao_history", 2),
         metric_is_low=False,
     )
     assert composed is not None
     native, obs_time, source, _ = composed
     assert native == 24.0  # absorbing max, canonical wins — NOT the stale 23
     assert obs_time == "2026-06-23T21:00:00+00:00"  # the dominant source's version
-    assert source == "durable_observation_instants"
+    assert source == "wu_icao_history"
 
 
 def test_compose_higher_live_improves_absorbing_extreme_high():
     """A live reading ABOVE canonical legitimately raises the absorbing high."""
     composed = monitor_refresh._compose_day0_observed_extreme(
         live=(25.0, "2026-06-23T22:00:00+00:00", "wu_live", 5),
-        canonical=(24.0, "2026-06-23T21:00:00+00:00", 2),
+        canonical=(24.0, "2026-06-23T21:00:00+00:00", "wu_icao_history", 2),
         metric_is_low=False,
     )
     native, obs_time, source, _ = composed
@@ -247,7 +263,7 @@ def test_compose_low_metric_live_above_does_not_undercut_canonical_min():
     """LOW: a live low 17 must not raise the absorbing min above canonical 16."""
     composed = monitor_refresh._compose_day0_observed_extreme(
         live=(17.0, "2026-06-19T13:00:00+00:00", "wu_live", 5),
-        canonical=(16.0, "2026-06-19T12:00:00+00:00", 2),
+        canonical=(16.0, "2026-06-19T12:00:00+00:00", "wu_icao_history", 2),
         metric_is_low=True,
     )
     native, obs_time, _, _ = composed
@@ -260,7 +276,7 @@ def test_compose_tie_prefers_later_observation_version():
     plateau observation still advances the version and re-materializes."""
     composed = monitor_refresh._compose_day0_observed_extreme(
         live=(24.0, "2026-06-23T22:00:00+00:00", "wu_live", 5),
-        canonical=(24.0, "2026-06-23T21:00:00+00:00", 2),
+        canonical=(24.0, "2026-06-23T21:00:00+00:00", "wu_icao_history", 2),
         metric_is_low=False,
     )
     native, obs_time, _, _ = composed
@@ -270,8 +286,10 @@ def test_compose_tie_prefers_later_observation_version():
 
 def test_compose_single_source_each():
     assert monitor_refresh._compose_day0_observed_extreme(
-        live=None, canonical=(24.0, "2026-06-23T21:00:00+00:00", 2), metric_is_low=False
-    ) == (24.0, "2026-06-23T21:00:00+00:00", "durable_observation_instants", 2)
+        live=None,
+        canonical=(24.0, "2026-06-23T21:00:00+00:00", "wu_icao_history", 2),
+        metric_is_low=False,
+    ) == (24.0, "2026-06-23T21:00:00+00:00", "wu_icao_history", 2)
     assert monitor_refresh._compose_day0_observed_extreme(
         live=(23.0, "2026-06-23T22:00:00+00:00", "wu_live", 5), canonical=None, metric_is_low=False
     ) == (23.0, "2026-06-23T22:00:00+00:00", "wu_live", 5)

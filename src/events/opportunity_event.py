@@ -21,6 +21,12 @@ EventType = Literal[
     "NEW_MARKET_DISCOVERED",
     "SOURCE_RUN_ARRIVED",
 ]
+Day0EvidenceFinality = Literal[
+    "PROVISIONAL_CURRENT_SNAPSHOT",
+    "MONOTONE_SETTLEMENT_BOUND",
+    "FINAL_DAILY_SETTLEMENT",
+    "UNKNOWN",
+]
 
 SCHEMA_VERSION = 1
 
@@ -77,6 +83,7 @@ class Day0ExtremeUpdatedPayload:
     rounding_status: str = "UNKNOWN"
     source_authorized_status: str = "UNKNOWN"
     live_authority_status: str = "UNKNOWN"
+    evidence_finality: Day0EvidenceFinality = "UNKNOWN"
     #: 2026-07-16 (day0 defect-5): settlement-unit margin absorbed into
     #: raw_value/rounded_value for a measured-but-not-settlement-faithful
     #: METAR station (Seoul/RKSI class) — see

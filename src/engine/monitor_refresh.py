@@ -2423,7 +2423,7 @@ def _day0_observed_extreme_from_canonical_surface(
     metric_is_low: bool,
     now: datetime | None = None,
     world_conn: sqlite3.Connection | None = None,
-) -> tuple[float, str, int] | None:
+) -> tuple[float, str, str, int] | None:
     """Observed running extreme + its observation version from the canonical settlement-grade
     ``world.observation_instants`` surface — the SAME source the day0 hard-fact lane
     (``day0_hard_fact_exit._durable_observation_instants_extremes``) and the
@@ -2434,9 +2434,11 @@ def _day0_observed_extreme_from_canonical_surface(
     fails on the settlement day ("All observation providers failed for <city>/<date>"), starving
     the day0 conditioning while this canonical WU-hourly surface already held the verified running
     extreme (Toronto NO@24 -98.94% incident). Returns ``(observed_native, observation_time_iso,
-    sample_count)``, or None when no VERIFIED WU row is available up to ``now``. ``world_conn`` is
-    injectable for tests; otherwise a private short-lived read-only world connection is opened and
-    closed (the position_belief read posture). See
+    chosen_source, sample_count)``, or None when no admissible row is available up to ``now``.
+    Preserving ``chosen_source`` is required because WU/Ogimet running extrema are monotone bounds
+    while the HKO intraday accumulator is a revisable current snapshot. ``world_conn`` is injectable
+    for tests; otherwise a private short-lived read-only world connection is opened and closed (the
+    position_belief read posture). See
     docs/evidence/same_day_exit_blindness/2026-06-23_toronto_total_loss.md.
     """
     decision_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -2480,6 +2482,7 @@ def _day0_observed_extreme_from_canonical_surface(
             return (
                 float(extreme),
                 str(result.last_observation_time_utc),
+                str(result.chosen_source),
                 int(result.row_count),
             )
         return None
@@ -2494,7 +2497,7 @@ def _day0_observed_extreme_from_canonical_surface(
 def _compose_day0_observed_extreme(
     *,
     live: tuple[float, str, str, int] | None,
-    canonical: tuple[float, str, int] | None,
+    canonical: tuple[float, str, str, int] | None,
     metric_is_low: bool,
 ) -> tuple[float, str, str, int] | None:
     """Compose live + canonical observed extremes by the ABSORBING LAW (consult
@@ -2505,7 +2508,7 @@ def _compose_day0_observed_extreme(
     idempotency version. None when neither source is available. A stale/lower live value therefore
     can NEVER suppress a higher canonical running extreme and materialise a fresh-but-wrong belief
     (the 9h staleness guard cannot catch a semantically false but timestamp-fresh posterior).
-    ``live`` = (native, observation_time, source, sample_count); ``canonical`` = (native, time, n).
+    ``live`` and ``canonical`` both carry (native, observation_time, source, sample_count).
     """
     from src.data.replacement_cycle_advance_trigger import normalize_observation_version
 
@@ -2514,7 +2517,7 @@ def _compose_day0_observed_extreme(
         candidates.append((float(live[0]), str(live[1]), str(live[2]), int(live[3])))
     if canonical is not None:
         candidates.append(
-            (float(canonical[0]), str(canonical[1]), "durable_observation_instants", int(canonical[2]))
+            (float(canonical[0]), str(canonical[1]), str(canonical[2]), int(canonical[3]))
         )
     if not candidates:
         return None
@@ -2611,19 +2614,49 @@ def _day0_observed_extreme_reseed_payload(
                     live_sample,
                 )
 
-    # CANONICAL candidate (ALWAYS read): the settlement-grade world.observation_instants surface
-    # the day0 hard-fact lane treats as authoritative. The live reading may only IMPROVE the
-    # absorbing extreme, never undercut this hard bound — a stale/lower live value cannot suppress
-    # the canonical running extreme and materialise a fresh-but-wrong belief (consult
-    # REQ-20260623-184115 BLOCKER). See docs/evidence/same_day_exit_blindness/.
+    # CANONICAL candidate (ALWAYS read): preserve the selected source because the storage surface
+    # is not the evidence semantics. WU/Ogimet running extrema are absorbing bounds; HKO's current
+    # intraday accumulator is a revisable snapshot. See docs/evidence/same_day_exit_blindness/.
     canonical = _day0_observed_extreme_from_canonical_surface(
         city_name=str(getattr(city_obj, "name", "") or city),
         target_date=str(target_date),
         metric_is_low=metric_is_low,
     )
-    composed = _compose_day0_observed_extreme(
-        live=live, canonical=canonical, metric_is_low=metric_is_low
-    )
+    source_type = str(
+        getattr(city_obj, "settlement_source_type", "") or ""
+    ).strip().lower()
+    if source_type == "hko":
+        # HKO may revise its official intraday snapshot. Choose the newest
+        # current fact and preserve its provisional source identity; MAX/MIN
+        # composition would resurrect a retracted value as a false hard bound.
+        from src.data.replacement_cycle_advance_trigger import (
+            normalize_observation_version,
+        )
+
+        hko_candidates: list[tuple[float, str, str, int]] = []
+        if live is not None:
+            hko_candidates.append(live)
+        if canonical is not None:
+            hko_candidates.append(
+                (
+                    float(canonical[0]),
+                    str(canonical[1]),
+                    str(canonical[2]),
+                    int(canonical[3]),
+                )
+            )
+        composed = (
+            max(
+                hko_candidates,
+                key=lambda candidate: normalize_observation_version(candidate[1]) or "",
+            )
+            if hko_candidates
+            else None
+        )
+    else:
+        composed = _compose_day0_observed_extreme(
+            live=live, canonical=canonical, metric_is_low=metric_is_low
+        )
     if composed is None:
         return {}
     observed_native, observation_time, source_label, sample_count = composed
@@ -2882,6 +2915,18 @@ def _refresh_day0_observation(
     # into 1 for missing-metric positions.
     _position_metric_str = resolve_position_metric(position)[0]
     """Recompute fresh probability through the Day0 observation + ENS path."""
+    if str(
+        getattr(city, "settlement_source_type", "") or ""
+    ).strip().lower() == "hko":
+        # This legacy fallback treats the observed extreme as a hard support
+        # clamp. HKO intraday snapshots are revisable, so only the current
+        # global probability path may price them; this fallback must abstain.
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "day0_observation",
+            "hko_provisional_snapshot_not_absorbing",
+            "current_global_probability_required",
+        ]
     try:
         entry_provenance = position.selected_method or position.entry_method
     except AttributeError:
