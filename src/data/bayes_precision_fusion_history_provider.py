@@ -135,12 +135,23 @@ class BayesPrecisionFusionHistoryProvider:
             placeholders = ",".join("?" for _ in models)
             # Single-DB intra-DB JOIN (raw_model_forecasts + settlement_outcomes both on
             # zeus-forecasts.db). The WHERE clause IS the no-leak antibody:
-            #   endpoint='previous_runs'  -> fixed-lead train only (never single_runs)
-            #   authority='VERIFIED'      -> provenance gate (no UNVERIFIED/DISPUTED)
-            #   r.target_date < :decision -> strict no-leak (no same-day / future settlement)
+            #   lead_days = :lead          -> fixed-lead train (both endpoints filtered to ONE lead)
+            #   endpoint IN (prev, single) -> previous_runs is PREFERRED per model in the grouping
+            #                                 below; single_runs is the FALLBACK used ONLY by a model
+            #                                 that carries NO previous_runs archive (station-calibrated
+            #                                 official forecasts cwa/hko are single_runs ONLY — agencies
+            #                                 publish no re-forecast archive). A model that HAS
+            #                                 previous_runs is byte-identical to before, so gridded
+            #                                 weights never move; only previous_runs-less sources gain
+            #                                 their real walk-forward residual history (no equal-weight
+            #                                 cold-start, no minimum-history gate).
+            #   authority='VERIFIED'       -> provenance gate (no UNVERIFIED/DISPUTED)
+            #   r.target_date < :decision  -> strict no-leak (no same-day / future settlement)
             sql = f"""
                 SELECT r.model AS model,
                        r.target_date AS target_date,
+                       r.endpoint AS endpoint,
+                       r.source_cycle_time AS source_cycle_time,
                        r.forecast_value_c AS forecast_value_c,
                        s.settlement_value AS settlement_value,
                        s.settlement_unit AS settlement_unit
@@ -152,7 +163,7 @@ class BayesPrecisionFusionHistoryProvider:
                 WHERE r.city = ?
                   AND r.metric = ?
                   AND r.lead_days = ?
-                  AND r.endpoint = 'previous_runs'
+                  AND r.endpoint IN ('previous_runs', 'single_runs')
                   AND r.model IN ({placeholders})
                   AND s.authority = 'VERIFIED'
                   AND s.settlement_value IS NOT NULL
@@ -180,22 +191,51 @@ class BayesPrecisionFusionHistoryProvider:
         # target_date. BLOCKER 2: the target_date is carried into ModelHistory.target_dates so
         # the fusion can align the covariance by date (NOT by positional index). The SQL ORDER BY
         # r.model, r.target_date keeps each model's series date-sorted.
+        # PER-MODEL source, never a within-model mix. A model with ANY previous_runs archive trains on
+        # previous_runs ONLY and is byte-identical to the historical behavior (rows appended in SQL
+        # order, duplicates included exactly as before). A model with NO previous_runs archive (station-
+        # calibrated official forecasts cwa/hko — agencies publish no re-forecast archive) trains on its
+        # single_runs residuals instead, deduped to the LATEST issue per target_date (a source can
+        # publish several same-lead issues in a day). Endpoints are never mixed within one model:
+        # previous_runs and single_runs disagree ~0.64C for the same cell (different runs), so a mix
+        # would inject source-heterogeneity variance into raw_m2. Downstream EB-shrinkage regularizes a
+        # thin source's raw_m2 toward the prior — no equal-weight cold-start, no minimum-history gate.
+        _has_prev = {str(r["model"]) for r in rows if str(r["endpoint"]) == "previous_runs"}
         per_model_fc: dict[str, list[float]] = {}
         per_model_settle_c: dict[str, list[float]] = {}
         per_model_dates: dict[str, list[str]] = {}
+        _station_latest: dict[str, dict[str, tuple[str, float, float]]] = {}
         for row in rows:
             try:
                 model = row["model"]
                 target_date = str(row["target_date"])
+                endpoint = str(row["endpoint"])
                 fc = float(row["forecast_value_c"])
                 settle_c = _settlement_to_celsius(
                     row["settlement_value"], row["settlement_unit"]
                 )
             except Exception:  # a single malformed row must not poison the whole model.
                 continue
-            per_model_fc.setdefault(model, []).append(fc)
-            per_model_settle_c.setdefault(model, []).append(settle_c)
-            per_model_dates.setdefault(model, []).append(target_date)
+            if model in _has_prev:
+                if endpoint != "previous_runs":
+                    continue
+                per_model_fc.setdefault(model, []).append(fc)
+                per_model_settle_c.setdefault(model, []).append(settle_c)
+                per_model_dates.setdefault(model, []).append(target_date)
+            else:
+                if endpoint != "single_runs":
+                    continue
+                cycle = str(row["source_cycle_time"] or "")
+                by_date = _station_latest.setdefault(model, {})
+                prior = by_date.get(target_date)
+                if prior is None or cycle > prior[0]:
+                    by_date[target_date] = (cycle, fc, settle_c)
+        for model, by_date in _station_latest.items():
+            for target_date in sorted(by_date):
+                _cycle, fc, settle_c = by_date[target_date]
+                per_model_fc.setdefault(model, []).append(fc)
+                per_model_settle_c.setdefault(model, []).append(settle_c)
+                per_model_dates.setdefault(model, []).append(target_date)
 
         out: dict[str, ModelHistory] = {}
         for model, fcs in per_model_fc.items():
