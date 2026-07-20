@@ -13703,6 +13703,90 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert current["phase"] == "pending_entry"
 
+    def test_cancel_pending_terminal_partial_fact_closes_remainder_without_voiding_fill(
+        self,
+        conn,
+    ):
+        """A terminal remainder fact closes cancel state while preserving exposure."""
+        _insert(conn, size=133.16, price=0.04)
+        _seed_pending_entry_projection(conn)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 69.34,
+                   chain_shares = 69.34,
+                   cost_basis_usd = 2.7736,
+                   entry_price = 0.04,
+                   order_status = 'partial'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-terminal-partial",
+            state="CONFIRMED",
+            filled_size="69.34",
+            fill_price="0.04",
+        )
+        _append_order_fact(
+            conn,
+            state="EXPIRED",
+            matched_size="69.34",
+            remaining_size="0",
+            raw_payload_json={
+                "proof_class": "confirmed_fill_plus_point_order_terminal_remainder"
+            },
+        )
+        _append_order_fact(
+            conn,
+            state="PARTIALLY_MATCHED",
+            matched_size="69.34",
+            remaining_size="0",
+            raw_payload_json={
+                "proof_class": "terminal_partial_order_fact",
+                "required_predicates": {
+                    "terminal_order_remainder_zero": True,
+                    "canonical_trade_facts_match_terminal_order_fact": True,
+                    "cumulative_fill_below_requested_size": True,
+                },
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        summary = reconcile_terminal_order_facts(conn)
+
+        assert summary == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        event = _get_events(conn, "cmd-001")[-1]
+        assert event["event_type"] == "CANCEL_ACKED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "terminal_positive_order_fact_cancel_ack"
+        current = conn.execute(
+            """
+            SELECT phase, shares, chain_shares, cost_basis_usd, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": pytest.approx(69.34),
+            "chain_shares": pytest.approx(69.34),
+            "cost_basis_usd": pytest.approx(2.7736),
+            "order_status": "partial",
+        }
+        assert reconcile_terminal_order_facts(conn)["scanned"] == 0
+
     def test_cancelled_terminal_order_fact_with_matched_size_recovers_entry_projection(
         self,
         conn,

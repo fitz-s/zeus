@@ -1553,7 +1553,28 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
                     AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
                 )
            )
-           AND fact.state IN (?, ?, ?)
+           AND (
+                fact.state IN (?, ?, ?)
+                OR (
+                    cmd.state = 'CANCEL_PENDING'
+                    AND fact.state = 'PARTIALLY_MATCHED'
+                    AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
+                    AND json_extract(fact.raw_payload_json, '$.proof_class')
+                        = 'terminal_partial_order_fact'
+                    AND json_extract(
+                            fact.raw_payload_json,
+                            '$.required_predicates.terminal_order_remainder_zero'
+                        ) = 1
+                    AND json_extract(
+                            fact.raw_payload_json,
+                            '$.required_predicates.canonical_trade_facts_match_terminal_order_fact'
+                        ) = 1
+                    AND json_extract(
+                            fact.raw_payload_json,
+                            '$.required_predicates.cumulative_fill_below_requested_size'
+                        ) = 1
+                )
+           )
            AND fact.source IN (?, ?, ?, ?, ?)
         """
     rows = conn.execute(
@@ -8342,7 +8363,7 @@ def reconcile_terminal_order_facts(
     *,
     collect_continuations: bool = False,
 ) -> dict:
-    """Close ACKED entry commands whose latest venue order fact is terminal no-fill."""
+    """Close entry commands whose latest venue fact proves no resting remainder."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     continuations: list[dict] = []
@@ -8364,12 +8385,59 @@ def reconcile_terminal_order_facts(
                 )
                 summary["errors"] += 1
                 continue
-            if not _decimal_is_zero(row.get("order_fact_matched_size")):
+            command_state = str(row.get("state") or "")
+            matched_size_raw = row.get("order_fact_matched_size")
+            matched_size = _positive_decimal_or_none(matched_size_raw)
+            if matched_size is None and not _decimal_is_zero(matched_size_raw):
                 logger.info(
-                    "terminal order fact candidate %s has matched_size=%s; leaving for fill reconciliation",
-                    command_id, row.get("order_fact_matched_size"),
+                    "terminal order fact candidate %s has no finite matched_size; "
+                    "leaving for fill reconciliation",
+                    command_id,
                 )
                 summary["stayed"] += 1
+                continue
+            if matched_size is not None:
+                if not (
+                    command_state == CommandState.CANCEL_PENDING.value
+                    and _decimal_is_zero(row.get("order_fact_remaining_size"))
+                    and _trade_facts_match_order_fact_size(
+                        conn,
+                        command_id=command_id,
+                        venue_order_id=order_id,
+                        matched_size=matched_size,
+                    )
+                ):
+                    logger.info(
+                        "terminal order fact candidate %s has matched_size=%s; "
+                        "leaving for fill reconciliation",
+                        command_id,
+                        row.get("order_fact_matched_size"),
+                    )
+                    summary["stayed"] += 1
+                    continue
+                occurred_at = str(row.get("order_fact_observed_at") or _now_iso())
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=CommandEventType.CANCEL_ACKED.value,
+                    occurred_at=occurred_at,
+                    payload={
+                        "reason": "venue_terminal_partial_fill_cancel_ack",
+                        "proof_class": "terminal_positive_order_fact_cancel_ack",
+                        "venue_order_id": order_id,
+                        "venue_order_fact_id": row.get("order_fact_id"),
+                        "venue_order_fact_state": row.get("order_fact_state"),
+                        "matched_size": str(matched_size),
+                        "remaining_size": row.get("order_fact_remaining_size"),
+                        "source": row.get("order_fact_source"),
+                        "required_predicates": {
+                            "command_state_cancel_pending": True,
+                            "terminal_order_remainder_zero": True,
+                            "canonical_trade_facts_match_terminal_order_fact": True,
+                        },
+                    },
+                )
+                summary["advanced"] += 1
                 continue
             if _fill_trade_fact_count(conn, command_id) > 0:
                 logger.info(
@@ -8389,7 +8457,6 @@ def reconcile_terminal_order_facts(
                     resolved_at=occurred_at,
                     resolution="command_recovery_terminal_no_fill",
                 )
-                command_state = str(row.get("state") or "")
                 if command_state in _ACKED_ORDER_STATES:
                     append_event(
                         conn,
@@ -18696,7 +18763,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         summary["deferred_full_sweep"] = True
         return
 
-    if scope in {"restart_preflight", "live_tick"}:
+    if scope == "restart_preflight":
+        _db_pass(
+            "terminal_order_facts",
+            reconcile_terminal_order_facts,
+            "terminal_order_facts",
+        )
         _db_pass(
             "completed_partial_order_facts",
             reconcile_completed_partial_order_facts,
