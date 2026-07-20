@@ -48,10 +48,20 @@ _BASE_CFG = {
     "seed_limit": 1,
     "limit": 1,
     "poll_batch_limit": 1,
+    "raw_manifest_dir": None,
     "request_dir": None,
     "processed_dir": None,
     "failed_dir": None,
 }
+
+
+_QUEUE_REPORT = types.SimpleNamespace(
+    processed_count=0,
+    seed_processed_count=0,
+    failed_count=0,
+    seed_failed_count=0,
+    as_dict=lambda: {},
+)
 
 
 def _patch_env(extras_report: dict | None, download_report=None):
@@ -61,6 +71,7 @@ def _patch_env(extras_report: dict | None, download_report=None):
         _replacement_forecast_runtime_flags_from_settings=MagicMock(return_value=_BASE_FLAGS),
         _replacement_forecast_live_materialization_enabled=MagicMock(return_value=True),
         _replacement_forecast_live_materialization_queue_config=MagicMock(return_value=_BASE_CFG),
+        _run_replacement_forecast_live_materialization_queue_once=MagicMock(return_value=_QUEUE_REPORT),
         _download_replacement_forecast_current_targets_if_needed=MagicMock(return_value=download_report),
         _download_bayes_precision_fusion_extra_raw_inputs_if_needed=MagicMock(return_value=extras_report),
     )
@@ -214,7 +225,9 @@ def test_extras_flag_off_no_health_entry():
 
 
 def test_download_cycle_drains_known_work_before_global_discovery():
-    """Fresh-input reseeds materialize before the global discovery backstop."""
+    """One micro-batch (poll_batch_limit) drains queued work with discovery inline —
+    8f1a0af8f collapsed the old discover=False/True two-phase loop into a single
+    prioritized call so a fresh source can preempt catch-up debt on the poll lane."""
 
     report = types.SimpleNamespace(
         processed_count=0,
@@ -238,6 +251,5 @@ def test_download_cycle_drains_known_work_before_global_discovery():
                 fn()
 
     assert queue.call_args_list == [
-        call(_BASE_CFG, discover=False),
         call(_BASE_CFG, discover=True, limit=1),
     ]
