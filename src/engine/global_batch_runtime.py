@@ -3630,6 +3630,10 @@ def process_current_global_batch(
         log_winner(initial_select_stage, selected, probabilities)
         if selected.actuation is None:
             return reject("GLOBAL_WINNER_ACTUATION_MISSING")
+        # Selection has already frozen q/book/wealth into ``selected``. Release
+        # its WORLD read transaction before the reactor materializes and claims
+        # an unpaged winner on that same canonical connection.
+        release_selection_snapshot()
         winner_id = selected.winner_event_id
         winner = next(
             (event for event in event_tuple if event.event_id == winner_id),
@@ -3665,14 +3669,10 @@ def process_current_global_batch(
                     "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
                     next_claim_event=next_claim,
                 )
-            # Selection owns one immutable cut. Preflight has the opposite job:
-            # re-read submit-time probability truth and refute that cut when a
-            # newer posterior or Day0 observation landed during book/solve work.
-            # Keeping the SQLite snapshot open here made the JIT resolver read
-            # the old cut again, so a probability reversal could appear stable.
-            # The prepared witnesses and book epoch below are already immutable
-            # values; release only their backing DB view before current recheck.
-            release_selection_snapshot()
+            # Preflight has the opposite job from selection: re-read submit-time
+            # probability truth and refute the immutable cut when a newer
+            # posterior or Day0 observation landed during book/solve work. The
+            # backing SQLite view released before the durable winner claim.
             winner_id = winner.event_id
             attempt_book_epoch = book_epoch_fence
             auction_deadline = (

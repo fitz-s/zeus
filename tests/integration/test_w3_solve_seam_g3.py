@@ -14850,6 +14850,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     scope = current_global_auction_scope_from_events(
         (event_a, event_b), captured_at_utc=decision_at
     )
+    world = sqlite3.connect(":memory:")
     family_a, family_b = scope.family_keys
 
     def _witness(family_key, suffix):
@@ -14991,6 +14992,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     venue_calls = [0]
 
     def _claim(target):
+        assert world.in_transaction is False
         claimed_targets.append(target)
         return True
 
@@ -15008,7 +15010,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     result = global_batch_runtime.process_current_global_batch(
         (event_a,),
         decision_time=decision_at,
-        world_conn=object(),
+        world_conn=world,
         forecast_conn=object(),
         trade_conn=object(),
         payload_reader=lambda event: json.loads(event.payload_json),
@@ -15069,7 +15071,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     resumed = global_batch_runtime.process_current_global_batch(
         (target,),
         decision_time=decision_at,
-        world_conn=object(),
+        world_conn=world,
         forecast_conn=object(),
         trade_conn=object(),
         payload_reader=lambda event: json.loads(event.payload_json),
@@ -15148,7 +15150,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     fenced = global_batch_runtime.process_current_global_batch(
         (event_a,),
         decision_time=decision_at,
-        world_conn=object(),
+        world_conn=world,
         forecast_conn=object(),
         trade_conn=object(),
         payload_reader=lambda event: json.loads(event.payload_json),
@@ -15190,6 +15192,8 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         event_a.event_id,
         claimed_targets[0].event_id,
     }
+    assert world.in_transaction is False
+    world.close()
 
 
 @pytest.mark.parametrize(

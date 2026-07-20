@@ -906,3 +906,22 @@ fill immediate/restart idempotency, actual-fill cost, retry coalescing/reset,
 compilation, diff checks, independent review, standard deployment, and fresh
 runtime proof that minimum-lot repair count is zero, the existing partial fill
 reconciles, and reactor/recovery throughput advances.
+
+## 2026-07-20 global winner claim transaction boundary
+
+Fresh production logs showed `GLOBAL_WINNER_CLAIM_WORLD_TXN_OPEN` only when the
+auction found a positive unpaged winner. The global selector had correctly
+included the canonical WORLD connection in its immutable read cut, but then
+called the reactor's WORLD write/claim callback before releasing that cut. A
+no-trade epoch therefore looked healthy while every actionable winner failed
+closed before preflight.
+
+The selected q/book/wealth values and identities are already immutable Python
+evidence at that boundary. The read snapshot now releases immediately after a
+winner and actuation are selected, before any durable winner materialization;
+JIT probability, book, risk, capital, and venue checks remain current and
+unchanged. A production-shaped antibody uses the same SQLite connection for
+selection and claim and requires `in_transaction=False` at the callback. The
+focused claim/snapshot sets pass `62` and the wider global batch/winner set
+passes `57`; standard deployment and a natural positive-winner receipt remain
+the runtime acceptance evidence.
