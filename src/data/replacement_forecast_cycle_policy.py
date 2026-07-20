@@ -90,7 +90,12 @@ _INTERMEDIATE_CYCLE_HOURS = frozenset()
 #   (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS). Defining it ONCE here (the module both the
 #   materializer and the readers already import, no cycle) makes all four sites share one definition.
 TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
-CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v2"
+# v3 re-keys probability identity after station single-runs residual weighting was
+# removed from the live center. Some v2 rows were built with that transient center
+# law, so v2 can no longer prove current semantics even though the implementation is
+# again previous-runs-only. Advancing both identities makes the existing coverage and
+# reseed paths rematerialize every ambiguous certificate instead of serving a mixed law.
+CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v3"
 
 # P2-B anomaly transport (consult docs/evidence/upstream_physical_2026_07_17/
 # consult_freshness_decoupling_verdict.txt; authority doc
@@ -101,11 +106,11 @@ CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v2"
 # as ens_center_delta_raw_c). That row's probability law differs from the same-cycle
 # disagreement semantics above, so it is stamped with ITS OWN revision string. Only
 # rows where translation_applied is true carry this value; same-cycle rows keep
-# CURRENT_EVIDENCE_SEMANTICS_REVISION. The v2 current-center scenario band applies
+# CURRENT_EVIDENCE_SEMANTICS_REVISION. The current-center scenario band applies
 # to both same-cycle and translated members, so both identities advance together;
 # current_evidence_shape_semantics_mismatch() then rematerializes each stale row
 # through the existing bounded target queue rather than accepting mixed semantics.
-ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION = "ensemble_anomaly_transport_v2"
+ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION = "ensemble_anomaly_transport_v3"
 
 
 def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:

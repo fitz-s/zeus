@@ -81,10 +81,27 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
             }
         }
     }
+    ambiguous_v2_same_cycle = {
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "semantics_revision": "ensemble_center_scenarios_v2",
+            }
+        }
+    }
+    ambiguous_v2_transport = {
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "semantics_revision": "ensemble_anomaly_transport_v2",
+                "translation_applied": True,
+            }
+        }
+    }
 
     assert current_evidence_shape_semantics_mismatch(current) is False
     assert current_evidence_shape_semantics_mismatch(transported) is False
     assert current_evidence_shape_semantics_mismatch(inconsistent_transport) is True
+    assert current_evidence_shape_semantics_mismatch(ambiguous_v2_same_cycle) is True
+    assert current_evidence_shape_semantics_mismatch(ambiguous_v2_transport) is True
     assert current_evidence_shape_semantics_mismatch(stale) is True
     assert current_evidence_shape_semantics_mismatch({}) is False
 
@@ -96,6 +113,8 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert "current_evidence_shape.translation_applied" in clause
     assert CURRENT_EVIDENCE_SEMANTICS_REVISION in clause
     assert ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION in clause
+    assert "ensemble_center_scenarios_v2" not in clause
+    assert "ensemble_anomaly_transport_v2" not in clause
 
 
 @dataclass(frozen=True)

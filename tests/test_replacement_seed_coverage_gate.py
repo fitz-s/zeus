@@ -27,6 +27,9 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+)
 from src.data.replacement_forecast_live_materialization_queue import SOURCE_ID, _seed_already_covered
 from src.data.replacement_input_hwm import (
     _raw_artifact_cycles_for_frozen_target,
@@ -99,7 +102,12 @@ def _insert_posterior(db_path: str, *, q_lcb_json: str | None) -> None:
                 {
                     "city": _CITY,
                     "q_lcb_basis": "fused_center_bootstrap_p05",
-                    "used_models": ["gfs_global"],
+                    "bayes_precision_fusion": {
+                        "used_models": ["gfs_global"],
+                        "current_evidence_shape": {
+                            "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                        },
+                    },
                 }
             ),
             "live",
@@ -302,6 +310,9 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) ->
                     "q_lcb_basis": "fused_center_bootstrap_p05",
                     "bayes_precision_fusion": {
                         "used_models": ["gfs_global", "regional_clock"],
+                        "current_evidence_shape": {
+                            "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                        },
                         "current_value_serving": {
                             "gfs_global": {
                                 "served_cycle": "2026-06-06T00:00:00+00:00",
