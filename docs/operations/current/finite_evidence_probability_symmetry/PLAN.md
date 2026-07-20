@@ -925,3 +925,15 @@ selection and claim and requires `in_transaction=False` at the callback. The
 focused claim/snapshot sets pass `62` and the wider global batch/winner set
 passes `57`; standard deployment and a natural positive-winner receipt remain
 the runtime acceptance evidence.
+
+The first natural post-deploy auction then exposed a separate proof-partition
+error: held-only probability fallback correctly disabled new BUY risk while
+retaining SELL evaluation, but it removed those BUY assets before the solver
+could emit typed rejected evaluations. The immutable book receipt still saw the
+native executable sides and therefore failed with
+`GLOBAL_AUCTION_RECEIPT_BUY_BOOK_MATERIALIZATION_MISMATCH:missing=38`. BUY-disabled
+families now materialize into the same global candidate set and are rejected by
+the solver policy as `GLOBAL_BUY_DISABLED_FAMILY`; SELL remains eligible and the
+receipt proves every native side as evaluated or explicitly rejected. No BUY
+authority is restored. The production-shaped held-only partition antibody and
+the expanded global slice pass `61`; the solver policy slice passes `73`.
