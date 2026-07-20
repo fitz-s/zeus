@@ -119,46 +119,18 @@ MIN_ENTRY_PROVIDER_FAMILIES = 2
 CONUS_LAT = (24.0, 50.0)
 CONUS_LON = (-125.0, -66.0)
 
-# TRUTH = the settlement-source ground value, one row per (city, target_date, metric):
-# venue-VERIFIED settlement_outcomes wins where present (authority of record); otherwise the
-# VERIFIED settlement-source observation (observations: WU/HKO/Ogimet per city_truth_contract
-# routing — the SAME physical station value the venue settles on; measured agreement where both
-# exist: high 98.8%, low 97.9%). This is exactly the one sanctioned backtest ("settlement-source
-# data accuracy"), and it is what lets low-metric baskets train: venue low markets have settled
-# in only ~9 cities, but the settlement-source low observation exists for every city (~900/city).
-# Without the fallback 46/54 low cells fell to the coarse GLOBAL_CORE basket on n_paired=0.
 _FIT_QUERY = """
-    WITH truth_all AS (
-        SELECT city, target_date, temperature_metric AS metric,
-               settlement_value AS value, settlement_unit AS unit, 0 AS pref
-        FROM settlement_outcomes
-        WHERE authority = 'VERIFIED' AND settlement_value IS NOT NULL
-        UNION ALL
-        SELECT city, target_date, 'high', high_temp, unit, 1
-        FROM observations
-        WHERE authority = 'VERIFIED' AND high_temp IS NOT NULL
-        UNION ALL
-        SELECT city, target_date, 'low', low_temp, unit, 1
-        FROM observations
-        WHERE authority = 'VERIFIED' AND low_temp IS NOT NULL
-    ),
-    truth AS (
-        SELECT city, target_date, metric, value, unit FROM (
-            SELECT t.*, ROW_NUMBER() OVER (
-                PARTITION BY city, target_date, metric ORDER BY pref
-            ) AS rn
-            FROM truth_all AS t
-        ) WHERE rn = 1
-    )
     SELECT r.city AS city, r.metric AS metric, r.model AS model,
            r.target_date AS target_date, r.lead_days AS lead_days,
            r.forecast_value_c AS forecast_value_c,
-           s.value AS settlement_value, s.unit AS settlement_unit
+           s.settlement_value AS settlement_value, s.settlement_unit AS settlement_unit
     FROM raw_model_forecasts AS r
-    JOIN truth AS s
-      ON s.city = r.city AND s.target_date = r.target_date AND s.metric = r.metric
+    JOIN settlement_outcomes AS s
+      ON s.city = r.city AND s.target_date = r.target_date AND s.temperature_metric = r.metric
     WHERE r.endpoint = 'previous_runs'
       AND r.lead_days IN (0, 1, 2)
+      AND s.authority = 'VERIFIED'
+      AND s.settlement_value IS NOT NULL
       AND r.target_date < ?
     ORDER BY r.city, r.metric, r.model, r.target_date, r.lead_days
 """
@@ -424,14 +396,7 @@ def city_metric_entry(
             if model in eligible_models
         }
 
-    # Degrade to the global-core basket when the tiered basket cannot form a live
-    # current-evidence shape: either no candidate had a paired observation (None) or the
-    # city/region archive holds only ONE provider family for this metric (e.g. a city
-    # whose low-metric previous_runs history is ukmo-only) — a single-family cell must
-    # fall back, never fail the whole artifact.
-    if basket is None or len(
-        {provider_family_for_source(model) for model in basket}
-    ) < MIN_ENTRY_PROVIDER_FAMILIES:
+    if basket is None:
         basket = tuple(model for model in GLOBAL_CORE_BASKET if model in eligible_models)
         basis = {
             model: stat
