@@ -67,13 +67,16 @@ def _day0_event(
     received_at: str | None = None,
     entity_suffix: str = "",
     seq: int = 0,
+    settlement_source: str = "metar",
+    value: float | None = None,
 ):
-    value = 30 + seq if metric == "high" else 30 - seq
+    if value is None:
+        value = float(30 + seq if metric == "high" else 30 - seq)
     payload = Day0ExtremeUpdatedPayload(
         city=city,
         target_date=target_date,
         metric=metric,  # type: ignore[arg-type]
-        settlement_source="metar",
+        settlement_source=settlement_source,
         station_id="STN",
         observation_time=available_at,
         observation_available_at=available_at,
@@ -456,6 +459,57 @@ def test_day0_superseded_keep_absorbing_extreme_per_family():
     assert _status_of(conn, events[5].event_id) == "pending", "highest reading must survive"
     for i in range(5):
         assert _status_of(conn, events[i].event_id) == "expired", f"reading {i} must be superseded"
+
+
+def test_hko_supersession_keeps_latest_official_correction_and_repairs_old_expiry():
+    conn = _world_conn()
+    writer = EventWriter(conn)
+    store = EventStore(conn)
+    provisional = _day0_event(
+        "Hong Kong",
+        "2026-07-20",
+        "high",
+        available_at="2026-07-19T16:30:35+00:00",
+        settlement_source="hko_hourly_accumulator",
+        value=30.0,
+    )
+    corrected = _day0_event(
+        "Hong Kong",
+        "2026-07-20",
+        "high",
+        available_at="2026-07-20T07:23:22+00:00",
+        settlement_source="hko_hourly_accumulator",
+        value=29.7,
+    )
+
+    writer.write(provisional)
+    writer.write(corrected)
+
+    assert _status_of(conn, provisional.event_id) == "expired"
+    assert _status_of(conn, corrected.event_id) == "pending"
+
+    # Reproduce the pre-fix live row: generic MAX kept 30 and expired 29.7.
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'pending', processed_at = NULL, last_error = NULL
+         WHERE event_id = ?
+        """,
+        (provisional.event_id,),
+    )
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'expired', last_error = 'DAY0_FAMILY_SUPERSEDED'
+         WHERE event_id = ?
+        """,
+        (corrected.event_id,),
+    )
+
+    store.archive_superseded_day0_family(corrected)
+
+    assert _status_of(conn, provisional.event_id) == "expired"
+    assert _status_of(conn, corrected.event_id) == "pending"
 
 
 def test_day0_families_independent():

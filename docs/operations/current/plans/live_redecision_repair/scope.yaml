@@ -34,6 +34,7 @@ allowed_files:
   - src/engine/replacement_forecast_hook_factory.py
   - src/engine/replacement_forecast_reactor_hook.py
   - src/events/triggers/day0_extreme_updated.py
+  - src/events/event_store.py
   - src/data/replacement_forecast_bundle_reader.py
   - src/data/day0_observation_reader.py
   - src/data/replacement_forecast_config_switch.py
@@ -77,6 +78,7 @@ allowed_files:
   - tests/test_day0_hard_fact_exit.py
   - tests/test_day0_observation_reader.py
   - tests/events/test_day0_extreme_updated_trigger.py
+  - tests/events/test_archive_day0_events_swept.py
   - tests/test_replacement_forecast_config_switch.py
   - tests/test_replacement_forecast_current_target_plan.py
   - tests/test_replacement_download_cycle_currency_gate.py

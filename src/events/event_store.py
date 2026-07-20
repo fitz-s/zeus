@@ -1,5 +1,5 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-07-20
 # Authority basis: Operator P1 2026-06-04 — channel-sweep keeper query index-back
 #                  (category-kill of 85s json_extract full-scan); Step-3 batch UPDATE.
 #                  2026-06-11 operator throughput/fairness directive — fetch_pending
@@ -229,6 +229,24 @@ class EventStore:
             return 0
 
         now = _utc_now()
+        # A source-specific keeper can differ from the formerly generic
+        # absorbing-extreme keeper (HKO provider corrections). Restore only rows
+        # this exact supersession mechanism expired; never resurrect terminal
+        # processing outcomes from another cause.
+        self.conn.execute(
+            """
+            UPDATE opportunity_event_processing
+               SET processing_status = 'pending',
+                   processed_at = NULL,
+                   last_error = NULL,
+                   updated_at = ?
+             WHERE consumer_name = ?
+               AND event_id = ?
+               AND processing_status = 'expired'
+               AND last_error = 'DAY0_FAMILY_SUPERSEDED'
+            """,
+            (now, self.consumer_name, keeper_id),
+        )
         cur = self.conn.execute(
             """
             UPDATE opportunity_event_processing
@@ -266,7 +284,51 @@ class EventStore:
         target_date: str,
         metric: str,
     ) -> str | None:
-        """Return one deterministic trigger for the family's absorbing extreme."""
+        """Return one deterministic trigger under its source-family semantics."""
+
+        source_rows = self.conn.execute(
+            """
+            SELECT DISTINCT LOWER(COALESCE(
+                       json_extract(e.payload_json, '$.settlement_source'), ''
+                   )) AS settlement_source
+              FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
+             WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(e.payload_json, '$.city') = ?
+               AND json_extract(e.payload_json, '$.target_date') = ?
+               AND json_extract(e.payload_json, '$.metric') = ?
+            """,
+            (city, target_date, metric),
+        ).fetchall()
+        sources = {str(row[0] or "") for row in source_rows if str(row[0] or "")}
+        if sources == {"hko_hourly_accumulator"}:
+            keeper = self.conn.execute(
+                """
+                SELECT e.event_id
+                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
+                  LEFT JOIN opportunity_event_processing p
+                    ON p.event_id = e.event_id
+                   AND p.consumer_name = ?
+                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND json_extract(e.payload_json, '$.city') = ?
+                   AND json_extract(e.payload_json, '$.target_date') = ?
+                   AND json_extract(e.payload_json, '$.metric') = ?
+                 ORDER BY datetime(json_extract(
+                              e.payload_json, '$.observation_time'
+                          )) DESC,
+                          e.available_at DESC,
+                          CASE p.processing_status
+                              WHEN 'processed' THEN 3
+                              WHEN 'processing' THEN 2
+                              WHEN 'pending' THEN 1
+                              ELSE 0
+                          END DESC,
+                          e.received_at DESC,
+                          e.event_id DESC
+                 LIMIT 1
+                """,
+                (self.consumer_name, city, target_date, metric),
+            ).fetchone()
+            return str(keeper[0]) if keeper is not None else None
 
         order = "DESC" if metric == "high" else "ASC"
         extreme_row = self.conn.execute(
