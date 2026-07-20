@@ -4348,6 +4348,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v6",
         "zlib+base64+canonical-json-v7",
         "zlib+base64+canonical-json-v8",
+        "zlib+base64+canonical-json-v9",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(
@@ -4387,7 +4388,7 @@ def test_high_yes_edge_reconstructs_latest_global_auction_candidate_delta(
     _write_high_yes_edge_dbs(
         sd,
         with_global_auction_candidate=True,
-        global_auction_encoding="zlib+base64+canonical-json-v8",
+        global_auction_encoding="zlib+base64+canonical-json-v9",
     )
     conn = sqlite3.connect(sd / "zeus_trades.db")
     try:

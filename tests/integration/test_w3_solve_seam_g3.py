@@ -680,7 +680,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v8"
+        "zlib+base64+canonical-json-v9"
     )
     candidate_evaluations = json.loads(evaluation_json)
     repair_row = dict(
@@ -794,6 +794,48 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             fractional_kelly_multiplier=Decimal("0.25"),
         )
     conn.close()
+
+
+def test_compact_buy_rejection_group_requires_complete_economic_frontier():
+    def row(candidate_id: str, growth: float, delta: float) -> dict[str, object]:
+        return {
+            "candidate_id": candidate_id,
+            "family_key": f"family-{candidate_id}",
+            "bin_id": "32C",
+            "condition_id": f"condition-{candidate_id}",
+            "token_id": f"token-{candidate_id}",
+            "buy_rejection_economics": {
+                "probe_robust_log_growth_per_hour": growth,
+                "probe_robust_delta_log_wealth": delta,
+                "probe_capital_efficiency": delta / 5,
+                "probe_cost_usd": "5",
+            },
+        }
+
+    complete = global_batch_runtime._compact_buy_rejection_group(
+        action="BUY",
+        side="YES",
+        reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+        rows=(
+            row("worse", -0.002, -0.02),
+            row("nearest-cash", -0.001, -0.03),
+        ),
+    )
+
+    assert complete["frontier_complete"] is True
+    assert complete["economics_candidate_count"] == 2
+    assert complete["frontier"]["candidate_id"] == "nearest-cash"
+
+    incomplete = global_batch_runtime._compact_buy_rejection_group(
+        action="BUY",
+        side="NO",
+        reason="DEPTH_INFEASIBLE",
+        rows=(row("measured", -0.001, -0.01), {"candidate_id": "missing"}),
+    )
+
+    assert incomplete["frontier_complete"] is False
+    assert incomplete["economics_candidate_count"] == 1
+    assert incomplete["frontier"] is None
 
 
 def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(

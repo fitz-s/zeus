@@ -1492,6 +1492,126 @@ class GlobalBuyMinimumMarketableRepair:
 
 
 @dataclass(frozen=True)
+class GlobalBuyRejectionEconomics:
+    """Best venue-legal non-zero BUY probe when CASH or Kelly wins."""
+
+    candidate_id: str
+    rejection_reason: str
+    robust_q_lcb: float
+    minimum_all_in_unit_cost: Decimal
+    current_token_shares: Decimal
+    full_kelly_target_shares: Decimal
+    fractional_kelly_target_shares: Decimal
+    remaining_fractional_target_shares: Decimal
+    probe_kind: Literal["BEST_EXECUTABLE", "MINIMUM_MARKETABLE"]
+    probe_shares: Decimal
+    probe_cost_usd: Decimal
+    probe_robust_delta_log_wealth: float
+    probe_robust_ev_usd: float
+    probe_capital_efficiency: float
+    probe_limit_price: Decimal
+    probe_expected_fill_price_before_fee: Decimal
+    resolution_at_utc: datetime | None = None
+    capital_lock_hours: float | None = None
+    probe_robust_log_growth_per_hour: float | None = None
+
+    def __post_init__(self) -> None:
+        current = Decimal(self.current_token_shares)
+        full = Decimal(self.full_kelly_target_shares)
+        fractional = Decimal(self.fractional_kelly_target_shares)
+        remaining = Decimal(self.remaining_fractional_target_shares)
+        shares = Decimal(self.probe_shares)
+        cost = Decimal(self.probe_cost_usd)
+        minimum_cost = Decimal(self.minimum_all_in_unit_cost)
+        limit = Decimal(self.probe_limit_price)
+        expected = Decimal(self.probe_expected_fill_price_before_fee)
+        reason = str(self.rejection_reason or "").strip()
+        horizon_fields = (
+            self.resolution_at_utc,
+            self.capital_lock_hours,
+            self.probe_robust_log_growth_per_hour,
+        )
+        horizon_complete = all(value is None for value in horizon_fields) or all(
+            value is not None for value in horizon_fields
+        )
+        if (
+            not str(self.candidate_id or "").strip()
+            or reason
+            not in {
+                "NON_POSITIVE_ROBUST_OBJECTIVE",
+                "FRACTIONAL_KELLY_TARGET_REACHED",
+                "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT",
+            }
+            or self.probe_kind not in {"BEST_EXECUTABLE", "MINIMUM_MARKETABLE"}
+            or not 0.0 <= self.robust_q_lcb <= 1.0
+            or not all(
+                value.is_finite()
+                for value in (
+                    current,
+                    full,
+                    fractional,
+                    remaining,
+                    shares,
+                    cost,
+                    minimum_cost,
+                    limit,
+                    expected,
+                )
+            )
+            or not all(
+                math.isfinite(value)
+                for value in (
+                    self.probe_robust_delta_log_wealth,
+                    self.probe_robust_ev_usd,
+                    self.probe_capital_efficiency,
+                )
+            )
+            or current < 0
+            or full < 0
+            or fractional < 0
+            or fractional > full
+            or remaining != fractional - current
+            or shares <= 0
+            or cost <= 0
+            or minimum_cost <= 0
+            or not Decimal("0") < limit < Decimal("1")
+            or expected <= 0
+            or expected > limit
+            or (
+                reason == "NON_POSITIVE_ROBUST_OBJECTIVE"
+                and self.probe_robust_delta_log_wealth > 0.0
+                and self.probe_robust_ev_usd > _ROBUST_EV_EPS_USD
+            )
+            or (
+                reason == "FRACTIONAL_KELLY_TARGET_REACHED"
+                and remaining > 0
+            )
+            or (
+                reason == "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
+                and not Decimal("0") < remaining < shares
+            )
+            or not horizon_complete
+        ):
+            raise ValueError("global BUY rejection economics are incoherent")
+        if self.resolution_at_utc is not None:
+            assert self.capital_lock_hours is not None
+            assert self.probe_robust_log_growth_per_hour is not None
+            if (
+                self.resolution_at_utc.tzinfo is None
+                or not math.isfinite(self.capital_lock_hours)
+                or self.capital_lock_hours <= 0.0
+                or not math.isfinite(self.probe_robust_log_growth_per_hour)
+                or not math.isclose(
+                    self.probe_robust_log_growth_per_hour,
+                    self.probe_robust_delta_log_wealth / self.capital_lock_hours,
+                    rel_tol=0.0,
+                    abs_tol=1e-15,
+                )
+            ):
+                raise ValueError("global BUY rejection capital horizon is incoherent")
+
+
+@dataclass(frozen=True)
 class GlobalSingleOrderCandidateEvaluation:
     """One candidate's complete result inside the current global auction."""
 
@@ -1533,6 +1653,7 @@ class GlobalSingleOrderCandidateEvaluation:
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
+    buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1563,6 +1684,7 @@ class GlobalSingleOrderCandidateEvaluation:
             raise ValueError("SELL evaluation requires an exact held-position binding")
         if self.status == "REJECTED":
             reason = str(self.rejection_reason or "").strip()
+            rejection_economics = self.buy_rejection_economics
             carries_economics = any(
                 (
                     self.shares != 0,
@@ -1579,6 +1701,12 @@ class GlobalSingleOrderCandidateEvaluation:
             )
             if not reason:
                 raise ValueError("rejected candidate evaluation cannot carry economics")
+            if rejection_economics is not None and (
+                self.action != "BUY"
+                or rejection_economics.candidate_id != self.candidate_id
+                or rejection_economics.rejection_reason != reason
+            ):
+                raise ValueError("BUY rejection economics disagree with evaluation")
             if (
                 self.buy_sizing_mode != "NOT_APPLICABLE"
                 or self.buy_minimum_marketable_repair is not None
@@ -1647,6 +1775,8 @@ class GlobalSingleOrderCandidateEvaluation:
                     "rejected SELL evaluation lacks coherent counterfactual economics"
                 )
             return
+        if self.buy_rejection_economics is not None:
+            raise ValueError("non-rejected candidate cannot carry rejection economics")
         if self.action == "BUY":
             if (
                 self.capital_action_mode != "SETTLEMENT_LOCKED_BUY"
@@ -1773,6 +1903,7 @@ class GlobalSingleOrderDecision:
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
+    buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
     candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
     candidate_input_count: int | None = None
@@ -1836,6 +1967,18 @@ class GlobalSingleOrderDecision:
                 raise ValueError("global no-trade decision requires a reason")
             if self.buy_minimum_marketable_repair is not None:
                 raise ValueError("global no-trade decision cannot carry a BUY repair")
+            rejection_economics = self.buy_rejection_economics
+            if rejection_economics is not None and (
+                not internal_score
+                or rejection_economics.rejection_reason != self.no_trade_reason
+                or self.rejection_reasons
+                != {
+                    rejection_economics.candidate_id: (
+                        rejection_economics.rejection_reason
+                    )
+                }
+            ):
+                raise ValueError("global no-trade BUY economics are not candidate-local")
             if self.buy_sizing_mode != "NOT_APPLICABLE":
                 raise ValueError("global no-trade decision cannot carry BUY sizing")
             if self.shares != 0 or self.cost_usd != 0:
@@ -1856,6 +1999,8 @@ class GlobalSingleOrderDecision:
             ):
                 raise ValueError("global no-trade decision cannot carry an execution boundary")
             return
+        if self.buy_rejection_economics is not None:
+            raise ValueError("selected global order cannot carry rejection economics")
         if getattr(self.candidate, "action", "BUY") == "SELL":
             if (
                 self.no_trade_reason is not None
@@ -1994,6 +2139,9 @@ def _global_candidate_evaluations(
     *,
     rejections: Mapping[str, str],
     scores: Sequence[GlobalSingleOrderDecision] = (),
+    buy_rejection_economics: Mapping[
+        str, GlobalBuyRejectionEconomics
+    ] | None = None,
     winner_id: str | None = None,
     default_rejection: str | None = None,
 ) -> tuple[GlobalSingleOrderCandidateEvaluation, ...]:
@@ -2004,6 +2152,7 @@ def _global_candidate_evaluations(
         for score in scores
         if score.candidate is not None
     }
+    rejected_buy_by_id = dict(buy_rejection_economics or {})
     evaluations: list[GlobalSingleOrderCandidateEvaluation] = []
     for candidate in candidates:
         is_sell = isinstance(candidate, GlobalSingleOrderSellCandidate)
@@ -2030,6 +2179,9 @@ def _global_candidate_evaluations(
                     position_id=position_id,
                     held_shares=held_shares,
                     rejection_reason=reason,
+                    buy_rejection_economics=rejected_buy_by_id.get(
+                        candidate.candidate_id
+                    ),
                 )
             )
             continue
@@ -2627,6 +2779,68 @@ def _single_order_continuous_optimum(
     return best
 
 
+def _buy_rejection_economics(
+    candidate: GlobalSingleOrderCandidate,
+    *,
+    reason: str,
+    robust_q: float,
+    q_samples: np.ndarray,
+    band_alpha: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    current_token_shares: Decimal,
+    full_kelly_target_shares: Decimal,
+    fractional_kelly_target_shares: Decimal,
+    probe_kind: Literal["BEST_EXECUTABLE", "MINIMUM_MARKETABLE"],
+    probe_shares: Decimal,
+) -> GlobalBuyRejectionEconomics | None:
+    """Measure the nearest forbidden BUY without turning it into an order."""
+
+    try:
+        robust_du, robust_ev, efficiency, cost = _single_order_metrics(
+            candidate,
+            q_samples=q_samples,
+            shares=probe_shares,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+            alpha=band_alpha,
+            robust_q=robust_q,
+        )
+        limit_price, expected_fill_price, _max_spend = (
+            _single_order_execution_boundary(candidate, probe_shares)
+        )
+    except ValueError:
+        return None
+    if not all(math.isfinite(value) for value in (robust_du, robust_ev, efficiency)):
+        return None
+    minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
+        candidate.executable_cost_curve.levels[0].price
+    )
+    return GlobalBuyRejectionEconomics(
+        candidate_id=candidate.candidate_id,
+        rejection_reason=reason,
+        robust_q_lcb=float(robust_q),
+        minimum_all_in_unit_cost=minimum_unit_cost,
+        current_token_shares=Decimal(current_token_shares),
+        full_kelly_target_shares=Decimal(full_kelly_target_shares),
+        fractional_kelly_target_shares=Decimal(
+            fractional_kelly_target_shares
+        ),
+        remaining_fractional_target_shares=(
+            Decimal(fractional_kelly_target_shares)
+            - Decimal(current_token_shares)
+        ),
+        probe_kind=probe_kind,
+        probe_shares=Decimal(probe_shares),
+        probe_cost_usd=cost,
+        probe_robust_delta_log_wealth=robust_du,
+        probe_robust_ev_usd=robust_ev,
+        probe_capital_efficiency=efficiency,
+        probe_limit_price=limit_price,
+        probe_expected_fill_price_before_fee=expected_fill_price,
+    )
+
+
 def _score_global_single_order(
     candidate: GlobalSingleOrderCandidate,
     *,
@@ -2698,30 +2912,6 @@ def _score_global_single_order(
         if not math.isfinite(payoff_q_lcb) or not 0.0 <= payoff_q_lcb <= 1.0:
             raise ValueError("candidate payoff q lower bound must be finite in [0, 1]")
         robust_q = min(robust_q, payoff_q_lcb)
-    minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
-        candidate.executable_cost_curve.levels[0].price
-    )
-    if robust_q <= float(minimum_unit_cost):
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
-            rejection_reasons={
-                candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
-            },
-        )
-    raw_probes = _single_order_stationary_probes(
-        candidate.executable_cost_curve,
-        robust_q=Decimal(str(robust_q)),
-        wealth_floor_usd=wealth_floor_usd,
-        wealth_ceiling_usd=wealth_ceiling_usd,
-        min_shares=raw_min_shares,
-        max_shares=raw_max_shares,
-    )
     legal_neighbor_cache: dict[tuple[Decimal, bool], Decimal | None] = {}
 
     def venue_legal_neighbor(shares: Decimal, *, at_most: bool) -> Decimal | None:
@@ -2734,13 +2924,55 @@ def _score_global_single_order(
             )
         return legal_neighbor_cache[key]
 
+    legal_min_shares = venue_legal_neighbor(raw_min_shares, at_most=False)
+    if legal_min_shares is None:
+        legal_min_shares = raw_min_shares
+    minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
+        candidate.executable_cost_curve.levels[0].price
+    )
+    if robust_q <= float(minimum_unit_cost):
+        reason = "NON_POSITIVE_ROBUST_OBJECTIVE"
+        full_target = held_shares
+        fractional_target = full_target * multiplier
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            buy_rejection_economics=_buy_rejection_economics(
+                candidate,
+                reason=reason,
+                robust_q=robust_q,
+                q_samples=q_samples,
+                band_alpha=band_alpha,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                current_token_shares=held_shares,
+                full_kelly_target_shares=full_target,
+                fractional_kelly_target_shares=fractional_target,
+                probe_kind="MINIMUM_MARKETABLE",
+                probe_shares=legal_min_shares,
+            ),
+            rejection_reasons={candidate.candidate_id: reason},
+        )
+
+    raw_probes = _single_order_stationary_probes(
+        candidate.executable_cost_curve,
+        robust_q=Decimal(str(robust_q)),
+        wealth_floor_usd=wealth_floor_usd,
+        wealth_ceiling_usd=wealth_ceiling_usd,
+        min_shares=raw_min_shares,
+        max_shares=raw_max_shares,
+    )
     probes: set[Decimal] = set()
     for raw_probe in raw_probes:
         for at_most in (True, False):
             legal = venue_legal_neighbor(raw_probe, at_most=at_most)
             if legal is not None:
                 probes.add(legal)
-
     full_best: tuple[
         float,
         float,
@@ -2788,6 +3020,10 @@ def _score_global_single_order(
             )
 
     if full_best is None or full_best[0] <= 0.0:
+        reason = "NON_POSITIVE_ROBUST_OBJECTIVE"
+        probe_shares = full_best[4] if full_best is not None else legal_min_shares
+        full_target = held_shares
+        fractional_target = full_target * multiplier
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2795,13 +3031,24 @@ def _score_global_single_order(
             robust_delta_log_wealth=0.0,
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
-            no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
-            rejection_reasons={candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"},
+            no_trade_reason=reason,
+            buy_rejection_economics=_buy_rejection_economics(
+                candidate,
+                reason=reason,
+                robust_q=robust_q,
+                q_samples=q_samples,
+                band_alpha=band_alpha,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                current_token_shares=held_shares,
+                full_kelly_target_shares=full_target,
+                fractional_kelly_target_shares=fractional_target,
+                probe_kind="BEST_EXECUTABLE",
+                probe_shares=probe_shares,
+            ),
+            rejection_reasons={candidate.candidate_id: reason},
         )
 
-    legal_min_shares = venue_legal_neighbor(raw_min_shares, at_most=False)
-    if legal_min_shares is None:
-        legal_min_shares = raw_min_shares
     full_kelly_target_shares = held_shares + full_best[4]
     fractional_kelly_target_shares = full_kelly_target_shares * multiplier
     remaining_target_shares = fractional_kelly_target_shares - held_shares
@@ -2815,6 +3062,20 @@ def _score_global_single_order(
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
             no_trade_reason=reason,
+            buy_rejection_economics=_buy_rejection_economics(
+                candidate,
+                reason=reason,
+                robust_q=robust_q,
+                q_samples=q_samples,
+                band_alpha=band_alpha,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                current_token_shares=held_shares,
+                full_kelly_target_shares=full_kelly_target_shares,
+                fractional_kelly_target_shares=fractional_kelly_target_shares,
+                probe_kind="MINIMUM_MARKETABLE",
+                probe_shares=legal_min_shares,
+            ),
             rejection_reasons={candidate.candidate_id: reason},
         )
     fractional_legal_max = venue_legal_neighbor(
@@ -2834,6 +3095,20 @@ def _score_global_single_order(
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
             no_trade_reason=reason,
+            buy_rejection_economics=_buy_rejection_economics(
+                candidate,
+                reason=reason,
+                robust_q=robust_q,
+                q_samples=q_samples,
+                band_alpha=band_alpha,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                current_token_shares=held_shares,
+                full_kelly_target_shares=full_kelly_target_shares,
+                fractional_kelly_target_shares=fractional_kelly_target_shares,
+                probe_kind="MINIMUM_MARKETABLE",
+                probe_shares=legal_min_shares,
+            ),
             rejection_reasons={candidate.candidate_id: reason},
         )
     fractional_max_shares = min(
@@ -2898,6 +3173,8 @@ def _score_global_single_order(
     if best is None or not (
         best[0] > 0.0 and best[1] > _ROBUST_EV_EPS_USD
     ):
+        reason = "NON_POSITIVE_ROBUST_OBJECTIVE"
+        probe_shares = best[4] if best is not None else legal_min_shares
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2905,8 +3182,22 @@ def _score_global_single_order(
             robust_delta_log_wealth=0.0,
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
-            no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
-            rejection_reasons={candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"},
+            no_trade_reason=reason,
+            buy_rejection_economics=_buy_rejection_economics(
+                candidate,
+                reason=reason,
+                robust_q=robust_q,
+                q_samples=q_samples,
+                band_alpha=band_alpha,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                current_token_shares=held_shares,
+                full_kelly_target_shares=full_kelly_target_shares,
+                fractional_kelly_target_shares=fractional_kelly_target_shares,
+                probe_kind="BEST_EXECUTABLE",
+                probe_shares=probe_shares,
+            ),
+            rejection_reasons={candidate.candidate_id: reason},
         )
     (
         robust_du,
@@ -3496,6 +3787,9 @@ def select_global_single_order(
 
     rejections: dict[str, str] = {}
     scored: list[GlobalSingleOrderDecision] = []
+    rejected_buy_economics_by_id: dict[
+        str, GlobalBuyRejectionEconomics
+    ] = {}
 
     def selection_cancelled() -> bool:
         if cancelled is None:
@@ -3742,6 +4036,7 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
+                        buy_rejection_economics=rejected_buy_economics_by_id,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3773,6 +4068,26 @@ def select_global_single_order(
         )
         if score.candidate is None:
             rejections.update(score.rejection_reasons)
+            rejected_buy = score.buy_rejection_economics
+            if rejected_buy is not None:
+                resolution_at = universe_witness.resolution_at_by_family.get(
+                    candidate.family_key
+                )
+                if resolution_at is not None:
+                    capital_lock_hours = (
+                        resolution_at - decision_at_utc.astimezone(timezone.utc)
+                    ).total_seconds() / 3600.0
+                    if math.isfinite(capital_lock_hours) and capital_lock_hours > 0.0:
+                        rejected_buy = replace(
+                            rejected_buy,
+                            resolution_at_utc=resolution_at,
+                            capital_lock_hours=capital_lock_hours,
+                            probe_robust_log_growth_per_hour=(
+                                rejected_buy.probe_robust_delta_log_wealth
+                                / capital_lock_hours
+                            ),
+                        )
+                rejected_buy_economics_by_id[candidate.candidate_id] = rejected_buy
         else:
             resolution_at = universe_witness.resolution_at_by_family.get(
                 candidate.family_key
@@ -3796,6 +4111,7 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
+                        buy_rejection_economics=rejected_buy_economics_by_id,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3822,6 +4138,7 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
+                        buy_rejection_economics=rejected_buy_economics_by_id,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3865,6 +4182,7 @@ def select_global_single_order(
                 candidates,
                 rejections=rejections,
                 scores=scored,
+                buy_rejection_economics=rejected_buy_economics_by_id,
             ),
             candidate_input_count=len(candidates),
         )
@@ -3927,6 +4245,7 @@ def select_global_single_order(
             candidates,
             rejections=rejections,
             scores=scored,
+            buy_rejection_economics=rejected_buy_economics_by_id,
             winner_id=winner_id,
         ),
         candidate_input_count=len(candidates),

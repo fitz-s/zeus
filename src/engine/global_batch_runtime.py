@@ -1225,6 +1225,69 @@ def _stored_global_auction_payload_ref(
     return ref
 
 
+def _compact_buy_rejection_group(
+    *,
+    action: str,
+    side: str,
+    reason: str,
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Persist a truthful best rejected BUY frontier without widening admission."""
+
+    candidate_ids = [str(row.get("candidate_id") or "") for row in rows]
+    economic_rows: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
+    for row in rows:
+        economics = row.get("buy_rejection_economics")
+        if not isinstance(economics, Mapping):
+            continue
+        growth = economics.get("probe_robust_log_growth_per_hour")
+        if growth is None:
+            continue
+        try:
+            numeric = (
+                float(growth),
+                float(economics["probe_robust_delta_log_wealth"]),
+                float(economics["probe_capital_efficiency"]),
+                Decimal(str(economics["probe_cost_usd"])),
+            )
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            continue
+        if not all(math.isfinite(value) for value in numeric[:3]):
+            continue
+        economic_rows.append((row, economics))
+
+    frontier_complete = len(economic_rows) == len(rows)
+    frontier: dict[str, object] | None = None
+    if frontier_complete and economic_rows:
+        row, economics = min(
+            economic_rows,
+            key=lambda item: (
+                -round(float(item[1]["probe_robust_log_growth_per_hour"]), 15),
+                -round(float(item[1]["probe_robust_delta_log_wealth"]), 15),
+                -round(float(item[1]["probe_capital_efficiency"]), 15),
+                Decimal(str(item[1]["probe_cost_usd"])),
+                str(item[0].get("candidate_id") or ""),
+            ),
+        )
+        frontier = {
+            "candidate_id": str(row.get("candidate_id") or ""),
+            "family_key": str(row.get("family_key") or ""),
+            "bin_id": str(row.get("bin_id") or ""),
+            "condition_id": str(row.get("condition_id") or ""),
+            "token_id": str(row.get("token_id") or ""),
+            "economics": economics,
+        }
+    return {
+        "action": action,
+        "side": side,
+        "reason": reason,
+        "candidate_ids": candidate_ids,
+        "economics_candidate_count": len(economic_rows),
+        "frontier_complete": frontier_complete,
+        "frontier": frontier,
+    }
+
+
 def _store_global_auction_receipt(
     conn,
     *,
@@ -1397,7 +1460,9 @@ def _store_global_auction_receipt(
         and row.get("buy_sizing_mode")
         == "MINIMUM_MARKETABLE_DISCRETE_REPAIR"
     }
-    rejection_groups: dict[tuple[str, str, str], list[str]] = {}
+    rejection_groups: dict[
+        tuple[str, str, str], list[Mapping[str, object]]
+    ] = {}
     detailed_rows: list[dict] = []
     for row in evaluation_rows:
         if row.get("status") == "REJECTED" and row.get("action") == "BUY":
@@ -1406,7 +1471,7 @@ def _store_global_auction_receipt(
                 str(row["side"]),
                 str(row["rejection_reason"]),
             )
-            rejection_groups.setdefault(key, []).append(str(row["candidate_id"]))
+            rejection_groups.setdefault(key, []).append(row)
         else:
             detailed_rows.append(row)
     buy_condition_masks: dict[str, int] = {}
@@ -1510,13 +1575,13 @@ def _store_global_auction_receipt(
     )
     compact_evaluations = {
         "rejected_groups": [
-            {
-                "action": action,
-                "side": side,
-                "reason": reason,
-                "candidate_ids": candidate_ids,
-            }
-            for (action, side, reason), candidate_ids in sorted(
+            _compact_buy_rejection_group(
+                action=action,
+                side=side,
+                reason=reason,
+                rows=rows,
+            )
+            for (action, side, reason), rows in sorted(
                 rejection_groups.items()
             )
         ],
@@ -1639,6 +1704,14 @@ def _store_global_auction_receipt(
         "candidate_input_count": candidate_input_count,
         "candidate_detailed_count": len(detailed_rows),
         "candidate_rejection_group_count": len(rejection_groups),
+        "buy_rejection_economics_count": sum(
+            int(group["economics_candidate_count"])
+            for group in compact_evaluations["rejected_groups"]
+        ),
+        "buy_rejection_frontier_complete_group_count": sum(
+            bool(group["frontier_complete"])
+            for group in compact_evaluations["rejected_groups"]
+        ),
         "candidate_coverage_complete": coverage_complete,
         "held_position_coverage_complete": held_position_coverage_complete,
         "held_position_expected_count": expected_holding_count,
@@ -1663,7 +1736,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v8",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v9",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),

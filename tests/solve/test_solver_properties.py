@@ -839,6 +839,16 @@ def test_fractional_kelly_rejects_a_positive_subminimum_target():
     assert decision.rejection_reasons[candidate.candidate_id] == (
         "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
     )
+    rejection = decision.buy_rejection_economics
+    assert rejection is not None
+    assert rejection.candidate_id == candidate.candidate_id
+    assert rejection.probe_kind == "MINIMUM_MARKETABLE"
+    assert rejection.probe_shares >= Decimal("1")
+    assert Decimal("0") < rejection.remaining_fractional_target_shares < (
+        rejection.probe_shares
+    )
+    assert rejection.probe_robust_delta_log_wealth > 0
+    assert rejection.probe_robust_ev_usd > 0
 
 
 def test_fractional_kelly_does_not_turn_7_015625_target_into_a_five_share_buy():
@@ -1699,6 +1709,14 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     assert evaluations[sell.candidate_id].terminal_wealth is not None
     assert evaluations[buy.candidate_id].position_id is None
     assert evaluations[buy.candidate_id].held_shares == 0
+    buy_rejection = evaluations[buy.candidate_id].buy_rejection_economics
+    assert buy_rejection is not None
+    assert buy_rejection.resolution_at_utc is not None
+    assert buy_rejection.capital_lock_hours == pytest.approx(24.0)
+    assert buy_rejection.probe_robust_delta_log_wealth < 0
+    assert buy_rejection.probe_robust_log_growth_per_hour == pytest.approx(
+        buy_rejection.probe_robust_delta_log_wealth / 24.0
+    )
 
 
 def test_global_single_order_capital_authority_failure_preserves_sell_and_stops_retries():
@@ -2916,6 +2934,12 @@ def test_global_single_order_prunes_impossible_ev_before_stake_probes(
     assert score.rejection_reasons == {
         candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
     }
+    rejection = score.buy_rejection_economics
+    assert rejection is not None
+    assert rejection.robust_q_lcb == pytest.approx(0.41)
+    assert rejection.minimum_all_in_unit_cost > Decimal("0.41")
+    assert rejection.probe_robust_delta_log_wealth < 0
+    assert rejection.probe_robust_ev_usd < 0
 
 
 def test_global_single_order_normalizes_each_probe_direction_once(monkeypatch):
