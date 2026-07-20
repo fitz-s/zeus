@@ -70,6 +70,10 @@ def _mem_conn(monkeypatch):
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._entry_replacement_family_from_snapshot",
+        lambda *_args, **_kwargs: ("Test City", "2026-04-27", "high"),
+    )
     yield mem
     _TEST_CONN = None
     mem.close()

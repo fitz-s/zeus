@@ -1978,7 +1978,7 @@ files:
   src/execution/executor.py:
     zone: K2_runtime
     authority_role: live_order_executor
-    why: Places live CLOB limit orders; real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before command persistence or SDK contact and persists/submits the selected maker/taker order type.
+    why: Places live CLOB limit orders; real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before command persistence or SDK contact and persists/submits the selected maker/taker order type. ENTRY carries exact executable-snapshot family identity into the unresolved exposure reservation so the next global auction prices the correct correlated endowment; this metadata is not a sibling-token veto.
     write_routes:
     - canonical_position_write
     downstream:
