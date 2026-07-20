@@ -3973,15 +3973,15 @@ def select_global_single_order(
                 wealth_floor_usd=wealth_witness.wealth_floor_usd,
                 wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
             )
+            if score.candidate is None:
+                rejections.update(score.rejection_reasons)
+                continue
             score = replace(
                 score,
                 capital_action_mode="IMMEDIATE_REDUCE_ONLY_SELL",
             )
-            if score.candidate is None:
-                rejections.update(score.rejection_reasons)
-            else:
-                scored.append(score)
-                rejections.update(score.rejection_reasons)
+            scored.append(score)
+            rejections.update(score.rejection_reasons)
             continue
         if not capital_authority_available:
             rejections[candidate.candidate_id] = "CAPITAL_CONSTRAINT_UNAVAILABLE"

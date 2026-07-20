@@ -1822,6 +1822,27 @@ def test_global_single_order_sell_uses_best_partial_depth_when_full_depth_is_abs
     assert decision.robust_ev_usd > 0.0
 
 
+def test_global_single_order_sell_with_subminimum_depth_is_a_complete_no_trade():
+    sell = _global_sell_candidate(
+        candidate_id="sell-subminimum-depth",
+        family="sell-subminimum-depth-family",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.50", "0.99"),),
+        shares="10",
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+    assert decision.capital_action_mode == "UNSCORED"
+    assert decision.rejection_reasons == {sell.candidate_id: "DEPTH_INFEASIBLE"}
+    assert len(decision.candidate_evaluations) == 1
+    assert decision.candidate_evaluations[0].status == "REJECTED"
+    assert decision.candidate_evaluations[0].rejection_reason == "DEPTH_INFEASIBLE"
+
+
 def test_global_single_order_sell_selects_interior_capital_optimal_reduction():
     sell = _global_sell_candidate(
         candidate_id="sell-interior-optimum",
