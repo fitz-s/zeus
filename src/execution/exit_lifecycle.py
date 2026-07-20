@@ -997,7 +997,6 @@ PARTIAL_FILL_STATUSES = frozenset({"PARTIAL", "PARTIALLY_FILLED", "PARTIALLY_MAT
 VOID_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
 EXIT_TRADE_FACT_CLOSE_STATES = frozenset({"CONFIRMED"})
 EXIT_TRADE_FACT_CLOSE_COMMAND_STATES = frozenset({"ACKED", "POST_ACKED", "PARTIAL", "FILLED"})
-EXIT_FULL_CLOSE_DUST_TOLERANCE = Decimal("0.011")
 EXIT_LIFECYCLE_OWNED_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 EXIT_LIFECYCLE_RECOVERY_STATES = frozenset({"exit_intent", "retry_pending", "backoff_exhausted"})
 # FIX 2a (2026-06-20): an exit order that is already on the book. The still-held
@@ -1745,19 +1744,24 @@ def _exit_token_id(position: Position) -> str:
     return str(token_id or "").strip()
 
 
-def _is_below_latest_snapshot_min_order(
+def _latest_fresh_snapshot_min_order(
     position: Position,
     *,
     conn: sqlite3.Connection | None,
-) -> bool:
+    now: datetime | None = None,
+) -> Decimal | None:
+    """min_order_size of the latest FRESH executable snapshot for the exit token.
+
+    C5: freshness requires a non-null, unexpired ``freshness_deadline``. A null
+    or expired snapshot cannot suppress a live exit/re-decision — it is treated
+    as absent. Returns None when no fresh snapshot exists.
+    """
+
     if conn is None:
-        return False
+        return None
     token_id = _exit_token_id(position)
-    shares = _positive_decimal(getattr(position, "effective_shares", None))
-    if shares is None:
-        shares = _positive_decimal(getattr(position, "shares", None))
-    if not token_id or shares is None:
-        return False
+    if not token_id:
+        return None
     saved = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
@@ -1766,17 +1770,18 @@ def _is_below_latest_snapshot_min_order(
             SELECT min_order_size
               FROM executable_market_snapshots
              WHERE selected_outcome_token_id = ?
+               AND freshness_deadline IS NOT NULL
+               AND datetime(freshness_deadline) >= datetime(?)
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,
-            (token_id,),
+            (token_id, (now or _utcnow()).astimezone(timezone.utc).isoformat()),
         ).fetchone()
     except sqlite3.Error:
-        return False
+        return None
     finally:
         conn.row_factory = saved
-    min_order = _positive_decimal(row["min_order_size"] if row is not None else None)
-    return min_order is not None and shares < min_order
+    return _positive_decimal(row["min_order_size"] if row is not None else None)
 
 
 def _dust_evidence_marks_non_executable(evidence: str) -> bool:
@@ -1803,8 +1808,16 @@ def _is_non_executable_dust_hold(
     exit_state = getattr(exit_state, "value", exit_state)
     if str(exit_state or "") != "backoff_exhausted":
         return False
-    if _is_below_latest_snapshot_min_order(position, conn=conn):
-        return True
+    # C5: a FRESH snapshot is authoritative both ways. If it proves the size is
+    # below min_order -> dust hold; if it proves the size is executable -> NOT
+    # dust, and a stale "[DUST:...]" reason string may not suppress re-decision.
+    # Historical dust text is a fallback ONLY when no fresh snapshot exists.
+    fresh_min = _latest_fresh_snapshot_min_order(position, conn=conn)
+    if fresh_min is not None:
+        shares = _positive_decimal(getattr(position, "effective_shares", None))
+        if shares is None:
+            shares = _positive_decimal(getattr(position, "shares", None))
+        return shares is not None and shares < fresh_min
     reason = str(getattr(position, "exit_reason", "") or "")
     last_error = str(getattr(position, "last_exit_error", "") or "")
     return _dust_evidence_marks_non_executable(f"{reason} {last_error}")
@@ -1880,7 +1893,8 @@ def _canonical_non_executable_dust_hold(
             SELECT min_order_size
               FROM executable_market_snapshots
              WHERE selected_outcome_token_id = ?
-               AND (freshness_deadline IS NULL OR datetime(freshness_deadline) >= datetime(?))
+               AND freshness_deadline IS NOT NULL
+               AND datetime(freshness_deadline) >= datetime(?)
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,
@@ -1911,6 +1925,59 @@ def _sync_runtime_to_canonical_dust_hold(
     position.last_exit_error = (error or reason)[:500]
 
 
+# C4: EXIT venue-command states that permit returning a still-held pending_exit
+# to live re-decision. Any other state (open/in-flight order, unknown side
+# effect, review-required) means a sell may still be live at the venue, so the
+# position STAYS in pending_exit for the command reconciler rather than risking a
+# second sell. FILLED is release-safe only in combination with the caller's
+# positive canonical-exposure gate (a filled reduction that leaves a residual).
+_EXIT_COMMAND_RELEASE_SAFE_STATES = frozenset(
+    {"REJECTED", "SUBMIT_REJECTED", "CANCELLED", "EXPIRED", "FILLED"}
+)
+
+
+def _latest_exit_command_release_witness(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+) -> tuple[bool, str] | None:
+    """Reconciliation witness for a backoff-exhausted pending-exit release.
+
+    Returns ``(permits_release, blocking_state)`` or ``None`` when there is no
+    durable command store to consult. Release is permitted only when no EXIT
+    command for the position is in a non-terminal state; an unrecognized state
+    fails safe (blocks). Absence of any EXIT command permits release.
+    """
+
+    if conn is None:
+        return None
+    position_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not position_id:
+        return None
+    safe = tuple(sorted(_EXIT_COMMAND_RELEASE_SAFE_STATES))
+    placeholders = ", ".join("?" for _ in safe)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT UPPER(COALESCE(state, '')) AS state
+              FROM venue_commands
+             WHERE position_id = ?
+               AND UPPER(COALESCE(intent_kind, '')) = 'EXIT'
+               AND UPPER(COALESCE(state, '')) NOT IN ({placeholders})
+             ORDER BY updated_at DESC, created_at DESC, command_id DESC
+             LIMIT 1
+            """,
+            (position_id, *safe),
+        ).fetchone()
+    except sqlite3.Error:
+        # Fail safe: cannot read the command store -> do not release.
+        return (False, "COMMAND_STORE_UNREADABLE")
+    if row is None:
+        return (True, "")
+    blocking = str(row["state"] if isinstance(row, sqlite3.Row) else row[0]) or "UNKNOWN"
+    return (False, blocking)
+
+
 def release_backoff_exhausted_pending_exit_for_redecision(
     position: Position,
     *,
@@ -1938,6 +2005,14 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     if shares is None:
         shares = _positive_decimal(getattr(position, "shares", None))
     if (chain_shares is None or chain_shares <= 0) and (shares is None or shares <= 0):
+        return False
+    # C4: gate the release on a reconciliation witness. Only release when the
+    # latest durable EXIT command is absent or terminal; an open/in-flight
+    # command or unknown side effect keeps the position in pending_exit for the
+    # command reconciler (single-flight law — never a second sell). DB-backed:
+    # without conn the exposure/dust gates alone decide (live always has conn).
+    witness = _latest_exit_command_release_witness(position, conn=conn)
+    if witness is not None and not witness[0]:
         return False
 
     prior_error = str(getattr(position, "last_exit_error", "") or "")
@@ -5422,6 +5497,39 @@ def _economic_exit_trade_fact_cte(
     """
 
 
+def _accumulate_exact_fills(
+    fill_pairs: object,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Exact (filled_size, fill_notional) from GROUP_CONCAT'd ``size#price`` text.
+
+    venue_trade_facts store filled_size/fill_price as canonical decimal TEXT.
+    A SQLite REAL ``SUM`` over them loses binary precision on the settlement
+    boundary; accumulate the exact Decimal atoms instead. Returns ``(None, None)``
+    when no positive fill economics are present (matches ``_positive_decimal``).
+    """
+
+    text = str(fill_pairs or "")
+    if not text:
+        return None, None
+    filled_total = Decimal("0")
+    notional_total = Decimal("0")
+    for pair in text.split("|"):
+        if not pair:
+            continue
+        size_text, sep, price_text = pair.partition("#")
+        if not sep:
+            continue
+        size = _positive_decimal(size_text)
+        price = _positive_decimal(price_text)
+        if size is None or price is None:
+            continue
+        filled_total += size
+        notional_total += size * price
+    if filled_total <= 0 or notional_total <= 0:
+        return None, None
+    return filled_total, notional_total
+
+
 def _exit_close_target_size(position: Position, command_size: object) -> Decimal | None:
     candidates = [
         _positive_decimal(command_size),
@@ -5470,11 +5578,11 @@ def _exit_trade_fact_close_candidate(
                    cmd.venue_order_id,
                    cmd.size AS command_size,
                    cmd.state AS command_state,
-                   SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)) AS filled_size,
-                   SUM(
-                       CAST(COALESCE(fact.filled_size, '0') AS REAL)
-                       * CAST(COALESCE(fact.fill_price, '0') AS REAL)
-                   ) AS fill_notional,
+                   GROUP_CONCAT(
+                       COALESCE(fact.filled_size, '0') || '#'
+                       || COALESCE(fact.fill_price, '0'),
+                       '|'
+                   ) AS fill_pairs,
                    GROUP_CONCAT(DISTINCT UPPER(COALESCE(fact.state, ''))) AS fill_states,
                    MAX(COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at)) AS observed_at
               FROM venue_commands cmd
@@ -5500,8 +5608,10 @@ def _exit_trade_fact_close_candidate(
     if row is None:
         return None
 
-    filled_size = _positive_decimal(row["filled_size"])
-    fill_notional = _positive_decimal(row["fill_notional"])
+    # C3: accumulate exact Decimal fill atoms. filled_size/fill_price are
+    # canonical decimal TEXT; a SQLite REAL SUM would lose binary precision on
+    # the close/settlement boundary and mis-size the residual comparison below.
+    filled_size, fill_notional = _accumulate_exact_fills(row["fill_pairs"])
     latest_reduction_target = _canonical_reduction_intent_shares(conn, position)
     reduction_target = (
         _canonical_reduction_intent_shares(
@@ -5514,10 +5624,17 @@ def _exit_trade_fact_close_candidate(
     )
     if latest_reduction_target is not None and reduction_target is None:
         return None
+    # C2: the full-close target is the EXACT semantic command target (the sell
+    # command size), not the max() of command/chain/shares. A command that fully
+    # fills closes; the chain residual left by a command sized below the position
+    # is preserved by _close_pending_exit_from_trade_fact (never fabricated-zero).
     target_size = (
         reduction_target
         if reduction_target is not None
-        else _exit_close_target_size(position, row["command_size"])
+        else (
+            _positive_decimal(row["command_size"])
+            or _exit_close_target_size(position, row["command_size"])
+        )
     )
     if filled_size is None or fill_notional is None or target_size is None:
         return None
@@ -5525,10 +5642,12 @@ def _exit_trade_fact_close_candidate(
         filled_size > reduction_target + Decimal("1e-9")
     ):
         return None
-    if (
-        reduction_target is None
-        and filled_size + EXIT_FULL_CLOSE_DUST_TOLERANCE < target_size
-    ):
+    if reduction_target is None and filled_size < target_size:
+        # C2: an underfill of a full-close command is NOT a close. Compare exact
+        # atomics vs the exact command target (no dust tolerance) so a partial
+        # fill (e.g. 0.990 of 1.000) preserves the positive residual instead of
+        # being zeroed by _close_pending_exit_from_trade_fact. A residual is only
+        # retired by the chain-confirmed-zero discipline (_void_chain_confirmed_zero).
         return None
     fill_price = fill_notional / filled_size
     if fill_price <= 0 or fill_price > 1:
