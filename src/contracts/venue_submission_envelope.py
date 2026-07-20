@@ -19,12 +19,10 @@ from typing import Any, ClassVar, Optional
 
 _DECIMAL_FIELDS = {"tick_size", "min_order_size", "price", "size"}
 _BYTES_FIELDS = {"signed_order"}
-LIVE_ORDER_MIN_UNIT_PRICE = Decimal("0.05")
-LIVE_ORDER_MAX_UNIT_PRICE = Decimal("0.95")
 
 
 def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
-    """Return a finite live-order price inside the absolute inclusive band."""
+    """Return a finite binary-contract price strictly inside ``(0, 1)``."""
 
     try:
         value = price if isinstance(price, Decimal) else Decimal(str(price))
@@ -32,9 +30,9 @@ def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
         raise ValueError(f"live order unit price must be decimal, got {price!r}") from exc
     if not value.is_finite():
         raise ValueError(f"live order unit price must be finite, got {price!r}")
-    if not LIVE_ORDER_MIN_UNIT_PRICE <= value <= LIVE_ORDER_MAX_UNIT_PRICE:
+    if not Decimal("0") < value < Decimal("1"):
         raise ValueError(
-            "live order unit price outside absolute inclusive [0.05, 0.95] submit band: "
+            "live order unit price outside strict open (0, 1) submit domain: "
             f"price={value}"
         )
     return value
