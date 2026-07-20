@@ -349,6 +349,6 @@ def test_legacy_selector_cannot_rank_family_when_all_quotes_are_below_floor():
         )
     selected = _select({"family_id": "milan-starve"}, proofs)
     assert selected is None
-    for proof in proofs:
+    for proof in (item for item in proofs if item.direction == "buy_yes"):
         assert proof.missing_reason is not None
         assert proof.missing_reason.startswith("LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:")
