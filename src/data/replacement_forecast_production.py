@@ -2152,6 +2152,33 @@ def _ingest_station_forecasts_live(cfg: dict[str, object]) -> dict[str, int] | N
         return None
 
 
+# Re-home guard (2026-07-20): the 2026-06-11 download-lane migration ("下载有自己的daemon") moved the
+# gridded download off forecast-live into ingest_main's availability poll, but LEFT BEHIND the station
+# ingest call above (it lived only in the now-descheduled _replacement_forecast_download_cycle). cwa_
+# township/hko_fnd went dark 2026-07-17 as a result. This due-gated wrapper re-homes the call onto the
+# (fast) availability poll: a monotonic-clock gate fetches at most ~1×/interval so the poll never hammers
+# the CWA/HKO provider APIs, matching the original ~4×/day download-cron cadence. Fail-soft throughout.
+_STATION_INGEST_MIN_INTERVAL_S = 3 * 3600
+_last_station_ingest_monotonic: float | None = None
+
+
+def _ingest_station_forecasts_if_due(cfg: dict[str, object]) -> dict[str, int] | None:
+    """Staleness-gated station-forecast ingest for the availability-poll lane. Returns the ingest
+    report when a fetch was due (and ran), else None. Never raises: the monotonic gate is advanced
+    before the fetch so a transient provider failure waits one interval rather than hammering."""
+    global _last_station_ingest_monotonic
+    import time  # noqa: PLC0415
+
+    now = time.monotonic()
+    if (
+        _last_station_ingest_monotonic is not None
+        and (now - _last_station_ingest_monotonic) < _STATION_INGEST_MIN_INTERVAL_S
+    ):
+        return None
+    _last_station_ingest_monotonic = now
+    return _ingest_station_forecasts_live(cfg)
+
+
 @_scheduler_job("replacement_forecast_download")
 def _replacement_forecast_download_cycle() -> None:
     """Proactive raw-input PRE-FETCH for the BAYES_PRECISION_FUSION/replacement soft-anchor forecast.

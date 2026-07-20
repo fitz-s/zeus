@@ -2055,6 +2055,7 @@ def _replacement_availability_poll_tick():
         _download_replacement_forecast_current_targets_if_needed,
         _enqueue_cycle_advance_reseeds_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
+        _ingest_station_forecasts_if_due,
         _replacement_forecast_live_materialization_queue_config,
     )
     from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
@@ -2081,6 +2082,17 @@ def _replacement_availability_poll_tick():
         }
         logger.info("replacement source-clock quota cooldown: %s", report)
         return report
+
+    # Station-calibrated official forecasts (CWA township / HKO fnd) ingest on THIS lane — re-homed
+    # 2026-07-20 after the 2026-06-11 download-lane migration orphaned the call (it lived only in the
+    # descheduled forecast-live _replacement_forecast_download_cycle, so cwa_township/hko_fnd went dark
+    # 2026-07-17). Due-gated (~3h) + fail-soft: a provider outage never touches the gridded capture.
+    try:
+        _station_report = _ingest_station_forecasts_if_due(cfg)
+        if _station_report:
+            logger.info("station-forecast live ingest wrote rows: %s", _station_report)
+    except Exception as exc:  # noqa: BLE001 - station ingest must never break the poll
+        logger.warning("station-forecast live ingest skipped (fail-soft): %s", exc)
 
     def _attach_reseed_reports(
         report: dict[str, object],

@@ -182,3 +182,41 @@ def test_resolve_cwa_key_accepts_documented_lowercase_file_key(tmp_path):
 def test_resolve_cwa_key_accepts_uppercase_file_key(tmp_path):
     _write_secret(tmp_path, {"CWA_API_KEY": "FAKE-UPPER"})
     assert adapter.resolve_cwa_api_key(environ={}, root=tmp_path) == "FAKE-UPPER"
+
+
+# ---------------------------------------------------------------------------
+# Re-home guard (2026-07-20): the 2026-06-11 download-lane migration orphaned the station ingest
+# call (it lived only in the descheduled forecast-live _replacement_forecast_download_cycle, so
+# cwa_township/hko_fnd went dark 2026-07-17). It is now re-homed onto ingest_main's availability
+# poll via the due-gated wrapper _ingest_station_forecasts_if_due. These guard both.
+# ---------------------------------------------------------------------------
+
+
+def test_due_gate_fetches_then_skips_within_interval_then_fetches_again(monkeypatch):
+    from src.data import replacement_forecast_production as prod
+
+    calls = {"n": 0}
+    monkeypatch.setattr(prod, "_ingest_station_forecasts_live", lambda cfg: (calls.__setitem__("n", calls["n"] + 1), {"cwa_township": 7})[1])
+    monkeypatch.setattr(prod, "_last_station_ingest_monotonic", None)
+
+    first = prod._ingest_station_forecasts_if_due({})       # due (never run) -> fetch
+    gated = prod._ingest_station_forecasts_if_due({})        # within interval -> skip
+    # rewind the stored monotonic stamp past the interval to simulate elapsed time
+    prod._last_station_ingest_monotonic -= (prod._STATION_INGEST_MIN_INTERVAL_S + 1)
+    again = prod._ingest_station_forecasts_if_due({})        # interval elapsed -> fetch
+
+    assert first == {"cwa_township": 7}
+    assert gated is None
+    assert again == {"cwa_township": 7}
+    assert calls["n"] == 2  # provider hit exactly twice, never on the gated tick
+
+
+def test_availability_poll_is_wired_to_station_ingest():
+    """Regression guard: the live availability-poll lane must call the station ingest wrapper so the
+    2026-07-17 orphaning cannot recur silently."""
+    import inspect
+
+    from src import ingest_main
+
+    src = inspect.getsource(ingest_main._replacement_availability_poll_tick)
+    assert "_ingest_station_forecasts_if_due" in src
