@@ -56,6 +56,12 @@ DAY0_HKO_POLL_SECONDS_ENV = "ZEUS_DAY0_HKO_POLL_SECONDS"
 DAY0_METAR_COMMIT_RETRY_SECONDS = 0.25
 DAY0_METAR_COMMIT_RETRY_MAX_SECONDS = 5.0
 DAY0_METAR_COMMIT_RETRY_MAX_FAILURES = 6
+# Bounded local retry for the Day0 family-admission resolver (review blocker
+# C6). A failed read gets one more shot within this call before the caller
+# gives up for this tick; the next scheduled poll re-derives admission fresh
+# regardless. Never unbounded — this must not stall the source-clock tick.
+DAY0_FAMILY_ADMISSION_RETRY_BUDGET_SECONDS = 1.0
+DAY0_FAMILY_ADMISSION_RETRY_INTERVAL_SECONDS = 0.1
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 _DAY0_METAR_EMITTER: Any | None = None
@@ -216,7 +222,23 @@ def _day0_priority_scopes() -> frozenset[tuple[str, str]]:
 def _day0_family_admission_for_scopes(
     scopes: tuple[tuple[str, str], ...],
 ):
-    """Bind source-clock events to a listed market or current exposure."""
+    """Bind source-clock events to a listed market or current exposure.
+
+    Fail-CLOSED (review blocker C6): a caller reads the returned predicate as
+    "admit only what it accepts" for any non-None return, and treats a bare
+    ``None`` as "no filter configured" (admit everything). So on admission-
+    read failure this must NEVER return ``None`` — that would silently widen
+    every eligible high/low family into an executable event on a plain DB
+    fault. Absence of admission truth is not the same as "all families".
+    Instead: retry the resolver a bounded number of times within this call,
+    and on exhaustion return a deny-all predicate (identical to the "no
+    scopes requested" branch below) so the caller emits nothing this tick.
+    Raw source facts are written upstream of this gate regardless (this
+    function only ever influences the trade-decision/reactor-wake event, not
+    the underlying observation persistence) and the next scheduled poll
+    re-resolves admission from scratch, so a transient outage delays
+    emission rather than losing or misrouting it.
+    """
 
     scopes = tuple(
         sorted(
@@ -235,66 +257,77 @@ def _day0_family_admission_for_scopes(
         get_trade_connection_read_only,
     )
 
-    forecasts_conn = None
-    trade_conn = None
-    try:
-        values = ",".join("(?,?)" for _ in scopes)
-        params = tuple(value for scope in scopes for value in scope)
-        forecasts_conn = get_forecasts_connection_read_only()
-        market_rows = forecasts_conn.execute(
-            f"""
-            WITH requested(city, target_date) AS (VALUES {values})
-            SELECT DISTINCT m.city, m.target_date, m.temperature_metric
-              FROM requested AS r
-              JOIN market_events AS m
-                ON m.city = r.city
-               AND m.target_date = r.target_date
-             WHERE m.temperature_metric IN ('high', 'low')
-               AND COALESCE(m.condition_id, '') != ''
-            """,
-            params,
-        ).fetchall()
+    values = ",".join("(?,?)" for _ in scopes)
+    params = tuple(value for scope in scopes for value in scope)
+    deadline = time.monotonic() + DAY0_FAMILY_ADMISSION_RETRY_BUDGET_SECONDS
+    last_exc: Exception | None = None
+    while True:
+        forecasts_conn = None
+        trade_conn = None
+        try:
+            forecasts_conn = get_forecasts_connection_read_only()
+            market_rows = forecasts_conn.execute(
+                f"""
+                WITH requested(city, target_date) AS (VALUES {values})
+                SELECT DISTINCT m.city, m.target_date, m.temperature_metric
+                  FROM requested AS r
+                  JOIN market_events AS m
+                    ON m.city = r.city
+                   AND m.target_date = r.target_date
+                 WHERE m.temperature_metric IN ('high', 'low')
+                   AND COALESCE(m.condition_id, '') != ''
+                """,
+                params,
+            ).fetchall()
 
-        trade_conn = get_trade_connection_read_only()
-        exposure_rows = trade_conn.execute(
-            f"""
-            WITH requested(city, target_date) AS (VALUES {values})
-            SELECT DISTINCT p.city, p.target_date, p.temperature_metric
-              FROM requested AS r
-              JOIN position_current AS p
-                ON p.city = r.city
-               AND p.target_date = r.target_date
-             WHERE p.temperature_metric IN ('high', 'low')
-               AND p.phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
-            """,
-            params,
-        ).fetchall()
-    except Exception as exc:  # noqa: BLE001 - admission loss must not swallow source facts
-        logger.warning(
-            "DAY0_METAR_FAMILY_ADMISSION_UNAVAILABLE fail_open=true exc=%s: %s",
-            type(exc).__name__,
-            exc,
+            trade_conn = get_trade_connection_read_only()
+            exposure_rows = trade_conn.execute(
+                f"""
+                WITH requested(city, target_date) AS (VALUES {values})
+                SELECT DISTINCT p.city, p.target_date, p.temperature_metric
+                  FROM requested AS r
+                  JOIN position_current AS p
+                    ON p.city = r.city
+                   AND p.target_date = r.target_date
+                 WHERE p.temperature_metric IN ('high', 'low')
+                   AND p.phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+                """,
+                params,
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001 - admission loss must not swallow source facts
+            last_exc = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(DAY0_FAMILY_ADMISSION_RETRY_INTERVAL_SECONDS)
+            continue
+        finally:
+            if trade_conn is not None:
+                trade_conn.close()
+            if forecasts_conn is not None:
+                forecasts_conn.close()
+
+        families = frozenset(
+            (str(city), str(target_date), str(metric).lower())
+            for city, target_date, metric in (*market_rows, *exposure_rows)
         )
-        return None
-    finally:
-        if trade_conn is not None:
-            trade_conn.close()
-        if forecasts_conn is not None:
-            forecasts_conn.close()
 
-    families = frozenset(
-        (str(city), str(target_date), str(metric).lower())
-        for city, target_date, metric in (*market_rows, *exposure_rows)
+        def _admit(observation: dict[str, Any]) -> bool:
+            return (
+                str(observation.get("city") or "").strip(),
+                str(observation.get("target_date") or "").strip(),
+                str(observation.get("metric") or "").strip().lower(),
+            ) in families
+
+        return _admit
+
+    logger.warning(
+        "DAY0_METAR_FAMILY_ADMISSION_UNAVAILABLE fail_closed=true "
+        "budget_s=%.1f exc=%s: %s",
+        DAY0_FAMILY_ADMISSION_RETRY_BUDGET_SECONDS,
+        type(last_exc).__name__,
+        last_exc,
     )
-
-    def _admit(observation: dict[str, Any]) -> bool:
-        return (
-            str(observation.get("city") or "").strip(),
-            str(observation.get("target_date") or "").strip(),
-            str(observation.get("metric") or "").strip().lower(),
-        ) in families
-
-    return _admit
+    return lambda _observation: False
 
 
 def _day0_source_family_admission(eligible: Any):
