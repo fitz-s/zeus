@@ -293,8 +293,11 @@ class EventStore:
         available_at = str(extreme_row[1] or "")
         keeper_rows = self.conn.execute(
             f"""
-            SELECT e.event_id, e.received_at
+            SELECT e.event_id, e.received_at, p.processing_status
               FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
+              LEFT JOIN opportunity_event_processing p
+                ON p.event_id = e.event_id
+               AND p.consumer_name = ?
              WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
                AND json_extract(e.payload_json, '$.city') = ?
                AND json_extract(e.payload_json, '$.target_date') = ?
@@ -303,6 +306,7 @@ class EventStore:
                AND e.available_at = ?
             """,
             (
+                self.consumer_name,
                 city,
                 target_date,
                 metric,
@@ -315,7 +319,14 @@ class EventStore:
         return str(
             max(
                 keeper_rows,
-                key=lambda row: (str(row[1] or ""), str(row[0] or "")),
+                key=lambda row: (
+                    {"processed": 3, "processing": 2, "pending": 1}.get(
+                        str(row[2] or ""),
+                        0,
+                    ),
+                    str(row[1] or ""),
+                    str(row[0] or ""),
+                ),
             )[0]
         )
 

@@ -64,6 +64,8 @@ def _day0_event(
     metric: str,
     *,
     available_at: str,
+    received_at: str | None = None,
+    entity_suffix: str = "",
     seq: int = 0,
 ):
     value = 30 + seq if metric == "high" else 30 - seq
@@ -80,13 +82,16 @@ def _day0_event(
         high_so_far=float(value) if metric == "high" else None,
         low_so_far=float(value) if metric == "low" else None,
     )
+    entity_key = f"{city}|{target_date}|{metric}|{seq}"
+    if entity_suffix:
+        entity_key = f"{entity_key}|{entity_suffix}"
     return make_opportunity_event(
         event_type="DAY0_EXTREME_UPDATED",
-        entity_key=f"{city}|{target_date}|{metric}|{seq}",
+        entity_key=entity_key,
         source="day0",
         observed_at=available_at,
         available_at=available_at,
-        received_at=available_at,
+        received_at=received_at or available_at,
         payload=payload,
         priority=60,
     )
@@ -397,6 +402,41 @@ def test_day0_insert_coalesces_equal_extreme_trigger_immediately():
 
     assert _status_of(conn, first.event_id) == "expired"
     assert _status_of(conn, repeated.event_id) == "pending"
+
+
+def test_processed_exact_day0_fact_suppresses_later_delivery_duplicate():
+    """A new receipt of one processed source fact must not trigger another order."""
+    conn = _world_conn()
+    store = EventStore(conn)
+    writer = EventWriter(conn)
+    first = _day0_event(
+        "Hong Kong",
+        "2026-07-20",
+        "high",
+        available_at="2026-07-19T16:30:35+00:00",
+        received_at="2026-07-20T06:35:10+00:00",
+        entity_suffix="first-delivery",
+    )
+    duplicate = _day0_event(
+        "Hong Kong",
+        "2026-07-20",
+        "high",
+        available_at="2026-07-19T16:30:35+00:00",
+        received_at="2026-07-20T06:37:18+00:00",
+        entity_suffix="duplicate-delivery",
+    )
+
+    writer.write(first)
+    store.mark_processed(first.event_id)
+    writer.write(duplicate)
+
+    assert first.event_id != duplicate.event_id
+    assert _status_of(conn, first.event_id) == "processed"
+    assert _status_of(conn, duplicate.event_id) == "expired"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM opportunity_events WHERE event_id IN (?, ?)",
+        (first.event_id, duplicate.event_id),
+    ).fetchone()[0] == 2
 
 
 def test_day0_superseded_keep_absorbing_extreme_per_family():
