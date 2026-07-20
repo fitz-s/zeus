@@ -451,62 +451,58 @@ def test_artifact_excludes_models_outside_each_city_domain(tmp_path: Path) -> No
     assert set(lagos["models"]) == {"ecmwf_ifs", "icon_global"}
 
 
-def test_thin_nest_admitted_by_significance_not_min_n(tmp_path: Path) -> None:
-    """A thin-history regional nest (n < MIN_SETTLED_N) must be admissible to a basket
-    the moment its paired 2*SE improvement clears — never held out until a fixed n
-    accrues (forbidden wait-N pattern). Two deep global families (A=NCEP-like,
-    B=UKMO-like) plus nest N (DWD-like family, only 12 settled dates, near-zero error).
-    The starting pick stays floor-guarded (A, deep), but the guarded ADD loop must
-    admit N on evidence."""
+@pytest.mark.parametrize("thin_n", [1, 2])
+def test_thin_model_cannot_bypass_finite_evidence_floor(
+    tmp_path: Path,
+    thin_n: int,
+) -> None:
+    """Neither a provider-family fallback nor zero empirical SE is evidence.
+
+    One or two identical paired deltas can make a sample SE vanish, but they do
+    not establish a population improvement. Until the fitter has a non-
+    degenerate finite-evidence bound, a model below MIN_SETTLED_N cannot enter
+    the served basket through either path.
+    """
     deep_n = 70
     rows = _rows_for_city(
-        "NestCity", "high", deep_n,
+        "ThinEvidenceCity",
+        "high",
+        deep_n,
         models={"A": 0.9, "B": 1.1},
     )
-    rows += _rows_for_city("NestCity", "low", deep_n, models={"A": 0.9, "B": 1.1})
-    # Nest: only the last 12 dates, tiny residual — clears eps and 2*SE on paired deltas.
-    nest_rows = _rows_for_city("NestCity", "high", deep_n, models={"N": 0.02})
-    rows += nest_rows[-12:]
+    rows += _rows_for_city(
+        "ThinEvidenceCity",
+        "low",
+        deep_n,
+        models={"A": 0.9, "B": 1.1},
+    )
+    thin = _rows_for_city(
+        "ThinEvidenceCity",
+        "high",
+        deep_n,
+        models={"N": 0.02},
+    )
+    rows += thin[-thin_n:]
     conn = _make_db(rows)
     cities_path = _cities_json(
         tmp_path,
-        [{"name": "NestCity", "timezone": "Pacific/Fiji", "country_code": "FJ",
-          "lat": -18.0, "lon": 178.0}],
+        [{
+            "name": "ThinEvidenceCity",
+            "timezone": "Pacific/Fiji",
+            "country_code": "FJ",
+            "lat": -18.0,
+            "lon": 178.0,
+        }],
     )
+
     artifact = fscw.build_artifact(
-        conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
-        frozen_csv_path=tmp_path / "missing.csv", git_sha="FIXED",
+        conn,
+        as_of="2026-12-31",
+        generated_at="FIXED",
+        cities_path=cities_path,
+        frozen_csv_path=tmp_path / "missing.csv",
+        git_sha="FIXED",
         servable=frozenset({"A", "B", "N"}),
     )
-    entry = artifact["cities"]["NestCity"]["high"]
-    assert entry["basket_provenance"]["tier"] == "CITY_SPECIFIC"
-    assert "N" in entry["models"], (
-        "thin nest with significant paired improvement must enter the basket; "
-        f"got {entry['models']}"
-    )
-    # The deep starting model must still be present (floor governs the start, not ADDs).
-    assert "A" in entry["models"]
 
-
-def test_thin_noise_model_still_cannot_start_basket(tmp_path: Path) -> None:
-    """The MIN_SETTLED_N floor still guards the UNGUARDED starting argmin: a lucky
-    thin model (n=10, tiny residual) must not displace a deep model as the start."""
-    rows = _rows_for_city("FloorCity", "high", 70, models={"A": 0.9, "B": 1.4})
-    rows += _rows_for_city("FloorCity", "low", 70, models={"A": 0.9, "B": 1.4})
-    lucky = _rows_for_city("FloorCity", "high", 70, models={"L": 0.01})
-    rows += lucky[-10:]
-    conn = _make_db(rows)
-    cities_path = _cities_json(
-        tmp_path,
-        [{"name": "FloorCity", "timezone": "Pacific/Fiji", "country_code": "FJ",
-          "lat": -18.0, "lon": 178.0}],
-    )
-    artifact = fscw.build_artifact(
-        conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
-        frozen_csv_path=tmp_path / "missing.csv", git_sha="FIXED",
-        servable=frozenset({"A", "B", "L"}),
-    )
-    entry = artifact["cities"]["FloorCity"]["high"]
-    models = list(entry["models"])
-    # L may be ADDed on significance, but the deep A must anchor the basket.
-    assert "A" in models, f"deep model must remain the floor-guarded start; got {models}"
+    assert "N" not in artifact["cities"]["ThinEvidenceCity"]["high"]["models"]

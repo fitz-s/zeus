@@ -262,38 +262,34 @@ def greedy_basket(
     2*SE significance test on the paired per-date delta. Returns the selected model tuple,
     or ``None`` when no candidate has even one paired observation.
 
-    MIN-N NOISE FLOOR — UNGUARDED picks only: a pick with NO significance test (the
-    starting argmin here, and the two-family fallback add below) prefers candidates
-    whose walk-forward n reaches ``MIN_SETTLED_N`` (the SAME thin-evidence threshold
-    ``raw_second_moment_weights`` uses to EB-shrink a model's precision) — without it a
-    model with a lucky ~10-observation sample (observed on icon_seamless for several
-    cities: n=10-11 vs 80-200+ for the rest of the pool) can become the city's ENTIRE
-    served basket on small-sample noise. The GUARDED ADD loop is open to EVERY
-    candidate: its paired 2*SE test is evidence-scaled (SE grows as ``1/sqrt(n)``), so
-    a thin candidate is admitted the moment its measured improvement clears the test —
-    never held back until some fixed n accrues. (The nests accrue previous_runs history
-    from 2026-06-17/25; restricting ADDs to floor-cleared candidates silently locked
-    every nest out of every basket behind an n>=30 wait.) Fail-soft both places: a
-    uniformly thin pool falls back to the full candidate list."""
+    MIN-N CANDIDACY FLOOR: a candidate's own walk-forward n must reach ``MIN_SETTLED_N``
+    (the SAME thin-evidence threshold ``raw_second_moment_weights`` uses to EB-shrink a
+    model's precision) before it may be picked as the STARTING single model. The 2*SE
+    significance test already self-penalizes a thin ADD candidate (SE grows as
+    ``1/sqrt(n)``), but the bare argmin used for the starting pick has no such guard —
+    without this floor a model with a lucky ~10-observation sample (observed on
+    icon_seamless for several cities: n=10-11 vs 80-200+ for the rest of the pool) can
+    become the city's ENTIRE served basket on small-sample noise. Fail-soft: if NO
+    candidate clears the floor (a uniformly thin candidate pool), fall back to the full
+    candidate list rather than returning None."""
     ordered_candidates = sorted(candidates)
-    floor_cleared = [
+    eligible = [
         m for m in ordered_candidates if raw_m2_and_n.get(m, (None, 0))[1] >= MIN_SETTLED_N
     ] or ordered_candidates
     singles: dict[str, float] = {}
-    for m in ordered_candidates:
+    for m in eligible:
         errs = _basket_errors((m,), raw_m2_and_n, obs_by_key, settle_by_key)
         if errs:
             singles[m] = sum(errs.values()) / len(errs)
     if not singles:
         return None
-    startable = [m for m in floor_cleared if m in singles] or sorted(singles)
-    best = min(startable, key=lambda m: (singles[m], m))
+    best = min(eligible, key=lambda m: singles.get(m, math.inf))
     basket: list[str] = [best]
     while len(basket) < cap:
         best_pick = None
         best_delta = 0.0
         basket_families = {provider_family_for_source(model) for model in basket}
-        for m in ordered_candidates:
+        for m in eligible:
             if m in basket or provider_family_for_source(m) in basket_families:
                 continue
             trial = tuple(basket) + (m,)
@@ -327,13 +323,7 @@ def greedy_basket(
         basket_families = {provider_family_for_source(model) for model in basket}
         remaining = [
             model
-            for model in startable
-            if model not in basket
-            and model in singles
-            and provider_family_for_source(model) not in basket_families
-        ] or [
-            model
-            for model in ordered_candidates
+            for model in eligible
             if model not in basket
             and model in singles
             and provider_family_for_source(model) not in basket_families
