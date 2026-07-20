@@ -869,6 +869,7 @@ def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeyp
         {
             "families": [("Paris", "2026-06-20", "low")],
             "condition_ids": ("cond-1",),
+            "selected_token_ids": (),
             "reason": "decision_triggered_targeted_refresh",
             "refresh_budget_seconds": 8.0,
             "snapshot_reserve_seconds": 2.0,
