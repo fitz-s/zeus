@@ -6323,7 +6323,13 @@ def _exit_monitor_cycle(
 
             should_preempt_for_urgent_day0 = _newer_day0_wake_pending
         else:
-            should_preempt_for_urgent_day0 = _day0_urgent_wake_pending.is_set
+            # A Day0 producer wake is not itself held-position work. Entry-only
+            # facts intentionally bypass the targeted monitor, so letting their
+            # raw wake flag preempt this full-book cycle can starve every held
+            # position indefinitely under a steady observation stream. Only a
+            # wake that actually owns a held-family monitor attempt outranks the
+            # periodic monitor after handoff.
+            should_preempt_for_urgent_day0 = _day0_exit_monitor_priority_pending
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             mark_held_position_monitor_complete=_held_position_monitor_active.clear,

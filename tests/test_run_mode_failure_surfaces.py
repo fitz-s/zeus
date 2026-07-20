@@ -6063,6 +6063,7 @@ def test_day0_entry_wake_does_not_pause_unrelated_periodic_monitor(monkeypatch) 
 
     def _run(**kwargs) -> bool:
         calls.append("run")
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
         kwargs["mark_held_position_monitor_complete"]()
         return True
 
@@ -6077,6 +6078,38 @@ def test_day0_entry_wake_does_not_pause_unrelated_periodic_monitor(monkeypatch) 
         main_module._day0_urgent_wake_pending.clear()
 
     assert calls == ["run"]
+
+
+def test_periodic_exit_monitor_runtime_preemption_requires_owned_held_wake(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        main_module._day0_exit_monitor_attempts["held-wake-after-handoff"] = None
+        assert kwargs["should_preempt_for_urgent_day0"]() is True
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._day0_exit_monitor_attempts.clear()
+    main_module._day0_urgent_wake_pending.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+    try:
+        assert main_module._exit_monitor_cycle() is True
+    finally:
+        main_module._day0_exit_monitor_attempts.clear()
+
+    assert main_module._held_position_monitor_active.is_set() is False
 
 
 def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
