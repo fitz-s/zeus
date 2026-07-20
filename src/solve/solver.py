@@ -73,7 +73,6 @@ from src.contracts.execution_intent import (
     quantize_submit_shares_for_venue_at_most,
     venue_submit_amount_precision_error,
 )
-from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.solve.exits import ZeroWealthOutcomeError
 from src.solve.kappa import KappaPolicy
 from src.solve.scenario_service import ScenarioService
@@ -3006,12 +3005,9 @@ def global_buy_fak_prefix_certificate(
         or getattr(candidate, "action", "BUY") != "BUY"
         or terminal is None
         or decision.shares <= 0
+        or not (Decimal("0") < decision.limit_price < Decimal("1"))
     ):
         raise ValueError("buy FAK prefix decision is not certificate-coherent")
-    try:
-        assert_live_order_unit_price(decision.limit_price)
-    except ValueError as exc:
-        raise ValueError("buy FAK prefix decision is outside absolute live price band") from exc
     curve = getattr(candidate, "executable_cost_curve", None)
     if curve is None or getattr(curve, "fee_model", None) is None:
         raise ValueError("buy FAK prefix curve is missing")
