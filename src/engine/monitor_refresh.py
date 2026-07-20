@@ -1328,6 +1328,8 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
             expected_models=expected_models,
             require_expected=bool(expected_models),
             max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            remaining_window_start=decision_time,
+            require_complete_remaining_window=True,
         )
     except sqlite3.Error:
         return None

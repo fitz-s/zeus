@@ -97,6 +97,7 @@ from src.solve.solver import (
     global_candidate_from_native,
     global_sell_fill_prefix_objective,
     executable_curve_identity,
+    family_payoff_q_samples,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
     _score_global_single_order,
@@ -3082,6 +3083,285 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         != witness.authority_certificate_hash
     )
     assert refreshed_witness.witness_identity != witness.witness_identity
+
+
+def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
+    monkeypatch,
+):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.replacement_forecast_hook_factory as hook_factory
+    import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+    from src.data.observation_client import _DAY0_COVERAGE_WINDOW_GRACE_HOURS
+
+    decision_at = _dt.datetime(2026, 7, 19, 23, 30, tzinfo=_dt.timezone.utc)
+    target_date = "2026-07-20"
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT, target_date TEXT, temperature_metric TEXT,
+            condition_id TEXT, token_id TEXT, market_slug TEXT,
+            range_label TEXT, range_low REAL, range_high REAL
+        )
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "London", target_date, "low", "c13", "yes13",
+                "london-13-or-below", "13C or below", None, 13.0,
+            ),
+            (
+                "London", target_date, "low", "c14", "yes14",
+                "london-14", "14C", 14.0, 14.0,
+            ),
+            (
+                "London", target_date, "low", "c15", "yes15",
+                "london-15-or-above", "15C or above", 15.0, None,
+            ),
+        ),
+    )
+    observations = sqlite3.connect(":memory:")
+    observations.execute(
+        "CREATE TABLE observation_instants ("
+        "city TEXT, target_date TEXT, marker INTEGER)"
+    )
+    payload = json.loads(
+        _global_scope_event(
+            city="London",
+            source_run_id="run-london",
+            city_timezone="Europe/London",
+        ).payload_json
+    )
+    payload.update(
+        {
+            "target_date": target_date,
+            "metric": "low",
+            "snapshot_id": "rmf-London|2026-07-20|low|2026-07-19",
+            "city_timezone": "Europe/London",
+            "station_id": "EGLC",
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "C",
+            "observation_time": decision_at.isoformat(),
+            "observation_available_at": decision_at.isoformat(),
+            "raw_value": 14.0,
+            "rounded_value": 14,
+            "low_so_far": 14.0,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+    )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="London|2026-07-20|low|EGLC",
+        source="held-unobserved-prefix-test",
+        observed_at=decision_at.isoformat(),
+        available_at=decision_at.isoformat(),
+        received_at=decision_at.isoformat(),
+        payload=payload,
+        causal_snapshot_id=str(payload["snapshot_id"]),
+    )
+    topology = (
+        ("p13", None, 13.0),
+        ("p14", 14.0, 14.0),
+        ("p15", 15.0, None),
+    )
+
+    def bundle(identity: str, probabilities=(0.2, 0.3, 0.5)):
+        return SimpleNamespace(
+            posterior_id=1,
+            posterior_identity_hash=identity,
+            dependency_hash=f"dependency-{identity}",
+            posterior_config_hash="config-held-prefix",
+            q={
+                key: probability
+                for (key, _low, _high), probability in zip(
+                    topology, probabilities, strict=True
+                )
+            },
+            provenance_json={
+                "q_bootstrap_samples_basis": "global_simplex_v1",
+                "q_bootstrap_samples_by_bin": {
+                    key: [probability] * 400
+                    for (key, _low, _high), probability in zip(
+                        topology, probabilities, strict=True
+                    )
+                },
+                "bin_topology": [
+                    {"bin_id": key, "lower_c": low, "upper_c": high}
+                    for key, low, high in topology
+                ],
+            },
+            source_cycle_time="2026-07-19T12:00:00+00:00",
+            source_available_at="2026-07-19T18:00:00+00:00",
+        )
+
+    bundle_result = {
+        "value": SimpleNamespace(
+            ok=True,
+            bundle=bundle("held-prefix-q"),
+            reason_code="READY",
+        )
+    }
+    reads = []
+
+    def read_bundle(*_args, **kwargs):
+        reads.append(kwargs)
+        return bundle_result["value"]
+
+    monkeypatch.setattr(
+        hook_factory, "_latest_replacement_readiness", lambda *_a, **_k: object()
+    )
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", read_bundle)
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_final_daily_observation_extreme",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        era, "_forecast_snapshot_row_for_event", lambda *_a, **_k: None
+    )
+
+    held = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        allow_unobserved_day0_replacement=True,
+    )
+    witness = held.probability_witness
+    held_bin_id = next(
+        binding.bin_id
+        for binding in witness.bindings
+        if binding.condition_id == "c14"
+    )
+    yes = family_payoff_q_samples(witness, bin_id=held_bin_id, side="YES")
+    no = family_payoff_q_samples(witness, bin_id=held_bin_id, side="NO")
+    assert yes is not None and no is not None
+    assert yes.tolist() == pytest.approx([0.3] * 400)
+    assert no.tolist() == pytest.approx([0.7] * 400)
+
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING"
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_unobserved_day0_replacement=False,
+        )
+    assert len(reads) == 1
+
+    current, _payload = era._current_global_actuation_prepared_family(
+        event,
+        global_actuation=SimpleNamespace(
+            probability_witness=witness,
+            decision=SimpleNamespace(
+                candidate=SimpleNamespace(condition_id="c14", action="SELL")
+            ),
+        ),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=decision_at + _dt.timedelta(milliseconds=1),
+    )
+    assert current.probability_witness is witness
+
+    bundle_result["value"] = SimpleNamespace(
+        ok=True,
+        bundle=bundle("held-prefix-q-drift", (0.1, 0.4, 0.5)),
+        reason_code="READY",
+    )
+    with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+        era._current_global_actuation_prepared_family(
+            event,
+            global_actuation=SimpleNamespace(
+                probability_witness=witness,
+                decision=SimpleNamespace(
+                    candidate=SimpleNamespace(condition_id="c14", action="SELL")
+                ),
+            ),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at + _dt.timedelta(milliseconds=2),
+        )
+
+    bundle_result["value"] = SimpleNamespace(
+        ok=True,
+        bundle=bundle("held-prefix-q"),
+        reason_code="READY",
+    )
+    observations.execute(
+        "INSERT INTO observation_instants VALUES (?, ?, ?)",
+        ("London", target_date, 1),
+    )
+    reads_before = len(reads)
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING"
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_unobserved_day0_replacement=True,
+        )
+    assert len(reads) == reads_before
+    observations.execute("DELETE FROM observation_instants")
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING"
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=(
+                decision_at
+                + _dt.timedelta(
+                    hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS + 1
+                )
+            ),
+            max_age=_dt.timedelta(seconds=30),
+            allow_unobserved_day0_replacement=True,
+        )
+    assert len(reads) == reads_before
+    bundle_result["value"] = SimpleNamespace(
+        ok=False,
+        bundle=None,
+        reason_code="STALE_FOR_LIVE",
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:STALE_FOR_LIVE",
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            allow_unobserved_day0_replacement=True,
+        )
+    forecast.close()
+    observations.close()
 
 
 def test_current_day0_global_probability_uses_current_remaining_day_not_full_day_bundle(

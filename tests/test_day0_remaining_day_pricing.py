@@ -343,6 +343,39 @@ class TestPersistence:
         assert [v.model for v in out] == ["icon_d2", "ecmwf_ifs"]
         assert [v.temps_c[0] for v in out] == [20.0, 18.0]
 
+    def test_live_read_rejects_fresh_but_truncated_remaining_horizon(self):
+        conn = _conn()
+        truncated = _vector(temps=[20.0] * 20)
+        truncated = Day0HourlyVector(
+            model=truncated.model,
+            city=truncated.city,
+            target_date=truncated.target_date,
+            timezone_name=truncated.timezone_name,
+            captured_at=truncated.captured_at,
+            times=truncated.times[:20],
+            temps_c=truncated.temps_c[:20],
+        )
+        persist_day0_hourly_vectors(
+            [truncated],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:test",
+            now=PRUNE_NOW,
+        )
+
+        out = read_freshest_day0_hourly_vectors(
+            city="Paris",
+            target_date="2026-06-10",
+            now=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+            conn=conn,
+            expected_models=["icon_d2"],
+            require_expected=True,
+            remaining_window_start=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
+            require_complete_remaining_window=True,
+        )
+
+        assert out == []
+
     def test_required_expected_bundle_rejects_excessive_model_capture_skew(self):
         conn = _conn()
         icon = _vector(
@@ -492,6 +525,103 @@ class TestRemainingDaySelection:
 
         assert remaining_day_extremes_c(
             [v], target_date="2026-06-10", now=now, metric="high"
+        ) == []
+
+    @pytest.mark.parametrize("metric", ["high", "low"])
+    def test_missing_future_hour_fails_closed_for_both_metrics(self, metric):
+        times = tuple(
+            f"2026-06-10T{hour:02d}:00"
+            for hour in range(24)
+            if hour != 20
+        )
+        v = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T13:00:00+00:00",
+            times=times,
+            temps_c=tuple(20.0 for _ in times),
+        )
+        now = datetime(2026, 6, 10, 13, 0, tzinfo=UTC)  # 15:00 local
+
+        assert remaining_day_extremes_c(
+            [v], target_date="2026-06-10", now=now, metric=metric
+        ) == []
+
+    def test_missing_hour_before_causal_boundary_does_not_block(self):
+        times = tuple(
+            f"2026-06-10T{hour:02d}:00"
+            for hour in range(24)
+            if hour != 10
+        )
+        v = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T13:00:00+00:00",
+            times=times,
+            temps_c=tuple(float(hour) for hour in range(24) if hour != 10),
+        )
+        now = datetime(2026, 6, 10, 13, 30, tzinfo=UTC)  # 15:30 local
+
+        assert remaining_day_extremes_c(
+            [v], target_date="2026-06-10", now=now, metric="high"
+        ) == [23.0]
+
+    def test_spring_forward_uses_the_real_23_hour_local_day(self):
+        times = tuple(
+            ["2026-03-29T00:00"]
+            + [f"2026-03-29T{hour:02d}:00" for hour in range(2, 24)]
+        )
+        v = Day0HourlyVector(
+            model="ukmo_global_deterministic_10km",
+            city="London",
+            target_date="2026-03-29",
+            timezone_name="Europe/London",
+            captured_at="2026-03-28T23:30:00+00:00",
+            times=times,
+            temps_c=tuple(float(index) for index in range(len(times))),
+        )
+
+        assert remaining_day_extremes_c(
+            [v],
+            target_date="2026-03-29",
+            now=datetime(2026, 3, 29, 0, 0, tzinfo=UTC),
+            metric="high",
+        ) == [22.0]
+
+    def test_fall_back_requires_both_repeated_local_hours(self):
+        complete_times = tuple(
+            ["2026-10-25T00:00", "2026-10-25T01:00", "2026-10-25T01:00"]
+            + [f"2026-10-25T{hour:02d}:00" for hour in range(2, 24)]
+        )
+        complete = Day0HourlyVector(
+            model="ukmo_global_deterministic_10km",
+            city="London",
+            target_date="2026-10-25",
+            timezone_name="Europe/London",
+            captured_at="2026-10-24T22:30:00+00:00",
+            times=complete_times,
+            temps_c=tuple(float(index) for index in range(len(complete_times))),
+        )
+        incomplete = Day0HourlyVector(
+            model=complete.model,
+            city=complete.city,
+            target_date=complete.target_date,
+            timezone_name=complete.timezone_name,
+            captured_at=complete.captured_at,
+            times=tuple(item for index, item in enumerate(complete_times) if index != 2),
+            temps_c=tuple(float(index) for index in range(len(complete_times) - 1)),
+        )
+        now = datetime(2026, 10, 24, 23, 0, tzinfo=UTC)  # local midnight
+
+        assert remaining_day_extremes_c(
+            [complete], target_date="2026-10-25", now=now, metric="high"
+        ) == [24.0]
+        assert remaining_day_extremes_c(
+            [incomplete], target_date="2026-10-25", now=now, metric="high"
         ) == []
 
     def test_low_metric_takes_min(self):
@@ -692,6 +822,10 @@ class TestRemainingDayMembers:
         assert captured["expected_models"] == ["icon_d2", "ecmwf_ifs"]
         assert captured["require_expected"] is True
         assert captured["max_bundle_skew_minutes"] == hv.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES
+        assert captured["remaining_window_start"] == datetime(
+            2026, 6, 10, 15, 0, tzinfo=UTC
+        )
+        assert captured["require_complete_remaining_window"] is True
         assert payload["_edli_day0_remaining_unavailable_reason"] == "incomplete_hourly_model_bundle"
 
     def test_redecision_members_missing_city_config_blocks_before_vector_read(self, monkeypatch):
@@ -740,6 +874,10 @@ class TestRemainingDayMembers:
         assert captured["expected_models"] == ["icon_d2", "ecmwf_ifs"]
         assert captured["require_expected"] is True
         assert captured["max_bundle_skew_minutes"] == hv.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES
+        assert captured["remaining_window_start"] == datetime(
+            2026, 6, 10, 9, 0, tzinfo=UTC
+        )
+        assert captured["require_complete_remaining_window"] is True
 
     def test_live_remaining_day_unavailable_blocks_before_legacy_fallback(self, monkeypatch):
         """When live Day0 remaining-day mode is enabled, missing vectors are an

@@ -34477,21 +34477,6 @@ def _day0_remaining_day_members(
         if city_obj is None:
             payload["_edli_day0_remaining_unavailable_reason"] = "city_config_missing_for_hourly_bundle"
             return None
-        expected_models = day0_hourly_models_for_city(city_obj)
-        vectors = read_freshest_day0_hourly_vectors(
-            city=str(family.city),
-            target_date=str(family.target_date),
-            now=decision_time,
-            expected_models=expected_models,
-            require_expected=bool(expected_models),
-            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-            conn=forecast_conn,
-        )
-        if not vectors:
-            if expected_models:
-                payload["_edli_day0_remaining_expected_models"] = list(expected_models)
-                payload["_edli_day0_remaining_unavailable_reason"] = "incomplete_hourly_model_bundle"
-            return None
         window_start = decision_time
         raw_observation_time = payload.get("observation_time")
         if raw_observation_time:
@@ -34518,6 +34503,23 @@ def _day0_remaining_day_members(
         payload["_edli_day0_remaining_window_start_utc"] = (
             window_start.astimezone(timezone.utc).isoformat()
         )
+        expected_models = day0_hourly_models_for_city(city_obj)
+        vectors = read_freshest_day0_hourly_vectors(
+            city=str(family.city),
+            target_date=str(family.target_date),
+            now=decision_time,
+            expected_models=expected_models,
+            require_expected=bool(expected_models),
+            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            remaining_window_start=window_start,
+            require_complete_remaining_window=True,
+            conn=forecast_conn,
+        )
+        if not vectors:
+            if expected_models:
+                payload["_edli_day0_remaining_expected_models"] = list(expected_models)
+                payload["_edli_day0_remaining_unavailable_reason"] = "incomplete_hourly_model_bundle"
+            return None
         extremes_c = remaining_day_extremes_c(
             vectors,
             target_date=str(family.target_date),

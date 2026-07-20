@@ -38,12 +38,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
+from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo
 
@@ -432,6 +434,8 @@ def read_freshest_day0_hourly_vectors(
     expected_models: Optional[Iterable[str]] = None,
     require_expected: bool = False,
     max_bundle_skew_minutes: Optional[float] = None,
+    remaining_window_start: datetime | None = None,
+    require_complete_remaining_window: bool = False,
 ) -> list[Day0HourlyVector]:
     """Freshest persisted vector per model for (city, target_date).
 
@@ -444,7 +448,10 @@ def read_freshest_day0_hourly_vectors(
     missing expected model returns [] so a partial single-model regional vector
     cannot sponsor a live decision. ``max_bundle_skew_minutes`` additionally
     prevents mixing a fresh model row with a materially older row from another
-    model as one live authority bundle.
+    model as one live authority bundle. Live probability consumers set
+    ``require_complete_remaining_window`` and provide their causal boundary;
+    every model must then contain each hourly grid point from that boundary to
+    local-day end. A partial future path is not probability authority.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     expected: list[str] = []
@@ -519,12 +526,122 @@ def read_freshest_day0_hourly_vectors(
                 ).total_seconds() / 60.0
                 if skew_minutes > float(max_bundle_skew_minutes):
                     return []
-        if expected:
-            return [freshest[model] for model in expected if model in freshest]
-        return list(freshest.values())
+        selected = (
+            [freshest[model] for model in expected if model in freshest]
+            if expected
+            else list(freshest.values())
+        )
+        if require_complete_remaining_window:
+            if remaining_window_start is None or not day0_hourly_vectors_cover_remaining_window(
+                selected,
+                target_date=target_date,
+                window_start=remaining_window_start,
+            ):
+                return []
+        return selected
     finally:
         if own_conn:
             conn.close()
+
+
+def _target_day_hour_grid_utc(*, target: date, tz: ZoneInfo) -> tuple[datetime, ...]:
+    """UTC instants for every local hourly grid point, including DST folds."""
+
+    start = datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
+    end = datetime.combine(
+        target + timedelta(days=1), datetime_time.min, tzinfo=tz
+    ).astimezone(UTC)
+    out: list[datetime] = []
+    cursor = start
+    while cursor < end:
+        out.append(cursor)
+        cursor += timedelta(hours=1)
+    return tuple(out)
+
+
+def _vector_target_hour_counts(
+    vector: Day0HourlyVector,
+    *,
+    target: date,
+    tz: ZoneInfo,
+) -> Counter[str] | None:
+    """Normalize provider timestamps to a local wall-hour multiset."""
+
+    counts: Counter[str] = Counter()
+    for raw_time, temp in zip(vector.times, vector.temps_c):
+        try:
+            local = datetime.fromisoformat(str(raw_time))
+            if local.tzinfo is None:
+                local = local.replace(tzinfo=tz)
+            else:
+                local = local.astimezone(tz)
+            value = float(temp)
+        except (TypeError, ValueError):
+            return None
+        if (
+            not math.isfinite(value)
+            or local.minute != 0
+            or local.second != 0
+            or local.microsecond != 0
+        ):
+            return None
+        if local.date() == target:
+            counts[local.strftime("%Y-%m-%dT%H:%M")] += 1
+    return counts
+
+
+def day0_hourly_vectors_cover_remaining_window(
+    vectors: list[Day0HourlyVector],
+    *,
+    target_date: str,
+    window_start: datetime,
+) -> bool:
+    """Prove every model covers the causal boundary through local-day end.
+
+    Open-Meteo serves a local hourly grid. Expected instants are generated in
+    UTC and compared as a local-label multiset so 23/25-hour DST days remain
+    exact even when provider timestamps omit offsets. When the causal boundary
+    is inside the terminal sub-hour, the final elapsed grid point is required
+    as the interval anchor instead of pretending that an empty future grid is
+    complete.
+    """
+
+    if not vectors or window_start.tzinfo is None:
+        return False
+    try:
+        target = date.fromisoformat(str(target_date)[:10])
+    except ValueError:
+        return False
+    boundary_utc = window_start.astimezone(UTC)
+    for vector in vectors:
+        try:
+            tz = ZoneInfo(vector.timezone_name)
+        except Exception:
+            return False
+        boundary_local = boundary_utc.astimezone(tz)
+        if boundary_local.date() != target:
+            return False
+        grid = _target_day_hour_grid_utc(target=target, tz=tz)
+        counts = _vector_target_hour_counts(vector, target=target, tz=tz)
+        if not grid or counts is None:
+            return False
+        required = Counter(
+            instant.astimezone(tz).strftime("%Y-%m-%dT%H:%M")
+            for instant in grid
+            if instant >= boundary_utc
+        )
+        if required:
+            if any(counts[key] < count for key, count in required.items()):
+                return False
+            continue
+        final_grid = grid[-1]
+        final_key = final_grid.astimezone(tz).strftime("%Y-%m-%dT%H:%M")
+        if (
+            counts[final_key] < 1
+            or not timedelta(0) <= boundary_utc - final_grid <= timedelta(hours=1)
+        ):
+            return False
+    return True
 
 
 def remaining_day_extremes_c(
@@ -554,6 +671,12 @@ def remaining_day_extremes_c(
     if start.astimezone(UTC) > now.astimezone(UTC):
         raise ValueError("window_start cannot be after now")
     target = date.fromisoformat(str(target_date)[:10])
+    if not day0_hourly_vectors_cover_remaining_window(
+        vectors,
+        target_date=target_date,
+        window_start=start,
+    ):
+        return []
     out: list[float] = []
     for vector in vectors:
         try:
