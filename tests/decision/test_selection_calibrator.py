@@ -182,12 +182,9 @@ def test_low_metric_cannot_borrow_high_metric_calibration_authority():
     assert verdict.basis == "METRIC_NOT_ARMED"
 
 
-def test_legacy_sel_v1_sparse_yes_cell_arms_and_serves_pooled_bound():
-    # Legacy sel_v1 artifacts can predate explicit side metadata. A present (even sparse) YES cell
-    # ARMS the side (presence, not a sample floor) and is USED at a conservative cascade-pooled
-    # Beta-95 lower bound, capped at the raw point — never a no-trade block (operator law: a
-    # present-but-thin cell must not be gated on first accruing min_n samples it cannot earn while
-    # blocked; downstream edge_lcb>0 still filters an insufficiently-strong bound).
+def test_legacy_sel_v1_sparse_yes_cell_does_not_arm_buy_yes():
+    # Legacy sel_v1 artifacts can predate explicit side metadata. Sparse YES cells remain corpus
+    # bookkeeping only; side scope is inferred only from deep cells that clear min_n.
     side, lead_b, bin_class = "YES", "L1", "modal"
     raw_yes_prob = 0.65
     bucket_idx, _ = sc.raw_prob_bucket(raw_yes_prob)
@@ -202,10 +199,10 @@ def test_legacy_sel_v1_sparse_yes_cell_arms_and_serves_pooled_bound():
         admission_margin=0.20,
         artifact=art,
     )
-    assert v.trade is True
-    assert v.abstained is False
-    assert 0.0 < v.q_safe <= raw_yes_prob  # conservative lower bound, never exceeds the raw point
-    assert v.basis.startswith("SELECTION_BETA_95")
+    assert v.trade is False
+    assert v.abstained is True
+    assert v.basis == "SIDE_NOT_ARMED"
+    assert v.q_safe == 0.0
 
 
 def test_legacy_sel_v1_deep_yes_cell_infers_buy_yes_authority():
@@ -279,10 +276,8 @@ def test_fail_closed_on_malformed_artifact():
     assert v.trade is False and v.q_safe == 0.0 and v.abstained is True
 
 
-def test_thin_known_cell_serves_pooled_bound_not_blocked():
-    # A KNOWN thin cell (< min_n) is USED, not blocked: it serves the conservative Beta-95 lower
-    # bound of the narrowest sufficient pool of the same artifact, capped at the raw point. Thin is
-    # NOT missing — the operator law forbids a no-trade block on present-but-few-samples data.
+def test_fail_closed_on_under_min_n_cell():
+    # A KNOWN cell that is below min_n is thin -> abstain (never serve a thin-cell rate).
     side, lead_b, bin_class = "NO", "L1", "nonmodal"
     raw = 0.875
     bucket_idx, _ = sc.raw_prob_bucket(raw)
@@ -292,8 +287,7 @@ def test_thin_known_cell_serves_pooled_bound_not_blocked():
         raw_side_prob=raw, side=side, lead_days=1.0, bin_class=bin_class,
         admission_margin=0.175, artifact=art,
     )
-    assert v.trade is True and v.abstained is False
-    assert 0.0 < v.q_safe <= raw and v.basis.startswith("SELECTION_BETA_95")
+    assert v.trade is False and v.q_safe == 0.0 and v.abstained is True
 
 
 def test_fail_closed_on_missing_cell_in_active_artifact():
