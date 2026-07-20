@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-20
 # Authority basis: EDLI v1 implementation prompt §9 Day0 trigger availability and hard-fact gates.
 from __future__ import annotations
 
@@ -694,6 +694,93 @@ def test_scan_observation_instants_rows_accepts_hko_runtime_monitoring_day0_even
     assert observation_instant_row_to_day0_observation(instant)["rounding_rule"] == (
         "oracle_truncate"
     )
+
+
+def test_scan_hko_snapshot_correction_emits_once_and_replaces_provisional_high():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = Day0ExtremeUpdatedTrigger(EventWriter(conn))
+
+    def insert_hko(*, local_hour: int, high: float, imported_at: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, local_hour, local_timestamp,
+                utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+                is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+                temp_unit, station_id, observation_count, imported_at, authority,
+                data_version, provenance_json, training_allowed, causality_status, source_role
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Hong Kong",
+                "2026-07-20",
+                "hko_hourly_accumulator",
+                "Asia/Hong_Kong",
+                float(local_hour),
+                f"2026-07-20T{local_hour:02d}:20:00+08:00",
+                f"2026-07-19T{16 + local_hour:02d}:20:00+00:00",
+                480,
+                0,
+                0,
+                0,
+                "hourly_accumulator",
+                29.0,
+                high,
+                25.7,
+                "C",
+                "HKO",
+                1,
+                imported_at,
+                "ICAO_STATION_NATIVE",
+                "v1.hko-native",
+                '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}',
+                0,
+                "OK",
+                "runtime_monitoring",
+            ),
+        )
+
+    insert_hko(
+        local_hour=0,
+        high=30.0,
+        imported_at="2026-07-19T16:20:10+00:00",
+    )
+    first = trigger.scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(30),
+        decision_time=datetime(2026, 7, 19, 16, 30, tzinfo=timezone.utc),
+        received_at="2026-07-19T16:30:00+00:00",
+    )
+    assert len(first) == 2
+
+    insert_hko(
+        local_hour=1,
+        high=29.7,
+        imported_at="2026-07-19T17:20:10+00:00",
+    )
+    corrected = trigger.scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(29),
+        decision_time=datetime(2026, 7, 19, 17, 30, tzinfo=timezone.utc),
+        received_at="2026-07-19T17:30:00+00:00",
+    )
+    assert len(corrected) == 1
+    corrected_payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM opportunity_events ORDER BY created_at DESC, event_id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
+    assert corrected_payload["metric"] == "high"
+    assert corrected_payload["high_so_far"] == pytest.approx(29.7)
+
+    unchanged = trigger.scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(29),
+        decision_time=datetime(2026, 7, 19, 17, 31, tzinfo=timezone.utc),
+        received_at="2026-07-19T17:31:00+00:00",
+    )
+    assert unchanged == []
 
 
 def test_observation_context_live_hook_uses_hko_station_and_rounding_semantics():

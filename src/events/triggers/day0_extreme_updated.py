@@ -281,23 +281,15 @@ class Day0ExtremeUpdatedTrigger:
         rows = _dict_rows(
             observation_conn,
             f"""
-            WITH eligible AS (
+            WITH qualified AS (
                 SELECT
-                    city,
-                    target_date,
-                    source,
-                    timezone_name,
-                    temp_unit,
-                    station_id,
-                    MAX(utc_timestamp) AS observation_time,
-                    MAX(imported_at) AS observation_available_at,
-                    MAX(running_max) AS high_so_far,
-                    MIN(running_min) AS low_so_far,
-                    COUNT(*) AS observation_count,
-                    MIN(authority) AS authority,
-                    MIN(training_allowed) AS training_allowed,
-                    MIN(causality_status) AS causality_status,
-                    MIN(source_role) AS source_role
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY city, target_date, source, timezone_name,
+                                     temp_unit, station_id
+                        ORDER BY datetime(utc_timestamp) DESC,
+                                 datetime(imported_at) DESC
+                    ) AS source_recency_rank
                 FROM {table}
                 WHERE target_date IS NOT NULL
                   {city_clause}
@@ -321,6 +313,32 @@ class Day0ExtremeUpdatedTrigger:
                   AND COALESCE(provenance_json, '') NOT IN ('', '{{}}')
                   AND COALESCE(station_id, '') != ''
                   AND COALESCE(source, '') != ''
+            ), eligible AS (
+                SELECT
+                    city,
+                    target_date,
+                    source,
+                    timezone_name,
+                    temp_unit,
+                    station_id,
+                    MAX(utc_timestamp) AS observation_time,
+                    MAX(imported_at) AS observation_available_at,
+                    CASE
+                        WHEN LOWER(source) = 'hko_hourly_accumulator'
+                        THEN MAX(CASE WHEN source_recency_rank = 1 THEN running_max END)
+                        ELSE MAX(running_max)
+                    END AS high_so_far,
+                    CASE
+                        WHEN LOWER(source) = 'hko_hourly_accumulator'
+                        THEN MAX(CASE WHEN source_recency_rank = 1 THEN running_min END)
+                        ELSE MIN(running_min)
+                    END AS low_so_far,
+                    COUNT(*) AS observation_count,
+                    MIN(authority) AS authority,
+                    MIN(training_allowed) AS training_allowed,
+                    MIN(causality_status) AS causality_status,
+                    MIN(source_role) AS source_role
+                FROM qualified
                 GROUP BY city, target_date, source, timezone_name, temp_unit, station_id
             )
             SELECT *
@@ -357,15 +375,29 @@ class Day0ExtremeUpdatedTrigger:
                     str(observation.get("target_date") or ""),
                     str(observation.get("station_id") or ""),
                 )
+                hko_snapshot = (
+                    str(observation.get("settlement_source") or "").strip().lower()
+                    == "hko_hourly_accumulator"
+                )
                 if metric == "high":
                     cur = observation.get("high_so_far")
+                    if cur is None:
+                        continue
+                    cur_value = float(cur)
                     prior = high_water.get(key)
-                    if cur is None or (prior is not None and float(cur) <= prior):
+                    if prior is not None and (
+                        cur_value == prior if hko_snapshot else cur_value <= prior
+                    ):
                         continue
                 else:
                     cur = observation.get("low_so_far")
+                    if cur is None:
+                        continue
+                    cur_value = float(cur)
                     prior = low_water.get(key)
-                    if cur is None or (prior is not None and float(cur) >= prior):
+                    if prior is not None and (
+                        cur_value == prior if hko_snapshot else cur_value >= prior
+                    ):
                         continue
                 semantics = settlement_semantics(observation) if callable(settlement_semantics) else settlement_semantics
                 result = self._write_observation_if_admitted(
@@ -377,9 +409,9 @@ class Day0ExtremeUpdatedTrigger:
                 if result is not None:
                     results.append(result)
                 if metric == "high":
-                    high_water[key] = float(cur)
+                    high_water[key] = cur_value
                 else:
-                    low_water[key] = float(cur)
+                    low_water[key] = cur_value
         return results
 
     def _emitted_extreme_watermarks(
@@ -388,12 +420,10 @@ class Day0ExtremeUpdatedTrigger:
         """Per (city, target_date, station_id) high-/low-water marks over ALREADY-emitted
         DAY0_EXTREME_UPDATED events, scoped to non-past target dates.
 
-        The high-water = MAX(high_so_far) and low-water = MIN(low_so_far) across the
-        family's persisted day0 events. ``scan_observation_instants_rows`` emits a new
-        day0 event only when the candidate extreme strictly passes this mark, suppressing
-        the unchanged-extreme firehose. Fail-soft: any read fault returns empty marks
-        (no suppression) so emission degrades to the prior always-emit behavior rather
-        than going silent.
+        WU/hourly sources retain monotone MAX/MIN watermarks. HKO uses the latest
+        official cumulative snapshot so a provider correction emits once instead
+        of being suppressed forever by an earlier provisional value. Fail-soft:
+        any read fault returns empty marks (no suppression).
         """
         high_water: dict[tuple[str, str, str], float] = {}
         low_water: dict[tuple[str, str, str], float] = {}
@@ -404,26 +434,42 @@ class Day0ExtremeUpdatedTrigger:
                 SELECT json_extract(payload_json, '$.city')        AS c,
                        json_extract(payload_json, '$.target_date') AS td,
                        json_extract(payload_json, '$.station_id')  AS st,
-                       MAX(CAST(json_extract(payload_json, '$.high_so_far') AS REAL)) AS hi,
-                       MIN(CAST(json_extract(payload_json, '$.low_so_far')  AS REAL)) AS lo
+                       json_extract(payload_json, '$.settlement_source') AS source,
+                       CAST(json_extract(payload_json, '$.high_so_far') AS REAL) AS hi,
+                       CAST(json_extract(payload_json, '$.low_so_far')  AS REAL) AS lo
                 FROM opportunity_events INDEXED BY idx_opportunity_events_fsr_target_date
                 WHERE event_type = 'DAY0_EXTREME_UPDATED'
                   AND json_extract(payload_json, '$.target_date') >= ?
-                GROUP BY c, td, st
+                ORDER BY datetime(json_extract(payload_json, '$.observation_time')) DESC,
+                         available_at DESC,
+                         created_at DESC,
+                         event_id DESC
                 """,
                 (target_floor,),
             ).fetchall()
         except Exception:  # noqa: BLE001 — fail-soft: no marks => prior always-emit behavior
             return high_water, low_water
+        hko_latest: set[tuple[str, str, str]] = set()
         for r in rows:
-            c, td, st, hi, lo = r[0], r[1], r[2], r[3], r[4]
+            c, td, st, source, hi, lo = r[0], r[1], r[2], r[3], r[4], r[5]
             if c is None or td is None:
                 continue
             key = (str(c), str(td), str(st or ""))
+            if str(source or "").strip().lower() == "hko_hourly_accumulator":
+                if key in hko_latest:
+                    continue
+                hko_latest.add(key)
+                if hi is not None:
+                    high_water[key] = float(hi)
+                if lo is not None:
+                    low_water[key] = float(lo)
+                continue
+            if key in hko_latest:
+                continue
             if hi is not None:
-                high_water[key] = float(hi)
+                high_water[key] = max(high_water.get(key, float("-inf")), float(hi))
             if lo is not None:
-                low_water[key] = float(lo)
+                low_water[key] = min(low_water.get(key, float("inf")), float(lo))
         return high_water, low_water
 
 

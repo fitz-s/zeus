@@ -26,6 +26,7 @@ from decimal import Decimal, InvalidOperation
 import math
 from typing import Any, Literal, Mapping, Optional
 
+
 AuthorityTier = Literal["GAMMA", "DATA", "CLOB", "CHAIN"]
 OutcomeLabel = Literal["YES", "NO"]
 

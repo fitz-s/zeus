@@ -464,6 +464,93 @@ def _insert_paris_day0_event(
     )
 
 
+def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> None:
+    """HKO cumulative snapshots may correct a provisional value; neither an
+    older event nor an earlier row may keep the retracted value absorbing."""
+    conn = _day0_source_switch_conn()
+    for local_ts, utc_ts, imported_at, high, low in (
+        (
+            "2026-07-20T00:20:00+08:00",
+            "2026-07-19T16:20:00+00:00",
+            "2026-07-19T16:20:10+00:00",
+            30.0,
+            29.5,
+        ),
+        (
+            "2026-07-20T06:20:00+08:00",
+            "2026-07-19T22:20:00+00:00",
+            "2026-07-19T22:20:10+00:00",
+            29.7,
+            25.7,
+        ),
+    ):
+        conn.execute(
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "Hong Kong",
+                "2026-07-20",
+                "hko_hourly_accumulator",
+                "HKO",
+                "C",
+                imported_at,
+                local_ts,
+                utc_ts,
+                high,
+                low,
+                "ICAO_STATION_NATIVE",
+                0,
+                "OK",
+                "runtime_monitoring",
+            ),
+        )
+    payload = {
+        "city": "Hong Kong",
+        "target_date": "2026-07-20",
+        "metric": "high",
+        "settlement_source": "hko_hourly_accumulator",
+        "station_id": "HKO",
+        "observation_time": "2026-07-19T16:20:00+00:00",
+        "observation_available_at": "2026-07-19T16:20:10+00:00",
+        "raw_value": 30.0,
+        "rounded_value": 30,
+        "high_so_far": 30.0,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "settlement_unit": "C",
+    }
+    conn.execute(
+        "INSERT INTO opportunity_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "hko-provisional-30",
+            "DAY0_EXTREME_UPDATED",
+            "2026-07-19T16:20:10+00:00",
+            "2026-07-19T16:20:10+00:00",
+            "2026-07-19T16:20:10+00:00",
+            json.dumps(payload),
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-20",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 19, 22, 30, tzinfo=timezone.utc),
+    )
+
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 29.7
+    assert fact["observation_time"] == "2026-07-19T22:20:00+00:00"
+    assert fact["observation_source"] == "hko_hourly_accumulator"
+    conn.close()
+
+
 def test_day0_running_high_does_not_regress_when_fresher_source_saw_less() -> None:
     """2026-07-14 Paris type specimen: wu_icao_history already saw 34.0C at
     14:00-17:00 UTC; a newly-eligible aviationweather_metar (fast lane) event

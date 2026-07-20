@@ -703,6 +703,11 @@ def _latest_authorized_day0_fact(
     if "observation_instants" in _table_names(conn):
         extreme_col = "running_min" if metric == "low" else "running_max"
         extreme_order = "ASC" if metric == "low" else "DESC"
+        instant_order = (
+            "utc_timestamp DESC"
+            if source_type == "hko"
+            else f"observed_extreme_native {extreme_order}, utc_timestamp DESC"
+        )
         instant_columns = {
             str(column[1])
             for column in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
@@ -811,8 +816,7 @@ def _latest_authorized_day0_fact(
                          FROM authorized
                    ) AS observation_available_at
               FROM authorized
-             ORDER BY observed_extreme_native {extreme_order},
-                      utc_timestamp DESC,
+             ORDER BY {instant_order},
                       source DESC
              LIMIT 1
             """,
@@ -1029,8 +1033,11 @@ def _latest_authorized_day0_fact(
                 settlement_channels = {"wu_icao_history"}
                 physical_channels = {"wu_icao_history", "aviationweather_metar", "wu_api"}
             elif source_type == "hko":
+                # HKO rhrread is an instantaneous diagnostic, not the official
+                # since-midnight 1-minute-mean extreme used by the contract.
+                # It may trigger collection, but it cannot become payoff support.
                 settlement_channels = set()
-                physical_channels = {"hko_rhrread_spot"}
+                physical_channels = set()
             elif source_type == "noaa" and expected_station:
                 ogimet_channel = f"ogimet_metar_{expected_station.lower()}"
                 settlement_channels = {ogimet_channel}
@@ -1140,6 +1147,18 @@ def _latest_authorized_day0_fact(
 
     if not facts:
         return None
+    if source_type == "hko":
+        # HKO publishes cumulative official snapshots. The provider may correct
+        # a provisional snapshot, so cross-time MAX/MIN would make a retracted
+        # value falsely absorbing. Select the latest official HKO fact and never
+        # mix the rhrread spot statistic into settlement support.
+        hko_facts = [
+            fact
+            for fact in facts
+            if str(fact.get("observation_source") or "").strip().lower()
+            == "hko_hourly_accumulator"
+        ]
+        return max(hko_facts, key=fact_time) if hko_facts else None
     # ABSORBING-DIRECTION REDUCTION, not "most recent wins" (2026-07-14 Paris
     # regression): the day-so-far extreme is the max (high) / min (low) across
     # every authorized source seen so far. Picking the temporally freshest

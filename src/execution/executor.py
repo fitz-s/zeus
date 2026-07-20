@@ -3943,7 +3943,6 @@ def _persist_pre_submit_envelope(
     order_type: str,
     post_only: bool,
     captured_at: str,
-    intent_kind: str = "ENTRY",
 ) -> str | None:
     envelope = _build_pre_submit_envelope(
         conn,
@@ -3956,7 +3955,6 @@ def _persist_pre_submit_envelope(
         order_type=order_type,
         post_only=post_only,
         captured_at=captured_at,
-        intent_kind=intent_kind,
     )
     return _persist_prebuilt_submit_envelope(conn, envelope, command_id=command_id)
 
@@ -3973,7 +3971,6 @@ def _build_pre_submit_envelope(
     order_type: str,
     post_only: bool,
     captured_at: str,
-    intent_kind: str = "ENTRY",
 ):
     """Build the U2 venue-submission envelope before SDK contact.
 
@@ -4063,15 +4060,7 @@ def _build_pre_submit_envelope(
         error_message=None,
         captured_at=captured_at,
     )
-    normalized_intent_kind = str(getattr(intent_kind, "value", intent_kind)).strip().upper()
-    if normalized_intent_kind == "CANCEL":
-        pass
-    elif normalized_intent_kind in {"ENTRY", "EXIT", "DERISK"}:
-        envelope.assert_live_submit_bound()
-    else:
-        raise ValueError(
-            f"intent_kind={intent_kind!r} has no submission-envelope price classification"
-        )
+    envelope.assert_live_submit_bound()
     return envelope
 
 

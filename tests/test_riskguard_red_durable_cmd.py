@@ -29,11 +29,11 @@ NOW = datetime(2026, 4, 27, 13, 0, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _conn(snapshot: ExecutableMarketSnapshot | None = None):
+def _conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    insert_snapshot(conn, snapshot or _snapshot())
+    insert_snapshot(conn, _snapshot())
     return conn
 
 
@@ -43,11 +43,7 @@ def _file_conn(path):
     return conn
 
 
-def _snapshot(
-    captured_at: datetime | None = None,
-    *,
-    min_tick_size: Decimal = Decimal("0.01"),
-) -> ExecutableMarketSnapshot:
+def _snapshot(captured_at: datetime | None = None) -> ExecutableMarketSnapshot:
     captured = captured_at or NOW
     return ExecutableMarketSnapshot(
         snapshot_id="snap-red",
@@ -68,7 +64,7 @@ def _snapshot(
         market_end_at=NOW + timedelta(days=1),
         market_close_at=NOW + timedelta(days=1, hours=1),
         sports_start_at=None,
-        min_tick_size=min_tick_size,
+        min_tick_size=Decimal("0.01"),
         min_order_size=Decimal("0.01"),
         fee_details={"bps": 0},
         token_map_raw={"YES": "yes-red", "NO": "no-red"},
@@ -135,23 +131,6 @@ def test_red_emits_cancel_command_within_same_cycle():
         "INTENT_CREATED",
         "CANCEL_REQUESTED",
     ]
-
-
-def test_red_cancel_preserves_tail_order_cancellability():
-    conn = _conn(_snapshot(min_tick_size=Decimal("0.001")))
-    position = _position(last_monitor_best_bid=0.996)
-
-    summary = _execute_force_exit_sweep(
-        PortfolioState(positions=[position]),
-        conn=conn,
-        now=NOW,
-    )
-
-    assert summary["cancel_commands_inserted"] == 1
-    assert summary["cancel_command_errors"] == 0
-    row = _red_command(conn)
-    assert row["intent_kind"] == "CANCEL"
-    assert row["price"] == 0.996
 
 
 def test_red_emit_grammar_bound_to_cancel_or_derisk_only():
