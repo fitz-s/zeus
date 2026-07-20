@@ -12,11 +12,12 @@ allowed_files:
   - docs/operations/current/plans/INDEX.md
   - docs/operations/current/plans/live_unit_price_band_incident/PLAN.md
   - docs/operations/current/plans/live_unit_price_band_incident/scope.yaml
-  - src/contracts/executable_market_snapshot.py
   - src/contracts/venue_submission_envelope.py
+  - src/engine/cycle_runner.py
+  - src/execution/executor.py
   - src/state/venue_command_repo.py
   - src/venue/polymarket_v2_adapter.py
-  - tests/test_executable_market_snapshot.py
+  - tests/test_riskguard_red_durable_cmd.py
   - tests/test_executor.py
   - tests/test_v2_adapter.py
   - tests/test_venue_command_repo.py
@@ -33,7 +34,7 @@ high_risk_changes:
   - operator control change
   - daemon restart
 tests:
-  - tests/test_executable_market_snapshot.py
+  - tests/test_riskguard_red_durable_cmd.py
   - tests/test_executor.py
   - tests/test_v2_adapter.py
   - tests/test_venue_command_repo.py

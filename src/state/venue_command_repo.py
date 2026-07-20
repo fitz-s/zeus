@@ -1023,7 +1023,18 @@ def insert_command(
         raise ValueError(
             f"side={side!r} must be 'BUY' or 'SELL'"
         )
-    _assert_persistable_live_unit_price(price)
+    if intent_kind == _IntentKind.CANCEL.value:
+        pass
+    elif intent_kind in {
+        _IntentKind.ENTRY.value,
+        _IntentKind.EXIT.value,
+        _IntentKind.DERISK.value,
+    }:
+        _assert_persistable_live_unit_price(price)
+    else:  # Future intent kinds must classify their venue side effect explicitly.
+        raise ValueError(
+            f"intent_kind={intent_kind!r} has no live order price-safety classification"
+        )
 
     snapshot_id_value = snapshot_id.strip() if isinstance(snapshot_id, str) else snapshot_id
     q_version_value = q_version.strip() or None if isinstance(q_version, str) else q_version

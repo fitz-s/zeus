@@ -566,7 +566,7 @@ files:
   src/contracts/executable_market_snapshot.py:
     zone: K0_frozen_kernel
     authority_role: executable_market_snapshot_contract
-    why: R3 U1 immutable CLOB market truth contract and fail-closed freshness/tradability gate; submitted command prices outside inclusive [0.05,0.95] reject without suppressing truthful tail-priced market observations.
+    why: R3 U1 immutable CLOB market truth contract and fail-closed freshness/tradability gate for venue command persistence.
     downstream:
     - src/state/snapshot_repo.py
     - src/state/venue_command_repo.py

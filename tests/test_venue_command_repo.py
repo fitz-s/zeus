@@ -101,6 +101,7 @@ class TestAbsoluteLivePriceBand:
             ("ENTRY", "BUY", 0.998),
             ("EXIT", "SELL", 0.0499),
             ("EXIT", "SELL", 0.9501),
+            ("DERISK", "SELL", 0.998),
         ),
     )
     def test_out_of_band_command_is_rejected_before_persistence(

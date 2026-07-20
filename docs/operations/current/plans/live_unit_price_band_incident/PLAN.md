@@ -31,11 +31,12 @@ files_may_change:
   - docs/operations/current/plans/INDEX.md
   - docs/operations/current/plans/live_unit_price_band_incident/PLAN.md
   - docs/operations/current/plans/live_unit_price_band_incident/scope.yaml
-  - src/contracts/executable_market_snapshot.py
   - src/contracts/venue_submission_envelope.py
+  - src/engine/cycle_runner.py
+  - src/execution/executor.py
   - src/state/venue_command_repo.py
   - src/venue/polymarket_v2_adapter.py
-  - tests/test_executable_market_snapshot.py
+  - tests/test_riskguard_red_durable_cmd.py
   - tests/test_executor.py
   - tests/test_v2_adapter.py
   - tests/test_venue_command_repo.py
@@ -46,7 +47,7 @@ files_may_not_change:
 schema_changes: false
 ci_gates_required: [scripts/check_work_packets.py, scripts/check_kernel_manifests.py]
 tests_required:
-  - tests/test_executable_market_snapshot.py
+  - tests/test_riskguard_red_durable_cmd.py
   - tests/test_executor.py
   - tests/test_v2_adapter.py
   - tests/test_venue_command_repo.py
@@ -56,7 +57,8 @@ rollback: "Revert the repair commit and keep entries paused; no schema or DB rol
 acceptance:
   - "0.05 and 0.95 remain valid when all other venue requirements pass."
   - "Anything below 0.05 or above 0.95 rejects for BUY/SELL, ENTRY/EXIT, single/batch."
-  - "Persistence, envelope, and independent SDK-boundary checks all fail closed."
+  - "Order-creating persistence, envelope, and independent SDK-boundary checks all fail closed."
+  - "CANCEL can still remove an existing tail-priced resting order because it creates no trade."
   - "Out-of-band rejection produces no SDK call even if the envelope guard is monkeypatched."
   - "Production boots the exact repair SHA and produces a current SDK-free rejection receipt."
 evidence_required:

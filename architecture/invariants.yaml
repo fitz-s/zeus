@@ -948,8 +948,9 @@ invariants:
       Every live BUY or SELL venue submission, including entry, reduce-only
       exit, single-order, and batch paths, must have a finite unit price inside
       inclusive [0.05, 0.95]. Anything below 0.05 or above 0.95 is rejected at
-      command persistence, the canonical envelope, and an independent final SDK
-      boundary. This band applies symmetrically to BUY and SELL; current snapshot
+      order-creating command persistence, the canonical envelope, and an independent
+      final SDK boundary. CANCEL remains able to remove previously resting tail-priced
+      orders because cancellation creates no trade. This band applies symmetrically to BUY and SELL; current snapshot
       tick alignment/range, minimum size, identity, tradeability, fee/depth, and
       economic authorization remain cumulative requirements and cannot waive it.
     why: >
@@ -966,7 +967,7 @@ invariants:
         - tests/test_v2_adapter.py::TestSubmitBatch::test_sdk_boundary_rejects_batch_even_if_envelope_guard_is_bypassed
         - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_out_of_band_price_before_persistence
         - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand
-        - tests/test_executable_market_snapshot.py
+        - tests/test_riskguard_red_durable_cmd.py::test_red_cancel_preserves_tail_order_cancellability
       negative_constraints: []
     capability_tags: [live_venue_submit, venue_adapter, execution_price]
     relationship_tests:
