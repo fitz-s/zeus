@@ -52,8 +52,22 @@ def _artifact_dir() -> Path:
     return DEFAULT_ARTIFACT_DIR
 
 
-@lru_cache(maxsize=8)
 def _load_active_artifact(artifact_dir_text: str) -> Mapping[str, object] | None:
+    """mtime-keyed wrapper: a weekly refit that rewrites ACTIVE.json is picked up by
+    long-lived daemons WITHOUT a restart; an unchanged pointer stays a pure cache hit.
+    Fail-soft contract of the inner loader is unchanged."""
+    pointer_path = Path(artifact_dir_text) / ACTIVE_POINTER_NAME
+    try:
+        mtime_ns = pointer_path.stat().st_mtime_ns
+    except OSError:
+        return None
+    return _load_active_artifact_at(artifact_dir_text, mtime_ns)
+
+
+@lru_cache(maxsize=8)
+def _load_active_artifact_at(
+    artifact_dir_text: str, pointer_mtime_ns: int
+) -> Mapping[str, object] | None:
     """Read+integrity-check the ACTIVE.json pointer -> the referenced artifact JSON.
 
     Fail-soft: a missing pointer/artifact, a sha256 mismatch, or any parse error
@@ -73,6 +87,10 @@ def _load_active_artifact(artifact_dir_text: str) -> Mapping[str, object] | None
         return json.loads(raw.decode("utf-8"))
     except Exception:
         return None
+
+
+# Test-compat: reset via _load_active_artifact.cache_clear().
+_load_active_artifact.cache_clear = _load_active_artifact_at.cache_clear  # type: ignore[attr-defined]
 
 
 def member_dependence_rho(metric: str | None) -> float:
