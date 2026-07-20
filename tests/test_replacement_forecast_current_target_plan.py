@@ -468,6 +468,9 @@ def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> Non
     """HKO cumulative snapshots may correct a provisional value; neither an
     older event nor an earlier row may keep the retracted value absorbing."""
     conn = _day0_source_switch_conn()
+    conn.execute(
+        "ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT"
+    )
     for local_ts, utc_ts, imported_at, high, low in (
         (
             "2026-07-20T00:20:00+08:00",
@@ -485,7 +488,7 @@ def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> Non
         ),
     ):
         conn.execute(
-            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 "Hong Kong",
                 "2026-07-20",
@@ -501,6 +504,11 @@ def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> Non
                 0,
                 "OK",
                 "runtime_monitoring",
+                json.dumps({
+                    "observation_basis": "hko_since_midnight_extrema_1min_mean",
+                    "official_running_high_c": high,
+                    "official_running_low_c": low,
+                }),
             ),
         )
     payload = {
@@ -548,6 +556,76 @@ def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> Non
     assert fact["observed_extreme_native"] == 29.7
     assert fact["observation_time"] == "2026-07-19T22:20:00+00:00"
     assert fact["observation_source"] == "hko_hourly_accumulator"
+    conn.close()
+
+
+def test_hko_day0_fact_rejects_unwitnessed_row_and_legacy_event() -> None:
+    conn = _day0_source_switch_conn()
+    conn.execute(
+        "ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT"
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Hong Kong",
+            "2026-07-20",
+            "hko_hourly_accumulator",
+            "HKO",
+            "C",
+            "2026-07-19T16:30:35+00:00",
+            "2026-07-20T00:20:00+08:00",
+            "2026-07-19T16:20:00+00:00",
+            30.0,
+            29.5,
+            "ICAO_STATION_NATIVE",
+            0,
+            "OK",
+            "runtime_monitoring",
+            '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}',
+        ),
+    )
+    payload = {
+        "city": "Hong Kong",
+        "target_date": "2026-07-20",
+        "metric": "high",
+        "settlement_source": "hko_hourly_accumulator",
+        "station_id": "HKO",
+        "observation_time": "2026-07-19T16:20:00+00:00",
+        "observation_available_at": "2026-07-19T16:30:35+00:00",
+        "raw_value": 30.0,
+        "rounded_value": 30,
+        "high_so_far": 30.0,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "settlement_unit": "C",
+    }
+    conn.execute(
+        "INSERT INTO opportunity_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "legacy-hko-30",
+            "DAY0_EXTREME_UPDATED",
+            "2026-07-19T16:30:35+00:00",
+            "2026-07-19T16:30:35+00:00",
+            "2026-07-19T16:30:35+00:00",
+            json.dumps(payload),
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-20",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 19, 17, 0, tzinfo=timezone.utc),
+    )
+
+    assert fact is None
     conn.close()
 
 

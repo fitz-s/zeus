@@ -506,7 +506,7 @@ def test_hko_ingest_repeated_provider_snapshot_is_idempotent(hko_ingest_tick_mod
         INSERT INTO observation_instants VALUES (
             1, 'Hong Kong', 'hko_hourly_accumulator',
             '2026-07-13T15:50:00+00:00', 33.8, 29.0, 'OK',
-            '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}'
+            '{"observation_basis":"hko_since_midnight_extrema_1min_mean","official_running_high_c":33.8,"official_running_low_c":29.0}'
         )
         """
     )
@@ -559,7 +559,8 @@ def _hko_projection_transaction_conn() -> sqlite3.Connection:
             ('2026-07-19', '2026-07-19T01:00Z', 31.0, '2026-07-19T01:01:00+00:00');
         INSERT INTO observation_instants VALUES
             (1, 'Hong Kong', '2026-07-19', 'hko_hourly_accumulator',
-             '2026-07-19T00:00:00+00:00', 30.0, 25.0, 'OK', '{}');
+             '2026-07-19T00:00:00+00:00', 30.0, 25.0, 'OK',
+             '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}');
         """
     )
     conn.commit()

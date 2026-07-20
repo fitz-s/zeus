@@ -755,6 +755,26 @@ def _latest_authorized_day0_fact(
             else:
                 unit_identity_clause = "AND UPPER(temp_unit) = ?"
                 query_params += (expected_unit,)
+        hko_semantics_clause = ""
+        if source_type == "hko":
+            if "provenance_json" not in instant_columns:
+                hko_semantics_clause = "AND 0 = 1"
+            else:
+                hko_semantics_clause = """
+                    AND CASE
+                        WHEN NOT json_valid(COALESCE(provenance_json, '')) THEN 0
+                        WHEN json_extract(
+                             provenance_json, '$.observation_basis'
+                        ) <> 'hko_since_midnight_extrema_1min_mean' THEN 0
+                        WHEN COALESCE(json_type(
+                             provenance_json, '$.official_running_high_c'
+                        ), '') NOT IN ('integer', 'real') THEN 0
+                        WHEN COALESCE(json_type(
+                             provenance_json, '$.official_running_low_c'
+                        ), '') NOT IN ('integer', 'real') THEN 0
+                        ELSE 1
+                    END = 1
+                """
         source_identity_clause = {
             "wu_icao": "LOWER(COALESCE(source, '')) = 'wu_icao_history'",
             "hko": "LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'",
@@ -783,6 +803,7 @@ def _latest_authorized_day0_fact(
                    {time_geometry_clause}
                    {station_identity_clause}
                    {unit_identity_clause}
+                   {hko_semantics_clause}
                    AND {source_identity_clause}
                    AND COALESCE(causality_status, 'OK') = 'OK'
                    AND (
@@ -1155,8 +1176,11 @@ def _latest_authorized_day0_fact(
         hko_facts = [
             fact
             for fact in facts
-            if str(fact.get("observation_source") or "").strip().lower()
-            == "hko_hourly_accumulator"
+            if (
+                str(fact.get("source") or "") == "durable_observation_instants"
+                and str(fact.get("observation_source") or "").strip().lower()
+                == "hko_hourly_accumulator"
+            )
         ]
         return max(hko_facts, key=fact_time) if hko_facts else None
     # ABSORBING-DIRECTION REDUCTION, not "most recent wins" (2026-07-14 Paris

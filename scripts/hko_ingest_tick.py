@@ -193,7 +193,19 @@ def _same_extrema_already_materialized(
            AND source = 'hko_hourly_accumulator'
            AND utc_timestamp = ?
            AND COALESCE(causality_status, 'OK') = 'OK'
-           AND json_extract(provenance_json, '$.observation_basis') = ?
+           AND CASE
+                WHEN NOT json_valid(COALESCE(provenance_json, '')) THEN 0
+                WHEN json_extract(
+                     provenance_json, '$.observation_basis'
+                ) <> ? THEN 0
+                WHEN COALESCE(json_type(
+                     provenance_json, '$.official_running_high_c'
+                ), '') NOT IN ('integer', 'real') THEN 0
+                WHEN COALESCE(json_type(
+                     provenance_json, '$.official_running_low_c'
+                ), '') NOT IN ('integer', 'real') THEN 0
+                ELSE 1
+           END = 1
          ORDER BY id DESC
          LIMIT 1
         """,
@@ -361,9 +373,19 @@ def project_accumulator_to_v2(
                AND target_date = ?
                AND source = 'hko_hourly_accumulator'
                AND COALESCE(causality_status, 'OK') = 'OK'
-               AND COALESCE(
-                    json_extract(provenance_json, '$.observation_basis'), ''
-               ) <> ?
+               AND CASE
+                    WHEN NOT json_valid(COALESCE(provenance_json, '')) THEN 1
+                    WHEN COALESCE(
+                         json_extract(provenance_json, '$.observation_basis'), ''
+                    ) <> ? THEN 1
+                    WHEN COALESCE(json_type(
+                         provenance_json, '$.official_running_high_c'
+                    ), '') NOT IN ('integer', 'real') THEN 1
+                    WHEN COALESCE(json_type(
+                         provenance_json, '$.official_running_low_c'
+                    ), '') NOT IN ('integer', 'real') THEN 1
+                    ELSE 0
+               END = 1
             """,
             (HK_CITY_NAME, snapshot.target_date, HKO_EXTREMA_BASIS),
         ).rowcount

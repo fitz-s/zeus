@@ -311,6 +311,20 @@ class Day0ExtremeUpdatedTrigger:
                         )
                   )
                   AND COALESCE(provenance_json, '') NOT IN ('', '{{}}')
+                  AND CASE
+                        WHEN LOWER(source) <> 'hko_hourly_accumulator' THEN 1
+                        WHEN NOT json_valid(COALESCE(provenance_json, '')) THEN 0
+                        WHEN json_extract(
+                             provenance_json, '$.observation_basis'
+                        ) <> 'hko_since_midnight_extrema_1min_mean' THEN 0
+                        WHEN COALESCE(json_type(
+                             provenance_json, '$.official_running_high_c'
+                        ), '') NOT IN ('integer', 'real') THEN 0
+                        WHEN COALESCE(json_type(
+                             provenance_json, '$.official_running_low_c'
+                        ), '') NOT IN ('integer', 'real') THEN 0
+                        ELSE 1
+                  END = 1
                   AND COALESCE(station_id, '') != ''
                   AND COALESCE(source, '') != ''
             ), eligible AS (

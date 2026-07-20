@@ -667,7 +667,7 @@ def test_scan_observation_instants_rows_accepts_hko_runtime_monitoring_day0_even
             "2026-06-25T23:05:00+00:00",
             "ICAO_STATION_NATIVE",
             "v1.wu-native",
-            '{"source_file":"hko_hourly_accumulator","station_id":"HKO","payload_hash":"sha256:test","parser_version":"test"}',
+            '{"source_file":"hko_hourly_accumulator","station_id":"HKO","payload_hash":"sha256:test","parser_version":"test","observation_basis":"hko_since_midnight_extrema_1min_mean","official_running_high_c":27.0,"official_running_low_c":27.0}',
             0,
             "OK",
             "runtime_monitoring",
@@ -694,6 +694,61 @@ def test_scan_observation_instants_rows_accepts_hko_runtime_monitoring_day0_even
     assert observation_instant_row_to_day0_observation(instant)["rounding_rule"] == (
         "oracle_truncate"
     )
+
+
+def test_scan_observation_instants_rows_rejects_unwitnessed_legacy_hko_extrema():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Hong Kong",
+            "2026-07-20",
+            "hko_hourly_accumulator",
+            "Asia/Hong_Kong",
+            0.333,
+            "2026-07-20T00:20:00+08:00",
+            "2026-07-19T16:20:00+00:00",
+            480,
+            0,
+            0,
+            0,
+            "hourly_accumulator",
+            30.0,
+            30.0,
+            29.5,
+            "C",
+            "HKO",
+            1,
+            "2026-07-19T16:30:35+00:00",
+            "ICAO_STATION_NATIVE",
+            "v1.wu-native",
+            '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}',
+            0,
+            "OK",
+            "runtime_monitoring",
+        ),
+    )
+
+    results = Day0ExtremeUpdatedTrigger(
+        EventWriter(conn)
+    ).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(30),
+        decision_time=datetime(2026, 7, 19, 16, 30, tzinfo=timezone.utc),
+        received_at="2026-07-19T16:30:36+00:00",
+    )
+
+    assert results == []
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
 
 
 def test_scan_hko_snapshot_correction_emits_once_and_replaces_provisional_high():
@@ -734,7 +789,11 @@ def test_scan_hko_snapshot_correction_emits_once_and_replaces_provisional_high()
                 imported_at,
                 "ICAO_STATION_NATIVE",
                 "v1.hko-native",
-                '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}',
+                json.dumps({
+                    "observation_basis": "hko_since_midnight_extrema_1min_mean",
+                    "official_running_high_c": high,
+                    "official_running_low_c": 25.7,
+                }),
                 0,
                 "OK",
                 "runtime_monitoring",

@@ -38,7 +38,8 @@ from src.data.day0_observation_reader import (
 
 
 _HKO_OFFICIAL_PROVENANCE = (
-    '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}'
+    '{"observation_basis":"hko_since_midnight_extrema_1min_mean",'
+    '"official_running_high_c":30.0,"official_running_low_c":20.0}'
 )
 
 
@@ -345,6 +346,50 @@ def test_reader_uses_latest_hko_cumulative_snapshot_not_cross_time_max():
     assert out.low_so_far == pytest.approx(29.0)
     assert out.provenance["running_max_semantics"] == "cumulative_snapshot_latest"
     assert out.provenance["aggregation"] == "latest qualifying HKO cumulative snapshot"
+
+
+def test_reader_rejects_legacy_hko_same_basis_without_official_extrema_witness():
+    """The old spot/official merge reused the official basis label.
+
+    Presence of the basis label alone is therefore not proof that running_max
+    and running_min came from HKO's official since-midnight extrema payload.
+    """
+    conn = _make_conn()
+    _insert(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-20",
+        source="hko_hourly_accumulator",
+        timezone_name="Asia/Hong_Kong",
+        local_timestamp="2026-07-20T00:20:00+08:00",
+        utc_timestamp="2026-07-19T16:20:00+00:00",
+        temp_current=30.0,
+        running_max=30.0,
+        running_min=29.5,
+        station_id="HKO",
+        imported_at="2026-07-19T16:30:35+00:00",
+        authority="ICAO_STATION_NATIVE",
+        training_allowed=0,
+        causality_status="OK",
+        source_role="runtime_monitoring",
+        provenance_json=(
+            '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}'
+        ),
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-20",
+        timezone_name="Asia/Hong_Kong",
+        decision_time_utc=datetime(2026, 7, 19, 16, 30, tzinfo=timezone.utc),
+        source_priority=("hko_hourly_accumulator",),
+    )
+
+    assert out.chosen_source is None
+    assert out.high_so_far is None
+    assert out.low_so_far is None
+    assert out.row_count == 0
 
 
 def test_context_reader_builds_executable_wu_context_without_temp_current():

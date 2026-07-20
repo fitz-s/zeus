@@ -337,10 +337,18 @@ def _source_semantics(source: str) -> tuple[str, tuple[str, ...]]:
     return (
         """
         AND CASE
-                WHEN json_valid(COALESCE(provenance_json, ''))
-                THEN json_extract(provenance_json, '$.observation_basis')
-                ELSE NULL
-            END = ?
+                WHEN NOT json_valid(COALESCE(provenance_json, '')) THEN 0
+                WHEN json_extract(
+                     provenance_json, '$.observation_basis'
+                ) <> ? THEN 0
+                WHEN COALESCE(json_type(
+                     provenance_json, '$.official_running_high_c'
+                ), '') NOT IN ('integer', 'real') THEN 0
+                WHEN COALESCE(json_type(
+                     provenance_json, '$.official_running_low_c'
+                ), '') NOT IN ('integer', 'real') THEN 0
+                ELSE 1
+            END = 1
         """,
         (_HKO_EXTREMA_BASIS,),
     )
