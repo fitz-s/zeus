@@ -597,7 +597,7 @@ files:
   src/contracts/venue_submission_envelope.py:
     zone: K0_frozen_kernel
     authority_role: venue_submission_contract
-    why: Frozen provenance envelope for Polymarket V2 submissions; pins canonical pre-sign/request/response evidence instead of one SDK call shape.
+    why: Frozen provenance envelope for Polymarket V2 submissions; pins canonical pre-sign/request/response evidence and enforces the non-waivable inclusive live unit-price band [0.05,0.95].
     downstream:
     - src/venue/polymarket_v2_adapter.py
     - src/execution/executor.py
@@ -1354,7 +1354,7 @@ files:
   src/venue/polymarket_v2_adapter.py:
     zone: K2_runtime
     authority_role: v2_venue_adapter
-    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope before SDK contact and anchors T1 fake/live adapter parity fakes.
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects prices outside [0.05,0.95] before any SDK submit contact.
     downstream:
     - src/execution/executor.py
     - src/data/polymarket_client.py
@@ -2590,7 +2590,7 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
+    why: Durable venue command/event journal; insert_command rejects any BUY/SELL command outside inclusive [0.05,0.95] before persistence; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
     write_routes:
     - venue_command_write
     downstream:
