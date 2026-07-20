@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-17
+# Last reused/audited: 2026-07-19
 # Authority basis: qkernel forecast authority replacement for the old Milan direction-law
 # antibody. Replays the incident family through _generate_candidate_proofs (the live proof
 # seam), asserts the old rounded-mu direction veto no longer fires, and pins that legacy
@@ -138,8 +138,8 @@ def _run(with_fusion_center: bool = True):
     return {(p.candidate.condition_id, p.direction): p for p in proofs}
 
 
-def test_day0_absorbing_no_at_999_reaches_current_economics():
-    """A 0.999 quote is not a semantic veto; current economics owns selection."""
+def test_day0_absorbing_no_at_999_is_blocked_by_absolute_price_band():
+    """Current economics cannot waive the absolute live-order price band."""
 
     candidate = MarketTopologyCandidate(
         city="Shanghai",
@@ -202,15 +202,17 @@ def test_day0_absorbing_no_at_999_reaches_current_economics():
     assert no_proof.passed_prefilter is True
 
 
-def test_incident_24c_buy_yes_is_not_killed_by_legacy_direction_law():
-    """The old modal-bin direction law must not reject the 24C buy_yes proof."""
+def test_incident_24c_buy_yes_is_blocked_by_absolute_price_band():
+    """The incident 0.016 quote is unrankable even without a direction veto."""
     proofs = _run()
     p = proofs[("cond-24", "buy_yes")]
-    assert p.missing_reason is None
-    assert p.passed_prefilter is True
-    # The #2-ranked incident candidate (23C) is likewise left to qkernel economics.
+    assert p.missing_reason is not None
+    assert p.missing_reason.startswith("LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:")
+    assert p.passed_prefilter is False
+    # The #2-ranked incident candidate (23C) is blocked for the same reason.
     p23 = proofs[("cond-23", "buy_yes")]
-    assert p23.missing_reason is None
+    assert p23.missing_reason is not None
+    assert p23.missing_reason.startswith("LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:")
 
 
 def test_forecast_adjacent_yes_is_not_direction_law_rejected():
@@ -239,7 +241,8 @@ def test_legacy_fallback_q_mean_does_not_create_direction_veto():
     """Rows without fusion provenance do not revive the old rounded-mu veto."""
     proofs = _run(with_fusion_center=False)
     p = proofs[("cond-24", "buy_yes")]
-    assert p.missing_reason is None
+    assert p.missing_reason is not None
+    assert p.missing_reason.startswith("LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:")
 
 
 def test_family_center_provenance_order():
@@ -268,20 +271,18 @@ def test_family_center_provenance_order():
 # Selector hardening: gate-rejected proofs are unrankable, not merely
 # unsubmittable — and the verbatim incident family therefore NO-TRADES.
 # ---------------------------------------------------------------------------
-def test_incident_family_shows_legacy_selector_is_not_forecast_authority():
-    """The old scalar selector can still choose the incident leg, so it is not live authority."""
+def test_incident_family_selector_cannot_rank_forbidden_incident_leg():
+    """The hard price band removes the 0.016 incident leg before selection."""
     from src.engine.event_reactor_adapter import _selected_candidate_proof
 
     proofs = tuple(_run().values())
     selected = _selected_candidate_proof({"family_id": "milan-incident"}, proofs)
     assert selected is not None
-    assert selected.candidate.condition_id == "cond-24"
-    assert selected.direction == "buy_yes"
-    assert selected.selection_authority_applied is None
+    assert selected.candidate.condition_id != "cond-24"
 
 
-def test_legacy_selector_would_starve_sibling_without_qkernel_authority():
-    """A corrupt high-q_lcb legacy proof demonstrates why forecast live requires qkernel."""
+def test_legacy_selector_cannot_rank_family_when_all_quotes_are_below_floor():
+    """Every candidate is unrankable when all executable quotes are below 0.05."""
     import json as _json
     import types as _types
     from datetime import datetime as _dt, timezone as _tz
@@ -346,7 +347,7 @@ def test_legacy_selector_would_starve_sibling_without_qkernel_authority():
             decision_time=_dt(2026, 6, 10, 3, 0, tzinfo=_tz.utc),
         )
     selected = _select({"family_id": "milan-starve"}, proofs)
-    assert selected is not None
-    assert selected.candidate.condition_id == "cond-24"
-    assert selected.direction == "buy_yes"
-    assert selected.selection_authority_applied is None
+    assert selected is None
+    for proof in proofs:
+        assert proof.missing_reason is not None
+        assert proof.missing_reason.startswith("LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:")
