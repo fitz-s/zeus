@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-07-20
-# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causality: previous-runs fixed-lead train ONLY;
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causality: fixed-lead walk-forward history;
 #   run_time != source_available_at), §1 observation model (residual z_s - Y), §5 walk-forward
 #   (no same-day leak); §7 antibodies ("top-K-uses-target-truth (walk-forward only)",
 #   "previous-runs-for-live-decision", "C/F unit mix (settlement-unit residual)").
@@ -10,13 +10,16 @@
 """F1/step-4 — the real walk-forward history provider for the BAYES_PRECISION_FUSION-Bayes fusion.
 
 Implements the ``BayesPrecisionFusionHistoryProvider`` Protocol (src/data/bayes_precision_fusion_capture.py:89-103):
-reads the PERSISTED previous-runs forecasts from raw_model_forecasts JOINed to VERIFIED
+reads persisted fixed-lead forecasts from raw_model_forecasts JOINed to VERIFIED
 settlement_outcomes, strictly target_date < decision_date, on the SINGLE zeus-forecasts.db
 connection (both tables are FORECAST_CLASS on the same DB -> intra-DB JOIN, INV-37 safe).
 
 THE NO-LEAK GUARANTEE (IRON RULE #3, structural — not a comment):
-  - endpoint = 'previous_runs' ONLY: single_runs (live capture, variable-lead) NEVER trains
-    (SPEC §3 antibody "previous-runs-for-live-decision"; run_time != source_available_at).
+  - previous_runs is the default and only history for gridded models.
+  - cwa_township/hko_fnd have no previous-runs product, so positive-lead single_runs may train
+    after per-target-date latest-available-issue selection, provided source_available_at is before
+    the target date. Day0 single_runs never train because this interface lacks the decision
+    time-of-day needed to align historical issues causally.
   - settlement authority = 'VERIFIED' ONLY: UNVERIFIED / DISPUTED excluded (provenance gate).
   - r.target_date < :decision_date (STRICT): same-day and future settlement can never leak.
   - residual = forecast_value_c - settlement_in_C: an F-settlement city's settlement_value
@@ -31,12 +34,41 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date
+from datetime import date, datetime, time, timezone
 from typing import Mapping, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.data.bayes_precision_fusion_capture import ModelHistory
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_history_provider")
+
+_STATION_SINGLE_RUNS_HISTORY_TIMEZONES = {
+    "cwa_township": {"Taipei": "Asia/Taipei"},
+    "hko_fnd": {"Hong Kong": "Asia/Hong_Kong"},
+}
+
+
+def _station_target_start_utc(model: str, city: str, target_date: str) -> datetime | None:
+    timezone_name = _STATION_SINGLE_RUNS_HISTORY_TIMEZONES.get(model, {}).get(city)
+    if timezone_name is None:
+        return None
+    try:
+        local_start = datetime.combine(
+            date.fromisoformat(target_date), time.min, tzinfo=ZoneInfo(timezone_name)
+        )
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return None
+    return local_start.astimezone(timezone.utc)
+
+
+def _parse_available_at_utc(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _settlement_to_celsius(value: float, unit: str | None) -> float:
@@ -68,8 +100,9 @@ def raw_second_moment_by_model(
 
         ``Ê[(x − Y)²] = mean( (forecast − settlement)² )``
 
-    over settlements with ``target_date < decision_date`` (the SAME no-leak SQL:
-    endpoint='previous_runs', authority='VERIFIED', strict target_date <). Returns
+    over settlements with ``target_date < decision_date`` (the same no-leak SQL:
+    previous-runs by default, positive-lead station single-runs exception,
+    authority='VERIFIED', strict target_date <). Returns
     ``{model: (raw_m2_degC, n_train)}`` for every model with ≥1 walk-forward
     residual; a model with no history is simply absent (the caller treats absent as
     equal-weight). FAIL-SOFT: any error → empty mapping (never raises).
@@ -135,12 +168,17 @@ class BayesPrecisionFusionHistoryProvider:
             placeholders = ",".join("?" for _ in models)
             # Single-DB intra-DB JOIN (raw_model_forecasts + settlement_outcomes both on
             # zeus-forecasts.db). The WHERE clause IS the no-leak antibody:
-            #   endpoint='previous_runs'  -> fixed-lead train only (never single_runs)
-            #   authority='VERIFIED'      -> provenance gate (no UNVERIFIED/DISPUTED)
-            #   r.target_date < :decision -> strict no-leak (no same-day / future settlement)
+            #   lead_days = :lead          -> fixed-lead train (both endpoints filtered to ONE lead)
+            #   endpoint IN (prev, single) -> grouping below preserves previous-runs for every
+            #                                 gridded model and permits single-runs only for the named
+            #                                 station products at positive lead.
+            #   authority='VERIFIED'       -> provenance gate (no UNVERIFIED/DISPUTED)
+            #   r.target_date < :decision  -> strict no-leak (no same-day / future settlement)
             sql = f"""
                 SELECT r.model AS model,
                        r.target_date AS target_date,
+                       r.endpoint AS endpoint,
+                       r.source_available_at AS source_available_at,
                        r.forecast_value_c AS forecast_value_c,
                        s.settlement_value AS settlement_value,
                        s.settlement_unit AS settlement_unit
@@ -152,7 +190,7 @@ class BayesPrecisionFusionHistoryProvider:
                 WHERE r.city = ?
                   AND r.metric = ?
                   AND r.lead_days = ?
-                  AND r.endpoint = 'previous_runs'
+                  AND r.endpoint IN ('previous_runs', 'single_runs')
                   AND r.model IN ({placeholders})
                   AND s.authority = 'VERIFIED'
                   AND s.settlement_value IS NOT NULL
@@ -180,22 +218,58 @@ class BayesPrecisionFusionHistoryProvider:
         # target_date. BLOCKER 2: the target_date is carried into ModelHistory.target_dates so
         # the fusion can align the covariance by date (NOT by positional index). The SQL ORDER BY
         # r.model, r.target_date keeps each model's series date-sorted.
+        # Per-model source, never an endpoint mix. Previous-runs wins whenever present. Only the two
+        # named station products may fall back to single-runs, and only at positive lead. "No rows in
+        # this query" is not proof that an arbitrary gridded model lacks a previous-runs product.
+        # Day0 is excluded because latest issue per target date could be later than the historical
+        # decision time; this provider has only a decision date and cannot align time-of-day causally.
+        # Positive-lead station rows also require pre-target source availability.
+        _has_prev = {str(r["model"]) for r in rows if str(r["endpoint"]) == "previous_runs"}
+        _single_fallback = {
+            str(model)
+            for model in models
+            if int(lead_days) > 0
+            and city in _STATION_SINGLE_RUNS_HISTORY_TIMEZONES.get(str(model), {})
+        }
         per_model_fc: dict[str, list[float]] = {}
         per_model_settle_c: dict[str, list[float]] = {}
         per_model_dates: dict[str, list[str]] = {}
+        _station_latest: dict[str, dict[str, tuple[str, float, float]]] = {}
         for row in rows:
             try:
-                model = row["model"]
+                model = str(row["model"])
                 target_date = str(row["target_date"])
+                endpoint = str(row["endpoint"])
                 fc = float(row["forecast_value_c"])
                 settle_c = _settlement_to_celsius(
                     row["settlement_value"], row["settlement_unit"]
                 )
             except Exception:  # a single malformed row must not poison the whole model.
                 continue
-            per_model_fc.setdefault(model, []).append(fc)
-            per_model_settle_c.setdefault(model, []).append(settle_c)
-            per_model_dates.setdefault(model, []).append(target_date)
+            if model in _has_prev:
+                if endpoint != "previous_runs":
+                    continue
+                per_model_fc.setdefault(model, []).append(fc)
+                per_model_settle_c.setdefault(model, []).append(settle_c)
+                per_model_dates.setdefault(model, []).append(target_date)
+            elif model in _single_fallback:
+                if endpoint != "single_runs":
+                    continue
+                available = str(row["source_available_at"] or "")
+                available_at = _parse_available_at_utc(available)
+                target_start = _station_target_start_utc(model, city, target_date)
+                if available_at is None or target_start is None or available_at >= target_start:
+                    continue
+                by_date = _station_latest.setdefault(model, {})
+                prior = by_date.get(target_date)
+                if prior is None or available > prior[0]:
+                    by_date[target_date] = (available, fc, settle_c)
+        for model, by_date in _station_latest.items():
+            for target_date in sorted(by_date):
+                _available, fc, settle_c = by_date[target_date]
+                per_model_fc.setdefault(model, []).append(fc)
+                per_model_settle_c.setdefault(model, []).append(settle_c)
+                per_model_dates.setdefault(model, []).append(target_date)
 
         out: dict[str, ModelHistory] = {}
         for model, fcs in per_model_fc.items():

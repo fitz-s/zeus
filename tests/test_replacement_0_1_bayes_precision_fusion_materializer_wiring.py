@@ -1,7 +1,7 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Reuse: Run with pytest; update if bayes_precision_fusion fusion, materializer wiring, or flag-gate semantics change.
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-07-20
 # Purpose: Protect the replacement_forecast_materializer wiring of the flag-gated BAYES_PRECISION_FUSION-Bayes
 #   multi-model fusion. (a) flag-OFF materialized posterior BYTE-IDENTICAL to today (hash
 #   unchanged); (b) flag-ON: the fused mu*/sigma REPLACE the single-anchor center/spread and the
@@ -857,6 +857,62 @@ def test_source_clock_skips_frozen_scheme_that_omits_live_station_source(monkeyp
         assert provenance["replacement_sigma_basis"] == (
             "decision_time_current_ensemble_within_plus_provider_between"
         )
+    finally:
+        source_clock.load_city_one_schemes.cache_clear()
+
+
+def test_station_entry_source_uses_its_walk_forward_raw_m2(monkeypatch, tmp_path) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as source_clock
+
+    _disable_other_layers(monkeypatch)
+    _enable_flag(monkeypatch)
+    scheme_path = tmp_path / "city_one_scheme_grid_aware.csv"
+    scheme_path.write_text(
+        "city,selection_status,grid_aware_sources,grid_aware_weighted_sources,"
+        "candidate_count,eligible_live_grid_cap10_count,eligible_grid_cap10_count,reason\n"
+        "Paris,GRID_CAP10_LIVE_READY,ecmwf_ifs+ukmo_global_deterministic_10km,"
+        "ecmwf_ifs:0.5+ukmo_global_deterministic_10km:0.5,10,2,2,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(source_clock.ENV_CITY_ONE_SCHEME_PATH, str(scheme_path))
+    source_clock.load_city_one_schemes.cache_clear()
+    models = ["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_eu"]
+    histories = _make_history(models)
+    settles = (20.0, 21.0, 22.0, 23.0, 24.0)
+    histories["hko_fnd"] = ModelHistory(
+        model="hko_fnd",
+        forecast_values=tuple(value + 2.0 for value in settles),
+        settlement_values=settles,
+    )
+
+    def _provider(*, city, metric, lead_days, target_date, models):
+        return {model: histories[model] for model in models if model in histories}
+
+    monkeypatch.setattr(
+        mod._replacement_bayes_precision_fusion_override,
+        "_history_provider",
+        _provider,
+        raising=False,
+    )
+    try:
+        conn = _conn()
+        _seed_current_single_runs(
+            conn,
+            live_values={
+                "ukmo_global_deterministic_10km": 23.0,
+                "icon_eu": 23.2,
+                "hko_fnd": 31.0,
+            },
+        )
+        _seed_current_ens(conn)
+        override = mod._replacement_bayes_precision_fusion_override(
+            _request(), metric="high", anchor_value_corrected_c=27.0, conn=conn
+        )
+        assert override is not None
+        station = override.precision_center_basis["hko_fnd"]
+        assert station["raw_m2"] == pytest.approx(4.0)
+        assert station["n"] == 5.0
+        assert station["weight"] > 0.0
     finally:
         source_clock.load_city_one_schemes.cache_clear()
 
