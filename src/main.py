@@ -90,6 +90,7 @@ _held_position_monitor_claim = threading.Lock()
 _held_position_monitor_handoff_pending = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
 _day0_urgent_wake_pending = threading.Event()
+_day0_held_monitor_preempt_requested = threading.Event()
 _day0_exit_monitor_attempts_lock = threading.Lock()
 _day0_exit_monitor_attempts: dict[str, bool | None] = {}
 _forecast_exit_monitor_attempts_lock = threading.Lock()
@@ -3665,6 +3666,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
 
     _edli_last_reactor_wake_id = None
     _day0_urgent_wake_pending.clear()
+    _day0_held_monitor_preempt_requested.clear()
 
 
 def _day0_wake_target_families(
@@ -6260,8 +6262,19 @@ def _exit_monitor_cycle(
         logger.info("periodic exit_monitor yielded to urgent Day0 held-family monitor")
         return True
     if not _held_position_monitor_claim.acquire(blocking=False):
+        if urgent_day0:
+            # The wake was classified as held-family work, but another monitor
+            # owns the single writer lane. Keep a stable signal after the
+            # attempt flips None -> False so the current periodic holder cannot
+            # miss the urgent handoff race.
+            _day0_held_monitor_preempt_requested.set()
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
+
+    if urgent_day0:
+        # Owning the claim satisfies any earlier request for the current holder
+        # to yield. A newer urgent wake has its own revision/claim attempt.
+        _day0_held_monitor_preempt_requested.clear()
 
     # Claim exit priority before waiting. New reactor ticks defer only through
     # the handoff; monitor network work does not stop unrelated decisions.
@@ -6329,7 +6342,10 @@ def _exit_monitor_cycle(
             # position indefinitely under a steady observation stream. Only a
             # wake that actually owns a held-family monitor attempt outranks the
             # periodic monitor after handoff.
-            should_preempt_for_urgent_day0 = _day0_exit_monitor_priority_pending
+            should_preempt_for_urgent_day0 = lambda: (
+                _day0_exit_monitor_priority_pending()
+                or _day0_held_monitor_preempt_requested.is_set()
+            )
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             mark_held_position_monitor_complete=_held_position_monitor_active.clear,
@@ -6343,6 +6359,8 @@ def _exit_monitor_cycle(
             _held_position_monitor_bootstrap_complete.set()
         return True
     finally:
+        if not urgent_fact:
+            _day0_held_monitor_preempt_requested.clear()
         _held_position_monitor_handoff_pending.clear()
         _held_position_monitor_active.clear()
         _held_position_monitor_claim.release()
