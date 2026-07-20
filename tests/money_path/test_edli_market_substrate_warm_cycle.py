@@ -1942,13 +1942,12 @@ def test_market_discovery_does_not_defer_on_reactor_state_after_p2_lift():
         )
 
 
-def test_held_position_monitor_does_not_pause_live_decision_line():
+def test_held_position_monitor_only_pauses_lock_competing_decision_work():
     """Held-position monitoring is not a global live-money stop-the-world lock.
 
-    The monitor's own job stays non-reentrant, and broad discretionary scans may
-    defer during its bootstrap. Targeted EDLI decision lanes must continue: those
-    lanes are what refresh prices, re-decide resting orders, recover commands,
-    and submit/reject new events while positions are being monitored.
+    The entry reactor must yield after the monitor claims the shared handoff;
+    otherwise a cancellation/requeue storm can reacquire the reactor lock before
+    the full-book monitor. Independent recovery and substrate lanes continue.
     """
 
     was_active = main_module._held_position_monitor_active.is_set()
@@ -1961,7 +1960,6 @@ def test_held_position_monitor_does_not_pause_live_decision_line():
     try:
         main_module._held_position_monitor_active.set()
         live_decision_jobs = {
-            "edli_event_reactor",
             "edli_command_recovery",
             "c3_staleness_cancel",
             "edli_redecision_screen",
@@ -1971,11 +1969,12 @@ def test_held_position_monitor_does_not_pause_live_decision_line():
         for job_name in live_decision_jobs:
             assert main_module._defer_for_held_position_monitor(job_name) is False
 
-        discretionary_jobs = {
+        monitor_competing_jobs = {
+            "edli_event_reactor",
             "market_discovery",
             "EDLI mainstream warm",
         }
-        for job_name in discretionary_jobs:
+        for job_name in monitor_competing_jobs:
             assert main_module._defer_for_held_position_monitor(job_name) is True
     finally:
         main_module._held_position_monitor_active.clear()

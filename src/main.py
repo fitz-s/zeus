@@ -97,6 +97,7 @@ _edli_reactor_wake_thread: threading.Thread | None = None
 _edli_last_reactor_wake_id: str | None = None
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
+        "edli_event_reactor",
         "market_discovery",
         "EDLI mainstream warm",
     }
@@ -226,8 +227,10 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     """Return True when the held-position monitor should pre-empt discretionary jobs.
 
     The monitor itself is non-reentrant, but it must not globally stop the live
-    money path. Targeted EDLI jobs stay on the continuous decision line while
-    broad scans yield to the monitor bootstrap.
+    money path. Jobs that do not compete for the reactor handoff stay on the
+    continuous decision line. A new entry-reactor cycle must yield after the
+    monitor claims priority; the in-flight auction already observes the monitor
+    cancellation probe and releases the shared reactor lock at a safe boundary.
     """
 
     if job_name not in _HELD_POSITION_MONITOR_DEFER_JOBS:
