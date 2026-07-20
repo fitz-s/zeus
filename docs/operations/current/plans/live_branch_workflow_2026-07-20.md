@@ -23,3 +23,23 @@ A branch whose commits are ancestors of live (fully absorbed) is deletable. A br
 ```
 git push origin --delete <absorbed-branch>   # only if merged into live and no open PR
 ```
+
+## Multi-agent live-repair protocol
+
+`main` runs 24/7 as a mesh of scheduled jobs; a mechanism (the improvement loop, a failing gate, a code review, a monitor alert, or an operator ask) wakes work. Many agents may repair concurrently. The **main thread is the integrator and landing authority** — it holds full context and owns alignment, integration, final verification, and the landing decision; agents own bounded slices and prove them in isolation.
+
+1. **Wake → align.** Reconcile the trigger into a precise work-list: per item, the exact `file:line` and the disposition to prove — *fix* / *refute* / *defer-with-rationale*. Alignment precedes fan-out; a vague brief buys well-argued irrelevance.
+
+2. **Fan out — one owner per file/slice.** Dispatch worktree-isolated agents over **disjoint** files, at the lowest model tier that fits the slice (reserve the top tier for outcome-deciding money-path logic). Every agent, without exception:
+   - **verifies the defect is real first** — locate by symbol, not the reported line (review line numbers drift); refute false positives with evidence rather than fabricating a fix;
+   - makes the **minimal** correct change — no architecture rewrite for a case the runtime already covers (Occam; the scheduler's separate pools + separate processes already isolate across jobs);
+   - ships a **behavioral antibody** that fails on the pre-fix tree and passes after;
+   - proves **zero new regressions** by diffing the failing-test-name set pre-vs-post, not by trusting a count.
+
+3. **Adversarially disposition the rest.** Before anything lands, read-only investigators verify every remaining or uncertain finding to a verdict — SATISFIED / MITIGATED / REFUTED / DEFERRED-with-rationale — each backed by `file:line`. Completeness without over-fixing; a deferred item carries the reasoning for *why the obvious fix doesn't hold here*, written down.
+
+4. **Integrate by disjoint cherry-pick.** Cherry-pick each agent's commit onto the **current** live tip in one integration branch (disjoint files → clean). Prove the composite adds zero failures with a **base-vs-integrated failing-set diff**, not by trust. Verify antibodies pass on the integrated branch together.
+
+5. **Land by lane; never clobber live-ops.** Hot-fix (a live money-path defect) → `cherry-pick` onto live + reload. PR (functional/milestone) → gates + review. The live branch moves under you as other agents/operators commit — rebase onto its current tip before landing; a **dirty live checkout is a coordination point, never a force** (preserve unrelated uncommitted work; overlapping governance files merge, they do not overwrite).
+
+**Balance point:** the main thread integrates and verifies; agents prove bounded slices in isolation; land small and often. Two agents never own the same file; parallel editors are worktree-isolated; the low tiers enumerate and build, the top tier only untangles the genuinely complex.
