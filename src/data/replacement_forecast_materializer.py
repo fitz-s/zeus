@@ -2171,7 +2171,34 @@ def _replacement_bayes_precision_fusion_override(
                     _z_by_model[_m_str] = float(_value)
                 except (TypeError, ValueError):
                     continue
-                _raw_m2_and_n[_m_str] = (None, 0)
+                # Station-calibrated source raw_m2 from its OWN walk-forward residual history — the
+                # provider reads single_runs for sources with no previous_runs archive, so the source
+                # enters the precision center at its MEASURED precision (raw mean(r²), degC², the same
+                # convention as the gridded instruments; downstream raw_second_moment_weights EB-shrinks
+                # a thin history toward the equal prior). NEVER a flat equal weight: equal-weight would
+                # dilute the settlement-station official forecast — structurally the most informative
+                # source for its own city — down to a gridded member's level. No history yet -> (None,0)
+                # cold-start (the shrink handles it), so a brand-new source is used immediately, never
+                # gated on accumulating N days.
+                _st_m2: float | None = None
+                _st_n = 0
+                if history_provider is not None:
+                    try:
+                        _sh = history_provider(
+                            city=request.city, metric=metric, lead_days=lead_days,
+                            target_date=target_local_date, models=[_m_str],
+                        ).get(_m_str)
+                        if _sh is not None and _sh.forecast_values:
+                            _errs = [
+                                (f - s)
+                                for f, s in zip(_sh.forecast_values, _sh.settlement_values)
+                            ]
+                            if _errs:
+                                _st_m2 = sum(e * e for e in _errs) / len(_errs)
+                                _st_n = len(_errs)
+                    except Exception:
+                        _st_m2, _st_n = None, 0
+                _raw_m2_and_n[_m_str] = (_st_m2, _st_n)
                 _added.append(_m_str)
             _station_entry_models_added = tuple(sorted(_added))
         except Exception:
