@@ -5056,13 +5056,13 @@ def _event_bound_effective_live_quality_floors(
 
 
 def _global_current_entry_feasibility_rejection_reason(candidate: object) -> str | None:
-    """Reject malformed or absolute-band-ineligible BUYs before selection.
+    """Reject malformed BUYs without imposing a nominal entry-price floor.
 
     The auction owns economic selection: current q bounds, fees, full depth,
     robust utility, Kelly sizing, wealth, and caps determine whether either
     YES or NO is a winner.  This adapter policy merely requires a native,
-    executable BUY quote inside the non-waivable live price band. SELL compares
-    against HOLD and does not consume BUY authority.
+    executable BUY quote; a low or high valid price is not a feasible-set
+    exclusion.  SELL compares against HOLD and does not consume BUY authority.
     """
 
     action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
@@ -5079,9 +5079,7 @@ def _global_current_entry_feasibility_rejection_reason(candidate: object) -> str
         best_ask = Decimal(levels[0].price)
     except (ArithmeticError, AttributeError, TypeError, ValueError):
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
-    try:
-        assert_live_order_unit_price(best_ask)
-    except ValueError:
+    if not best_ask.is_finite() or not Decimal("0") < best_ask < Decimal("1"):
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
     return None
 
@@ -9760,7 +9758,7 @@ def _day0_selected_route_fdr_proof(
         bool(getattr(selected_proof, "passed_prefilter", False))
         and getattr(selected_proof, "missing_reason", None) is None
         and 0.0 <= q_lcb <= 1.0
-        and 0.05 <= price <= 0.95
+        and 0.0 < price < 1.0
         and q_lcb > price
         and trade_score > 0.0
         and false_edge_rate <= float(DEFAULT_FDR_ALPHA)
@@ -22428,20 +22426,14 @@ def _native_side_cost_curve_from_execution_price(
         return None
     execution_price = getattr(proof, "execution_price", None)
     price_value = _optional_float(getattr(execution_price, "value", None))
-    if price_value is None:
-        return None
-    try:
-        assert_live_order_unit_price(price_value)
-    except ValueError:
+    if price_value is None or not (0.0 < price_value < 1.0):
         return None
     if not bool(getattr(proof, "native_quote_available", False)):
         return None
 
     # Land the all-in price on a tick grid fine enough to represent it exactly.
     price = Decimal(str(price_value)).quantize(Decimal("0.0001"))
-    try:
-        assert_live_order_unit_price(price)
-    except ValueError:
+    if not (Decimal("0") < price < Decimal("1")):
         return None
     min_tick = Decimal("0.0001")
 
@@ -24898,15 +24890,6 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = capital_efficiency_reason
-            absolute_price_reason = None
-            if execution_price is not None:
-                try:
-                    assert_live_order_unit_price(execution_price.value)
-                except ValueError as exc:
-                    absolute_price_reason = f"LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:{exc}"
-                    score = 0.0
-                    if missing_reason is None:
-                        missing_reason = absolute_price_reason
             def _lcb_source(value: object) -> str | None:
                 source = getattr(value, "calibration_source", None)
                 return str(source) if source else None
@@ -24967,7 +24950,6 @@ def _generate_candidate_proofs(
             # concern is telemetry-only now and is deliberately NOT a prefilter trigger.)
             if (
                 capital_efficiency_reason is not None
-                or absolute_price_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
             ):

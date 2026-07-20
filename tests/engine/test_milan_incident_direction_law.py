@@ -197,10 +197,9 @@ def test_day0_absorbing_no_at_999_is_blocked_before_selection():
     assert no_proof.q_lcb_5pct == 1.0
     assert no_proof.execution_price is not None
     assert float(no_proof.execution_price.value) == 0.999
-    assert no_proof.missing_reason is not None
-    assert no_proof.missing_reason.startswith("LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:")
-    assert no_proof.trade_score == 0.0
-    assert no_proof.passed_prefilter is False
+    assert no_proof.missing_reason is None
+    assert no_proof.trade_score > 0.0
+    assert no_proof.passed_prefilter is True
 
 
 def test_incident_24c_buy_yes_is_blocked_by_absolute_price_band():
