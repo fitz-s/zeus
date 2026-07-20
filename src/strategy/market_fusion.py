@@ -117,42 +117,21 @@ def compute_alpha(
             "Wrap raw spreads with the city settlement unit first."
         )
 
-    # K1/#5: deprecated alpha override removed — alpha_overrides table had 0 rows
-    # and per-decision adjustments (below) are the correct alpha mechanism.
+    # ALPHA IS DORMANT — serve the calibration-level base weight, nothing added. The returned value is
+    # DISCARDED on every live and replay path: all call sites build MarketAnalysis with
+    # posterior_mode=MODEL_ONLY_POSTERIOR_MODE, and compute_posterior's MODEL_ONLY branch returns the
+    # normalized calibrated belief WITHOUT ever reading alpha, so alpha never blends into a live
+    # decision. The eight per-decision "adjustments" that used to shape it (a += 0.10 / a -= 0.15 /
+    # a -= 0.10 / a -= 0.20 / a += 0.05 / a -= 0.05 / a += 0.10 / a += 0.05) were HARDCODED constants
+    # stapled onto a continuous weight via threshold branches on continuously-varying signals
+    # (ensemble_spread, lead_days, hours_since_open) — the forbidden "fixed constant added to a
+    # continuously-varying value" pattern (a static offset cannot correct a varying quantity). Deleted:
+    # byte-identical live (the value is discarded). If market-blending is ever revived, alpha must be a
+    # DATA-DRIVEN function of measured model-vs-market skill, never these magic offsets. The
+    # authority_verified gate and the ensemble_spread type check above are untouched.
     base = BASE_ALPHA_BY_LEVEL[calibration_level]
-    a = base
-
-    # Ensemble spread adjustments — typed thresholds prevent °C/°F confusion
-    # D4 analysis (2026-03-31): spread IS predictive of per-decision accuracy
-    # (r=+0.214, tight Brier 0.114 vs wide 0.269). Sweep showed bonus=0.10
-    # gives -0.00825 Brier improvement vs -0.00460 at the old bonus=0.05.
-    tight = SPREAD_TIGHT.to(ensemble_spread.unit)
-    wide = SPREAD_WIDE.to(ensemble_spread.unit)
-    if ensemble_spread < tight:
-        a += 0.10  # was 0.05, increased per D4
-    if ensemble_spread > wide:
-        a -= 0.15  # was 0.10, increased per D4
-
-    # Model agreement adjustments
-    if model_agreement == "SOFT_DISAGREE":
-        a -= 0.10
-    if model_agreement == "CONFLICT":
-        a -= 0.20
-
-    # Lead time adjustments
-    if lead_days <= 1:
-        a += 0.05
-    if lead_days >= 5:
-        a -= 0.05
-
-    # Market freshness: recently-opened markets have unreliable prices
-    if hours_since_open < 12:
-        a += 0.10
-    if hours_since_open < 6:
-        a += 0.05  # Cumulative with above
-
     return AlphaDecision(
-        value=max(0.20, min(0.85, a)),
+        value=max(0.20, min(0.85, base)),
         optimization_target="risk_cap",
         evidence_basis="D1 resolution: conservative blending weight, not pure Brier minimizer",
         ci_bound=0.05,

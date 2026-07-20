@@ -86,18 +86,21 @@ class TestComputeAlpha:
         a = compute_alpha(4, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0, authority_verified=True).value
         assert a == pytest.approx(0.25, abs=0.01)
 
-    def test_conflict_reduces_alpha(self):
+    def test_agreement_does_not_shift_alpha(self):
+        # model_agreement must NOT offset alpha: the hardcoded CONFLICT -0.20 penalty was the forbidden
+        # fixed-offset-on-a-continuously-varying-value pattern (removed). All agreement values serve base.
         spread = TemperatureDelta(3.0, "F")
         a_agree = compute_alpha(1, spread, "AGREE", 3, 24.0, authority_verified=True).value
         a_conflict = compute_alpha(1, spread, "CONFLICT", 3, 24.0, authority_verified=True).value
-        assert a_conflict < a_agree
+        assert a_conflict == a_agree
 
-    def test_fresh_market_increases_alpha(self):
-        """hours_since_open < 6 → +0.15 total (0.10 + 0.05)."""
+    def test_freshness_does_not_shift_alpha(self):
+        # hours_since_open must NOT offset alpha: the hardcoded freshness bonus (+0.10/+0.05) was the
+        # same forbidden fixed-offset pattern (removed).
         spread = TemperatureDelta(3.0, "F")
         a_old = compute_alpha(2, spread, "AGREE", 3, 48.0, authority_verified=True).value
         a_fresh = compute_alpha(2, spread, "AGREE", 3, 4.0, authority_verified=True).value
-        assert a_fresh > a_old
+        assert a_fresh == a_old
 
     def test_clamped_floor(self):
         """Alpha should never go below 0.20."""
@@ -114,20 +117,16 @@ class TestComputeAlpha:
             compute_alpha(1, 3.0, "AGREE", 3, 24.0, authority_verified=True)
 
     @pytest.mark.parametrize(
-        "agreement, expected_alpha",
-        [
-            ("NOT_CHECKED", 0.65),    # no penalty — treated same as AGREE
-            ("AGREE", 0.65),          # no penalty
-            ("SOFT_DISAGREE", 0.55),  # -0.10 penalty
-        ],
-        ids=["not_checked", "agree", "soft_disagree"],
+        "agreement",
+        ["NOT_CHECKED", "AGREE", "SOFT_DISAGREE", "CONFLICT"],
+        ids=["not_checked", "agree", "soft_disagree", "conflict"],
     )
-    def test_p9_model_agreement_alpha_adjustment(self, agreement, expected_alpha):
-        """P9: model_agreement field drives alpha penalty correctly."""
+    def test_agreement_does_not_adjust_alpha(self, agreement):
+        """No per-agreement offset: every model_agreement value serves the level base (0.65 for L1)."""
         a = compute_alpha(
             1, TemperatureDelta(3.0, "F"), agreement, 3, 24.0, authority_verified=True
         ).value
-        assert a == pytest.approx(expected_alpha, abs=0.01)
+        assert a == pytest.approx(0.65, abs=0.01)
 
 
 class TestComputePosterior:

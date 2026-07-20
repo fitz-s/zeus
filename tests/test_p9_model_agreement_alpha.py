@@ -1,6 +1,14 @@
-"""P9 regression test: model_agreement affects alpha correctly."""
+"""P9 regression guard: model_agreement must NOT shift alpha via a hardcoded offset.
+
+The former per-agreement penalty (SOFT_DISAGREE -0.10 / CONFLICT -0.20) was a fixed constant stapled
+onto a continuous blending weight — the forbidden "fixed offset on a continuously-varying value"
+pattern (a static constant cannot correct a varying quantity). alpha now serves the calibration-level
+base unchanged; model_agreement must not move it. (alpha is also dormant end-to-end: its value is
+discarded by the MODEL_ONLY posterior on every live path.)
+"""
 import pytest
-from src.strategy.market_fusion import compute_alpha, TemperatureDelta
+
+from src.strategy.market_fusion import TemperatureDelta, compute_alpha
 
 _COMMON = dict(
     calibration_level=2,
@@ -12,14 +20,12 @@ _COMMON = dict(
     authority_verified=True,
 )
 
-@pytest.mark.parametrize("agreement,expected_penalty", [
-    ("AGREE", 0.0),
-    ("NOT_CHECKED", 0.0),
-    ("SOFT_DISAGREE", -0.10),
-    ("CONFLICT", -0.20),
-])
-def test_model_agreement_alpha_penalty(agreement, expected_penalty):
+
+@pytest.mark.parametrize("agreement", ["AGREE", "NOT_CHECKED", "SOFT_DISAGREE", "CONFLICT"])
+def test_model_agreement_does_not_offset_alpha(agreement):
     baseline = compute_alpha(**_COMMON, model_agreement="AGREE")
     result = compute_alpha(**_COMMON, model_agreement=agreement)
-    assert abs(result.value - (baseline.value + expected_penalty)) < 1e-9, \
-        f"{agreement}: expected penalty {expected_penalty}, got {result.value - baseline.value}"
+    assert result.value == baseline.value, (
+        f"{agreement}: model_agreement must not shift alpha (no hardcoded offset), "
+        f"got delta {result.value - baseline.value}"
+    )
