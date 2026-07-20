@@ -3178,8 +3178,8 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
-        ("queue", "post-start"),
         ("monitor", "post-start"),
+        ("queue", "post-start"),
         ("launch", heartbeat_supervisor),
         ("resume_entries", tuple(expanded_labels)),
     ]
@@ -3478,6 +3478,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     assert calls.index(("verify", "dddddddd")) > live_launch_index
     assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
+    assert calls.index(("monitor", "post-start")) < calls.index(("queue", "post-start"))
     preflight_launches = [
         call for call in calls[recovery_index:preflight_index]
         if call[0] == "launch"

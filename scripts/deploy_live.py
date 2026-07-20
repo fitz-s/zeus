@@ -1474,17 +1474,20 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             if not runtime_ok:
                 rc_all = 1
             else:
-                queue_ok, queue_detail = _wait_for_post_start_edli_queue_progress(
-                    launched_after=launched_after,
-                )
-                print(queue_detail)
-                if not queue_ok:
-                    rc_all = 1
+                # Runtime restart recovery gives held-position monitoring priority.
+                # Prove that obligation first; only then expect the reactor queue
+                # to advance on the shared lane.
                 monitor_ok, monitor_detail = _wait_for_post_start_monitor_cadence(
                     launched_after=launched_after,
                 )
                 print(monitor_detail)
                 if not monitor_ok:
+                    rc_all = 1
+                queue_ok, queue_detail = _wait_for_post_start_edli_queue_progress(
+                    launched_after=launched_after,
+                )
+                print(queue_detail)
+                if not queue_ok:
                     rc_all = 1
             # The supervisor must not observe the new daemon until its first
             # queue and monitor writes have replaced stale PID-bearing status.
