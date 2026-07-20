@@ -16,7 +16,10 @@ from collections.abc import Mapping
 from src.calibration.settlement_backward_coverage import (
     settlement_coverage_refutes_claim,
 )
-from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_global_current_state_rejection_reason,
+    stable_hash,
+)
 
 
 # Compatibility default for callers that can optionally request a hit-rate
@@ -426,6 +429,28 @@ def live_buy_no_conservative_evidence_rejection_reason(
         condition_id=condition_id,
     ):
         return None
+    global_current_reason = qkernel_global_current_state_rejection_reason(
+        qkernel_execution_economics,
+        direction=direction,
+    )
+    if global_current_reason is None:
+        assert isinstance(qkernel_execution_economics, Mapping)
+        try:
+            certified_q = float(qkernel_execution_economics["payoff_q_point"])
+            certified_lcb = float(qkernel_execution_economics["payoff_q_lcb"])
+            certified_cost = float(qkernel_execution_economics["cost"])
+        except (KeyError, TypeError, ValueError):
+            certified_q = certified_lcb = certified_cost = float("nan")
+        if all(
+            math.isclose(actual, certified, rel_tol=0.0, abs_tol=1e-12)
+            for actual, certified in (
+                (q_value, certified_q),
+                (q_lcb_value, certified_lcb),
+                (price, certified_cost),
+                (yes_posterior, 1.0 - certified_q),
+            )
+        ):
+            return None
     if replacement_authority:
         return (
             "ADMISSION_BUY_NO_REPLACEMENT_BOUND_CERTIFICATE_MISSING:"

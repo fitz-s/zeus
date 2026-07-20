@@ -16,6 +16,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+import src.strategy.live_inference.live_admission as live_admission
 from src.calibration.qlcb_provenance import CALIBRATION_SOURCES
 from src.decision_kernel.canonicalization import stable_hash
 from src.engine.event_reactor_adapter import (
@@ -213,6 +216,56 @@ def test_material_yes_buy_no_with_allowed_native_no_source_is_admitted() -> None
     )
 
     assert reason is None
+
+
+def test_exact_global_current_certificate_admits_selected_material_buy_no(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    economics = {
+        "payoff_q_point": 0.65,
+        "payoff_q_lcb": 0.61,
+        "cost": 0.32,
+    }
+    monkeypatch.setattr(
+        live_admission,
+        "qkernel_global_current_state_rejection_reason",
+        lambda payload, *, direction: (
+            None
+            if payload is economics and direction == "buy_no"
+            else "not_exact_global_current"
+        ),
+    )
+
+    assert live_buy_no_conservative_evidence_rejection_reason(
+        direction="buy_no",
+        q_direction=0.65,
+        q_lcb=0.61,
+        execution_price=0.32,
+        q_lcb_calibration_source="FORECAST_BOOTSTRAP",
+        same_bin_yes_posterior=0.35,
+        qkernel_execution_economics=economics,
+    ) is None
+
+    for field, value in (
+        ("q_direction", 0.64),
+        ("q_lcb", 0.60),
+        ("execution_price", 0.31),
+        ("same_bin_yes_posterior", 0.36),
+    ):
+        kwargs = {
+            "direction": "buy_no",
+            "q_direction": 0.65,
+            "q_lcb": 0.61,
+            "execution_price": 0.32,
+            "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
+            "same_bin_yes_posterior": 0.35,
+            "qkernel_execution_economics": economics,
+        }
+        kwargs[field] = value
+        assert (
+            live_buy_no_conservative_evidence_rejection_reason(**kwargs)
+            is not None
+        )
 
 
 def test_immaterial_yes_buy_no_is_not_gated_by_source() -> None:

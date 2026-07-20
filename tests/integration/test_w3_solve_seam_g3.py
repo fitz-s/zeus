@@ -11195,6 +11195,71 @@ def _current_global_book_probability():
     return result.global_family.probability_witness
 
 
+def test_global_actuation_rebinds_only_selected_day0_buy_no_admission():
+    witness = _current_global_book_probability()
+    family, proofs, _ = _corpus()[0]
+    binding = witness.bindings[0]
+    proof = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_no"
+    )
+    proof = replace(
+        proof,
+        q_posterior=0.1,
+        q_lcb_5pct=0.0,
+        missing_reason=(
+            "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:test"
+        ),
+    )
+    selected_candidate = SimpleNamespace(
+        candidate_id="selected-no",
+        family_key=witness.family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="NO",
+        token_id=binding.no_token_id,
+        probability_witness_identity=witness.witness_identity,
+    )
+    no_samples = 1.0 - witness.yes_q_samples[:, 0]
+    cap = float(no_samples.min())
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="current-day0",
+        probability_witness=witness,
+        candidate_seeds=(),
+        candidate_payoff_q_lcb_caps=(
+            (
+                witness.family_key,
+                binding.condition_id,
+                binding.bin_id,
+                "NO",
+                cap,
+            ),
+        ),
+    )
+
+    rebound = era._global_actuation_current_admission_proofs(
+        proofs=(proof,),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=selected_candidate)
+        ),
+        prepared_global_family=prepared,
+        family=family,
+    )
+
+    assert len(rebound) == 1
+    assert rebound[0].missing_reason is None
+    assert rebound[0].q_posterior == pytest.approx(float(no_samples.mean()))
+    assert rebound[0].q_lcb_5pct == pytest.approx(cap)
+    assert rebound[0].same_bin_yes_posterior == pytest.approx(
+        float(witness.yes_q_samples[:, 0].mean())
+    )
+    assert rebound[0].probability_authority == (
+        "global_current_probability_witness"
+    )
+
+
 def test_current_global_book_epoch_refreshes_one_newer_projected_token():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(

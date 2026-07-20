@@ -575,6 +575,39 @@ def test_decision_refresh_targets_selected_row_only():
     assert token == "selected-no"
 
 
+def test_missing_global_winner_refresh_targets_exact_condition_and_token():
+    winner = SimpleNamespace(
+        condition_id="winner-condition",
+        token_id="winner-no",
+        side="NO",
+    )
+
+    conditions, token = era._global_candidate_snapshot_refresh_target(winner)
+
+    assert conditions == ("winner-condition",)
+    assert token == "winner-no"
+
+
+@pytest.mark.parametrize(
+    "winner",
+    (
+        SimpleNamespace(condition_id="", token_id="winner-no", side="NO"),
+        SimpleNamespace(condition_id="winner-condition", token_id="", side="NO"),
+        SimpleNamespace(
+            condition_id="winner-condition",
+            token_id="winner-no",
+            side="SELL",
+        ),
+    ),
+)
+def test_missing_global_winner_refresh_fails_closed_on_identity(winner):
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_SNAPSHOT_REFRESH_IDENTITY_MISSING",
+    ):
+        era._global_candidate_snapshot_refresh_target(winner)
+
+
 def test_global_submit_requires_complete_candidate_bound_jit_identity():
     candidate = SimpleNamespace(candidate_id="global-candidate")
     payload = {

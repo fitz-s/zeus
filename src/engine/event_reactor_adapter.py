@@ -12324,7 +12324,9 @@ def _global_actuation_current_admission_proofs(
     same_bin_yes = float(yes_samples.mean())
     if (
         not all(math.isfinite(value) for value in (q_point, same_bin_yes, cap))
-        or not 0.0 <= cap <= q_point <= 1.0
+        or not 0.0 <= cap <= 1.0
+        or not 0.0 <= q_point <= 1.0
+        or cap > q_point + 1e-12
         or not 0.0 <= same_bin_yes <= 1.0
         or not math.isclose(
             q_point + same_bin_yes,
@@ -12334,6 +12336,7 @@ def _global_actuation_current_admission_proofs(
         )
     ):
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_INVALID")
+    cap = min(cap, q_point)
     sample_identity = str(
         getattr(witness, "sample_matrix_identity", "") or ""
     ).strip()
