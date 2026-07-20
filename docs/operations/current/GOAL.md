@@ -1,27 +1,36 @@
 # Goal
 
-Maximize settlement-graded net captured alpha by acting on new causal weather truth before the market reprices. Process liveness, throughput, a green healthcheck, an order, or a merged PR is not completion. Average cycle speed is not the target; the target is the elapsed time from one newly committed causal fact to its economically correct affected action.
+Maximize settlement-graded net captured alpha rate in zero-sum Polymarket weather trading. For every newly committed causal weather fact, Zeus must complete the economically correct affected action before the market reprices. Work completed after the edge reverses has no alpha value, even when it improves average latency, component throughput, process liveness, or healthcheck status.
 
-The optimized chain is `source available -> ingest commit -> current q -> executable book -> risk -> submit -> fill -> settlement grade`. Work that does not shorten this chain, increase executable edge capture, or reduce its failure cost is outside the objective.
+The complete race is `source available -> ingest commit -> affected-scope probability update -> current executable book -> zero-sum decision -> risk/sizing -> submit -> fill -> durable settlement/reconciliation -> settlement grade`. Optimize this end to end. A change that does not shorten an active alpha clock, increase executable capture probability, or reduce failure cost is outside the goal.
 
-Two alpha clocks govern priority:
+## Alpha Clocks
 
-- Forecast reversal: when a new forecast materially moves one target-bin probability before the book reacts, recompute only affected families and reach a current executable BUY/SELL/HOLD decision inside a small fraction of the measured market-repricing window.
-- Deterministic observation reversal: when a newly committed absorbing/extreme fact drives one held outcome to zero or a sibling outcome to one, prioritize the affected held-position SELL and exact complementary BUY over unrelated discovery or full-universe rebuilding. The internal post-commit target is sub-second for held-risk reduction and bounded low seconds for new risk, subject to current venue and risk authority.
+- **Deterministic observation reversal:** a newly committed measurement or absorbing/extreme fact can drive a held outcome toward 0 and a sibling outcome toward 1 in seconds or milliseconds. Its affected held-position SELL and exact complementary BUY preempt forecast discovery, maintenance, and unrelated work. The post-commit target is sub-second held-risk reduction and the lowest bounded latency possible for new risk, subject to fresh venue and risk authority.
+- **Forecast reversal:** a new forecast issue may expose a target-bin repricing window of roughly hundreds of seconds. Source-issue detection and ingest commit must directly fan out only to affected city x metric x target-date families; those families must reach a fresh BUY/SELL/HOLD/CASH decision inside a small fraction of the measured repricing window.
+- **Maintenance and recovery:** work without an expiring executable edge runs behind both money lanes unless it is required to preserve safety or complete an already-started external side effect.
 
-Fault containment is a co-equal objective, because unrelated work consuming an expiring alpha clock is an economic loss:
+Scheduling is not FIFO. Ready work is ranked by expected settlement-graded net alpha lost per second of delay, constrained by risk and authority. A newer authoritative fact supersedes stale queued computation for the same scope. Zero live orders when no positive executable edge exists is correct; failing to process a qualified opportunity before repricing is the throughput failure.
 
-- A stalled source, city, family, event, candidate, metadata request, DB query, lock, or venue command may delay only the state and action that depend on it. Independent families and already-authoritative actions continue.
-- Every pre-submit unit has a bounded monotonic deadline and a named cancellation boundary. Timeout, retry, and backoff remain local; they must not create global sleep, queue-head blocking, repeated whole-universe work, or cross-cycle duplicate work.
-- After an external side effect may have started, that command leaves the deadline-bound discovery lane and enters idempotent must-complete settlement/reconciliation. It must not hold the global decision reactor.
-- Global serialization is allowed only where one canonical ordering is mathematically or durably required. Its critical section contains no network I/O, model computation, metadata discovery, retry sleep, or unrelated DB scan.
+## First Principles
 
-Steady-state money-path constraints:
+- Recompute and reload only state changed by the causal fact. Prefer event-driven incremental state over polling, full-universe sweeps, historical reconstruction, repeated per-row SQL, or repeated per-tick truth construction.
+- Keep databases on the durability, audit, replay, recovery, and reconciliation plane. No unrelated DB read, writer wait, checkpoint, projection replay, metadata discovery, retry sleep, or report work may occupy the steady-state decision path.
+- Batch and vectorize necessary work, reuse one immutable versioned fact per decision, and remove semantic or error-handling work that cannot change the action or protect capital.
+- BUY, SELL, HOLD, and CASH are one zero-sum economic comparison. Actuation priority follows alpha expiry, not module order or historical queue age.
+- Fresh contract, source, probability, position, capital, book, risk, and submit authority remain mandatory. Speed never authorizes stale evidence, guessed truth, or weakened fail-closed gates.
 
-- No unrelated full-table reconstruction, synchronous metadata discovery, or repeated lock wait may sit between a causal fact and its affected action.
-- BUY, SELL, HOLD, and CASH remain one zero-sum economic comparison, but actuation priority follows alpha expiry: current deterministic exits outrank forecast entries and maintenance.
-- Missing current probability, book, position, capital, settlement, or submit authority fails closed for the affected action. One unavailable family cannot erase independent executable opportunities.
-- Each optimization must report causal-fact queue age, fact-to-decision, decision-to-submit, deadline overrun, and unaffected-lane progress. A lower median without bounded tail latency and isolation is not an efficiency gain.
-- The only score that counts is the decision-certificate x settlement join (`settlement_skill_attribution`; SKILL_WIN is evidence, LUCKY_WIN is a miss), including fees, slippage, failed captures, and latency-induced edge loss.
+## Failure Isolation
 
-Current work state lives in `docs/operations/current/plans/hourly_capital_gains_improvement_loop.md` (forward journal) and `plans/INDEX.md`. This file carries no blocker narrative; read the journal for current evidence.
+- A stalled source, city, family, condition, event, candidate, metadata request, DB operation, lock, model, or venue command may delay only the facts and actions that depend on it. Independent scopes continue and prove forward progress.
+- Every pre-side-effect unit carries one absolute monotonic deadline and a named cancellation boundary through ingest, update, decision, sizing, risk, and pre-submit validation. Timeout, retry, and backoff remain local; they cannot create global sleep, queue-head blocking, whole-universe replay, or cross-cycle duplicate work.
+- Once a venue side effect may have begun, the command leaves the deadline-bound discovery lane and enters an idempotent must-complete settlement/reconciliation lane. That lane cannot hold the global decision reactor.
+- Global serialization is permitted only where one canonical ordering is mathematically or durably necessary. Its critical section contains no network I/O, model computation, metadata discovery, retry sleep, or unrelated DB scan.
+
+## Acceptance
+
+Each optimization must be justified by current runtime evidence and replayable causal measurement. Record source availability, ingest commit, state application, decision, fresh-book observation, submit, acknowledgement, fill, and durable settlement timestamps. Report p50/p95/p99/p99.9, queue age, snapshot age, book age at submit, deadline overruns, lock/SQL/network work, stale-decision rejection, unaffected-lane progress, fill probability, executable edge, and realized PnL.
+
+Lower median latency without bounded tails and isolation is not an efficiency gain. The final score is the decision-certificate x settlement join (`settlement_skill_attribution`; SKILL_WIN is evidence and LUCKY_WIN is a miss), net of fees, slippage, failed captures, adverse selection, and latency-induced edge loss.
+
+Current work state lives in `docs/operations/current/plans/hourly_capital_gains_improvement_loop.md` and `plans/INDEX.md`. This file is the persistent objective, not a runtime diary or blocker log.
