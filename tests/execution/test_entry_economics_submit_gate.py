@@ -366,7 +366,7 @@ def test_entry_economics_micro_tail_is_blocked_by_absolute_band():
     assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
-def test_entry_economics_buenos_aires_shape_is_blocked_by_absolute_band():
+def test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.041,

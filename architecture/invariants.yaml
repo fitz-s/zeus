@@ -964,7 +964,7 @@ invariants:
         - tests/test_v2_adapter.py::test_adapter_sdk_boundary_rejects_even_if_envelope_guard_is_bypassed
         - tests/test_v2_adapter.py::TestSubmitBatch::test_out_of_band_price_rejects_entire_batch_before_sdk_contact
         - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_out_of_band_price_before_persistence
-        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand
+        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand::test_out_of_band_command_is_rejected_before_persistence
       negative_constraints: []
     capability_tags: [live_venue_submit, venue_adapter, execution_price]
     relationship_tests:
