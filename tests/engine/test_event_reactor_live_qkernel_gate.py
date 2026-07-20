@@ -3137,7 +3137,7 @@ def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
         )
 
 
-def test_live_entry_qkernel_authority_rejects_price_below_absolute_floor():
+def test_live_entry_qkernel_authority_accepts_low_price_with_current_state_economics():
     cert = _current_qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:b34@proof",
@@ -3165,8 +3165,7 @@ def test_live_entry_qkernel_authority_rejects_price_below_absolute_floor():
         "qkernel_execution_economics": cert,
     }
 
-    with pytest.raises(ValueError, match="LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS"):
-        _assert_live_entry_submit_authority(payload)
+    _assert_live_entry_submit_authority(payload)
 
 
 @pytest.mark.parametrize("price", (0.0, 1.0, float("nan")))
