@@ -4347,6 +4347,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v5",
         "zlib+base64+canonical-json-v6",
         "zlib+base64+canonical-json-v7",
+        "zlib+base64+canonical-json-v8",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(
