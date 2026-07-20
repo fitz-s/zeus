@@ -947,29 +947,35 @@ invariants:
     statement: >
       Every live BUY or SELL venue submission, including entry, reduce-only
       exit, single-order, and batch paths, must have a finite unit price
-      strictly inside (0, 1). Zero, one, NaN, and infinities are rejected before
-      SDK contact. This binary-contract domain applies symmetrically to BUY and
-      SELL; current snapshot tick alignment/range, minimum size, identity,
-      tradeability, fee/depth, and economic authorization remain cumulative
-      requirements.
+      inside the absolute inclusive band [0.05, 0.95]. Prices outside the
+      band, zero, one, NaN, and infinities are rejected before SDK contact.
+      The band applies symmetrically to BUY and SELL on every path
+      (economics, Day0, exit, batch, SDK); no path may bypass it. Current
+      snapshot tick alignment/range, minimum size, identity, tradeability,
+      fee/depth, and economic authorization remain cumulative requirements.
     why: >
-      A fixed 0.05/0.95 band conflated nominal price with probability quality,
-      blocked tick-legal binary claims, and treated BUY and reduce-only SELL
-      differently at the tails. The envelope owns only the primitive binary
-      price domain; robust delta-log-wealth/EV, Kelly, fees, depth, and current
-      executable truth decide whether a legal price is economically actionable.
+      Operator production law (ruling reaffirmed 2026-07-19 after an
+      unauthorized band-removal lineage was reverted): deep-tail binary
+      prices carry degenerate risk/reward and adverse-selection exposure
+      that no per-trade economics check reliably prices; the absolute band
+      is the fail-closed floor/ceiling. Enforced at two independent
+      layers: venue_submission_envelope.assert_live_order_unit_price at
+      every executor submit/alignment site, and the venue_command_repo
+      insert CAS; the v2 adapter additionally rejects non-binary prices
+      (0, 1, NaN, inf) before SDK contact.
     enforced_by:
       tests:
         - tests/test_v2_adapter.py::test_live_submit_unit_price_domain_is_side_symmetric
         - tests/test_v2_adapter.py::test_live_submit_rejects_non_binary_price_before_sdk_contact
         - tests/test_v2_adapter.py::TestSubmitBatch::test_non_binary_price_rejects_entire_batch_before_sdk_contact
         - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_non_binary_price_before_persistence
+        - tests/test_venue_command_repo.py
       negative_constraints: []
     capability_tags: [live_venue_submit, venue_adapter, execution_price]
     relationship_tests:
       - tests/test_v2_adapter.py
       - tests/test_executor.py
-    basis: operator first-principles live venue price directive 2026-07-18
+    basis: operator absolute live price band law — production ruling 2026-07-19 (supersedes the 2026-07-18 (0,1)-domain reading)
     added: 2026-07-15
 
   - id: INV-44
