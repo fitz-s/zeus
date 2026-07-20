@@ -28,6 +28,7 @@ from src.decision_kernel.verifier import (
     verify_live_cap_transition,
 )
 from src.contracts.execution_intent import quantize_submit_shares_for_venue_at_most
+from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.events.live_order_aggregate import LiveOrderAggregateEvent
 
 
@@ -825,7 +826,9 @@ def _validate_exact_taker_limit(
 ) -> None:
     """Prove an externally optimized taker boundary is marketable and on-grid."""
 
-    if not (math.isfinite(limit_price) and 0.0 < limit_price < 1.0):
+    try:
+        assert_live_order_unit_price(limit_price)
+    except ValueError:
         raise ValueError("EXACT_TAKER_LIMIT_OUT_OF_RANGE")
     if not math.isclose(
         limit_price / tick_size,
