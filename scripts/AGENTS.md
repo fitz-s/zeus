@@ -75,7 +75,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `check_dynamic_sql.py` | Enforcement scan for f-string SQL interpolations without whitelist; security review §10 antibody (created 2026-05-01) |
 | `check_identity_column_defaults.py` | Enforcement check for identity-column DEFAULT violations per INV-14 and SYNTHESIS K-D (created 2026-05-01) |
 | `check_invariant_test_citations.py` | Enforcement scan verifying all test files carry invariant citation headers per SYNTHESIS K-A two-ring rule (created 2026-05-01) |
-| `check_live_restart_preflight.py` | Read-only pre-restart diagnostic for process state, submit config, absolute price and exclusive-family entry guards, posterior freshness, pending-exit risk, and held-position belief coverage (created 2026-06-18) |
+| `check_live_restart_preflight.py` | Read-only pre-restart diagnostic for process state, submit config, posterior freshness, pending-exit risk, and held-position belief coverage (created 2026-06-18) |
 | `migrate_observations_k1.py` | Repair script: migrates live state/zeus-world.db::observations from legacy single-atom to K1 dual-atom shape (dry-run/apply; created 2026-05-01) |
 | `_rebuild_calibration_pairs_parallel.py` | Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs; imported lazily when --workers>1 (created 2026-05-11) |
 | `authority_inventory.py` | Authority inventory v2 per task_2026-05-15_p9_authority_inventory SCAFFOLD; diagnostic report writer (created 2026-05-15) |

@@ -320,17 +320,18 @@ current-evidence robust win majority, positive robust EV and delta log wealth,
 and only the remaining shares below the cumulative Fractional Kelly final-
 holding target. These economic conditions apply symmetrically to YES and NO.
 
-### 10.3 Mutually-Exclusive Weather Family Entry Boundary
+### 10.3 Same-Family Portfolio Capital Objective
 
-One `(city, target_date, temperature_metric)` weather family is an exhaustive
-settlement partition. Once canonical runtime state carries an open position or
-unresolved entry obligation in that family, a live BUY may only fill up the same
-canonical position/outcome token. Global selection removes every sibling-token
-BUY and the command journal independently rejects a different-position or
-different-token sibling under its admission transaction. SELL, CANCEL,
-monitoring, and exit are unaffected; a close-before-open rebalance must first
-close the prior exposure. A legacy family already carrying multiple outcome
-tokens admits no further BUY (INV-45).
+Mutual exclusivity defines payoff geometry, not a one-token position limit.
+Zeus may hold or buy multiple outcome tokens inside one
+`(city, target_date, temperature_metric)` family when the marginal order
+improves the full current portfolio objective. The auction must project all
+same-family YES/NO holdings and unresolved entry commitments onto the
+exhaustive outcome set, then require positive robust delta log wealth and EV
+after fees, depth, affordability, and the cumulative Fractional Kelly target.
+The command journal enforces executable-truth and risk contracts; it must not
+categorically reject a sibling token merely because another family token is
+open (INV-45).
 
 ### 10.4 Live / Backtest Boundary — NO SHADOW LANE
 
@@ -351,7 +352,7 @@ standing observation window.
 Replay is diagnostic until it has full market-price linkage, active sizing
 parity, and selection-family parity with live control units.
 
-### 10.4 Authority-Loss Degradation
+### 10.5 Authority-Loss Degradation
 
 When DB truth is unavailable or degraded, new-entry paths must fail closed, but
 monitor/exit/reconciliation lanes should keep operating in read-only or

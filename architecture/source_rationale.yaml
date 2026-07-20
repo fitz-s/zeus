@@ -1867,7 +1867,7 @@ files:
   src/engine/global_batch_runtime.py:
     zone: K2_K3_coordination
     authority_role: current_global_single_order_runtime
-    why: "Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set. Current held outcome tokens and unresolved entry-obligation tokens are sibling-entry authority: a BUY for another token in the same weather family is removed while same-token fill-up and SELL remain eligible."
+    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set.
     downstream:
     - src/engine/global_auction_universe.py
     - src/engine/global_single_order_auction.py
@@ -1978,7 +1978,7 @@ files:
   src/execution/executor.py:
     zone: K2_runtime
     authority_role: live_order_executor
-    why: Places live CLOB limit orders; real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before command persistence or SDK contact and persists/submits the selected maker/taker order type. ENTRY derives the certified weather-family identity from the executable snapshot and carries it into the command journal's independent sibling-exposure gate.
+    why: Places live CLOB limit orders; real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before command persistence or SDK contact and persists/submits the selected maker/taker order type.
     write_routes:
     - canonical_position_write
     downstream:
@@ -2590,7 +2590,7 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95] before persistence while preserving CANCEL, and rejects a live ENTRY that lacks weather-family identity or would create a different-position or different-token sibling exposure in an already-open family while preserving exact same-position same-token fill-up; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
+    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95] before persistence while preserving CANCEL; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
     write_routes:
     - venue_command_write
     downstream:

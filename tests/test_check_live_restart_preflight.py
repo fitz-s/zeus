@@ -89,48 +89,6 @@ def test_absolute_live_unit_price_band_restart_check_blocks_envelope_wiring_remo
     )
 
 
-def test_exclusive_weather_family_entry_restart_check_passes_current_contract():
-    result = preflight._exclusive_weather_family_entry_check()
-
-    assert result.ok is True
-    assert result.restart_blocking is True
-    assert result.evidence["failures"] == []
-
-
-def test_exclusive_weather_family_entry_restart_check_blocks_selection_guard_removal(
-    monkeypatch,
-):
-    from src.engine import global_batch_runtime
-
-    monkeypatch.setattr(
-        global_batch_runtime,
-        "_sibling_entry_buy_rejection_reason",
-        lambda *_args, **_kwargs: None,
-    )
-
-    result = preflight._exclusive_weather_family_entry_check()
-
-    assert result.ok is False
-    assert "global selection accepted sibling BUY" in result.evidence["failures"]
-
-
-def test_exclusive_weather_family_entry_restart_check_blocks_persistence_guard_removal(
-    monkeypatch,
-):
-    from src.state import venue_command_repo
-
-    monkeypatch.setattr(
-        venue_command_repo,
-        "_assert_entry_family_exclusive",
-        lambda *_args, **_kwargs: None,
-    )
-
-    result = preflight._exclusive_weather_family_entry_check()
-
-    assert result.ok is False
-    assert "command persistence accepted sibling position" in result.evidence["failures"]
-
-
 def _qlcb_meta() -> dict[str, object]:
     return {
         "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,

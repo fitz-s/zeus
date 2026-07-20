@@ -12666,6 +12666,34 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
     assert yes_endowment.win_wealth_ceiling_usd == Decimal("135")
     assert yes_endowment.current_token_shares == Decimal("10")
 
+    # A fresh sibling token is a legitimate marginal portfolio candidate. Its
+    # current size is zero, but the held NO-c claim still changes both branches.
+    sibling_endowment = _candidate_portfolio_endowment(
+        SimpleNamespace(
+            family_key="family",
+            bin_id="b",
+            side="NO",
+            token_id="fresh-no-b",
+        ),
+        probability_witness=SimpleNamespace(bin_ids=("a", "b", "c")),
+        holdings_snapshot=SimpleNamespace(
+            family_key="family",
+            ledger_snapshot_id="ledger-current",
+            holdings=(
+                SimpleNamespace(
+                    bin_id="c",
+                    side="NO",
+                    token_id="no-c",
+                    shares=Decimal("5"),
+                ),
+            ),
+        ),
+        wealth_witness=wealth,
+    )
+    assert sibling_endowment.loss_wealth_floor_usd == Decimal("105")
+    assert sibling_endowment.win_wealth_ceiling_usd == Decimal("135")
+    assert sibling_endowment.current_token_shares == Decimal("0")
+
 
 def test_global_selection_endowment_uses_same_chain_balance_as_wealth_witness():
     """A just-filled token cannot be sized again from a stale position projection."""
@@ -14324,111 +14352,6 @@ def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
     )
 
 
-def test_global_sibling_entry_policy_blocks_new_bin_but_keeps_fill_up_and_sell():
-    held = {"seoul|2026-07-21|high": frozenset({"no-28c"})}
-
-    sibling_buy = SimpleNamespace(
-        action="BUY",
-        family_key="seoul|2026-07-21|high",
-        token_id="no-29c",
-    )
-    fill_up = SimpleNamespace(
-        action="BUY",
-        family_key="seoul|2026-07-21|high",
-        token_id="no-28c",
-    )
-    sibling_sell = SimpleNamespace(
-        action="SELL",
-        family_key="seoul|2026-07-21|high",
-        token_id="no-29c",
-    )
-
-    assert global_batch_runtime._sibling_entry_buy_rejection_reason(
-        sibling_buy, held
-    ) == "GLOBAL_SIBLING_ENTRY_FAMILY_EXPOSURE"
-    assert global_batch_runtime._sibling_entry_buy_rejection_reason(fill_up, held) is None
-    assert global_batch_runtime._sibling_entry_buy_rejection_reason(sibling_sell, held) is None
-
-    incoherent_legacy_family = {
-        "seoul|2026-07-21|high": frozenset({"no-28c", "no-29c"})
-    }
-    assert global_batch_runtime._sibling_entry_buy_rejection_reason(
-        fill_up, incoherent_legacy_family
-    ) == "GLOBAL_SIBLING_ENTRY_FAMILY_EXPOSURE"
-
-
-def test_global_sibling_entry_policy_includes_unfilled_open_obligation():
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE entry_exposure_obligations (
-            command_id TEXT PRIMARY KEY,
-            family_city TEXT,
-            family_target_date TEXT,
-            family_temperature_metric TEXT,
-            token_id TEXT,
-            status TEXT
-        )
-        """
-    )
-    conn.execute(
-        "CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, position_id TEXT)"
-    )
-    conn.execute(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT PRIMARY KEY,
-            city TEXT,
-            target_date TEXT,
-            temperature_metric TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO entry_exposure_obligations VALUES (
-            'pending-28c', 'Seoul', '2026-07-21', 'high', 'no-28c', 'OPEN'
-        )
-        """
-    )
-    conn.execute("INSERT INTO venue_commands VALUES ('legacy-pending', 'legacy-position')")
-    conn.execute(
-        """
-        INSERT INTO position_current VALUES (
-            'legacy-position', 'Hong Kong', '2026-07-20', 'low'
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO entry_exposure_obligations VALUES (
-            'legacy-pending', NULL, NULL, NULL, 'no-27c', 'OPEN'
-        )
-        """
-    )
-
-    occupied = global_batch_runtime._open_entry_obligation_tokens_by_family(conn)
-    family_key = global_batch_runtime.weather_family_id(
-        city="Seoul", target_date="2026-07-21", metric="high"
-    )
-    legacy_family_key = global_batch_runtime.weather_family_id(
-        city="Hong Kong", target_date="2026-07-20", metric="low"
-    )
-
-    sibling = SimpleNamespace(
-        action="BUY",
-        family_key=family_key,
-        token_id="no-29c",
-    )
-    assert occupied == {
-        family_key: frozenset({"no-28c"}),
-        legacy_family_key: frozenset({"no-27c"}),
-    }
-    assert global_batch_runtime._sibling_entry_buy_rejection_reason(
-        sibling, occupied
-    ) == "GLOBAL_SIBLING_ENTRY_FAMILY_EXPOSURE"
-
-
 def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     monkeypatch,
 ):
@@ -14579,25 +14502,6 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     )
 
     assert selected_kwargs["buy_disabled_family_keys"] == frozenset({family_key})
-    candidate_policy = selected_kwargs["candidate_policy_rejection_resolver"]
-    assert candidate_policy(
-        SimpleNamespace(
-            action="BUY",
-            family_key=family_key,
-            bin_id="22C",
-            side="NO",
-            token_id="sibling-no",
-        )
-    ) == "GLOBAL_SIBLING_ENTRY_FAMILY_EXPOSURE"
-    assert candidate_policy(
-        SimpleNamespace(
-            action="BUY",
-            family_key=family_key,
-            bin_id="21C",
-            side="YES",
-            token_id="held-yes",
-        )
-    ) is None
     assert stored_kwargs["buy_disabled_reason_by_family"] == {
         family_key: (
             "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
@@ -17589,18 +17493,6 @@ def test_global_batch_commits_receipts_before_external_io(monkeypatch, tmp_path)
     observer = sqlite3.connect(path, timeout=0)
     assert trade_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
     trade_conn.execute("CREATE TABLE receipt_marks (stage TEXT NOT NULL)")
-    trade_conn.execute(
-        """
-        CREATE TABLE entry_exposure_obligations (
-            command_id TEXT PRIMARY KEY,
-            family_city TEXT,
-            family_target_date TEXT,
-            family_temperature_metric TEXT,
-            token_id TEXT,
-            status TEXT
-        )
-        """
-    )
     trade_conn.commit()
     stages = []
     venue_calls = [0]

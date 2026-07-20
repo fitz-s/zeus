@@ -112,104 +112,6 @@ class _CurrentHeldObligation:
     held_shares: Decimal
 
 
-def _sibling_entry_buy_rejection_reason(
-    candidate: object,
-    held_tokens_by_family: Mapping[str, frozenset[str]],
-) -> str | None:
-    if str(getattr(candidate, "action", "BUY") or "BUY").upper() != "BUY":
-        return None
-    family_key = str(getattr(candidate, "family_key", "") or "").strip()
-    held_tokens = held_tokens_by_family.get(family_key, frozenset())
-    if not held_tokens:
-        return None
-    if len(held_tokens) != 1:
-        return "GLOBAL_SIBLING_ENTRY_FAMILY_EXPOSURE"
-    token_id = str(getattr(candidate, "token_id", "") or "").strip()
-    if token_id in held_tokens:
-        return None
-    return "GLOBAL_SIBLING_ENTRY_FAMILY_EXPOSURE"
-
-
-def _open_entry_obligation_tokens_by_family(
-    trade_conn: object,
-) -> dict[str, frozenset[str]]:
-    """Return unresolved command tokens that already occupy a weather family."""
-
-    try:
-        open_rows = trade_conn.execute(
-            """
-            SELECT command_id, token_id
-              FROM entry_exposure_obligations
-             WHERE status = 'OPEN'
-             ORDER BY command_id
-            """
-        ).fetchall()
-        if not open_rows:
-            return {}
-        columns = {
-            str(row[1])
-            for row in trade_conn.execute(
-                "PRAGMA table_info(entry_exposure_obligations)"
-            ).fetchall()
-        }
-        family_columns = {
-            "family_city",
-            "family_target_date",
-            "family_temperature_metric",
-        }
-        rows = trade_conn.execute(
-            """
-            SELECT command_id, family_city, family_target_date,
-                   family_temperature_metric, token_id
-              FROM entry_exposure_obligations AS eo
-             WHERE eo.status = 'OPEN'
-             ORDER BY eo.command_id
-            """
-        ).fetchall() if family_columns <= columns else [
-            (command_id, None, None, None, token_id)
-            for command_id, token_id in open_rows
-        ]
-    except Exception as exc:
-        raise ValueError("GLOBAL_ENTRY_OBLIGATION_AUTHORITY_UNAVAILABLE") from exc
-    tokens: dict[str, set[str]] = {}
-    for command_id, city, target_date, metric, token_id in rows:
-        if city is None or target_date is None or metric is None:
-            try:
-                legacy_family = trade_conn.execute(
-                    """
-                    SELECT pc.city, pc.target_date, pc.temperature_metric
-                      FROM venue_commands AS vc
-                      JOIN position_current AS pc ON pc.position_id = vc.position_id
-                     WHERE vc.command_id = ?
-                     LIMIT 1
-                    """,
-                    (command_id,),
-                ).fetchone()
-            except Exception as exc:
-                raise ValueError("GLOBAL_ENTRY_OBLIGATION_AUTHORITY_UNAVAILABLE") from exc
-            if legacy_family is not None:
-                city, target_date, metric = legacy_family
-        city_value = str(city or "").strip()
-        date_value = str(target_date or "").strip()
-        metric_value = str(metric or "").strip().lower()
-        token_value = str(token_id or "").strip()
-        if (
-            not str(command_id or "").strip()
-            or not city_value
-            or not date_value
-            or metric_value not in {"high", "low"}
-            or not token_value
-        ):
-            raise ValueError("GLOBAL_ENTRY_OBLIGATION_FAMILY_INVALID")
-        family_key = weather_family_id(
-            city=city_value,
-            target_date=date_value,
-            metric=metric_value,
-        )
-        tokens.setdefault(family_key, set()).add(token_value)
-    return {key: frozenset(value) for key, value in tokens.items()}
-
-
 def _current_held_obligations(
     portfolio_state: object,
     wealth_witness: object,
@@ -3411,20 +3313,6 @@ def process_current_global_batch(
         held_obligation_family_keys = {
             obligation.family_key for obligation in holding_obligations
         }
-        held_tokens_by_family: dict[str, frozenset[str]] = {}
-        for family_key in held_obligation_family_keys:
-            held_tokens_by_family[family_key] = frozenset(
-                obligation.token_id
-                for obligation in holding_obligations
-                if obligation.family_key == family_key
-            )
-        if hasattr(trade_conn, "execute"):
-            for family_key, tokens in _open_entry_obligation_tokens_by_family(
-                trade_conn
-            ).items():
-                held_tokens_by_family[family_key] = frozenset(
-                    set(held_tokens_by_family.get(family_key, frozenset())) | set(tokens)
-                )
         full_scope_event_by_family = dict(decision_scope.events_by_family)
         ineligible_by_family: dict[str, str] = {}
         ineligible_by_event: dict[str, str] = {}
@@ -3645,12 +3533,6 @@ def process_current_global_batch(
                 reason = excluded_candidates.get(key)
                 if reason is not None:
                     return f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
-                sibling_reason = _sibling_entry_buy_rejection_reason(
-                    candidate,
-                    held_tokens_by_family,
-                )
-                if sibling_reason is not None:
-                    return sibling_reason
                 if candidate_policy_rejection_resolver is None:
                     return None
                 return candidate_policy_rejection_resolver(candidate)

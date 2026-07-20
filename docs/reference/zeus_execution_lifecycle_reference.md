@@ -548,14 +548,13 @@ independently rechecks it immediately before SDK contact. Tick legality, minimum
 size, identity, tradeability, fees/depth, and economic proof remain additional
 requirements and cannot waive the band (INV-43).
 
-Weather family coherence is a separate cumulative entry contract. The family
-key is `(city, target_date, temperature_metric)`, whose bins are exhaustive and
-mutually exclusive. An open position or unresolved entry obligation blocks a
-BUY for every different sibling token at global selection and again at command
-persistence; same-position same-token fill-up remains legal. SELL/CANCEL and
-held-position monitor/exit paths do not inherit this entry block. A legacy
-family already holding multiple outcome tokens blocks every further BUY
-(INV-45).
+Same-family exposure is portfolio endowment, not an entry prohibition. Before
+ranking a sibling-bin BUY, the global auction projects every current
+same-family YES/NO holding plus unresolved entry commitment onto the exhaustive
+family outcomes. The order remains eligible only when its marginal robust
+delta-log-wealth and EV are positive after fees, depth, affordability, and the
+cumulative Kelly target. Venue-command persistence must not impose a blanket
+one-position or one-token family veto (INV-45).
 
 ### 7.2 Kelly safety gate
 
