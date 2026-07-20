@@ -776,15 +776,59 @@ class LiveLaneDarkInvariantError(RuntimeError):
     The combination (nominally-armed live daemon + proof_accepted=True +
     side_effect_status=NO_SUBMIT + submit_lane="LIVE") is IMPOSSIBLE for a genuine
     full-pass: the live lane either submits, produces an execution terminal, or
-    returns a typed pre-venue abort with proof_accepted=False. If this combination
-    reaches persistence the live lane silently ate a tradeable full-pass entry —
-    the 2026-06-12 11:51-12:12Z silent-kill incident — so we RAISE instead of
-    persisting a kill indistinguishable from normal no-submit accounting.
+    returns a typed LIVE_PRE_VENUE_ABORT-lane receipt (see below). If plain
+    submit_lane="LIVE" reaches persistence with proof_accepted + NO_SUBMIT the live
+    lane silently ate a tradeable full-pass entry — the 2026-06-12 11:51-12:12Z
+    silent-kill incident — so we RAISE instead of persisting a kill
+    indistinguishable from normal no-submit accounting.
 
     A no-submit receipt produced by the legitimate control-blocked lane carries
     submit_lane="NO_SUBMIT_ADAPTER" + a named live block cause and is NOT impacted by
     this invariant (it persists, honestly labelled).
+
+    LIVE_PRE_VENUE_ABORT (BLOCKER fix, 2026-07-20, ~/cgc-answers/
+    2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md): a genuine terminal
+    live-lane verdict reached BEFORE any venue call, with valid upstream proof
+    (Kelly/FDR/trade-score already passed) — e.g. a Day0 admission-circuit-breaker
+    reject or a strategy-floor pre-submit abort. Commit 106942322 restored
+    proof_accepted=True for exactly these two receipts but left them stamped
+    submit_lane="LIVE", which this invariant then rejected before insertion —
+    defeating the restoration and risking a dead letter. LIVE_PRE_VENUE_ABORT is the
+    ONLY submit_lane allowed to pair proof_accepted=True with NO_SUBMIT, and only for
+    an exact registered reason base (LIVE_PRE_VENUE_ABORT_REASONS) with
+    venue_call_started=False — self-checked here, not merely trusted at the call
+    site, so no future caller can smuggle an unregistered terminal through this
+    lane.
     """
+
+
+# SUBMIT-LANE STAMP for a typed pre-venue live abort (BLOCKER fix, 2026-07-20).
+# Mirrors src.engine.event_reactor_adapter.SUBMIT_LANE_LIVE /
+# SUBMIT_LANE_NO_SUBMIT_ADAPTER — the adapter stamps this lane INSTEAD of "LIVE"
+# for the exact registered reasons below; the invariant re-validates both facts
+# (registered reason base + no venue call) rather than trusting the stamp alone.
+SUBMIT_LANE_LIVE_PRE_VENUE_ABORT = "LIVE_PRE_VENUE_ABORT"
+
+# Exact allowlist of terminal pre-venue-abort reason BASES (text before the first
+# ':', via _money_path_reason_base) permitted to carry
+# submit_lane=LIVE_PRE_VENUE_ABORT. Each is a designed circuit-breaker/policy
+# refusal proven AFTER Kelly/FDR/trade-score already passed and BEFORE any venue
+# side effect — never a build failure and never the ordinary submit path. Adding a
+# new pre-venue abort category means registering its reason base here; nothing
+# else can pair proof_accepted=True with a NO_SUBMIT LIVE-family receipt.
+LIVE_PRE_VENUE_ABORT_REASONS: frozenset[str] = frozenset({
+    # Day0 live-admission circuit breaker (day0_admission.py) — city/metric/
+    # source-health/quote-freshness/one-bin-fragility/final-localday/taker-
+    # forbidden/bin-dead gates all wrap this one base (K2.1 registry:
+    # src/contracts/rejection_reasons.py DAY0_LIVE_ADMISSION_REJECTED).
+    "DAY0_LIVE_ADMISSION_REJECTED",
+    # PreSubmitRevalidated strategy-floor aborts (event_reactor_adapter.py
+    # _PRESUBMIT_STRATEGY_FLOOR_ABORT_REASONS) — genuine terminal economic floor
+    # rejects with valid upstream proof, not build failures.
+    "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR",
+    "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR",
+    "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR",
+})
 
 
 @dataclass
@@ -3189,13 +3233,16 @@ class OpportunityEventReactor:
             # accepted terminal. If the daemon is NOMINALLY ARMED (reactor_mode=live AND
             # the operator arm is on — read the SAME way the main.py selector reads it,
             # no second authority) the receipt MUST NOT carry submit_lane="LIVE": the
-            # live lane never produces a full-pass NO_SUBMIT with proof_accepted; a
-            # typed pre-venue abort is proof_accepted=False and is routed through
-            # visible rejection/retry classification. submit_lane="LIVE" here means
-            # the live lane silently ate a tradeable entry
-            # (the 11:51-12:12Z incident). Raise rather than persist the kill. Receipts
-            # from the honest control-blocked lane (submit_lane="NO_SUBMIT_ADAPTER" + named
-            # cause) and legacy pre-stamp receipts (submit_lane=None) pass through.
+            # live lane never produces an ORDINARY full-pass NO_SUBMIT with
+            # proof_accepted — submit_lane="LIVE" here means the live lane silently ate
+            # a tradeable entry (the 11:51-12:12Z incident). Raise rather than persist
+            # the kill. Receipts from the honest control-blocked lane
+            # (submit_lane="NO_SUBMIT_ADAPTER" + named cause) and legacy pre-stamp
+            # receipts (submit_lane=None) pass through. The ONE typed exception is
+            # submit_lane=LIVE_PRE_VENUE_ABORT (BLOCKER fix, 2026-07-20): a registered
+            # pre-venue abort (Day0 admission reject / strategy-floor abort) with valid
+            # upstream proof and no venue call — see LiveLaneDarkInvariantError and
+            # LIVE_PRE_VENUE_ABORT_REASONS above.
             self._assert_no_submit_lane_invariant(receipt)
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
         elif receipt.side_effect_status in EXECUTION_RECEIPT_TERMINAL_STATUSES:
@@ -3239,7 +3286,8 @@ class OpportunityEventReactor:
 
     def _assert_no_submit_lane_invariant(self, receipt: EventSubmissionReceipt) -> None:
         """Refuse to persist a full-pass NO_SUBMIT receipt stamped LIVE on an armed
-        live daemon (silent-trade-kill antibody 2026-06-12).
+        live daemon (silent-trade-kill antibody 2026-06-12), except the exact typed
+        LIVE_PRE_VENUE_ABORT disposition (BLOCKER fix, 2026-07-20).
 
         Backward compatible: legacy receipts carry submit_lane=None and pass through;
         only a NEW write that is simultaneously (a) on a nominally-armed live daemon,
@@ -3247,6 +3295,16 @@ class OpportunityEventReactor:
         the impossible combination that, in the incident, silently booked $16 Kelly
         full-pass candidates as accepted no-submits with zero signal the live lane was
         dark.
+
+        submit_lane=LIVE_PRE_VENUE_ABORT is the ONE allowlisted exception: a genuine
+        terminal live-lane verdict (Day0 admission reject / strategy-floor abort)
+        reached BEFORE any venue call, with valid upstream Kelly/FDR/trade-score
+        proof. It is admitted ONLY when the reason base is registered in
+        LIVE_PRE_VENUE_ABORT_REASONS AND venue_call_started is False — checked HERE,
+        not merely trusted from the stamp, so no future caller can widen this lane
+        into a silent-kill bypass by reusing the lane name for an unregistered
+        reason. Ordinary submit_lane="LIVE" stays impossible for a full-pass
+        NO_SUBMIT regardless of reason text.
         """
         nominally_armed = (
             self._config.reactor_mode == "live"
@@ -3254,11 +3312,9 @@ class OpportunityEventReactor:
         )
         if not nominally_armed:
             return
-        if (
-            receipt.proof_accepted is True
-            and receipt.side_effect_status == "NO_SUBMIT"
-            and receipt.submit_lane == "LIVE"
-        ):
+        if not (receipt.proof_accepted is True and receipt.side_effect_status == "NO_SUBMIT"):
+            return
+        if receipt.submit_lane == "LIVE":
             raise LiveLaneDarkInvariantError(
                 "LIVE_LANE_DARK_FULL_PASS_NO_SUBMIT: a proof_accepted NO_SUBMIT receipt "
                 f"stamped submit_lane=LIVE reached the persist boundary on an armed live "
@@ -3267,6 +3323,19 @@ class OpportunityEventReactor:
                 f"{receipt.reason!r}. The live lane never produces a full-pass NO_SUBMIT — "
                 "this is a silently-consumed tradeable entry."
             )
+        if receipt.submit_lane == SUBMIT_LANE_LIVE_PRE_VENUE_ABORT:
+            reason_base = _money_path_reason_base(str(receipt.reason or ""))
+            if reason_base not in LIVE_PRE_VENUE_ABORT_REASONS or receipt.venue_call_started:
+                raise LiveLaneDarkInvariantError(
+                    "LIVE_LANE_DARK_UNREGISTERED_PRE_VENUE_ABORT: a proof_accepted "
+                    "NO_SUBMIT receipt stamped submit_lane=LIVE_PRE_VENUE_ABORT reached "
+                    f"the persist boundary with reason base {reason_base!r} "
+                    f"(registered={reason_base in LIVE_PRE_VENUE_ABORT_REASONS}) and "
+                    f"venue_call_started={receipt.venue_call_started}. event_id="
+                    f"{receipt.event_id} final_intent_id={receipt.final_intent_id} reason="
+                    f"{receipt.reason!r}. LIVE_PRE_VENUE_ABORT is allowlisted ONLY for "
+                    f"{sorted(LIVE_PRE_VENUE_ABORT_REASONS)} with venue_call_started=False."
+                )
 
     def _reject_or_retry_post_submit(
         self,

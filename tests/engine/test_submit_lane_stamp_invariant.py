@@ -1,11 +1,19 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-06-28
+# Last reused/audited: 2026-07-20
 # Authority basis: silent-trade-kill antibody — submit_lane stamp + persist-boundary
 #   invariant. Root cause /tmp/allpass_nosubmit_rootcause.md (32 full-pass candidates
 #   consumed on the no-submit adapter during a live-arm crash-loop, receipts byte-
 #   identical to genuine decision-declined no-submits). RELATIONSHIP tests: they assert
 #   the cross-module invariant that holds when an adapter's receipt flows into the
 #   reactor's persist boundary — not a single function's input/output.
+#   2026-07-20 (BLOCKER fix, ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/
+#   answer.md): added the LIVE_PRE_VENUE_ABORT lane tests. Commit 106942322 restored
+#   proof_accepted=True for the Day0-admission-reject and strategy-floor-abort receipts
+#   but left them stamped submit_lane="LIVE", which this file's OWN invariant then
+#   rejected before insertion (see the two tests below whose docstrings referenced the
+#   now-superseded "typed abort is proof_accepted=False" design). The typed
+#   LIVE_PRE_VENUE_ABORT lane is the fix; plain submit_lane="LIVE" stays impossible for a
+#   full-pass NO_SUBMIT regardless of reason text.
 from __future__ import annotations
 
 import json
@@ -23,12 +31,14 @@ from src.events.opportunity_event import (
 )
 from src.events.reactor import (
     EventSubmissionReceipt,
+    LIVE_PRE_VENUE_ABORT_REASONS,
     LiveLaneDarkInvariantError,
     OpportunityEventReactor,
     ReactorConfig,
 )
 from src.engine.event_reactor_adapter import (
     SUBMIT_LANE_LIVE,
+    SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
     SUBMIT_LANE_NO_SUBMIT_ADAPTER,
     SUBMIT_LANE_SUBMIT_DISABLED,
     _stamp_live_adapter_lane,
@@ -290,12 +300,15 @@ def test_persist_boundary_raises_on_live_stamped_full_pass_no_submit():
 
 
 def test_persist_boundary_rejects_live_typed_abort_when_marked_proof_accepted():
-    """A typed pre-venue abort is not a proof-accepted live no-submit.
+    """A registered pre-venue abort reason stamped PLAIN "LIVE" is still impossible.
 
-    If an adapter emits the old shape (proof_accepted=True + NO_SUBMIT + LIVE
-    stamp), the persist boundary must still treat it as the silent-kill
-    signature. Valid typed abort receipts use proof_accepted=False and route
-    through rejection/retry classification before this boundary.
+    Only submit_lane=LIVE_PRE_VENUE_ABORT is allowlisted for a proof_accepted
+    NO_SUBMIT with one of these reasons (see
+    test_persist_boundary_accepts_live_pre_venue_abort_for_registered_reason
+    below, the production shape since the 2026-07-20 BLOCKER fix). If some future
+    caller stamps the SAME reason text under the plain "LIVE" lane instead, the
+    persist boundary must still treat it as the silent-kill signature — the lane
+    stamp, not the reason text, is what the invariant trusts.
     """
     conn, store = _store()
     event = _forecast_event()
@@ -322,7 +335,10 @@ def test_persist_boundary_rejects_live_typed_abort_when_marked_proof_accepted():
 
 
 def test_armed_live_daemon_rejects_profit_floor_abort_as_visible_decline():
-    """Profit-floor recapture aborts have no venue side effect and no accepted intent."""
+    """A proof_accepted=False strategy-floor abort (the legacy/hypothetical shape, not
+    the production LIVE_PRE_VENUE_ABORT+proof_accepted=True shape below) has no venue
+    side effect and no accepted intent — it is a visible decline, never persisted or
+    dead-lettered."""
     conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
@@ -492,3 +508,154 @@ def test_legacy_receipt_without_submit_lane_still_persists():
     assert len(rows) == 1
     # submit_lane omitted from receipt_json when None (byte-stable legacy hash).
     assert "submit_lane" not in json.loads(rows[0][0])
+
+
+# ---------------------------------------------------------------------------
+# LIVE_PRE_VENUE_ABORT (BLOCKER fix, 2026-07-20): the typed disposition that
+# restores commit 106942322's intent without resurrecting the silent-kill shape.
+# Layer-2 relationship tests: same _reactor()/process_pending harness as above —
+# this IS the reactor's real persist-boundary seam (_assert_no_submit_lane_invariant
+# -> EdliNoSubmitReceiptLedger.insert_idempotent inside process_pending), not a
+# hand-built ledger row bypassing the invariant.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE",
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+        "PreSubmitRevalidated expected profit below strategy floor",
+    ),
+)
+def test_persist_boundary_accepts_live_pre_venue_abort_for_registered_reason(reason: str):
+    """The production shape: proof_accepted=True + NO_SUBMIT + submit_lane=
+    LIVE_PRE_VENUE_ABORT with a registered reason base does NOT trip the invariant."""
+    conn, store = _store()
+    event = _forecast_event()
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
+        reason=reason,
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+    reactor._assert_no_submit_lane_invariant(receipt)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE",
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+        "PreSubmitRevalidated expected profit below strategy floor",
+        "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:x",
+        "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR:x",
+    ),
+)
+def test_armed_live_daemon_persists_registered_pre_venue_abort_end_to_end(reason: str):
+    """End-to-end regression for the BLOCKER fix: the exact receipts commit 106942322
+    intended to restore (Day0 admission reject / strategy-floor abort, proof_accepted=True)
+    now persist to edli_no_submit_receipts through the real reactor seam instead of
+    raising LiveLaneDarkInvariantError before insertion. No requeue, no dead letter —
+    a clean terminal reject with the receipt on record and no venue call
+    (venue_call_started defaults False on this receipt shape)."""
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
+        reason=reason,
+    )
+    assert receipt.venue_call_started is False
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+    result = reactor.process_pending(decision_time=_DECISION_TIME)
+
+    assert result.retried == 0
+    assert result.dead_lettered == 0
+    assert result.proof_accepted == 1
+    rows = _no_submit_rows(conn, event.event_id)
+    assert len(rows) == 1
+    persisted = json.loads(rows[0][0])
+    assert persisted["reason"] == reason
+    assert persisted["submit_lane"] == SUBMIT_LANE_LIVE_PRE_VENUE_ABORT
+
+
+def test_persist_boundary_rejects_live_pre_venue_abort_for_unregistered_reason():
+    """No parallel bypass: the LIVE_PRE_VENUE_ABORT lane is not a free pass for any
+    reason text — only the exact registered bases in LIVE_PRE_VENUE_ABORT_REASONS are
+    admitted. An unregistered reason on this lane still trips the invariant, exactly
+    like a plain LIVE full-pass no-submit would."""
+    conn, store = _store()
+    event = _forecast_event()
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
+        reason="SOME_FUTURE_UNREGISTERED_PRE_VENUE_REASON:detail",
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+    with pytest.raises(LiveLaneDarkInvariantError):
+        reactor._assert_no_submit_lane_invariant(receipt)
+
+
+def test_persist_boundary_rejects_live_pre_venue_abort_when_venue_call_started():
+    """Defense-in-depth: even a registered reason on the LIVE_PRE_VENUE_ABORT lane
+    must still carry venue_call_started=False. If a future code path somehow reaches
+    the venue before returning this typed abort, the invariant refuses to launder
+    that as a pre-venue disposition."""
+    conn, store = _store()
+    event = _forecast_event()
+    receipt = replace(
+        _full_pass_receipt(
+            event,
+            submit_lane=SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
+            reason="DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE",
+        ),
+        venue_call_started=True,
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+    with pytest.raises(LiveLaneDarkInvariantError):
+        reactor._assert_no_submit_lane_invariant(receipt)
+
+
+def test_live_pre_venue_abort_reasons_registry_matches_reactor_export():
+    """The adapter's stamping decision and the invariant's allowlist must agree on the
+    exact reason-base registry — both read the SAME frozenset, not independent copies."""
+    assert LIVE_PRE_VENUE_ABORT_REASONS == {
+        "DAY0_LIVE_ADMISSION_REJECTED",
+        "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR",
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR",
+        "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR",
+    }

@@ -34,6 +34,7 @@ from src.engine.event_reactor_adapter import (
 )
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.reactor import EventSubmissionReceipt, _is_transient_money_path_reason
+from src.riskguard.risk_level import RiskLevel
 from src.contracts.execution_intent import DecisionSourceContext
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -1021,62 +1022,368 @@ def test_day0_live_admission_rejected_registered_in_rejection_reason_registry() 
     assert RejectionReason("DAY0_LIVE_ADMISSION_REJECTED").value == "DAY0_LIVE_ADMISSION_REJECTED"
 
 
-def test_day0_admission_rejection_persists_to_edli_no_submit_receipts(tmp_path) -> None:
-    """End-to-end regression for the M-13 fix: a receipt carrying the classified
-    Day0 admission reason with proof_accepted=True actually writes through
-    EdliNoSubmitReceiptLedger — the exact durable table the audit found empty for
-    every DAY0_* reason. proof_accepted=False (the pre-fix state) must still be
-    refused by the ledger, documenting the exact bug this closes."""
+def test_day0_admission_rejection_ledger_still_refuses_proof_accepted_false() -> None:
+    """The ledger's own gate is unconditional: proof_accepted=False is refused
+    regardless of submit_lane or reason. This is the ledger-level half of the M-13
+    fix; the live-lane persistence half is proven end-to-end below (the previous
+    version of this test hand-inserted a receipt directly and never exercised the
+    production live-lane stamp or the reactor's _assert_no_submit_lane_invariant —
+    see the BLOCKER finding, ~/cgc-answers/
+    2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md, and
+    test_armed_day0_admission_rejection_persists_through_real_adapter_and_reactor_seam
+    which replaces it)."""
     from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
     from src.state.db import init_schema
 
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
+    ledger = EdliNoSubmitReceiptLedger(conn)
+    decision_time = datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
 
-    accepted_receipt = EventSubmissionReceipt(
+    refused_receipt = EventSubmissionReceipt(
         submitted=False,
-        proof_accepted=True,
-        event_id="event-day0-admission-1",
-        causal_snapshot_id="snapshot-day0-admission-1",
+        proof_accepted=False,
+        event_id="event-day0-admission-refused",
+        causal_snapshot_id="snapshot-day0-admission-refused",
         city="Manila",
         target_date="2026-07-02",
         metric="high",
-        executable_snapshot_id="exec-day0-admission-1",
-        final_intent_id="intent-day0-admission-1",
+        executable_snapshot_id="exec-day0-admission-refused",
+        final_intent_id="intent-day0-admission-refused",
         side_effect_status="NO_SUBMIT",
         reason="DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE",
         trade_score_positive=True,
         fdr_pass=True,
-        fdr_family_id="family-day0-admission-1",
+        fdr_family_id="family-day0-admission-refused",
         fdr_hypothesis_count=1,
         kelly_pass=True,
         kelly_execution_price_type="ExecutionPrice",
         kelly_price_fee_deducted=True,
         kelly_size_usd=5.0,
-        kelly_cost_basis_id="cost-basis-1",
-    )
-    ledger = EdliNoSubmitReceiptLedger(conn)
-    decision_time = datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
-
-    ledger.insert_idempotent(accepted_receipt, decision_time=decision_time)
-
-    row = conn.execute(
-        "SELECT receipt_json FROM edli_no_submit_receipts WHERE event_id = ?",
-        (accepted_receipt.event_id,),
-    ).fetchone()
-    assert row is not None
-    assert json.loads(row[0])["reason"] == "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE"
-
-    # The pre-fix shape (proof_accepted=False) is still correctly refused — this is
-    # the exact persist-gate the generic exception wrapper used to trip on.
-    refused_receipt = dataclass_replace(
-        accepted_receipt,
-        event_id="event-day0-admission-2",
-        final_intent_id="intent-day0-admission-2",
-        proof_accepted=False,
+        kelly_cost_basis_id="cost-basis-refused",
     )
     with pytest.raises(ValueError, match="only accepts proof-accepted receipts"):
         ledger.insert_idempotent(refused_receipt, decision_time=decision_time)
+
+
+# BLOCKER FIX (2026-07-20, ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/
+# answer.md): the tests below REPLACE the trivialized persistence test above. That test
+# hand-inserted a receipt directly into EdliNoSubmitReceiptLedger, bypassing BOTH the live
+# adapter's submit_lane stamping (_stamp_live_adapter_lane) and the reactor's persist-
+# boundary invariant (_assert_no_submit_lane_invariant) — so it could not detect that the
+# EXACT receipt shape commit 106942322 restored (proof_accepted=True + NO_SUBMIT, stamped
+# submit_lane="LIVE" by the live adapter) is rejected by LiveLaneDarkInvariantError before
+# insertion on an armed live daemon, defeating the restoration and risking a dead letter.
+#
+# These tests drive the REAL seam: the armed live adapter's _submit_inner raises the
+# production exception, the production classifier (_day0_admission_rejection_receipt_reason
+# / _presubmit_strategy_floor_abort_reason) tags the reason, the adapter stamps the NEW typed
+# submit_lane=LIVE_PRE_VENUE_ABORT (not plain LIVE), and a REAL OpportunityEventReactor
+# persists the receipt through EdliNoSubmitReceiptLedger — proving the receipt survives to
+# the durable table with no venue call and no dead letter. The Day0 admission GATE's own
+# internal logic (city/metric/source-health/etc.) is separately covered by the ~20
+# test_day0_submit_gate_* tests above; here it is monkeypatched to fire so the test isolates
+# the receipt-persistence seam this fix targets.
+
+
+def _day0_admission_real_seam_event():
+    """A FORECAST_SNAPSHOT_READY event (matches build_test_no_submit_proof_bundle's
+    forecast-lane fixture assumptions — its source_truth.source_id must agree with
+    the forecast evidence's forecast_source_id, both "opendata"; a Day0 payload has
+    no source_id field at all). The Day0 admission circuit breaker this test
+    isolates (day0_admission.py, invoked from
+    _build_live_execution_command_certificates) runs unconditional on event_type —
+    forecast and Day0 events share the exact same live submit path in
+    event_reactor_adapter.py's _submit_inner, so a forecast-lane event drives the
+    identical exception-classification + submit_lane-stamping seam this fix
+    targets."""
+    from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+
+    payload = ForecastSnapshotReadyPayload(
+        city="Manila",
+        target_date="2026-07-02",
+        metric="high",
+        source_id="opendata",
+        source_run_id="run-day0-admission-real-seam",
+        cycle="00",
+        track="live",
+        snapshot_id="snap-day0-admission-real-seam",
+        snapshot_hash="hash-day0-admission-real-seam",
+        captured_at="2026-07-02T02:00:00+00:00",
+        available_at="2026-07-02T02:01:00+00:00",
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=51,
+        min_members_floor=40,
+        completeness_status="COMPLETE",
+        required_steps=[0],
+        observed_steps=[0],
+        expected_members=51,
+        source_run_status="SUCCESS",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Manila|2026-07-02|high|day0-admission-real-seam",
+        source="forecast_live",
+        observed_at="2026-07-02T02:00:00+00:00",
+        available_at="2026-07-02T02:01:00+00:00",
+        received_at="2026-07-02T02:02:00+00:00",
+        payload=payload,
+        causal_snapshot_id="snap-day0-admission-real-seam",
+    )
+
+
+def _full_pass_no_submit_receipt_for_real_seam(event):
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    base = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        city="Manila",
+        target_date="2026-07-02",
+        metric="high",
+        condition_id="condition-day0-real-seam-1",
+        token_id="yes-day0-real-seam-1",
+        executable_snapshot_id="snapshot-day0-real-seam-1",
+        family_id="family-day0-real-seam-1",
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="family-day0-real-seam-1",
+        fdr_hypothesis_count=1,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=5.0,
+        kelly_cost_basis_id="cost-day0-real-seam-1",
+        kelly_decision_id="kelly-day0-real-seam-1",
+        risk_decision_id="risk-day0-real-seam-1",
+        final_intent_id="intent-day0-real-seam-1",
+        side_effect_status="NO_SUBMIT",
+        reason="event_bound_final_intent_no_submit",
+    )
+    decision_time = datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
+    return dataclass_replace(
+        base,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(
+            event, base, decision_time=decision_time
+        ),
+    )
+
+
+def _build_real_seam_live_adapter(monkeypatch, event, *, raising_exception: BaseException):
+    """Build the armed live adapter with build_event_bound_no_submit_receipt mocked to
+    the full-pass receipt above (the internal candidate/proof-building pipeline is
+    exhaustively covered elsewhere; this test isolates the exception-classification +
+    submit_lane-stamping + reactor-persistence seam) and
+    _build_live_execution_command_certificates monkeypatched to raise the EXACT
+    production exception this fix classifies. executor_submit raises if ever called —
+    a pre-venue abort must never reach the venue."""
+    from src.events.reactor import require_operator_arm
+
+    monkeypatch.setattr(
+        era,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: _full_pass_no_submit_receipt_for_real_seam(event),
+    )
+    # Entry-pause control-plane read is a SEPARATE, unrelated gate (reads the real
+    # control_overrides/risk_actions tables via get_world_connection(), which this
+    # in-memory test fixture never provisions). Force it to its default "not paused"
+    # answer so the test isolates the exception-classification seam this fix targets
+    # rather than an unrelated control-plane wiring gap.
+    monkeypatch.setattr(era, "_entry_pause_blocks_live_submit", lambda *_args, **_kwargs: None)
+
+    def _raise_command_certificates(**_kwargs):
+        raise raising_exception
+
+    monkeypatch.setattr(
+        era,
+        "_build_live_execution_command_certificates",
+        _raise_command_certificates,
+    )
+
+    executor_called = {"called": False}
+
+    def _executor(_final_intent, _command):
+        executor_called["called"] = True
+        raise AssertionError(
+            "executor_submit must never be reached by a pre-venue abort"
+        )
+
+    submit = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        durable_submit_outbox_enabled=True,
+        executor_submit=_executor,
+        operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
+        edli_live_scope="forecast_plus_day0",
+    )
+    return submit, executor_called
+
+
+def test_armed_day0_admission_rejection_stamps_typed_pre_venue_abort_lane(monkeypatch) -> None:
+    """Layer-1 (adapter): the armed live adapter classifies a real Day0 admission
+    ValueError as proof_accepted=True + submit_lane=LIVE_PRE_VENUE_ABORT — not plain
+    LIVE, which the reactor invariant would reject before insertion."""
+    event = _day0_admission_real_seam_event()
+    submit, executor_called = _build_real_seam_live_adapter(
+        monkeypatch,
+        event,
+        raising_exception=ValueError(
+            "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE"
+        ),
+    )
+
+    receipt = submit(event, datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc))
+
+    assert receipt.reason == "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE"
+    assert receipt.proof_accepted is True
+    assert receipt.submitted is False
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.submit_lane == era.SUBMIT_LANE_LIVE_PRE_VENUE_ABORT
+    assert executor_called["called"] is False
+
+
+def test_armed_strategy_floor_abort_stamps_typed_pre_venue_abort_lane(monkeypatch) -> None:
+    """Same Layer-1 proof for the strategy-floor abort restored by 106942322."""
+    from src.events.live_order_aggregate import LiveOrderAggregateError
+
+    event = _day0_admission_real_seam_event()
+    submit, executor_called = _build_real_seam_live_adapter(
+        monkeypatch,
+        event,
+        raising_exception=LiveOrderAggregateError(
+            "PreSubmitRevalidated expected profit below strategy floor: -0.03 < 0.0"
+        ),
+    )
+
+    receipt = submit(event, datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc))
+
+    assert receipt.reason.startswith(
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+    )
+    assert receipt.proof_accepted is True
+    assert receipt.submitted is False
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.submit_lane == era.SUBMIT_LANE_LIVE_PRE_VENUE_ABORT
+    assert executor_called["called"] is False
+
+
+def test_armed_day0_admission_rejection_persists_through_real_adapter_and_reactor_seam(
+    monkeypatch,
+) -> None:
+    """Layer-2 (adapter -> reactor, end-to-end): the receipt the armed adapter
+    produces above is fed as final_intent_submit into a REAL OpportunityEventReactor.
+    process_pending. The receipt persists to edli_no_submit_receipts with the
+    DAY0_LIVE_ADMISSION_REJECTED reason and the typed lane, the event is terminally
+    disposed (not requeued, not dead-lettered), and the venue is never called — the
+    exact assembly the BLOCKER finding says commit 106942322 broke.
+
+    ``submit`` is wrapped in a plain function before wiring it into the reactor:
+    the real adapter always exposes ``process_global_batch`` on its returned
+    callable, and process_pending unconditionally routes EVERY event through the
+    separate multi-winner global-batch auction loop whenever that attribute is
+    present (reactor.py ~1254, docs/operations/current/plans/
+    auction_multiwinner_plan_2026-07-19.md) — a different, actively-reviewed
+    subsystem with its own blockers. Stripping the attribute pins this test to the
+    single-event submit + persist-boundary seam this BLOCKER fix actually targets,
+    without entangling it with that separate auction-continuation surface."""
+    from src.events.event_store import EventStore
+    from src.events.reactor import OpportunityEventReactor, ReactorConfig
+    from src.state.db import init_schema
+    from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+
+    event = _day0_admission_real_seam_event()
+    submit, executor_called = _build_real_seam_live_adapter(
+        monkeypatch,
+        event,
+        raising_exception=ValueError(
+            "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE"
+        ),
+    )
+    plain_submit = lambda _event, _decision_time: submit(_event, _decision_time)
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    store = EventStore(conn)
+    store.insert_or_ignore(event)
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=plain_submit,
+        reject=lambda _event, _stage, _reason: None,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    result = reactor.process_pending(
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
+    )
+
+    assert executor_called["called"] is False, "no venue call on a pre-venue abort"
+    assert result.retried == 0
+    assert result.dead_lettered == 0
+    assert result.proof_accepted == 1
+
+    row = conn.execute(
+        "SELECT receipt_json FROM edli_no_submit_receipts WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None, (
+        "the receipt must survive to edli_no_submit_receipts — the exact table the "
+        "audit found empty for every DAY0_* reason"
+    )
+    persisted = json.loads(row[0])
+    assert persisted["reason"] == "DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE"
+    assert persisted["submit_lane"] == era.SUBMIT_LANE_LIVE_PRE_VENUE_ABORT
+
+
+def test_ordinary_live_no_submit_still_hard_fails_the_invariant() -> None:
+    """Negative control: an ordinary LIVE submit_lane claiming a proof_accepted
+    NO_SUBMIT (the impossible shape the invariant exists to catch) must still raise
+    — the LIVE_PRE_VENUE_ABORT allowlist above does not weaken this."""
+    from src.events.reactor import LiveLaneDarkInvariantError, OpportunityEventReactor, ReactorConfig
+
+    event = _day0_admission_real_seam_event()
+    receipt = dataclass_replace(
+        _full_pass_no_submit_receipt_for_real_seam(event),
+        reason="DAY0_LIVE_ADMISSION_REJECTED:DAY0_ONE_BIN_EDGE_FRAGILE",
+        submit_lane="LIVE",
+    )
+    conn = sqlite3.connect(":memory:")
+    from src.state.db import init_schema
+
+    init_schema(conn)
+    from src.events.event_store import EventStore
+
+    reactor = OpportunityEventReactor(
+        EventStore(conn),
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _decision_time: receipt,
+        reject=lambda _event, _stage, _reason: None,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+        regret_ledger=None,
+    )
+    with pytest.raises(LiveLaneDarkInvariantError):
+        reactor._assert_no_submit_lane_invariant(receipt)
 
 
 @pytest.mark.parametrize(

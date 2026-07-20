@@ -269,6 +269,7 @@ from src.events.reactor import (
     GlobalBatchSubmitResult,
     OpportunityEventReactor,
     ReactorConfig,
+    SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
 )
 from src.riskguard.risk_level import RiskLevel
 from src.sizing.sizing_context import SizingContext
@@ -7323,12 +7324,25 @@ def event_bound_live_adapter_from_trade_conn(
                 # decision_time > 2026-06-28 (last through 2026-07-13). Restored to
                 # proof_accepted=True so the durable economic-receipt ledger resumes carrying
                 # this gate's rejects instead of only the diagnostic regret stream.
+                #
+                # TYPED PRE-VENUE ABORT LANE (BLOCKER fix, 2026-07-20, ~/cgc-answers/
+                # 2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md): proof_accepted=True
+                # + NO_SUBMIT stamped submit_lane="LIVE" (the generic stamp
+                # _stamp_live_adapter_lane applies when submit_lane is still None) is exactly
+                # the shape reactor.OpportunityEventReactor._assert_no_submit_lane_invariant
+                # rejects on an armed daemon — the restoration above never actually persisted
+                # on a live-armed daemon; it raised LiveLaneDarkInvariantError first. Stamp the
+                # typed LIVE_PRE_VENUE_ABORT lane HERE (before _stamp_live_adapter_lane sees a
+                # None) so the invariant recognizes this as the registered pre-venue abort it
+                # is (reason base is in reactor.LIVE_PRE_VENUE_ABORT_REASONS) rather than the
+                # impossible plain-LIVE full-pass no-submit.
                 return dataclass_replace(
                     no_submit_receipt,
                     submitted=False,
                     side_effect_status="NO_SUBMIT",
                     reason=_strategy_floor_abort,
                     proof_accepted=True,
+                    submit_lane=SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
                 )
             _price_moved_abort = _submit_price_moved_abort_reason(exc)
             if _price_moved_abort is not None:
@@ -7352,6 +7366,11 @@ def event_bound_live_adapter_from_trade_conn(
             # invisible in that ledger). This is a genuine gate verdict with valid upstream
             # Kelly/FDR/trade-score proof, not a build failure — same category as the strategy
             # floor abort — so it gets its own classification and proof_accepted=True.
+            #
+            # TYPED PRE-VENUE ABORT LANE (BLOCKER fix, 2026-07-20 — see the strategy-floor
+            # abort above for the full incident): stamp submit_lane=LIVE_PRE_VENUE_ABORT so
+            # the reactor's persist-boundary invariant admits this registered reason instead
+            # of raising LiveLaneDarkInvariantError on the plain LIVE stamp.
             _day0_admission_abort = _day0_admission_rejection_receipt_reason(exc)
             if _day0_admission_abort is not None:
                 return dataclass_replace(
@@ -7360,6 +7379,7 @@ def event_bound_live_adapter_from_trade_conn(
                     side_effect_status="NO_SUBMIT",
                     reason=_day0_admission_abort,
                     proof_accepted=True,
+                    submit_lane=SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
                 )
             if (
                 real_order_submit_enabled
