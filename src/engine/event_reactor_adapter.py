@@ -28800,41 +28800,6 @@ def _prepare_current_global_probability_family(
             raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
         local_target = date.fromisoformat(str(family.target_date))
         local_now = decision_time.astimezone(ZoneInfo(str(city.timezone)))
-        observation_table = day0_observation_conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type='table' AND name='observation_instants'"
-        ).fetchone()
-        if observation_table is None:
-            raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
-        has_target_observation = (
-            day0_observation_conn.execute(
-                "SELECT 1 FROM observation_instants "
-                "WHERE city = ? AND target_date = ? LIMIT 1",
-                (str(family.city), str(family.target_date)),
-            ).fetchone()
-            is not None
-        )
-        if (
-            allow_unobserved_day0_replacement
-            and not has_target_observation
-            and local_now.date() == local_target
-        ):
-            from src.data.observation_client import (
-                _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
-            )
-
-            local_midnight = local_now.replace(
-                hour=0,
-                minute=0,
-                second=0,
-                microsecond=0,
-                fold=0,
-            )
-            use_unobserved_day0_replacement = (
-                timedelta(0) <= local_now - local_midnight <= timedelta(
-                    hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
-                )
-            )
         from src.execution.day0_hard_fact_exit import (
             _final_daily_observation_extreme,
         )
@@ -28846,8 +28811,44 @@ def _prepare_current_global_probability_family(
             now=decision_time,
             conn=forecast_conn,
         )
-        if final_daily_observation is not None:
-            use_unobserved_day0_replacement = False
+        if final_daily_observation is None:
+            if local_target < local_now.date():
+                raise ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
+            observation_table = day0_observation_conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='observation_instants'"
+            ).fetchone()
+            if observation_table is None:
+                raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
+            has_target_observation = (
+                day0_observation_conn.execute(
+                    "SELECT 1 FROM observation_instants "
+                    "WHERE city = ? AND target_date = ? LIMIT 1",
+                    (str(family.city), str(family.target_date)),
+                ).fetchone()
+                is not None
+            )
+            if (
+                allow_unobserved_day0_replacement
+                and not has_target_observation
+                and local_now.date() == local_target
+            ):
+                from src.data.observation_client import (
+                    _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
+                )
+
+                local_midnight = local_now.replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                    fold=0,
+                )
+                use_unobserved_day0_replacement = (
+                    timedelta(0) <= local_now - local_midnight <= timedelta(
+                        hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
+                    )
+                )
         local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
         if use_unobserved_day0_replacement:
             readiness = _latest_replacement_readiness(
