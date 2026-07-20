@@ -2127,6 +2127,13 @@ def test_forecast_event_bridge_accepts_fsr_reemit_with_matching_posterior_identi
     assert "forecast_event_bridge" not in result["failing_surfaces"]
 
 
+def test_forecast_event_bridge_latest_fsr_uses_indexed_available_time_order() -> None:
+    source = inspect.getsource(live_health._forecast_to_event_bridge_surface)
+
+    assert '"available_at DESC"' in source
+    assert 'if "available_at" in event_columns' in source
+
+
 def test_forecast_event_bridge_rejects_superseded_matching_posterior_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

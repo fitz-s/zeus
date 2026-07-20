@@ -1184,13 +1184,18 @@ def _forecast_to_event_bridge_surface(
             if "payload_json" in event_columns
             else "NULL AS payload_json"
         )
+        latest_order = (
+            "available_at DESC"
+            if "available_at" in event_columns
+            else "rowid DESC"
+        )
         latest_fsr_rows, fsr_rows_err = _sqlite_ro_rows(
             world_db,
             f"""
             SELECT event_id, entity_key, created_at, {payload_select}
              FROM opportunity_events
              WHERE event_type = 'FORECAST_SNAPSHOT_READY'
-             ORDER BY rowid DESC
+             ORDER BY {latest_order}
              LIMIT 1
             """,
         )
