@@ -1,5 +1,5 @@
 # Created: 2026-06-29
-# Last audited: 2026-06-29
+# Last reused/audited: 2026-07-20
 # Authority basis: operator directive "加数据" (add CWA/HKO station-forecast data to the
 #   live forecast cycle); src/data/station_forecast_adapter.py single_runs persist contract;
 #   config/station_forecast_sources.json adapter_kind dispatch seam.
@@ -220,3 +220,13 @@ def test_availability_poll_is_wired_to_station_ingest():
 
     src = inspect.getsource(ingest_main._replacement_availability_poll_tick)
     assert "_ingest_station_forecasts_if_due" in src
+
+
+def test_diagnostic_download_cycle_does_not_duplicate_station_ingest():
+    """Only the due-gated availability poll may fetch station forecasts."""
+    import inspect
+
+    from src.data import replacement_forecast_production as prod
+
+    src = inspect.getsource(prod._replacement_forecast_download_cycle)
+    assert "_ingest_station_forecasts_live(cfg)" not in src
