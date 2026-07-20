@@ -6553,6 +6553,98 @@ def test_check_pending_retries_persists_day0_redecision_release(conn):
     assert payload["release_reason"] == "EXIT_RETRY_COOLDOWN_EXPIRED"
 
 
+def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution.exit_lifecycle import check_pending_retries
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    now = datetime.now(timezone.utc)
+    position = Position(
+        trade_id="pos-no-bid-liquidity-wait",
+        market_id="condition-test",
+        city="London",
+        cluster="London",
+        target_date="2026-07-02",
+        bin_label="14C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        day0_entered_at="2026-07-02T00:48:30+00:00",
+        chain_state="synced",
+        shares=5.0,
+        chain_shares=5.0,
+        cost_basis_usd=2.50,
+        chain_cost_basis_usd=2.50,
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+        entered_at="2026-07-02T00:11:43+00:00",
+        order_status="retry_pending",
+        exit_state="retry_pending",
+        exit_retry_count=3,
+        next_exit_retry_at="2000-01-01T00:00:00+00:00",
+        last_exit_error="exit_no_executable_bid",
+        exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-no-bid-liquidity-wait",
+        captured_at=now,
+        freshness_deadline=now + timedelta(minutes=5),
+        orderbook_top_bid=None,
+        orderbook_top_ask=Decimal("0.001"),
+    )
+
+    assert check_pending_retries(position, conn=conn) is False
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+    assert position.exit_retry_count == 3
+    assert position.next_exit_retry_at == "2000-01-01T00:00:00+00:00"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-positive-bid-liquidity-wake",
+        captured_at=now + timedelta(seconds=1),
+        freshness_deadline=now + timedelta(minutes=5),
+        orderbook_top_bid=Decimal("0.001"),
+        orderbook_top_ask=Decimal("0.002"),
+    )
+
+    assert check_pending_retries(position, conn=conn) is True
+    assert position.state == "day0_window"
+    assert position.exit_state == ""
+    assert position.exit_retry_count == 0
+    assert position.next_exit_retry_at == ""
+    event = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert event["event_type"] == "EXIT_RETRY_RELEASED"
+    assert json.loads(event["payload_json"])["error"] == "exit_no_executable_bid"
+
+
 def test_monitor_refreshed_projection_updated_at_tracks_event_time(monkeypatch):
     from src.engine import lifecycle_events
     from src.state.portfolio import Position

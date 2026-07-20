@@ -6110,6 +6110,20 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     if not runtime_gate_block and is_exit_cooldown_active(position):
         return False  # Still cooling down
 
+    if previous_error == "exit_no_executable_bid":
+        snapshot = _latest_exit_snapshot_context(
+            conn,
+            _asset_id_for_position(position),
+            require_sell_bid=False,
+        )
+        if (
+            _positive_decimal(
+                snapshot.get("executable_snapshot_orderbook_top_bid")
+            )
+            is None
+        ):
+            return False
+
     # Cooldown expired — position is eligible for exit re-evaluation
     position.exit_state = ""  # Reset to allow new exit attempt
     position.next_exit_retry_at = ""

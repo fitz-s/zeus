@@ -6392,6 +6392,16 @@ def execute_monitoring_phase(
                     summary["pending_exit_retry_current_clob_quote_refreshed"] = (
                         summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
                     )
+                    if pending_exit_monitor_only and check_pending_retries(
+                        pos,
+                        conn=conn,
+                    ):
+                        pending_exit_monitor_only = False
+                        portfolio_dirty = True
+                        summary["pending_exit_liquidity_wait_released"] = (
+                            summary.get("pending_exit_liquidity_wait_released", 0)
+                            + 1
+                        )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
             # An absorbing hard fact makes the held token worth exactly zero at
