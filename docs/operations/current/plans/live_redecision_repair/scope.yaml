@@ -9,6 +9,7 @@ allowed_files:
   - architecture/script_manifest.yaml
   - config/settings.json
   - scripts/check_replacement_forecast_live_dry_run.py
+  - scripts/download_replacement_forecast_current_targets.py
   - scripts/apply_replacement_forecast_live_switch.py
   - scripts/plan_replacement_forecast_live_config.py
   - scripts/verify_e2e_money_path.py
@@ -70,6 +71,7 @@ allowed_files:
   - tests/test_replacement_forecast_switch_decision.py
   - tests/test_replacement_forecast_config_switch.py
   - tests/test_replacement_forecast_current_target_plan.py
+  - tests/test_replacement_download_cycle_currency_gate.py
   - tests/test_replacement_forecast_seed_discovery.py
   - tests/test_replacement_qlcb_materialization.py
   - tests/engine/test_qkernel_spine_bridge.py

@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-07-19
+# Last reused or audited: 2026-07-20
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
 #   src/data/replacement_forecast_production.py + replacement_forecast_current_target_plan.py):
 #   the ALREADY_COVERED / HAVE_RAW_MANIFESTS short-circuits contained NO cycle comparison, so once
@@ -23,6 +23,8 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from src.data.replacement_forecast_production import (
     _download_replacement_forecast_current_targets_if_needed,
@@ -392,6 +394,210 @@ def test_scoped_source_commit_is_not_truncated_by_maintenance_limit(
     assert len(calls) == 1
     assert calls[0]["required_scopes"] == scopes
     assert calls[0]["limit"] is None
+
+
+def test_current_target_budget_starts_after_probe_and_plan(tmp_path, monkeypatch) -> None:
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    calls: list = []
+    clock = [0.0]
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+
+    def _probe():
+        clock[0] = 100.0
+        return AVAILABLE_CYCLE
+
+    monkeypatch.setattr(production, "_probe_resolved_available_cycle", _probe)
+    monkeypatch.setattr(production.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda *_args, **_kwargs: _PlanStub(
+            ready=False,
+            missing_openmeteo_manifest_count=1,
+        ),
+    )
+
+    def _download(**kwargs):
+        calls.append(kwargs)
+        return {"status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"}
+
+    monkeypatch.setattr(dl, "download_current_target_raw_inputs", _download)
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        max_wall_clock_seconds=5.0,
+    )
+
+    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
+    assert len(calls) == 1
+    assert calls[0]["max_wall_clock_seconds"] == 5.0
+
+
+def test_timeboxed_current_target_slices_reuse_cycle_bucket_pool(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    calls: list[dict[str, object]] = []
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+
+    class _Pool:
+        close_count = 0
+
+        def read(self, _uri, _index):
+            return 0.0
+
+        def close(self):
+            self.close_count += 1
+
+    pool = _Pool()
+    production._close_current_target_bucket_pool()
+    monkeypatch.setattr(
+        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
+    )
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda *_args, **_kwargs: _PlanStub(
+            ready=False,
+            missing_openmeteo_manifest_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_bucket_transport.BucketPointReaderPool",
+        lambda: pool,
+    )
+
+    def _download(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": len(calls) == 1,
+        }
+
+    monkeypatch.setattr(dl, "download_current_target_raw_inputs", _download)
+
+    first = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path), max_wall_clock_seconds=5.0
+    )
+    second = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path), max_wall_clock_seconds=5.0
+    )
+
+    assert first["timeboxed_incomplete"] is True
+    assert second["timeboxed_incomplete"] is False
+    assert calls[0]["bucket_reader_pool"] is pool
+    assert calls[1]["bucket_reader_pool"] is pool
+    assert pool.close_count == 1
+
+
+def test_cycle_change_closes_timeboxed_pool_before_zero_budget_return(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    import src.data.replacement_forecast_production as production
+
+    class _Pool:
+        close_count = 0
+
+        def close(self):
+            self.close_count += 1
+
+    old_pool = _Pool()
+    production._close_current_target_bucket_pool()
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_bucket_transport.BucketPointReaderPool",
+        lambda: old_pool,
+    )
+    assert production._current_target_bucket_pool(AVAILABLE_CYCLE) is old_pool
+    next_cycle = AVAILABLE_CYCLE.replace(hour=6)
+    monkeypatch.setattr(
+        production, "_probe_resolved_available_cycle", lambda: next_cycle
+    )
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        max_wall_clock_seconds=0.0,
+        required_scopes=(("London", "2026-06-10", "high"),),
+    )
+
+    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
+    assert old_pool.close_count == 1
+
+
+def test_preflight_error_closes_timeboxed_cycle_pool(tmp_path, monkeypatch) -> None:
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+
+    class _Pool:
+        close_count = 0
+
+        def close(self):
+            self.close_count += 1
+
+    pool = _Pool()
+    production._close_current_target_bucket_pool()
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_bucket_transport.BucketPointReaderPool",
+        lambda: pool,
+    )
+    assert production._current_target_bucket_pool(AVAILABLE_CYCLE) is pool
+    monkeypatch.setattr(
+        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
+    )
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("plan failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="plan failed"):
+        _download_replacement_forecast_current_targets_if_needed(_cfg(db, tmp_path))
+
+    assert pool.close_count == 1
+
+
+def test_direct_downloader_does_not_close_injected_bucket_pool(tmp_path) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    class _Pool:
+        close_count = 0
+
+        def close(self):
+            self.close_count += 1
+
+    pool = _Pool()
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=_PlanStub(ready=False, rows=()),
+        max_wall_clock_seconds=5.0,
+        bucket_reader_pool=pool,
+    )
+
+    assert report["target_count"] == 0
+    assert pool.close_count == 0
 
 
 def test_ready_plan_with_current_artifacts_skips_without_download(tmp_path, monkeypatch) -> None:

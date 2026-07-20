@@ -24,6 +24,7 @@ manifests only — it never downloads).
 
 from __future__ import annotations
 
+import atexit
 import functools
 import json
 import logging
@@ -44,6 +45,73 @@ logger = logging.getLogger("zeus.replacement_forecast_production")
 
 _SOURCE_CLOCK_DOWNLOAD_INFLIGHT_LOCK = Lock()
 _SOURCE_CLOCK_DOWNLOAD_INFLIGHT: dict[tuple[object, ...], object] = {}
+_CURRENT_TARGET_DOWNLOAD_LOCK = Lock()
+_CURRENT_TARGET_BUCKET_POOL_LOCK = Lock()
+_CURRENT_TARGET_BUCKET_POOL: object | None = None
+_CURRENT_TARGET_BUCKET_POOL_CYCLE: datetime | None = None
+
+
+def _close_current_target_bucket_pool(cycle: datetime | None = None) -> None:
+    global _CURRENT_TARGET_BUCKET_POOL, _CURRENT_TARGET_BUCKET_POOL_CYCLE
+    with _CURRENT_TARGET_BUCKET_POOL_LOCK:
+        if (
+            cycle is not None
+            and _CURRENT_TARGET_BUCKET_POOL_CYCLE is not None
+            and _CURRENT_TARGET_BUCKET_POOL_CYCLE != cycle
+        ):
+            return
+        pool = _CURRENT_TARGET_BUCKET_POOL
+        _CURRENT_TARGET_BUCKET_POOL = None
+        _CURRENT_TARGET_BUCKET_POOL_CYCLE = None
+    if pool is not None:
+        pool.close()
+
+
+def _close_stale_current_target_bucket_pool(cycle: datetime) -> None:
+    global _CURRENT_TARGET_BUCKET_POOL, _CURRENT_TARGET_BUCKET_POOL_CYCLE
+    with _CURRENT_TARGET_BUCKET_POOL_LOCK:
+        if (
+            _CURRENT_TARGET_BUCKET_POOL is None
+            or _CURRENT_TARGET_BUCKET_POOL_CYCLE == cycle
+        ):
+            return
+        pool = _CURRENT_TARGET_BUCKET_POOL
+        _CURRENT_TARGET_BUCKET_POOL = None
+        _CURRENT_TARGET_BUCKET_POOL_CYCLE = None
+    pool.close()
+
+
+def _current_target_bucket_pool(cycle: datetime):
+    global _CURRENT_TARGET_BUCKET_POOL, _CURRENT_TARGET_BUCKET_POOL_CYCLE
+    _close_stale_current_target_bucket_pool(cycle)
+    with _CURRENT_TARGET_BUCKET_POOL_LOCK:
+        if _CURRENT_TARGET_BUCKET_POOL is None:
+            from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+                BucketPointReaderPool,
+            )
+
+            _CURRENT_TARGET_BUCKET_POOL = BucketPointReaderPool()
+            _CURRENT_TARGET_BUCKET_POOL_CYCLE = cycle
+        return _CURRENT_TARGET_BUCKET_POOL
+
+
+def _single_current_target_download(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not _CURRENT_TARGET_DOWNLOAD_LOCK.acquire(blocking=False):
+            return {"status": "CURRENT_TARGET_DOWNLOAD_INFLIGHT_SKIP"}
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            _close_current_target_bucket_pool()
+            raise
+        finally:
+            _CURRENT_TARGET_DOWNLOAD_LOCK.release()
+
+    return wrapped
+
+
+atexit.register(_close_current_target_bucket_pool)
 
 # The source-clock downloader can parse up to this many Open-Meteo locations
 # from one response. Keep the urgent first request equally dense: after a run
@@ -329,6 +397,7 @@ def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
     return newest_complete_cycle(availability)
 
 
+@_single_current_target_download
 def _download_replacement_forecast_current_targets_if_needed(
     cfg: dict[str, object],
     *,
@@ -362,11 +431,6 @@ def _download_replacement_forecast_current_targets_if_needed(
     # source_available_at metadata model passed to the downloader — it takes no part in
     # deciding WHICH run to fetch.
     release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-    deadline = (
-        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
-        if max_wall_clock_seconds is not None
-        else None
-    )
     available_cycle = _probe_resolved_available_cycle()
     if available_cycle is None:
         return {
@@ -374,6 +438,7 @@ def _download_replacement_forecast_current_targets_if_needed(
         "detail": "no anchor cycle provable by provider probes this tick; "
             "retrying next tick — a guessed run is never requested",
         }
+    _close_stale_current_target_bucket_pool(available_cycle)
     downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
     cycle_advanced = downloaded_cycle is None or downloaded_cycle < available_cycle
 
@@ -395,6 +460,7 @@ def _download_replacement_forecast_current_targets_if_needed(
     )
     cycle_targets_are_materialized = plan is not None and plan.ready
     if cycle_targets_are_materialized:
+        _close_current_target_bucket_pool()
         return {
             "status": "CURRENT_TARGETS_ALREADY_COVERED",
             "coverage": plan.as_dict(),
@@ -402,12 +468,18 @@ def _download_replacement_forecast_current_targets_if_needed(
             "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
         }
     if cycle_targets_have_current_manifests:
+        _close_current_target_bucket_pool()
         return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "coverage": plan.as_dict(),
             "available_cycle": available_cycle.isoformat(),
             "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
         }
+    deadline = (
+        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+        if max_wall_clock_seconds is not None
+        else None
+    )
     remaining = (
         max(0.0, deadline - time.monotonic())
         if deadline is not None
@@ -431,35 +503,43 @@ def _download_replacement_forecast_current_targets_if_needed(
     download_kwargs: dict[str, object] = {}
     if required_scopes is not None:
         download_kwargs["required_scopes"] = required_scopes
-    result = download_current_target_openmeteo_inputs(
-        forecast_db=Path(str(forecast_db)),
-        output_dir=Path(str(output_dir)),
-        cycle=cycle,
-        # ``required_scopes`` is already the bounded, freshly committed source
-        # batch. Applying the generic maintenance limit here silently drops the
-        # tail before the deadline can decide how much work fits, leaving raw
-        # model rows without the anchor required to materialize q.
-        limit=(
-            None
-            if required_scopes is not None
-            else int(cfg.get("download_limit") or 10)
-        ),
-        write_db=True,
-        release_lag_hours=release_lag_hours,
-        anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-        # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
-        # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
-        # needed for ALL current targets — coverage ("a posterior exists") must not filter
-        # the target list. Once that cycle is already represented, a residual manifest gap
-        # must repair only uncovered rows; replaying every covered target each poll rewrites
-        # the same manifests and repeatedly drives global seed discovery.
-        include_covered=cycle_advanced,
-        missing_manifests_only=not cycle_advanced,
-        precomputed_plan=plan,
-        max_wall_clock_seconds=remaining,
-        fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
-        **download_kwargs,
-    )
+    bucket_pool = _current_target_bucket_pool(cycle)
+    try:
+        result = download_current_target_openmeteo_inputs(
+            forecast_db=Path(str(forecast_db)),
+            output_dir=Path(str(output_dir)),
+            cycle=cycle,
+            # ``required_scopes`` is already the bounded, freshly committed source
+            # batch. Applying the generic maintenance limit here silently drops the
+            # tail before the deadline can decide how much work fits, leaving raw
+            # model rows without the anchor required to materialize q.
+            limit=(
+                None
+                if required_scopes is not None
+                else int(cfg.get("download_limit") or 10)
+            ),
+            write_db=True,
+            release_lag_hours=release_lag_hours,
+            anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
+            # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
+            # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
+            # needed for ALL current targets — coverage ("a posterior exists") must not filter
+            # the target list. Once that cycle is already represented, a residual manifest gap
+            # must repair only uncovered rows; replaying every covered target each poll rewrites
+            # the same manifests and repeatedly drives global seed discovery.
+            include_covered=cycle_advanced,
+            missing_manifests_only=not cycle_advanced,
+            precomputed_plan=plan,
+            max_wall_clock_seconds=remaining,
+            fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+            bucket_reader_pool=bucket_pool,
+            **download_kwargs,
+        )
+    except Exception:
+        _close_current_target_bucket_pool(cycle)
+        raise
+    if not bool(result.get("timeboxed_incomplete")):
+        _close_current_target_bucket_pool(cycle)
     result.setdefault("available_cycle", available_cycle.isoformat())
     result.setdefault(
         "downloaded_cycle",

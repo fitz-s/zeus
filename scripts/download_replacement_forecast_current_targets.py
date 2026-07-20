@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-07-17
-# Lifecycle: created=2026-06-07; last_reviewed=2026-07-17
+# Last reused/audited: 2026-07-20
+# Lifecycle: created=2026-06-07; last_reviewed=2026-07-20
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -592,6 +592,7 @@ def download_current_target_raw_inputs(
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
     max_wall_clock_seconds: float | None = None,
     fetch_workers: int = 4,
+    bucket_reader_pool=None,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
     # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
@@ -771,7 +772,10 @@ def download_current_target_raw_inputs(
 
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketPointReaderPool
 
-    bucket_pool = BucketPointReaderPool()
+    owns_bucket_pool = bucket_reader_pool is None
+    bucket_pool = (
+        bucket_reader_pool if bucket_reader_pool is not None else BucketPointReaderPool()
+    )
     try:
         for target in targets:
             target_key = (target.city, target.target_date)
@@ -895,7 +899,8 @@ def download_current_target_raw_inputs(
             )
             processed_target_count += 1
     finally:
-        bucket_pool.close()
+        if owns_bucket_pool:
+            bucket_pool.close()
         openmeteo_client.close()
 
     written_manifests: list[str] = []
@@ -979,6 +984,7 @@ def download_current_target_openmeteo_inputs(
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
     max_wall_clock_seconds: float | None = None,
     fetch_workers: int = 4,
+    bucket_reader_pool=None,
 ) -> dict[str, object]:
     """Live replacement-chain downloader for Open-Meteo current-target inputs."""
 
@@ -996,6 +1002,7 @@ def download_current_target_openmeteo_inputs(
         required_scopes=required_scopes,
         max_wall_clock_seconds=max_wall_clock_seconds,
         fetch_workers=fetch_workers,
+        bucket_reader_pool=bucket_reader_pool,
     )
 
 
