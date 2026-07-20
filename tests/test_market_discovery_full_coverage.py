@@ -2662,6 +2662,62 @@ def test_exact_forced_condition_uses_bounded_direct_books_after_batch_reset(monk
     assert summary["prefetch_missing_skipped"] == 0
 
 
+def test_exact_forced_selected_token_never_waits_for_sibling_book(monkeypatch):
+    """A missing selected NO row refreshes NO without requiring the YES sibling."""
+
+    conn = _make_in_memory_trade_db()
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    outcome = market["outcomes"][0]
+    condition_id = outcome["condition_id"]
+    selected_token_id = outcome["no_token_id"]
+    direct_calls: list[str] = []
+    captured_books: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise ConnectionResetError("batch reset")
+
+        def get_orderbook_snapshot(self, token_id):
+            direct_calls.append(str(token_id))
+            if token_id != selected_token_id:
+                raise AssertionError("sibling token must not be fetched")
+            return {
+                "asset_id": token_id,
+                "market": token_id,
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.73", "size": "10"}],
+            }
+
+    def _capture(conn, *, prefetched_orderbook, **_kwargs):
+        captured_books.append(str(prefetched_orderbook["asset_id"]))
+
+    with patch(
+        "src.data.market_scanner.capture_executable_market_snapshot",
+        side_effect=_capture,
+    ):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={condition_id},
+            force_refresh_condition_ids={condition_id},
+            priority_token_ids={selected_token_id},
+            force_refresh_token_ids={selected_token_id},
+        )
+
+    assert direct_calls == [selected_token_id]
+    assert captured_books == [selected_token_id]
+    assert summary["forced_condition_count"] == 1
+    assert summary["forced_token_count"] == 1
+    assert summary["attempted"] == 1
+    assert summary["inserted"] == 1
+    assert summary["prefetched_orderbook_count"] == 1
+
+
 def test_exact_forced_condition_direct_book_failure_still_fails_closed(monkeypatch):
     conn = _make_in_memory_trade_db()
     market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")

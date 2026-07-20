@@ -682,6 +682,70 @@ def test_global_winner_refresh_noop_stays_fail_closed(
     assert reread is False
 
 
+def test_real_decision_refresher_propagates_and_proves_exact_selected_token(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from src.data import substrate_observer
+    from src.events import reactor
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setenv("ZEUS_DECISION_TARGETED_REFRESH_BUDGET_SECONDS", "8")
+    monkeypatch.setenv(
+        "ZEUS_DECISION_TARGETED_REFRESH_SNAPSHOT_RESERVE_SECONDS",
+        "2",
+    )
+
+    def refresh_now(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "refreshed",
+            "forced_condition_count": 1,
+            "forced_token_count": 1,
+            "attempted": 1,
+            "inserted": 1,
+            "prefetched_orderbook_count": 1,
+        }
+
+    monkeypatch.setattr(
+        substrate_observer,
+        "refresh_money_path_substrate_now",
+        refresh_now,
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_selected_token_snapshot_is_fresh",
+        lambda **kwargs: kwargs["selected_token_id"] == "winner-no",
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_families_with_fresh_scoped_executable_substrate",
+        lambda *_args, **_kwargs: pytest.fail("selected-token proof must not require sibling side"),
+    )
+
+    refresh = reactor._edli_decision_family_snapshot_refresher(object())
+
+    assert refresh(
+        city="Paris",
+        target_date="2026-07-20",
+        metric="high",
+        condition_ids=("winner-condition",),
+        selected_token_id="winner-no",
+        force_refresh=True,
+    ) is True
+    assert calls == [
+        {
+            "families": [("Paris", "2026-07-20", "high")],
+            "condition_ids": ("winner-condition",),
+            "selected_token_ids": ("winner-no",),
+            "reason": "decision_triggered_targeted_refresh",
+            "refresh_budget_seconds": 8.0,
+            "snapshot_reserve_seconds": 2.0,
+            "include_money_risk_families": False,
+            "force_refresh": True,
+        }
+    ]
+
+
 def test_non_global_empty_family_snapshot_returns_typed_missing_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ):

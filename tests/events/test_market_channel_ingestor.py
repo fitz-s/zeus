@@ -3234,7 +3234,7 @@ def test_tick_size_change_invokes_refresh_callback():
     assert actions == [action]
 
 
-def test_market_channel_refresh_action_dedupes_within_window():
+def test_market_channel_successive_refresh_actions_are_not_dropped_after_invalidation():
     _conn, writer = _conn_writer()
     actions = []
     service = MarketChannelOnlineService(
@@ -3251,18 +3251,19 @@ def test_market_channel_refresh_action_dedupes_within_window():
     service._handle_action(action)
     service._handle_action(action)
 
-    assert service.refresh_action_count == 1
-    assert service.refresh_action_dropped_count == 1
-    assert actions == [action]
+    assert service.refresh_action_count == 2
+    assert service.refresh_action_dropped_count == 0
+    assert actions == [action, action]
 
 
-def test_market_channel_refresh_action_budget_limits_work():
+def test_market_channel_refresh_action_budget_defers_instead_of_dropping_work():
     _conn, writer = _conn_writer()
     actions = []
     service = MarketChannelOnlineService(
         MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
         refresh_snapshot=actions.append,
         max_refresh_actions_per_window=1,
+        refresh_window_seconds=1.0,
     )
     first = MarketChannelAction(
         refresh_snapshot=True,
@@ -3277,15 +3278,16 @@ def test_market_channel_refresh_action_budget_limits_work():
         condition_id="0xcondition-2",
     )
 
-    service._handle_action(first)
-    service._handle_action(second)
+    service._enqueue_refresh_action(first)
+    service._enqueue_refresh_action(second)
 
-    assert service.refresh_action_count == 1
-    assert service.refresh_action_dropped_count == 1
-    assert actions == [first]
+    assert service.wait_refresh_idle(timeout=2.0)
+    assert service.refresh_action_count == 2
+    assert service.refresh_action_dropped_count == 0
+    assert actions == [first, second]
 
 
-def test_market_channel_refresh_budget_still_invalidates_dropped_actions():
+def test_market_channel_refresh_budget_invalidates_once_then_retries_deferred_action():
     _conn, writer = _conn_writer()
     invalidated = []
     refreshed = []
@@ -3294,6 +3296,7 @@ def test_market_channel_refresh_budget_still_invalidates_dropped_actions():
         invalidate_snapshot=invalidated.append,
         refresh_snapshot=refreshed.append,
         max_refresh_actions_per_window=1,
+        refresh_window_seconds=1.0,
     )
     first = MarketChannelAction(
         refresh_snapshot=True,
@@ -3308,12 +3311,13 @@ def test_market_channel_refresh_budget_still_invalidates_dropped_actions():
         condition_id="0xcondition-2",
     )
 
-    service._handle_action(first)
-    service._handle_action(second)
+    service._enqueue_refresh_action(first)
+    service._enqueue_refresh_action(second)
 
+    assert service.wait_refresh_idle(timeout=2.0)
     assert invalidated == [first, second]
-    assert refreshed == [first]
-    assert service.refresh_action_dropped_count == 1
+    assert refreshed == [first, second]
+    assert service.refresh_action_dropped_count == 0
 
 
 def test_market_channel_refresh_queue_keeps_slow_work_off_caller_thread():
@@ -3378,10 +3382,73 @@ def test_market_channel_refresh_queue_coalesces_identical_pending_work():
     release.set()
 
     assert service.wait_refresh_idle(timeout=1.0)
-    assert refreshed == [action]
-    assert service.refresh_action_count == 1
-    assert service.refresh_action_dropped_count == 1
+    assert refreshed == [action, action]
+    assert service.refresh_action_count == 2
+    assert service.refresh_action_dropped_count == 0
     assert service.refresh_action_coalesced_count == 1
+
+
+def test_market_channel_refresh_queue_retries_deferred_work_without_reinvalidating():
+    _conn, writer = _conn_writer()
+    invalidated: list[MarketChannelAction] = []
+    refreshed: list[MarketChannelAction] = []
+
+    def refresh(action: MarketChannelAction):
+        refreshed.append(action)
+        return "deferred" if len(refreshed) == 1 else "completed"
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        invalidate_snapshot=invalidated.append,
+        refresh_snapshot=refresh,
+    )
+    action = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="token-1",
+        condition_id="0xcondition",
+    )
+
+    service._enqueue_refresh_action(action)
+
+    assert service.wait_refresh_idle(timeout=1.0)
+    assert invalidated == [action]
+    assert refreshed == [action, action]
+    assert service.refresh_action_count == 2
+    assert service.refresh_action_dropped_count == 0
+
+
+def test_market_channel_refresh_queue_retries_exception_without_reinvalidating():
+    _conn, writer = _conn_writer()
+    invalidated: list[MarketChannelAction] = []
+    attempts = 0
+
+    def refresh(_action: MarketChannelAction):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("transient quota wait")
+        return "completed"
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        invalidate_snapshot=invalidated.append,
+        refresh_snapshot=refresh,
+    )
+    action = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="token-1",
+        condition_id="0xcondition",
+    )
+
+    service._enqueue_refresh_action(action)
+
+    assert service.wait_refresh_idle(timeout=1.0)
+    assert invalidated == [action]
+    assert attempts == 2
+    assert service.refresh_action_count == 2
+    assert service.refresh_action_dropped_count == 0
 
 
 def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets():

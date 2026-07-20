@@ -1351,6 +1351,8 @@ def _refresh_pending_family_snapshots(
     include_pending_families: bool = True,
     priority_condition_ids: Iterable[str] | None = None,
     force_refresh_condition_ids: Iterable[str] | None = None,
+    priority_token_ids: Iterable[str] | None = None,
+    force_refresh_token_ids: Iterable[str] | None = None,
     refresh_budget_seconds: float | None = None,
     snapshot_reserve_seconds: float | None = None,
     include_money_risk_families: bool = True,
@@ -1399,6 +1401,20 @@ def _refresh_pending_family_snapshots(
     }
     if not forced_conditions.issubset(explicit_priority_conditions):
         raise ValueError("forced refresh conditions require exact priority scope")
+    priority_tokens = {
+        str(token_id or "").strip()
+        for token_id in (priority_token_ids or ())
+        if str(token_id or "").strip()
+    }
+    forced_tokens = {
+        str(token_id or "").strip()
+        for token_id in (force_refresh_token_ids or ())
+        if str(token_id or "").strip()
+    }
+    if not forced_tokens.issubset(priority_tokens):
+        raise ValueError("forced refresh tokens require exact token priority scope")
+    if forced_tokens and not forced_conditions:
+        raise ValueError("forced refresh tokens require exact condition scope")
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
     if include_pending_families:
@@ -2376,6 +2392,8 @@ def _refresh_pending_family_snapshots(
                     capture_reserve_seconds=snapshot_reserve_s,
                     priority_condition_ids=priority_conditions,
                     force_refresh_condition_ids=forced_conditions,
+                    priority_token_ids=priority_tokens,
+                    force_refresh_token_ids=forced_tokens,
                     snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
                         "substrate_pending_family_snapshot_refresh"
                     ),
@@ -2406,6 +2424,8 @@ def _refresh_pending_family_snapshots(
         "held_position_priority_families": len(held_position_priority_families),
         "priority_family_count": len(priority_families),
         "priority_condition_ids_requested": len(priority_conditions),
+        "priority_token_ids_requested": len(priority_tokens),
+        "forced_token_count": len(forced_tokens),
         "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
         "gamma_refresh_families": len(gamma_refresh_families),
         "cached_topology_families": cached_topology_families,
@@ -3041,6 +3061,7 @@ def refresh_money_path_substrate_now(
     *,
     families: Iterable[tuple[str, str, str]],
     condition_ids: Iterable[str] | None = None,
+    selected_token_ids: Iterable[str] | None = None,
     reason: str = "money_path_targeted_refresh",
     refresh_budget_seconds: float | None = None,
     snapshot_reserve_seconds: float | None = None,
@@ -3072,12 +3093,26 @@ def refresh_money_path_substrate_now(
         for condition_id in (condition_ids or ())
         if str(condition_id or "").strip()
     }
+    clean_selected_token_ids = {
+        str(token_id or "").strip()
+        for token_id in (selected_token_ids or ())
+        if str(token_id or "").strip()
+    }
+    if clean_selected_token_ids and not clean_condition_ids:
+        return {
+            "status": "selected_token_scope_missing_condition",
+            "reason": str(reason or ""),
+            "families_requested": len(clean_families),
+            "condition_ids_requested": 0,
+            "selected_token_ids_requested": len(clean_selected_token_ids),
+        }
     if force_refresh and not clean_condition_ids:
         return {
             "status": "force_refresh_scope_missing",
             "reason": str(reason or ""),
             "families_requested": len(clean_families),
             "condition_ids_requested": 0,
+            "selected_token_ids_requested": len(clean_selected_token_ids),
         }
     if not clean_families and not clean_condition_ids:
         return {
@@ -3085,6 +3120,7 @@ def refresh_money_path_substrate_now(
             "reason": str(reason or ""),
             "families_requested": 0,
             "condition_ids_requested": 0,
+            "selected_token_ids_requested": 0,
         }
 
     lock_wait_s = _inline_refresh_lock_wait_seconds()
@@ -3156,6 +3192,10 @@ def refresh_money_path_substrate_now(
             include_pending_families=False,
             priority_condition_ids=clean_condition_ids,
             force_refresh_condition_ids=(clean_condition_ids if force_refresh else ()),
+            priority_token_ids=clean_selected_token_ids,
+            force_refresh_token_ids=(
+                clean_selected_token_ids if force_refresh else ()
+            ),
             refresh_budget_seconds=refresh_budget_seconds,
             snapshot_reserve_seconds=snapshot_reserve_seconds,
             include_money_risk_families=include_money_risk_families,
@@ -3167,6 +3207,7 @@ def refresh_money_path_substrate_now(
                 "reason": str(reason or ""),
                 "families_requested": len(clean_families),
                 "condition_ids_requested": len(clean_condition_ids),
+                "selected_token_ids_requested": len(clean_selected_token_ids),
                 "lock_wait_seconds": lock_wait_s,
                 "lock_wait_elapsed_seconds": lock_wait_elapsed_s,
             }
@@ -3181,6 +3222,7 @@ def refresh_money_path_substrate_now(
             "error": str(exc),
             "families_requested": len(clean_families),
             "condition_ids_requested": len(clean_condition_ids),
+            "selected_token_ids_requested": len(clean_selected_token_ids),
         }
     finally:
         if forecasts_conn is not None:

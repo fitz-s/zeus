@@ -3296,6 +3296,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             MarketChannelAction,
             MarketChannelIngestor,
             MarketChannelOnlineService,
+            RefreshSnapshotResult,
             invalidate_executable_snapshots_for_market_channel_action,
             run_market_channel_service_forever,
         )
@@ -3353,7 +3354,9 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     finally:
                         trade_conn.close()
 
-            def _refresh_snapshot_action(action: "MarketChannelAction") -> None:
+            def _refresh_snapshot_action(
+                action: "MarketChannelAction",
+            ) -> RefreshSnapshotResult:
                 from src.data.market_scanner import (
                     MarketEventsPersistenceError,
                     find_weather_markets_or_raise,
@@ -3365,9 +3368,9 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                 substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
                 if not substrate_acquired:
                     logger.info(
-                        "EDLI market-channel refresh skipped: executable substrate refresh already running"
+                        "EDLI market-channel refresh deferred: executable substrate refresh already running"
                     )
-                    return
+                    return "deferred"
                 process_lock_ctx = acquire_lock("market_substrate_refresh")
                 process_entered = False
                 process_acquired = False
@@ -3377,9 +3380,9 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     process_entered = True
                     if not process_acquired:
                         logger.info(
-                            "EDLI market-channel refresh skipped: cross-process executable substrate refresh already running"
+                            "EDLI market-channel refresh deferred: cross-process executable substrate refresh already running"
                         )
-                        return
+                        return "deferred"
                     try:
                         markets = find_weather_markets_or_raise(
                             min_hours_to_resolution=0.0,
@@ -3391,7 +3394,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                             "failure — snapshot substrate not refreshed: %s",
                             _persistence_exc,
                         )
-                        return
+                        return "deferred"
                     if action.condition_id:
                         markets = _edli_filter_markets_for_condition(markets, action.condition_id)
                         if not markets:
@@ -3399,7 +3402,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                                 "EDLI market-channel refresh skipped: condition_id=%s not found in active weather markets",
                                 action.condition_id,
                             )
-                            return
+                            return "completed"
                     trade_conn = get_trade_connection(write_class="live")
                     summary = refresh_executable_market_substrate_snapshots(
                         trade_conn,
@@ -3427,13 +3430,13 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     action.condition_id,
                     summary,
                 )
+                return "completed"
 
             # The redecision-routing decision (WHICH families to re-solve) is a decision-layer
             # concern this boundary module only WIRES IN, never inlines (R6 split).
             from src.events.price_channel_redecision_router import (
                 _edli_coalesced_price_channel_redecision_sink,
             )
-
             with PolymarketClient() as clob:
                 reload_token_metadata = _edli_market_channel_token_metadata_reloader(
                     initial_token_metadata=token_metadata,

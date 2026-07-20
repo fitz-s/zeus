@@ -39,7 +39,12 @@ MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS = 0.05
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS = 1.0
 MARKET_CHANNEL_DEPTH_REPAIR_DEBOUNCE_SECONDS = 0.05
 MARKET_CHANNEL_DEPTH_REPAIR_RETRY_SECONDS = 1.0
+MARKET_CHANNEL_REFRESH_ACTION_RETRY_BASE_SECONDS = 0.05
+MARKET_CHANNEL_REFRESH_ACTION_RETRY_MAX_SECONDS = 1.0
 _logger = logging.getLogger(__name__)
+
+RefreshSnapshotResult = Literal["completed", "deferred"]
+_RefreshActionStatus = Literal["completed", "deferred", "dropped"]
 
 
 def _is_sqlite_write_contention(exc: BaseException) -> bool:
@@ -79,6 +84,17 @@ class MarketChannelAction:
     reason: str = ""
     token_id: str | None = None
     condition_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _PendingRefreshAction:
+    """One queued snapshot repair; invalidation is durable before refresh retries."""
+
+    action: MarketChannelAction
+    generation: int
+    invalidated: bool = False
+    retry_count: int = 0
+    not_before_monotonic: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1246,7 +1262,9 @@ class MarketChannelOnlineService:
     fetch_orderbook: RestOrderbookFetch | None = None
     fetch_orderbooks: RestOrderbookBatchFetch | None = None
     invalidate_snapshot: Callable[[MarketChannelAction], None] | None = None
-    refresh_snapshot: Callable[[MarketChannelAction], None] | None = None
+    refresh_snapshot: Callable[
+        [MarketChannelAction], RefreshSnapshotResult | None
+    ] | None = None
     reload_token_metadata: TokenMetadataReload | None = None
     universe_refresh_interval_seconds: float = 15.0
     continuity_sink: Callable[[dict[str, Any]], None] | None = None
@@ -1267,7 +1285,6 @@ class MarketChannelOnlineService:
     rest_seed_backpressure_reason: str | None = None
     _connected_at: str | None = None
     _refresh_window_start: datetime | None = None
-    _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
     _current_generation_depth_tokens: set[str] = field(default_factory=set)
     _missing_depth_tokens: set[str] = field(
         default_factory=set,
@@ -1292,8 +1309,9 @@ class MarketChannelOnlineService:
         repr=False,
     )
     _pending_refresh_actions: dict[
-        tuple[str, str, str], MarketChannelAction
+        tuple[str, str], _PendingRefreshAction
     ] = field(default_factory=dict, init=False, repr=False)
+    _refresh_action_generation: int = field(default=0, init=False, repr=False)
     _refresh_worker_running: bool = field(default=False, init=False, repr=False)
     _refresh_worker_idle: threading.Event = field(
         default_factory=threading.Event,
@@ -2595,12 +2613,12 @@ class MarketChannelOnlineService:
                 await asyncio.sleep(reconnect_delay_seconds)
 
     @staticmethod
-    def _refresh_action_key(action: MarketChannelAction) -> tuple[str, str, str]:
-        return (
-            str(action.reason or ""),
-            str(action.condition_id or ""),
-            str(action.token_id or ""),
-        )
+    def _refresh_action_key(action: MarketChannelAction) -> tuple[str, str]:
+        condition_id = str(action.condition_id or "").strip()
+        token_id = str(action.token_id or "").strip()
+        if condition_id or token_id:
+            return condition_id, token_id
+        return f"reason:{str(action.reason or '').strip()}", ""
 
     def _enqueue_refresh_action(self, action: MarketChannelAction) -> None:
         if not action.refresh_snapshot:
@@ -2608,9 +2626,20 @@ class MarketChannelOnlineService:
         start = False
         key = self._refresh_action_key(action)
         with self._refresh_worker_lock:
-            if key in self._pending_refresh_actions:
+            previous = self._pending_refresh_actions.get(key)
+            if previous is not None:
                 self.refresh_action_coalesced_count += 1
-            self._pending_refresh_actions[key] = action
+            self._refresh_action_generation += 1
+            self._pending_refresh_actions[key] = _PendingRefreshAction(
+                action=action,
+                generation=self._refresh_action_generation,
+                invalidated=(
+                    previous.invalidated
+                    if previous is not None
+                    and previous.action.reason == action.reason
+                    else False
+                ),
+            )
             if not self._refresh_worker_running:
                 self._refresh_worker_running = True
                 self._refresh_worker_idle.clear()
@@ -2629,10 +2658,21 @@ class MarketChannelOnlineService:
                     self._refresh_worker_running = False
                     self._refresh_worker_idle.set()
                     return
-                key = next(iter(self._pending_refresh_actions))
-                action = self._pending_refresh_actions.pop(key)
+                key, pending = min(
+                    self._pending_refresh_actions.items(),
+                    key=lambda item: (
+                        item[1].not_before_monotonic,
+                        item[1].generation,
+                    ),
+                )
+                wait_seconds = pending.not_before_monotonic - time.monotonic()
+                if wait_seconds <= 0.0:
+                    self._pending_refresh_actions.pop(key)
+            if wait_seconds > 0.0:
+                time.sleep(min(wait_seconds, 0.05))
+                continue
             try:
-                self._handle_action(action)
+                status, pending = self._attempt_refresh_action(pending)
             except Exception as exc:  # noqa: BLE001 - refresh failure must not kill quote ingest
                 _logger.warning(
                     "market-channel snapshot refresh failed off socket loop: %s: %s",
@@ -2640,15 +2680,49 @@ class MarketChannelOnlineService:
                     exc,
                     exc_info=True,
                 )
+                status = "deferred"
+            if status != "deferred":
+                continue
+            retry_count = pending.retry_count + 1
+            retry_seconds = min(
+                MARKET_CHANNEL_REFRESH_ACTION_RETRY_MAX_SECONDS,
+                MARKET_CHANNEL_REFRESH_ACTION_RETRY_BASE_SECONDS
+                * (2 ** min(retry_count - 1, 10)),
+            )
+            retried = _PendingRefreshAction(
+                action=pending.action,
+                generation=pending.generation,
+                invalidated=pending.invalidated,
+                retry_count=retry_count,
+                not_before_monotonic=max(
+                    pending.not_before_monotonic,
+                    time.monotonic() + retry_seconds,
+                ),
+            )
+            with self._refresh_worker_lock:
+                current = self._pending_refresh_actions.get(key)
+                if current is None or current.generation < retried.generation:
+                    self._pending_refresh_actions[key] = retried
 
     def wait_refresh_idle(self, timeout: float | None = None) -> bool:
         return self._refresh_worker_idle.wait(timeout)
 
-    def _handle_action(self, action: MarketChannelAction) -> None:
+    def _attempt_refresh_action(
+        self,
+        pending: _PendingRefreshAction,
+    ) -> tuple[_RefreshActionStatus, _PendingRefreshAction]:
+        action = pending.action
         if not action.refresh_snapshot:
-            return
-        if self.invalidate_snapshot is not None:
+            return "dropped", pending
+        if not pending.invalidated and self.invalidate_snapshot is not None:
             self.invalidate_snapshot(action)
+            pending = _PendingRefreshAction(
+                action=action,
+                generation=pending.generation,
+                invalidated=True,
+                retry_count=pending.retry_count,
+                not_before_monotonic=pending.not_before_monotonic,
+            )
         now = datetime.now(UTC)
         if (
             self._refresh_window_start is None
@@ -2656,19 +2730,53 @@ class MarketChannelOnlineService:
         ):
             self._refresh_window_start = now
             self.refresh_window_action_count = 0
-            self._refresh_action_keys.clear()
-        key = (str(action.reason or ""), str(action.condition_id or ""), str(action.token_id or ""))
-        if key in self._refresh_action_keys:
-            self.refresh_action_dropped_count += 1
-            return
         if self.refresh_window_action_count >= max(1, self.max_refresh_actions_per_window):
-            self.refresh_action_dropped_count += 1
-            return
-        self._refresh_action_keys.add(key)
+            assert self._refresh_window_start is not None
+            window_deadline = self._refresh_window_start + timedelta(
+                seconds=max(1.0, self.refresh_window_seconds)
+            )
+            pending = _PendingRefreshAction(
+                action=action,
+                generation=pending.generation,
+                invalidated=pending.invalidated,
+                retry_count=pending.retry_count,
+                not_before_monotonic=max(
+                    pending.not_before_monotonic,
+                    time.monotonic()
+                    + max(0.0, (window_deadline - now).total_seconds()),
+                ),
+            )
+            return "deferred", pending
         self.refresh_window_action_count += 1
         self.refresh_action_count += 1
         if self.refresh_snapshot is not None:
-            self.refresh_snapshot(action)
+            try:
+                result = self.refresh_snapshot(action)
+            except Exception as exc:  # noqa: BLE001 - retain invalidation and retry
+                _logger.warning(
+                    "market-channel snapshot refresh attempt deferred: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                return "deferred", pending
+            if result == "deferred":
+                return "deferred", pending
+            if result not in {None, "completed"}:
+                raise ValueError(f"invalid refresh snapshot result: {result!r}")
+        return "completed", pending
+
+    def _handle_action(self, action: MarketChannelAction) -> _RefreshActionStatus:
+        """Run one synchronous attempt; the background queue owns retries."""
+
+        self._refresh_action_generation += 1
+        status, _pending = self._attempt_refresh_action(
+            _PendingRefreshAction(
+                action=action,
+                generation=self._refresh_action_generation,
+            )
+        )
+        return status
 
 
 def run_market_channel_service_forever(

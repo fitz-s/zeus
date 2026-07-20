@@ -4827,6 +4827,8 @@ def refresh_executable_market_substrate_snapshots(
     capture_reserve_seconds: float | None = None,
     priority_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     force_refresh_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    priority_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    force_refresh_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
@@ -4858,6 +4860,20 @@ def refresh_executable_market_substrate_snapshots(
     }
     if not forced_conditions.issubset(priority_conditions):
         raise ValueError("forced snapshot recapture requires exact priority scope")
+    priority_tokens = {
+        str(token_id or "").strip()
+        for token_id in (priority_token_ids or ())
+        if str(token_id or "").strip()
+    }
+    forced_selected_tokens = {
+        str(token_id or "").strip()
+        for token_id in (force_refresh_token_ids or ())
+        if str(token_id or "").strip()
+    }
+    if not forced_selected_tokens.issubset(priority_tokens):
+        raise ValueError("forced token recapture requires exact token priority scope")
+    if forced_selected_tokens and not forced_conditions:
+        raise ValueError("forced token recapture requires exact condition scope")
     priority_condition_rank: dict[str, int] = {}
     for raw_condition_id in priority_condition_ids or ():
         condition_id = str(raw_condition_id or "").strip()
@@ -4960,8 +4976,19 @@ def refresh_executable_market_substrate_snapshots(
                     skipped += 1
                     continue
                 selected_token = _selected_token_for_direction(outcome, direction)
+                if (
+                    forced_selected_tokens
+                    and condition_id in forced_conditions
+                    and selected_token not in forced_selected_tokens
+                ):
+                    _reject_candidate("outside_forced_selected_token_scope")
+                    skipped += 1
+                    continue
                 if selected_token and selected_token in fresh_selected_tokens:
-                    if condition_id in forced_conditions:
+                    if selected_token in forced_selected_tokens or (
+                        condition_id in forced_conditions
+                        and not forced_selected_tokens
+                    ):
                         _override_candidate("forced_selected_token_recapture")
                     else:
                         _reject_candidate("selected_token_already_fresh")
@@ -4989,6 +5016,10 @@ def refresh_executable_market_substrate_snapshots(
         group_list = sorted(
             candidate_groups[group_key],
             key=lambda item: (
+                0
+                if _selected_token_for_direction(item[4], item[6])
+                in priority_tokens
+                else 1,
                 0 if str(item[5] or "").strip() in priority_conditions else 1,
                 priority_condition_rank.get(str(item[5] or "").strip(), len(priority_condition_rank)),
                 item[0],
@@ -5454,6 +5485,7 @@ def refresh_executable_market_substrate_snapshots(
         "executable_snapshot_candidate_rejection_counts": candidate_rejection_counts,
         "executable_snapshot_candidate_override_counts": candidate_override_counts,
         "forced_condition_count": len(forced_conditions),
+        "forced_token_count": len(forced_selected_tokens),
         "selected_executable_snapshot_count": len(selected_candidates),
         "executable_candidate_city_count": len(candidate_cities),
         "selected_executable_city_count": len(selected_cities),
