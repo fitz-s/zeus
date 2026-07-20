@@ -320,7 +320,19 @@ current-evidence robust win majority, positive robust EV and delta log wealth,
 and only the remaining shares below the cumulative Fractional Kelly final-
 holding target. These economic conditions apply symmetrically to YES and NO.
 
-### 10.3 Live / Backtest Boundary — NO SHADOW LANE
+### 10.3 Mutually-Exclusive Weather Family Entry Boundary
+
+One `(city, target_date, temperature_metric)` weather family is an exhaustive
+settlement partition. Once canonical runtime state carries an open position or
+unresolved entry obligation in that family, a live BUY may only fill up the same
+canonical position/outcome token. Global selection removes every sibling-token
+BUY and the command journal independently rejects a different-position or
+different-token sibling under its admission transaction. SELL, CANCEL,
+monitoring, and exit are unaffected; a close-before-open rebalance must first
+close the prior exposure. A legacy family already carrying multiple outcome
+tokens admits no further BUY (INV-45).
+
+### 10.4 Live / Backtest Boundary — NO SHADOW LANE
 
 - Live may act.
 - Backtest may evaluate (walk-forward, settlement-truth graded, no

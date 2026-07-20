@@ -548,6 +548,15 @@ independently rechecks it immediately before SDK contact. Tick legality, minimum
 size, identity, tradeability, fees/depth, and economic proof remain additional
 requirements and cannot waive the band (INV-43).
 
+Weather family coherence is a separate cumulative entry contract. The family
+key is `(city, target_date, temperature_metric)`, whose bins are exhaustive and
+mutually exclusive. An open position or unresolved entry obligation blocks a
+BUY for every different sibling token at global selection and again at command
+persistence; same-position same-token fill-up remains legal. SELL/CANCEL and
+held-position monitor/exit paths do not inherit this entry block. A legacy
+family already holding multiple outcome tokens blocks every further BUY
+(INV-45).
+
 ### 7.2 Kelly safety gate
 
 `assert_kelly_safe()` enforces three conditions before Kelly sizing can proceed:

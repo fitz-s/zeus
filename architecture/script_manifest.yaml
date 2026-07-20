@@ -578,7 +578,7 @@ scripts:
     promotion_barrier: "Read-only pre-restart diagnostic; cannot submit/cancel orders, mutate DB truth, start daemons, or authorize live trading by itself."
     required_helpers: [src.engine.position_belief.load_replacement_belief]
     required_tests: [tests/test_check_live_restart_preflight.py]
-    reason: "Separates process state, submit config, absolute [0.05,0.95] live-order guard attestation, posterior freshness, pending-exit risk, and held-position belief coverage before an armed live daemon restart; any missing/widened price guard or config drift is restart-blocking."
+    reason: "Separates process state, submit config, absolute [0.05,0.95] live-order guard attestation, mutually-exclusive weather-family sibling-entry attestation, posterior freshness, pending-exit risk, and held-position belief coverage before an armed live daemon restart; any missing/widened price guard, sibling-entry guard, live wiring, or config drift is restart-blocking."
   repair_dust_exit_projection.py:
     # Created: 2026-06-18
     # Last reused or audited: 2026-07-09

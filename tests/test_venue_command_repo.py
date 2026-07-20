@@ -28,10 +28,12 @@ _NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
 def conn():
     """In-memory DB with full schema (via init_schema)."""
     from src.state.db import init_schema
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
+    ensure_table(c)
     yield c
     c.close()
 
@@ -48,7 +50,7 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             intent_kind="ENTRY", market_id="mkt-001", token_id="tok-001",
             side="BUY", size=10.0, price=0.5,
             created_at="2026-04-26T00:00:00Z", q_version=None,
-            decision_certificate_hash=None):
+            decision_certificate_hash=None, entry_family_key=None):
     from src.state.venue_command_repo import insert_command
     snapshot_id = _ensure_snapshot(c, token_id=token_id)
     insert_command(
@@ -74,6 +76,7 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
         created_at=created_at,
         q_version=q_version,
         decision_certificate_hash=decision_certificate_hash,
+        entry_family_key=entry_family_key,
     )
 
 
@@ -662,6 +665,275 @@ class TestInsertCommandQVersionStamp:
             "SELECT command_id FROM venue_commands WHERE command_id = 'cmd-live-no-qv'"
         ).fetchone()
         assert row is None
+
+
+class TestExclusiveWeatherFamilyEntryBoundary:
+    @staticmethod
+    def _open_position(
+        conn, *, position_id="held-1", bin_label="28C", no_token_id="no-28c"
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, city, target_date, bin_label, direction,
+                strategy_key, condition_id, no_token_id, updated_at,
+                temperature_metric
+            ) VALUES (?, 'active', 'Seoul', '2026-07-21', ?, 'buy_no',
+                      'center_bin_buy', ?, ?, '2026-07-20T00:00:00Z', 'high')
+            """,
+            (position_id, bin_label, f"condition-{position_id}", no_token_id),
+        )
+
+    def test_sibling_position_entry_is_rejected_before_command_persistence(self, conn):
+        self._open_position(conn)
+
+        with pytest.raises(ValueError, match="ENTRY sibling family exposure blocked"):
+            _insert(
+                conn,
+                command_id="cmd-sibling",
+                position_id="new-29c-position",
+                token_id="no-29c",
+                idempotency_key="idem-sibling",
+                entry_family_key=("Seoul", "2026-07-21", "high"),
+            )
+
+        assert conn.execute(
+            "SELECT 1 FROM venue_commands WHERE command_id='cmd-sibling'"
+        ).fetchone() is None
+
+    def test_same_position_fill_up_remains_allowed(self, conn):
+        self._open_position(conn)
+
+        _insert(
+            conn,
+            command_id="cmd-fill-up",
+            position_id="held-1",
+            token_id="no-28c",
+            idempotency_key="idem-fill-up",
+            entry_family_key=("Seoul", "2026-07-21", "high"),
+        )
+
+        assert conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id='cmd-fill-up'"
+        ).fetchone()[0] == "INTENT_CREATED"
+
+    def test_same_position_different_token_is_rejected(self, conn):
+        self._open_position(conn)
+
+        with pytest.raises(ValueError, match="ENTRY sibling family exposure blocked"):
+            _insert(
+                conn,
+                command_id="cmd-false-fill-up",
+                position_id="held-1",
+                token_id="no-29c",
+                idempotency_key="idem-false-fill-up",
+                entry_family_key=("Seoul", "2026-07-21", "high"),
+            )
+
+        assert conn.execute(
+            "SELECT 1 FROM venue_commands WHERE command_id='cmd-false-fill-up'"
+        ).fetchone() is None
+
+    def test_pending_command_obligation_blocks_sibling_before_position_projection(self, conn):
+        from src.contracts.review_work_item import FamilyKey
+        from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+
+        _insert(
+            conn,
+            command_id="cmd-pending-28c",
+            position_id="pending-28c-position",
+            token_id="no-28c",
+            idempotency_key="idem-pending-28c",
+            entry_family_key=("Seoul", "2026-07-21", "high"),
+        )
+        open_entry_exposure_obligation(
+            conn,
+            command_id="cmd-pending-28c",
+            owner_domain="trade",
+            token_id="no-28c",
+            condition_id="condition-28c",
+            shares=10.0,
+            cost_basis_usd=7.0,
+            unbounded=False,
+            family_key=FamilyKey(
+                city="Seoul",
+                target_date="2026-07-21",
+                temperature_metric="high",
+                market_family_id="",
+            ),
+        )
+
+        with pytest.raises(ValueError, match="ENTRY sibling family obligation blocked"):
+            _insert(
+                conn,
+                command_id="cmd-pending-29c",
+                position_id="pending-29c-position",
+                token_id="no-29c",
+                idempotency_key="idem-pending-29c",
+                entry_family_key=("Seoul", "2026-07-21", "high"),
+            )
+
+    def test_pending_same_position_different_token_is_rejected(self, conn):
+        from src.contracts.review_work_item import FamilyKey
+        from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+
+        _insert(
+            conn,
+            command_id="cmd-pending-same-position",
+            position_id="pending-position",
+            token_id="no-28c",
+            idempotency_key="idem-pending-same-position",
+            entry_family_key=("Seoul", "2026-07-21", "high"),
+        )
+        open_entry_exposure_obligation(
+            conn,
+            command_id="cmd-pending-same-position",
+            owner_domain="trade",
+            token_id="no-28c",
+            condition_id="condition-28c",
+            shares=10.0,
+            cost_basis_usd=7.0,
+            unbounded=False,
+            family_key=FamilyKey(
+                city="Seoul",
+                target_date="2026-07-21",
+                temperature_metric="high",
+                market_family_id="",
+            ),
+        )
+
+        with pytest.raises(ValueError, match="ENTRY sibling family obligation blocked"):
+            _insert(
+                conn,
+                command_id="cmd-pending-same-position-sibling",
+                position_id="pending-position",
+                token_id="no-29c",
+                idempotency_key="idem-pending-same-position-sibling",
+                entry_family_key=("Seoul", "2026-07-21", "high"),
+            )
+
+    def test_legacy_familyless_obligation_recovers_family_from_projection(self, conn):
+        from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+
+        _insert(
+            conn,
+            command_id="cmd-legacy-familyless",
+            position_id="legacy-position",
+            token_id="no-28c",
+            idempotency_key="idem-legacy-familyless",
+            entry_family_key=("Seoul", "2026-07-21", "high"),
+        )
+        open_entry_exposure_obligation(
+            conn,
+            command_id="cmd-legacy-familyless",
+            owner_domain="trade",
+            token_id="no-28c",
+            condition_id="condition-28c",
+            shares=10.0,
+            cost_basis_usd=7.0,
+            unbounded=False,
+            family_key=None,
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, city, target_date, bin_label, direction,
+                strategy_key, condition_id, no_token_id, updated_at,
+                temperature_metric
+            ) VALUES (
+                'legacy-position', 'settled', 'Seoul', '2026-07-21', '28C',
+                'buy_no', 'center_bin_buy', 'condition-28c', 'no-28c',
+                '2026-07-20T00:00:00Z', 'high'
+            )
+            """
+        )
+
+        with pytest.raises(ValueError, match="ENTRY sibling family obligation blocked"):
+            _insert(
+                conn,
+                command_id="cmd-legacy-familyless-sibling",
+                position_id="new-position",
+                token_id="no-29c",
+                idempotency_key="idem-legacy-familyless-sibling",
+                entry_family_key=("Seoul", "2026-07-21", "high"),
+            )
+
+    def test_unprojected_familyless_obligation_fails_closed(self, conn):
+        from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+
+        _insert(
+            conn,
+            command_id="cmd-unprojected-familyless",
+            position_id="unprojected-position",
+            token_id="no-28c",
+            idempotency_key="idem-unprojected-familyless",
+            entry_family_key=("Seoul", "2026-07-21", "high"),
+        )
+        open_entry_exposure_obligation(
+            conn,
+            command_id="cmd-unprojected-familyless",
+            owner_domain="trade",
+            token_id="no-28c",
+            condition_id="condition-28c",
+            shares=10.0,
+            cost_basis_usd=7.0,
+            unbounded=False,
+            family_key=None,
+        )
+
+        with pytest.raises(
+            ValueError, match="ENTRY pending family exposure truth is unavailable"
+        ):
+            _insert(
+                conn,
+                command_id="cmd-after-unknown-family",
+                position_id="other-position",
+                token_id="yes-other",
+                idempotency_key="idem-after-unknown-family",
+                entry_family_key=("Miami", "2026-07-22", "high"),
+            )
+
+    def test_live_entry_without_family_identity_fails_closed(self, conn, monkeypatch):
+        monkeypatch.setenv("ZEUS_MODE", "live")
+
+        with pytest.raises(ValueError, match="requires a weather family key"):
+            _insert(
+                conn,
+                command_id="cmd-no-family",
+                q_version="q-live",
+                idempotency_key="idem-no-family",
+            )
+
+    def test_exit_is_not_blocked_by_sibling_entry_boundary(self, conn):
+        self._open_position(conn)
+
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="other-position",
+            intent_kind="EXIT",
+            side="SELL",
+            idempotency_key="idem-exit",
+        )
+
+        assert conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id='cmd-exit'"
+        ).fetchone()[0] == "INTENT_CREATED"
+
+    def test_cancel_is_not_blocked_by_sibling_entry_boundary(self, conn):
+        self._open_position(conn)
+
+        _insert(
+            conn,
+            command_id="cmd-cancel",
+            position_id="other-position",
+            intent_kind="CANCEL",
+            idempotency_key="idem-cancel",
+        )
+
+        assert conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id='cmd-cancel'"
+        ).fetchone()[0] == "INTENT_CREATED"
 
     def test_xpc_live_entry_missing_q_version_rejected_before_insert(self, conn, monkeypatch):
         from src.state.venue_command_repo import insert_command

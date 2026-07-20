@@ -3792,6 +3792,7 @@ def _open_entry_risk_reservation(
     intent: "ExecutionIntent",
     shares: float,
     cost_basis_usd: float,
+    family_key: tuple[str, str, str],
 ) -> None:
     """EntryRiskReservation (T2, BLOCKER-1): persist a conservative bounded
     EntryExposureObligation for this ENTRY command in the SAME transaction as
@@ -3815,17 +3816,15 @@ def _open_entry_risk_reservation(
 
     Worst-case bound: shares x $1 (long-only CTF payout bound — see
     src.contracts.entry_exposure_obligation module docstring). Family identity
-    is a best-effort market_events lookup keyed by intent.market_id (the
-    Polymarket condition id at this seam) / intent.token_id; ``None`` is
-    passed through unresolved rather than guessed (an obligation with no
-    family_key still counts toward total_open_obligation_usd/has_unbounded_
-    obligation, just not toward family-scoped blocking).
+    is the exact executable-snapshot identity already validated by the caller;
+    it is persisted here so a later serialized auction epoch cannot enter a
+    sibling while the first command is durable but its fill projection has not
+    reached ``position_current`` yet.
 
     INV-37: caller supplies conn; this function never commits.
     """
     from src.contracts.review_work_item import FamilyKey
     from src.state.entry_exposure_obligation import open_entry_exposure_obligation
-    from src.state.review_work_items import family_key_for_condition_or_token
     from src.state.schema.entry_exposure_obligations_schema import ensure_table as _ensure_obligations_table
 
     # Idempotent DDL (CREATE TABLE/INDEX IF NOT EXISTS): production always has
@@ -3836,18 +3835,11 @@ def _open_entry_risk_reservation(
 
     condition_id = str(getattr(intent, "market_id", "") or "")
     token_id = str(getattr(intent, "token_id", "") or "")
-    weather_family_key = family_key_for_condition_or_token(
-        conn, condition_id=condition_id, token_id=token_id
-    )
-    family_key = (
-        FamilyKey(
-            city=weather_family_key.city,
-            target_date=weather_family_key.target_date,
-            temperature_metric=weather_family_key.temperature_metric,
-            market_family_id=weather_family_key.market_family_id,
-        )
-        if weather_family_key is not None
-        else None
+    exact_family_key = FamilyKey(
+        city=family_key[0],
+        target_date=family_key[1],
+        temperature_metric=family_key[2],
+        market_family_id="",
     )
     open_entry_exposure_obligation(
         conn,
@@ -3858,7 +3850,7 @@ def _open_entry_risk_reservation(
         shares=float(shares),
         cost_basis_usd=float(cost_basis_usd),
         unbounded=False,
-        family_key=family_key,
+        family_key=exact_family_key,
     )
 
 
@@ -7343,6 +7335,41 @@ def _live_order(
             )
 
         try:
+            entry_family_key = _entry_replacement_family_from_snapshot(
+                conn,
+                intent.executable_snapshot_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - family authority loss blocks entry
+            logger.warning(
+                "_live_order: weather family identity lookup failed before command "
+                "persistence for trade_id=%s token=%s snapshot=%s: %s",
+                trade_id,
+                intent.token_id,
+                intent.executable_snapshot_id,
+                exc,
+            )
+            entry_family_key = None
+        if entry_family_key is None:
+            logger.warning(
+                "_live_order: weather family identity unavailable before command "
+                "persistence for trade_id=%s token=%s snapshot=%s",
+                trade_id,
+                intent.token_id,
+                intent.executable_snapshot_id,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason="entry_family_exclusive:family_identity_unavailable",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_id=command_id,
+                command_state="REJECTED",
+            )
+
+        try:
             collateral_refresh_component = _refresh_entry_collateral_snapshot_for_submit(conn)
         except CollateralInsufficient as exc:
             return OrderResult(
@@ -7503,6 +7530,7 @@ def _live_order(
                     str(getattr(intent, "actionable_certificate_hash", None) or "").strip()
                     or None
                 ),
+                entry_family_key=entry_family_key,
             )
             append_event(
                 conn,
@@ -7571,6 +7599,7 @@ def _live_order(
                 intent=intent,
                 shares=shares,
                 cost_basis_usd=required_pusd_micro / 1_000_000.0,
+                family_key=entry_family_key,
             )
             conn.commit()
         except MarketSnapshotError as exc:

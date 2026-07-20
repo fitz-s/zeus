@@ -46,6 +46,12 @@ UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
 )
 _ABSOLUTE_LIVE_PRICE_MIN = Decimal("0.05")
 _ABSOLUTE_LIVE_PRICE_MAX = Decimal("0.95")
+_OPEN_ENTRY_FAMILY_PHASES = (
+    "pending_entry",
+    "active",
+    "day0_window",
+    "pending_exit",
+)
 
 
 def _assert_persistable_live_unit_price(price: Decimal | str | float) -> Decimal:
@@ -72,6 +78,128 @@ def _strict_live_entry_q_version_required() -> bool:
         or str(os.environ.get("ZEUS_MODE", "")).strip().lower() == "live"
         or str(os.environ.get("XPC_SERVICE_NAME", "")) == "com.zeus.live-trading"
     )
+
+
+def _normalize_entry_family_key(
+    value: tuple[str, str, str] | None,
+) -> tuple[str, str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, tuple) or len(value) != 3:
+        raise ValueError("ENTRY venue command family key must be (city, target_date, metric)")
+    city, target_date, metric = (str(part or "").strip() for part in value)
+    metric = metric.lower()
+    if not city or not target_date or metric not in {"high", "low"}:
+        raise ValueError("ENTRY venue command family key is incomplete or invalid")
+    return city, target_date, metric
+
+
+def _assert_entry_family_exclusive(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    token_id: str,
+    family_key: tuple[str, str, str],
+) -> None:
+    """Reject a second live position inside one exclusive weather family.
+
+    Same-position fill-up remains legal. Different-position sibling entries do
+    not: exactly one temperature bin can settle YES, so independent scalar BUYs
+    must never accumulate across later auction epochs.
+    """
+
+    city, target_date, metric = family_key
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT position_id, bin_label, condition_id, phase,
+                   direction, token_id, no_token_id
+              FROM position_current
+             WHERE LOWER(TRIM(city)) = LOWER(TRIM(?))
+               AND target_date = ?
+               AND LOWER(TRIM(temperature_metric)) = ?
+               AND phase IN ({','.join('?' for _ in _OPEN_ENTRY_FAMILY_PHASES)})
+             ORDER BY updated_at DESC, position_id
+            """,
+            (city, target_date, metric, *_OPEN_ENTRY_FAMILY_PHASES),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("ENTRY family exposure truth is unavailable") from exc
+    for row in rows:
+        existing_position_id = str(row[0] or "")
+        existing_bin = str(row[1] or "")
+        existing_condition = str(row[2] or "")
+        existing_phase = str(row[3] or "")
+        direction = str(row[4] or "").lower()
+        if direction == "buy_yes":
+            existing_token = str(row[5] or "").strip()
+        elif direction == "buy_no":
+            existing_token = str(row[6] or "").strip()
+        else:
+            existing_token = ""
+        if existing_position_id == position_id and existing_token == token_id:
+            continue
+        raise ValueError(
+            "ENTRY sibling family exposure blocked: "
+            f"family={city}|{target_date}|{metric} "
+            f"candidate_position_id={position_id!r} "
+            f"candidate_token_id={token_id!r} "
+            f"existing_position_id={existing_position_id!r} "
+            f"existing_token_id={existing_token!r} "
+            f"existing_bin={existing_bin!r} "
+            f"existing_condition_id={existing_condition!r} "
+            f"existing_phase={existing_phase!r}"
+        )
+
+    try:
+        pending_rows = conn.execute(
+            """
+            SELECT vc.position_id, eo.command_id, eo.token_id, eo.condition_id,
+                   eo.family_city, eo.family_target_date,
+                   eo.family_temperature_metric,
+                   pc.city, pc.target_date, pc.temperature_metric
+              FROM entry_exposure_obligations AS eo
+              LEFT JOIN venue_commands AS vc ON vc.command_id = eo.command_id
+              LEFT JOIN position_current AS pc ON pc.position_id = vc.position_id
+             WHERE eo.status = 'OPEN'
+             ORDER BY eo.created_at DESC, eo.command_id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ValueError("ENTRY pending family exposure truth is unavailable") from exc
+    for pending in pending_rows:
+        stored_family = tuple(str(pending[index] or "").strip() for index in (4, 5, 6))
+        if all(stored_family):
+            pending_family = stored_family
+        elif any(stored_family):
+            raise ValueError("ENTRY pending family exposure truth is unavailable")
+        else:
+            projected_family = tuple(
+                str(pending[index] or "").strip() for index in (7, 8, 9)
+            )
+            if not all(projected_family):
+                raise ValueError("ENTRY pending family exposure truth is unavailable")
+            pending_family = projected_family
+        if (
+            pending_family[0].lower() != city.lower()
+            or pending_family[1] != target_date
+            or pending_family[2].lower() != metric
+        ):
+            continue
+        existing_position_id = str(pending[0] or "")
+        existing_token = str(pending[2] or "").strip()
+        if existing_position_id == position_id and existing_token == token_id:
+            continue
+        raise ValueError(
+            "ENTRY sibling family obligation blocked: "
+            f"family={city}|{target_date}|{metric} "
+            f"candidate_position_id={position_id!r} "
+            f"candidate_token_id={token_id!r} "
+            f"existing_position_id={existing_position_id!r} "
+            f"existing_command_id={str(pending[1] or '')!r} "
+            f"existing_token_id={existing_token!r} "
+            f"existing_condition_id={str(pending[3] or '')!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -984,6 +1112,7 @@ def insert_command(
     venue_order_id: str | None = None,
     reason: str | None = None,
     decision_certificate_hash: str | None = None,
+    entry_family_key: tuple[str, str, str] | None = None,
 ) -> None:
     """INSERT a new venue_commands row in INTENT_CREATED state.
 
@@ -1038,12 +1167,19 @@ def insert_command(
 
     snapshot_id_value = snapshot_id.strip() if isinstance(snapshot_id, str) else snapshot_id
     q_version_value = q_version.strip() or None if isinstance(q_version, str) else q_version
+    normalized_entry_family = _normalize_entry_family_key(entry_family_key)
     if (
         intent_kind == _IntentKind.ENTRY.value
         and q_version_value is None
         and _strict_live_entry_q_version_required()
     ):
         raise ValueError("ENTRY venue command requires non-empty q_version")
+    if (
+        intent_kind == _IntentKind.ENTRY.value
+        and normalized_entry_family is None
+        and _strict_live_entry_q_version_required()
+    ):
+        raise ValueError("live ENTRY venue command requires a weather family key")
     _assert_snapshot_gate(
         conn,
         snapshot_id=snapshot_id_value,
@@ -1069,6 +1205,13 @@ def insert_command(
     event_id = _new_id()
 
     with _savepoint_atomic(conn):
+        if intent_kind == _IntentKind.ENTRY.value and normalized_entry_family is not None:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id=position_id,
+                token_id=token_id,
+                family_key=normalized_entry_family,
+            )
         conn.execute(
             """
             INSERT INTO venue_commands (

@@ -230,6 +230,7 @@ class TestEntryRiskReservation:
         intent = self._make_intent()
         _open_entry_risk_reservation(
             conn, command_id="cmd-1", intent=intent, shares=25.0, cost_basis_usd=10.0,
+            family_key=("Denver", "2026-08-10", "high"),
         )
         assert total_open_obligation_usd(conn) == pytest.approx(25.0)
         assert has_unbounded_obligation(conn) is False
@@ -250,6 +251,7 @@ class TestEntryRiskReservation:
         intent = self._make_intent(market_id="cond-reservation-2", token_id="tok-reservation-2")
         _open_entry_risk_reservation(
             conn, command_id="cmd-2", intent=intent, shares=5.0, cost_basis_usd=2.0,
+            family_key=("Denver", "2026-08-10", "high"),
         )
         blocked = blocked_family_keys(conn, portfolio=None)
         assert WeatherFamilyKey("Denver", "2026-08-10", "high", "") in blocked
@@ -264,6 +266,7 @@ class TestEntryRiskReservation:
         intent = self._make_intent()
         _open_entry_risk_reservation(
             conn, command_id="cmd-3", intent=intent, shares=25.0, cost_basis_usd=10.0,
+            family_key=("Denver", "2026-08-10", "high"),
         )
         assert total_open_obligation_usd(conn) == pytest.approx(25.0)
         released = _release_entry_risk_reservation(conn, command_id="cmd-3")
@@ -360,6 +363,7 @@ class TestAcceptanceSequence:
         )
         _open_entry_risk_reservation(
             conn, command_id="cmd-accept-1", intent=intent, shares=20.0, cost_basis_usd=8.0,
+            family_key=("Miami", "2026-08-20", "high"),
         )
 
         # 2. Venue submit maybe-succeeded; 3. fill observation write FAILS

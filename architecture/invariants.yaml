@@ -1023,3 +1023,39 @@ invariants:
       - tests/test_command_recovery.py
     basis: docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md §5
     added: 2026-07-19
+
+  - id: INV-45
+    zones: [K2_runtime, live_venue_submit]
+    statement: >
+      A weather settlement family is the exhaustive mutually-exclusive partition
+      keyed by (city, target_date, temperature_metric). If canonical runtime state
+      contains an open position or unresolved entry obligation for that family, a
+      live BUY may target only the same canonical position/outcome token as an
+      explicit fill-up. A BUY for a sibling bin is rejected during global-auction
+      candidate policy and again inside venue-command persistence under the
+      admission transaction. SELL, CANCEL, monitoring, and exit remain available;
+      close-before-open rebalance cannot admit the sibling until the prior family
+      exposure is closed. A legacy family already carrying multiple outcome tokens
+      admits no further BUY.
+    why: >
+      The Seoul 2026-07-21 HIGH incident proved that one winner per serialized
+      auction epoch is not family coherence: later epochs independently selected
+      BUY NO on 24C through 29C, including q_mean=1.0 for several incompatible
+      siblings. Family exposure must therefore be current-state authority at both
+      selection and command persistence, not merely a within-epoch optimizer input.
+    enforced_by:
+      tests:
+        - tests/integration/test_w3_solve_seam_g3.py::test_global_sibling_entry_policy_blocks_new_bin_but_keeps_fill_up_and_sell
+        - tests/integration/test_w3_solve_seam_g3.py::test_global_sibling_entry_policy_includes_unfilled_open_obligation
+        - tests/test_venue_command_repo.py::TestExclusiveWeatherFamilyEntryBoundary
+        - tests/test_check_live_restart_preflight.py::test_exclusive_weather_family_entry_restart_check_passes_current_contract
+        - tests/test_check_live_restart_preflight.py::test_exclusive_weather_family_entry_restart_check_blocks_selection_guard_removal
+        - tests/test_check_live_restart_preflight.py::test_exclusive_weather_family_entry_restart_check_blocks_persistence_guard_removal
+      negative_constraints: []
+    capability_tags: [global_auction, venue_command_write, live_venue_submit]
+    relationship_tests:
+      - tests/integration/test_w3_solve_seam_g3.py
+      - tests/test_venue_command_repo.py
+      - tests/test_check_live_restart_preflight.py
+    basis: operator Seoul family-coherence directive and canonical incident evidence 2026-07-20
+    added: 2026-07-20

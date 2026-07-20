@@ -195,6 +195,14 @@ Durable trading rules:
   tick/range, minimum size, identity, tradeability, fees, depth, robust
   delta-log-wealth/EV, and Kelly remain cumulative requirements; none may waive
   this absolute band. There are no strategy, side, lifecycle, or exit exceptions.
+- A weather family is the exhaustive mutually-exclusive partition keyed by
+  `(city, target_date, temperature_metric)`. Once that family has an open
+  position or unresolved entry obligation, a live ENTRY may add only to the same
+  canonical position / outcome token; a BUY for any sibling bin is rejected at
+  global selection and again at venue-command persistence. SELL, CANCEL,
+  monitoring, and exit remain available, and a typed close-before-open rebalance
+  must close the old exposure before a sibling entry can be admitted. A legacy
+  family already holding multiple outcome tokens admits no further BUY.
 - Live may act; backtest may evaluate — and only against verified settlement joins, never mixed regimes. Shadow modes are extirpated (operator directive 2026-06-12); do not reintroduce one as a staging tier.
 - Settlement values flow through `SettlementSemantics`.
 - DB commits precede derived JSON/report exports.

@@ -6511,6 +6511,260 @@ def _absolute_live_unit_price_band_check(cfg: dict[str, Any]) -> CheckResult:
     )
 
 
+def _exclusive_weather_family_entry_check() -> CheckResult:
+    """Refuse restart if sibling BUY defense or its live wiring has regressed."""
+
+    evidence: dict[str, Any] = {
+        "family": ["Seoul", "2026-07-21", "high"],
+        "held_token": "no-28c",
+        "sibling_token": "no-29c",
+    }
+    failures: list[str] = []
+    try:
+        from src.engine.global_batch_runtime import (
+            _open_entry_obligation_tokens_by_family,
+            _sibling_entry_buy_rejection_reason,
+        )
+        from src.state.venue_command_repo import _assert_entry_family_exclusive
+    except Exception as exc:  # noqa: BLE001 - a missing guard blocks restart.
+        evidence["import_error"] = str(exc)
+        return CheckResult(
+            "exclusive_weather_family_entry_boundary",
+            False,
+            "one or more weather-family entry guards are unavailable",
+            evidence,
+        )
+
+    class Candidate:
+        action = "BUY"
+        family_key = "seoul|2026-07-21|high"
+        token_id = "no-29c"
+
+    held = {Candidate.family_key: frozenset({"no-28c"})}
+    if _sibling_entry_buy_rejection_reason(Candidate(), held) != (
+        "GLOBAL_SIBLING_ENTRY_FAMILY_EXPOSURE"
+    ):
+        failures.append("global selection accepted sibling BUY")
+    Candidate.token_id = "no-28c"
+    if _sibling_entry_buy_rejection_reason(Candidate(), held) is not None:
+        failures.append("global selection rejected same-token fill-up")
+    Candidate.action = "SELL"
+    Candidate.token_id = "no-29c"
+    if _sibling_entry_buy_rejection_reason(Candidate(), held) is not None:
+        failures.append("global selection rejected SELL")
+    Candidate.action = "BUY"
+    Candidate.token_id = "no-28c"
+    incoherent = {Candidate.family_key: frozenset({"no-28c", "no-29c"})}
+    if _sibling_entry_buy_rejection_reason(Candidate(), incoherent) != (
+        "GLOBAL_SIBLING_ENTRY_FAMILY_EXPOSURE"
+    ):
+        failures.append("global selection accepted BUY in incoherent multi-token family")
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT NOT NULL,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                bin_label TEXT,
+                condition_id TEXT,
+                direction TEXT,
+                token_id TEXT,
+                no_token_id TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, position_id TEXT NOT NULL)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE entry_exposure_obligations (
+                command_id TEXT PRIMARY KEY,
+                token_id TEXT,
+                condition_id TEXT,
+                family_city TEXT,
+                family_target_date TEXT,
+                family_temperature_metric TEXT,
+                status TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current VALUES (
+                'held-28c', 'active', 'Seoul', '2026-07-21', 'high',
+                '28C', 'condition-28c', 'buy_no', '', 'no-28c',
+                '2026-07-20T00:00:00Z'
+            )
+            """
+        )
+        try:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id="new-29c",
+                token_id="no-29c",
+                family_key=("Seoul", "2026-07-21", "high"),
+            )
+        except ValueError as exc:
+            if "sibling family exposure blocked" not in str(exc):
+                failures.append(f"persistence guard raised wrong sibling error: {exc}")
+        else:
+            failures.append("command persistence accepted sibling position")
+        try:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id="held-28c",
+                token_id="no-28c",
+                family_key=("Seoul", "2026-07-21", "high"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"command persistence rejected same-position fill-up: {exc}")
+        try:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id="held-28c",
+                token_id="no-29c",
+                family_key=("Seoul", "2026-07-21", "high"),
+            )
+        except ValueError as exc:
+            if "sibling family exposure blocked" not in str(exc):
+                failures.append(f"same-position sibling raised wrong error: {exc}")
+        else:
+            failures.append("command persistence accepted same-position sibling token")
+        conn.execute("INSERT INTO venue_commands VALUES ('pending-hk', 'pending-hk-pos')")
+        conn.execute(
+            """
+            INSERT INTO entry_exposure_obligations VALUES (
+                'pending-hk', 'no-27c', 'condition-27c', 'Hong Kong',
+                '2026-07-20', 'low', 'OPEN', '2026-07-20T00:00:00Z'
+            )
+            """
+        )
+        try:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id="pending-hk-pos",
+                token_id="no-27c",
+                family_key=("Hong Kong", "2026-07-20", "low"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"pending same-token fill-up was rejected: {exc}")
+        try:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id="pending-hk-pos",
+                token_id="no-28c",
+                family_key=("Hong Kong", "2026-07-20", "low"),
+            )
+        except ValueError as exc:
+            if "sibling family obligation blocked" not in str(exc):
+                failures.append(f"pending same-position sibling raised wrong error: {exc}")
+        else:
+            failures.append("pending obligation accepted same-position sibling token")
+        try:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id="new-hk-28c",
+                token_id="no-28c",
+                family_key=("Hong Kong", "2026-07-20", "low"),
+            )
+        except ValueError as exc:
+            if "sibling family obligation blocked" not in str(exc):
+                failures.append(f"pending obligation raised wrong sibling error: {exc}")
+        else:
+            failures.append("command persistence accepted sibling of pending obligation")
+        obligation_tokens = _open_entry_obligation_tokens_by_family(conn)
+        from src.events.candidate_binding import weather_family_id
+
+        pending_family = weather_family_id(
+            city="Hong Kong", target_date="2026-07-20", metric="low"
+        )
+        if obligation_tokens.get(pending_family) != frozenset({"no-27c"}):
+            failures.append("global selection did not load pending obligation token authority")
+        conn.execute("INSERT INTO venue_commands VALUES ('legacy-familyless', 'legacy-pos')")
+        conn.execute(
+            """
+            INSERT INTO position_current VALUES (
+                'legacy-pos', 'settled', 'Miami', '2026-07-22', 'high',
+                '31C', 'condition-31c', 'buy_no', '', 'no-31c',
+                '2026-07-20T00:00:00Z'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO entry_exposure_obligations VALUES (
+                'legacy-familyless', 'no-31c', 'condition-31c', NULL,
+                NULL, NULL, 'OPEN', '2026-07-20T00:00:00Z'
+            )
+            """
+        )
+        try:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id="new-miami-32c",
+                token_id="no-32c",
+                family_key=("Miami", "2026-07-22", "high"),
+            )
+        except ValueError as exc:
+            if "sibling family obligation blocked" not in str(exc):
+                failures.append(f"legacy familyless fallback raised wrong error: {exc}")
+        else:
+            failures.append("persistence accepted sibling of legacy familyless obligation")
+        conn.execute("INSERT INTO venue_commands VALUES ('unknown-family', 'unknown-pos')")
+        conn.execute(
+            """
+            INSERT INTO entry_exposure_obligations VALUES (
+                'unknown-family', 'unknown-token', 'unknown-condition', NULL,
+                NULL, NULL, 'OPEN', '2026-07-20T00:00:00Z'
+            )
+            """
+        )
+        try:
+            _assert_entry_family_exclusive(
+                conn,
+                position_id="new-any-family",
+                token_id="new-any-token",
+                family_key=("Paris", "2026-07-22", "high"),
+            )
+        except ValueError as exc:
+            if "pending family exposure truth is unavailable" not in str(exc):
+                failures.append(f"unknown familyless obligation raised wrong error: {exc}")
+        else:
+            failures.append("persistence accepted entry with unknown familyless obligation")
+    finally:
+        conn.close()
+
+    executor_source = (ROOT / "src" / "execution" / "executor.py").read_text()
+    batch_source = (ROOT / "src" / "engine" / "global_batch_runtime.py").read_text()
+    if "entry_family_key=entry_family_key" not in executor_source:
+        failures.append("executor no longer carries family identity into insert_command")
+    if "_sibling_entry_buy_rejection_reason(" not in batch_source.split(
+        "def process_current_global_batch", 1
+    )[-1]:
+        failures.append("global batch no longer invokes sibling BUY policy")
+    if "_open_entry_obligation_tokens_by_family(" not in batch_source.split(
+        "def process_current_global_batch", 1
+    )[-1]:
+        failures.append("global batch no longer loads pending obligation token authority")
+
+    evidence["failures"] = failures
+    return CheckResult(
+        "exclusive_weather_family_entry_boundary",
+        not failures,
+        "global selection and command persistence reject sibling BUY exposure"
+        if not failures
+        else "weather-family sibling entry guard regression detected",
+        evidence,
+    )
+
 def evaluate() -> dict[str, Any]:
     cfg = _settings()
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
@@ -6529,6 +6783,7 @@ def evaluate() -> dict[str, Any]:
         _live_trading_launchagent_bootstrapable_check(),
         _live_trading_process_absent_check(),
         _absolute_live_unit_price_band_check(cfg),
+        _exclusive_weather_family_entry_check(),
         CheckResult(
             "submit_authority_config",
             submit_ok,

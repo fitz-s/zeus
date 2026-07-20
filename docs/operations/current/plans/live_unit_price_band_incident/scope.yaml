@@ -1,7 +1,7 @@
 id: live_unit_price_band_incident
 status: verified_local
 owner: operator
-frontier: absolute_live_unit_price_submit_boundary
+frontier: absolute_live_unit_price_and_weather_family_entry_boundary
 allowed_files:
   - AGENTS.md
   - architecture/invariants.yaml
@@ -16,11 +16,13 @@ allowed_files:
   - docs/operations/current/plans/live_unit_price_band_incident/PLAN.md
   - docs/operations/current/plans/live_unit_price_band_incident/scope.yaml
   - scripts/check_live_restart_preflight.py
+  - scripts/AGENTS.md
   - scripts/deploy_live.py
   - src/contracts/venue_submission_envelope.py
   - src/data/polymarket_client.py
   - src/engine/cycle_runner.py
   - src/engine/cycle_runtime.py
+  - src/engine/global_batch_runtime.py
   - src/engine/lifecycle_events.py
   - src/execution/executor.py
   - src/state/venue_command_repo.py
@@ -29,9 +31,11 @@ allowed_files:
   - tests/test_check_live_restart_preflight.py
   - tests/test_riskguard_red_durable_cmd.py
   - tests/test_executor.py
+  - tests/test_excision_t2.py
   - tests/test_v2_adapter.py
   - tests/test_venue_command_repo.py
   - tests/test_runtime_guards.py
+  - tests/integration/test_w3_solve_seam_g3.py
 forbidden_files:
   - state/zeus-world.db
   - state/zeus-forecasts.db
@@ -39,12 +43,15 @@ forbidden_files:
 live_side_effects_allowed: durable_entry_pause_and_operator_deploy_restart_only
 completed_live_side_effects:
   - indefinite entries_paused override written at 2026-07-20T15:27:19Z
+  - first override resumed after price/runtime deployment proof at 2026-07-20T19:41:52Z
+  - second indefinite entries_paused override written at 2026-07-20T19:47:28Z after sibling-entry bypass proof
 high_risk_changes:
   - K0 venue submission contract
   - live SDK submission boundary
   - official restart preflight
   - daemon restart
   - Day0 canonical projection repair after non-transition events
+  - same-family sibling BUY rejection at global selection and command persistence
 tests:
   - tests/test_ops_scripts_smoke.py
   - tests/test_check_live_restart_preflight.py
@@ -53,4 +60,5 @@ tests:
   - tests/test_v2_adapter.py
   - tests/test_venue_command_repo.py
   - tests/test_runtime_guards.py
+  - tests/integration/test_w3_solve_seam_g3.py
 closeout_required: true
