@@ -18125,10 +18125,18 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             }
 
         def get_fee_rate_details(self, token_id):
-            assert token_id == "yes-token"
-            return {"fee_rate_fraction": 0}
+            raise AssertionError(
+                f"legacy CLOB fee authority called for global SELL: {token_id}"
+            )
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Clob)
+    monkeypatch.setattr(
+        era,
+        "_current_global_sell_fee_fraction",
+        lambda **_kwargs: (
+            actuation.decision.candidate.executable_sell_curve.fee_model.fee_rate
+        ),
+    )
     exits = []
 
     def execute_exit(portfolio_arg, position_arg, context, **kwargs):

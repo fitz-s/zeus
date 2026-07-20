@@ -428,6 +428,82 @@ def _global_current_gamma_client(*, timeout_seconds: float):
         return client
 
 
+def _governed_global_gamma_get(
+    client: object,
+    path: str,
+    *,
+    params: Mapping[str, object] | None,
+    timeout: float,
+    priority: object,
+):
+    """Route every global-auction Gamma read through persistent quota law."""
+
+    from src.data.market_scanner import GAMMA_BASE
+    from src.data.polymarket_request_governor import polymarket_request_governor
+
+    request_params = dict(params or {})
+    return polymarket_request_governor.request(
+        lambda: client.get(
+            path,
+            params=request_params or None,
+            timeout=float(timeout),
+        ),
+        "GET",
+        f"{GAMMA_BASE}{path}",
+        params=request_params or None,
+        priority=priority,
+    )
+
+
+def _current_global_sell_fee_fraction(
+    *,
+    condition_id: str,
+    token_id: str,
+    gamma_get: Callable[..., object],
+    timeout: float,
+) -> Decimal:
+    """Read the selected market's current V2 fee schedule or fail closed."""
+
+    from src.contracts.executable_market_snapshot import (
+        fee_details_from_gamma_fee_schedule,
+        fee_rate_fraction_from_details,
+    )
+    from src.contracts.fee_authority import resolve_taker_fee_fraction
+    from src.engine.global_auction_universe import fetch_current_gamma_markets
+
+    markets, _request_count = fetch_current_gamma_markets(
+        [condition_id],
+        gamma_get=gamma_get,
+        timeout=float(timeout),
+        chunk_size=1,
+        max_workers=1,
+    )
+    matching = tuple(
+        market
+        for market in markets
+        if str(
+            market.get("conditionId")
+            or market.get("condition_id")
+            or ""
+        ).strip()
+        == condition_id
+    )
+    if len(matching) != 1:
+        raise ValueError("GLOBAL_SELL_JIT_FEE_MARKET_IDENTITY_INVALID")
+    market = matching[0]
+    schedule = market.get("feeSchedule") or market.get("fee_schedule")
+    details = fee_details_from_gamma_fee_schedule(
+        schedule,
+        source="global_sell_jit_gamma_fee_schedule",
+        token_id=token_id,
+        fee_type=str(market.get("feeType") or market.get("fee_type") or "")
+        or None,
+    )
+    schedule_fee = fee_rate_fraction_from_details(details)
+    fee_rate, _fee_source = resolve_taker_fee_fraction(schedule_fee)
+    return Decimal(str(fee_rate))
+
+
 def _global_probability_family_cache_namespace(
     connections: Iterable[sqlite3.Connection],
     *,
@@ -8136,10 +8212,12 @@ def event_bound_live_adapter_from_trade_conn(
                         return min(gamma_timeout, remaining)
 
                     def _gamma_get_once(path, *, params=None, timeout):
-                        return gamma.get(
+                        return _governed_global_gamma_get(
+                            gamma,
                             path,
                             params=params,
                             timeout=min(float(timeout), _remaining_gamma_timeout()),
+                            priority=RequestPriority.SUBMIT_JIT,
                         )
 
                     def _gamma_markets(condition_ids):
@@ -11007,21 +11085,26 @@ def _submit_current_global_sell(
             raw_book = books.get(str(getattr(candidate, "token_id", "") or ""))
             if not isinstance(raw_book, Mapping):
                 raise ValueError("GLOBAL_SELL_JIT_BOOK_MISSING")
-            fee_reader = getattr(clob, "get_fee_rate_details", None)
-            if not callable(fee_reader):
-                raise ValueError("GLOBAL_SELL_JIT_FEE_AUTHORITY_MISSING")
-            from src.contracts.executable_market_snapshot import (
-                fee_rate_fraction_from_details,
-            )
-            from src.contracts.fee_authority import resolve_taker_fee_fraction
+            gamma = _global_current_gamma_client(timeout_seconds=timeout)
 
-            current_schedule_fee = fee_rate_fraction_from_details(
-                fee_reader(str(getattr(candidate, "token_id", "") or ""))
+            def _held_gamma_get(path, *, params=None, timeout):
+                return _governed_global_gamma_get(
+                    gamma,
+                    path,
+                    params=params,
+                    timeout=float(timeout),
+                    priority=RequestPriority.HELD_REDUCE_ONLY,
+                )
+
+            current_fee = _current_global_sell_fee_fraction(
+                condition_id=str(
+                    getattr(candidate, "condition_id", "") or ""
+                ),
+                token_id=str(getattr(candidate, "token_id", "") or ""),
+                gamma_get=_held_gamma_get,
+                timeout=timeout,
             )
-            current_fee, _fee_source = resolve_taker_fee_fraction(
-                current_schedule_fee
-            )
-            if Decimal(str(current_fee)) != Decimal(
+            if current_fee != Decimal(
                 candidate.executable_sell_curve.fee_model.fee_rate
             ):
                 raise ValueError("GLOBAL_SELL_JIT_FEE_SUPERSEDED")

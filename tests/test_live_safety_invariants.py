@@ -6677,6 +6677,123 @@ def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_poste
     assert "posterior_cycle=2026-06-29T06:00:00+00:00" in reason
 
 
+def test_global_sell_jit_fee_uses_current_gamma_v2_schedule(monkeypatch):
+    """A legacy CLOB base-fee cap cannot supersede the current market schedule."""
+    from src.contracts import fee_authority
+    from src.engine import event_reactor_adapter as adapter
+
+    calls = []
+
+    def gamma_get(path, *, params, timeout):
+        calls.append((path, params, timeout))
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: [
+                {
+                    "conditionId": "condition-weather",
+                    "feeType": "weather_fees",
+                    "feeSchedule": {
+                        "exponent": 1,
+                        "rate": 0.05,
+                        "takerOnly": True,
+                        "rebateRate": 0.25,
+                    },
+                    "takerBaseFee": 1000,
+                }
+            ],
+        )
+
+    monkeypatch.setattr(
+        fee_authority,
+        "resolve_taker_fee_fraction",
+        lambda schedule: (schedule, "current_schedule"),
+    )
+
+    fee = adapter._current_global_sell_fee_fraction(
+        condition_id="condition-weather",
+        token_id="no-token-weather",
+        gamma_get=gamma_get,
+        timeout=3.0,
+    )
+
+    assert fee == Decimal("0.05")
+    assert calls == [
+        (
+            "/markets",
+            {"condition_ids": ["condition-weather"], "limit": 1},
+            3.0,
+        )
+    ]
+
+
+def test_global_sell_jit_fee_rejects_wrong_gamma_market(monkeypatch):
+    """Submit-time fee truth must bind the selected condition exactly."""
+    from src.contracts import fee_authority
+    from src.engine import event_reactor_adapter as adapter
+
+    monkeypatch.setattr(
+        fee_authority,
+        "resolve_taker_fee_fraction",
+        lambda schedule: (schedule, "current_schedule"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_SELL_JIT_FEE_MARKET_IDENTITY_INVALID",
+    ):
+        adapter._current_global_sell_fee_fraction(
+            condition_id="condition-selected",
+            token_id="no-token-selected",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200,
+                json=lambda: [
+                    {
+                        "conditionId": "condition-other",
+                        "feeSchedule": {"exponent": 1, "rate": 0.05},
+                    }
+                ],
+            ),
+            timeout=3.0,
+        )
+
+
+def test_global_gamma_reads_use_persistent_request_governor(monkeypatch):
+    """Global auction metadata may not bypass cross-process quota authority."""
+    from src.data import polymarket_request_governor as governor_module
+    from src.data.polymarket_request_governor import RequestPriority
+    from src.engine import event_reactor_adapter as adapter
+
+    response = SimpleNamespace(status_code=200)
+    client = SimpleNamespace(get=lambda *_args, **_kwargs: response)
+    captured = {}
+
+    def request(send, method, url, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return send()
+
+    monkeypatch.setattr(
+        governor_module.polymarket_request_governor,
+        "request",
+        request,
+    )
+
+    observed = adapter._governed_global_gamma_get(
+        client,
+        "/markets",
+        params={"condition_ids": ["condition-weather"]},
+        timeout=2.0,
+        priority=RequestPriority.HELD_REDUCE_ONLY,
+    )
+
+    assert observed is response
+    assert captured == {
+        "method": "GET",
+        "url": "https://gamma-api.polymarket.com/markets",
+        "params": {"condition_ids": ["condition-weather"]},
+        "priority": RequestPriority.HELD_REDUCE_ONLY,
+    }
+
+
 def test_entry_replacement_ignores_partial_non_anchor_raw_cycle_newer_than_posterior():
     """Partial regional/model rows cannot stale replacement authority by themselves.
 
