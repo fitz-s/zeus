@@ -40,13 +40,13 @@ LIVE_ANCHOR_MODEL = "ecmwf_ifs"        # 9km / 0.1-degree deterministic (the liv
 STORED_ANCHOR_MODEL = "ecmwf_ifs025"   # 0.25-degree deterministic (the only OM prev-runs ECMWF).
 BRIDGE_ID = "ifs025_to_ifs9"
 
-# Bridge reconciliation parameters (conservative, documented):
-#   delta_bias: claimed systematic mean shift 025->9km. ZERO — no empirically-calibrated bias in
-#     this PR; we do not invent a correction we cannot justify (widen-only honesty).
+# Bridge reconciliation is VARIANCE-ONLY (widen, never shift). There is NO empirically-calibrated
+# 025->9km systematic CENTER shift, and a hardcoded constant is never added to a continuously-varying
+# center (a static offset cannot correct a varying quantity — forbidden by first principles). The
+# reconciliation therefore only scales/widens the anchor's uncertainty:
 #   rho_sigma:  scale on the 025 residual std carried into the 9km frame. 1.0 — the 025 spread is
 #     a LOWER BOUND on the 9km anchor's own spread (a coarser grid is not MORE certain).
 #   uncertainty_c: additive degC buffer (in quadrature) for the cross-product translation loss.
-BRIDGE_DELTA_BIAS_C = 0.0
 BRIDGE_RHO_SIGMA = 1.0
 BRIDGE_UNCERTAINTY_C = 0.5
 
@@ -62,11 +62,6 @@ def anchor_history_requires_bridge(*, stored_model_name: str | None) -> bool:
         # Unknown product provenance -> be conservative and bridge (widen). Provenance-first.
         return True
     return stored_model_name != LIVE_ANCHOR_MODEL
-
-
-def bridge_anchor_center(raw_center_c: float) -> float:
-    """Shift the 025-frame anchor center into the 9km frame by the (declared) bridge bias."""
-    return float(raw_center_c) + BRIDGE_DELTA_BIAS_C
 
 
 def bridge_anchor_tau0(raw_tau0_c: float) -> float:
@@ -87,7 +82,7 @@ def bridge_metadata(*, stored_model_name: str | None) -> dict[str, object]:
         "stored_model": STORED_ANCHOR_MODEL,
         "live_anchor_model": LIVE_ANCHOR_MODEL,
         "stored_model_name_observed": stored_model_name,
-        "bridge_delta_bias_c": BRIDGE_DELTA_BIAS_C,
+        "bridge_delta_bias_c": 0.0,  # variance-only bridge — no center shift is ever added
         "bridge_rho_sigma": BRIDGE_RHO_SIGMA,
         "bridge_uncertainty_c": BRIDGE_UNCERTAINTY_C,
         "applied": anchor_history_requires_bridge(stored_model_name=stored_model_name),
