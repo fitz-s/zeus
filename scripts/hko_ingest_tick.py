@@ -51,6 +51,8 @@ import json
 import logging
 import sqlite3
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,6 +110,16 @@ class HkoExtremaPrefetch:
     last_modified: str | None
 
 
+class HkoPrefetchTimeoutError(httpx.TimeoutException):
+    """An HKO prefetch exceeded its absolute total-duration budget.
+
+    httpx's own ``timeout`` bounds each I/O phase (connect/read/write/pool)
+    independently and resets on every successful low-level socket read — a
+    peer that drips bytes just under that per-phase timeout can hold a plain
+    GET open indefinitely. This is a distinct, total-duration failure mode.
+    """
+
+
 class HkoExtremaPoller:
     """Conditional source-clock client with commit-coupled validators."""
 
@@ -116,9 +128,11 @@ class HkoExtremaPoller:
         *,
         client: httpx.Client | None = None,
         timeout_s: float = 5.0,
+        total_budget_s: float = 15.0,
     ) -> None:
         self._client = client or httpx.Client(timeout=max(0.1, float(timeout_s)))
         self._owns_client = client is None
+        self._total_budget_s = float(total_budget_s)
         self._etag: str | None = None
         self._last_modified: str | None = None
 
@@ -128,7 +142,7 @@ class HkoExtremaPoller:
             headers["If-None-Match"] = self._etag
         if self._last_modified:
             headers["If-Modified-Since"] = self._last_modified
-        response = self._client.get(HKO_EXTREMA_URL, headers=headers)
+        response = self._bounded_get(headers)
         if response.status_code == 304:
             return None
         response.raise_for_status()
@@ -141,6 +155,35 @@ class HkoExtremaPoller:
             etag=response.headers.get("etag"),
             last_modified=response.headers.get("last-modified"),
         )
+
+    def _bounded_get(self, headers: dict[str, str]) -> httpx.Response:
+        """GET with an absolute wall-clock ceiling, not just per-phase timeouts.
+
+        httpx's per-phase timeout resets on every low-level socket read, so a
+        drip-feeding peer can hold the plain call open past any per-phase
+        bound. Running the unchanged blocking GET on a one-shot executor and
+        bounding it with ``future.result(timeout=...)`` enforces a real
+        total-duration ceiling regardless of which phase the peer stalls in.
+
+        The executor is created fresh per call, never reused: if a call
+        times out, its worker thread is abandoned still blocked on the
+        socket (a known thread leak — accepted here because the poller runs
+        on a single-instance, ``max_instances=1`` schedule against a
+        low-risk internal source). Reusing one persistent single-worker
+        executor instead would let one stuck peer permanently wedge every
+        later prefetch behind it — recreating the exact freeze this budget
+        exists to prevent.
+        """
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._client.get, HKO_EXTREMA_URL, headers=headers)
+        try:
+            return future.result(timeout=self._total_budget_s)
+        except _FutureTimeoutError as exc:
+            raise HkoPrefetchTimeoutError(
+                f"HKO prefetch exceeded total budget of {self._total_budget_s}s"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False)
 
     def acknowledge(self, prefetch: HkoExtremaPrefetch) -> None:
         self._etag = prefetch.etag

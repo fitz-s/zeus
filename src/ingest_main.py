@@ -379,22 +379,6 @@ def _bridge_committed_day0_events(
         from src.data.replacement_cycle_advance_trigger import (
             enqueue_day0_extreme_updated_materialization_seed,
         )
-
-        for city, target_date, metric in unique_families:
-            report = enqueue_day0_extreme_updated_materialization_seed(
-                city=city,
-                target_date=target_date,
-                metric=metric,
-            )
-            logger.info(
-                "DAY0_SOURCE_MATERIALIZATION_BRIDGE source=%s city=%s "
-                "target_date=%s metric=%s status=%s",
-                source,
-                city,
-                target_date,
-                metric,
-                report.get("status"),
-            )
     except Exception:
         logger.warning(
             "DAY0_SOURCE_MATERIALIZATION_BRIDGE_FAILED source=%s families=%d; "
@@ -403,6 +387,39 @@ def _bridge_committed_day0_events(
             len(unique_families),
             exc_info=True,
         )
+    else:
+        for city, target_date, metric in unique_families:
+            # Per-family boundary: one family's seed-enqueue error must not
+            # skip the seed pre-warm for later families. The underlying fact
+            # is already durably committed before this function runs, so a
+            # scheduled recompute remains the fallback for the failed family
+            # alone — this is latency isolation, not fact-loss prevention.
+            try:
+                report = enqueue_day0_extreme_updated_materialization_seed(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+                logger.info(
+                    "DAY0_SOURCE_MATERIALIZATION_BRIDGE source=%s city=%s "
+                    "target_date=%s metric=%s status=%s",
+                    source,
+                    city,
+                    target_date,
+                    metric,
+                    report.get("status"),
+                )
+            except Exception:
+                logger.warning(
+                    "DAY0_SOURCE_MATERIALIZATION_BRIDGE_FAILED source=%s "
+                    "city=%s target_date=%s metric=%s; scheduled recompute "
+                    "remains the fallback",
+                    source,
+                    city,
+                    target_date,
+                    metric,
+                    exc_info=True,
+                )
     try:
         from src.runtime.reactor_wake import publish_reactor_wake
 
