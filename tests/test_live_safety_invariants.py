@@ -228,6 +228,52 @@ def test_monitor_selection_syncs_pending_exit_projection_over_stale_runtime_stat
     assert "DUST" in pos.exit_reason
 
 
+def test_targeted_monitor_scopes_canonical_projection_to_runtime_exposure():
+    """A family wake must not scan canonical history outside its loaded subset."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, 'settled', 1.0, 0.0)",
+        [(f"historical-{index}",) for index in range(1_000)],
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES ('target-held', 'active', 10.0, 10.0)"
+    )
+    pos = _make_position(
+        trade_id="target-held",
+        state="holding",
+        shares=10.0,
+        chain_shares=10.0,
+    )
+    portfolio = _make_portfolio(pos)
+    portfolio.authority_scope = "runtime_exposure"
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    selected = cycle_runtime._monitoring_phase_positions(portfolio, conn=conn)
+
+    assert selected == [pos]
+    projection_reads = [
+        statement
+        for statement in statements
+        if "FROM position_current" in statement
+    ]
+    assert len(projection_reads) == 1
+    assert "WHERE position_id IN ('target-held')" in projection_reads[0]
+
+
 def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monkeypatch):
     """Held-position monitoring must preserve cadence instead of overrunning the scheduler."""
     from src.engine import cycle_runtime

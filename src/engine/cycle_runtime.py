@@ -4124,7 +4124,12 @@ _CANONICAL_MONITOR_PHASE_PRIORITY = {
 }
 
 
-def _canonical_monitor_position_rows(conn, *, now_utc: datetime | None = None) -> list | None:
+def _canonical_monitor_position_rows(
+    conn,
+    *,
+    now_utc: datetime | None = None,
+    position_ids: tuple[str, ...] | None = None,
+) -> list | None:
     """Return monitorable canonical position_current rows in monitor order.
 
     ``None`` means the canonical projection is unavailable and callers should use
@@ -4180,8 +4185,20 @@ def _canonical_monitor_position_rows(conn, *, now_utc: datetime | None = None) -
             monitor_event_payload,
         ]
     )
+    where_sql = ""
+    params: tuple[str, ...] = ()
+    if position_ids is not None:
+        params = tuple(dict.fromkeys(value for value in position_ids if value))
+        if params:
+            placeholders = ", ".join("?" for _value in params)
+            where_sql = f" WHERE position_id IN ({placeholders})"
+        else:
+            where_sql = " WHERE 0"
     try:
-        rows = conn.execute(f"SELECT {select_sql} FROM position_current").fetchall()
+        rows = conn.execute(
+            f"SELECT {select_sql} FROM position_current{where_sql}",
+            params,
+        ).fetchall()
     except Exception:
         return None
 
@@ -4302,8 +4319,6 @@ def _monitoring_phase_positions(portfolio, conn=None, *, now_utc: datetime | Non
     second-level exit-monitor loop ahead of active/pending money-risk rows.
     """
 
-    canonical_rows = _canonical_monitor_position_rows(conn, now_utc=now_utc)
-
     out = []
     seen: set[str] = set()
     all_positions = list(getattr(portfolio, "positions", []) or [])
@@ -4312,6 +4327,14 @@ def _monitoring_phase_positions(portfolio, conn=None, *, now_utc: datetime | Non
         for pos in all_positions
         if str(getattr(pos, "trade_id", "") or "")
     }
+    position_ids = None
+    if getattr(portfolio, "authority_scope", "full_portfolio") == "runtime_exposure":
+        position_ids = tuple(by_position_id)
+    canonical_rows = _canonical_monitor_position_rows(
+        conn,
+        now_utc=now_utc,
+        position_ids=position_ids,
+    )
     if canonical_rows is not None:
         for row in canonical_rows:
             position_id = str(_row_get(row, "position_id", "") or "").strip()
