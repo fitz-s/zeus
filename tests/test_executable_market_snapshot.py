@@ -34,6 +34,7 @@ from src.contracts.executable_market_snapshot import (
     canonicalize_fee_details,
     fee_details_from_gamma_fee_schedule,
     is_fresh,
+    assert_snapshot_executable,
 )
 from src.contracts.exceptions import EmptyOrderbookError
 from src.contracts.execution_intent import (
@@ -1484,6 +1485,31 @@ def test_tick_mismatch_blocks_before_signing(conn):
 
     with pytest.raises(MarketSnapshotMismatchError, match="not aligned"):
         _insert_command(conn, snapshot_id="snap-tick", price=0.333)
+
+
+@pytest.mark.parametrize("price", [Decimal("0.049"), Decimal("0.951")])
+def test_snapshot_submit_gate_rejects_absolute_price_band(price):
+    with pytest.raises(MarketSnapshotMismatchError, match=r"inclusive \[0\.05, 0\.95\]"):
+        assert_snapshot_executable(
+            _snapshot(),
+            token_id="yes-token",
+            side="BUY",
+            price=price,
+            size=Decimal("10"),
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("price", [Decimal("0.05"), Decimal("0.95")])
+def test_snapshot_submit_gate_accepts_absolute_price_boundaries(price):
+    assert_snapshot_executable(
+        _snapshot(min_tick_size=Decimal("0.01")),
+        token_id="yes-token",
+        side="BUY",
+        price=price,
+        size=Decimal("10"),
+        now=NOW,
+    )
 
 
 def test_min_order_size_mismatch_blocks_before_signing(conn):
