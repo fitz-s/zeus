@@ -5056,13 +5056,13 @@ def _event_bound_effective_live_quality_floors(
 
 
 def _global_current_entry_feasibility_rejection_reason(candidate: object) -> str | None:
-    """Reject malformed BUYs without imposing a nominal entry-price floor.
+    """Reject malformed or absolute-band-ineligible BUYs before selection.
 
     The auction owns economic selection: current q bounds, fees, full depth,
     robust utility, Kelly sizing, wealth, and caps determine whether either
     YES or NO is a winner.  This adapter policy merely requires a native,
-    executable BUY quote; a low or high valid price is not a feasible-set
-    exclusion.  SELL compares against HOLD and does not consume BUY authority.
+    executable BUY quote inside the non-waivable live price band. SELL compares
+    against HOLD and does not consume BUY authority.
     """
 
     action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
@@ -5079,7 +5079,9 @@ def _global_current_entry_feasibility_rejection_reason(candidate: object) -> str
         best_ask = Decimal(levels[0].price)
     except (ArithmeticError, AttributeError, TypeError, ValueError):
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
-    if not best_ask.is_finite() or not Decimal("0") < best_ask < Decimal("1"):
+    try:
+        assert_live_order_unit_price(best_ask)
+    except ValueError:
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
     return None
 
@@ -9758,7 +9760,7 @@ def _day0_selected_route_fdr_proof(
         bool(getattr(selected_proof, "passed_prefilter", False))
         and getattr(selected_proof, "missing_reason", None) is None
         and 0.0 <= q_lcb <= 1.0
-        and 0.0 < price < 1.0
+        and 0.05 <= price <= 0.95
         and q_lcb > price
         and trade_score > 0.0
         and false_edge_rate <= float(DEFAULT_FDR_ALPHA)
@@ -10181,6 +10183,19 @@ def _decision_snapshot_refresh_target(
     token_id = str(payload.get("token_id") or "").strip()
     conditions = (condition_id,) if condition_id else tuple(family_condition_ids)
     return conditions, token_id or None
+
+
+def _global_candidate_snapshot_refresh_target(
+    candidate: object,
+) -> tuple[tuple[str, ...], str]:
+    """Target the exact native-side global winner whose persisted row vanished."""
+
+    condition_id = str(getattr(candidate, "condition_id", "") or "").strip()
+    token_id = str(getattr(candidate, "token_id", "") or "").strip()
+    side = str(getattr(candidate, "side", "") or "").strip().upper()
+    if not condition_id or not token_id or side not in {"YES", "NO"}:
+        raise ValueError("GLOBAL_ACTUATION_SNAPSHOT_REFRESH_IDENTITY_MISSING")
+    return (condition_id,), token_id
 
 
 def _global_selected_order_economics_drift(
@@ -12242,6 +12257,103 @@ def _global_actuation_selected_proof(
     return bound
 
 
+def _global_actuation_current_admission_proofs(
+    *,
+    proofs: tuple["_CandidateProof", ...],
+    global_actuation: object,
+    prepared_global_family: object,
+    family: object,
+) -> tuple["_CandidateProof", ...]:
+    """Rebind only the selected proof to its sealed current global witness cap."""
+
+    decision = getattr(global_actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    witness = getattr(prepared_global_family, "probability_witness", None)
+    cap_rows = tuple(
+        getattr(prepared_global_family, "candidate_payoff_q_lcb_caps", ()) or ()
+    )
+    if candidate is None or witness is None or not cap_rows:
+        return proofs
+    side = str(getattr(candidate, "side", "") or "").strip().upper()
+    direction = {"YES": "buy_yes", "NO": "buy_no"}.get(side)
+    family_key = str(getattr(candidate, "family_key", "") or "").strip()
+    bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
+    condition_id = str(getattr(candidate, "condition_id", "") or "").strip()
+    token_id = str(getattr(candidate, "token_id", "") or "").strip()
+    if (
+        direction is None
+        or not all((family_key, bin_id, condition_id, token_id))
+        or family_key != str(getattr(family, "family_id", "") or "")
+        or family_key != str(getattr(witness, "family_key", "") or "")
+        or str(getattr(candidate, "probability_witness_identity", "") or "")
+        != str(getattr(witness, "witness_identity", "") or "")
+    ):
+        raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_IDENTITY_MISMATCH")
+
+    matches = tuple(
+        proof
+        for proof in proofs
+        if str(getattr(proof.candidate, "condition_id", "") or "")
+        == condition_id
+        and _candidate_bin_id_from_topology(proof.candidate) == bin_id
+        and str(getattr(proof, "token_id", "") or "") == token_id
+        and str(getattr(proof, "direction", "") or "") == direction
+    )
+    if len(matches) != 1:
+        raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROOF_MISSING")
+    selected = matches[0]
+    missing_reason = str(getattr(selected, "missing_reason", "") or "")
+    if not missing_reason.startswith(
+        "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:"
+    ):
+        return proofs
+    if side != "NO":
+        raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_SIDE_MISMATCH")
+
+    from src.solve.solver import family_payoff_q_samples
+
+    payoff_samples = family_payoff_q_samples(witness, bin_id=bin_id, side=side)
+    yes_samples = family_payoff_q_samples(witness, bin_id=bin_id, side="YES")
+    cap = _prepared_candidate_payoff_q_lcb_cap(
+        prepared_global_family,
+        candidate,
+    )
+    if payoff_samples is None or yes_samples is None or cap is None:
+        raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_MISSING")
+    q_point = float(payoff_samples.mean())
+    same_bin_yes = float(yes_samples.mean())
+    if (
+        not all(math.isfinite(value) for value in (q_point, same_bin_yes, cap))
+        or not 0.0 <= cap <= q_point <= 1.0
+        or not 0.0 <= same_bin_yes <= 1.0
+        or not math.isclose(
+            q_point + same_bin_yes,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_INVALID")
+    sample_identity = str(
+        getattr(witness, "sample_matrix_identity", "") or ""
+    ).strip()
+    if not sample_identity:
+        raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_IDENTITY_MISSING")
+    rebound = dataclass_replace(
+        selected,
+        q_posterior=q_point,
+        q_lcb_5pct=cap,
+        same_bin_yes_posterior=same_bin_yes,
+        q_source="global_current_probability_witness",
+        q_lcb_calibration_source="GLOBAL_CURRENT_WITNESS_CAP",
+        probability_authority="global_current_probability_witness",
+        p_cal_vector_hash=sample_identity,
+        p_live_vector_hash=sample_identity,
+        missing_reason=None,
+    )
+    return tuple(rebound if proof is selected else proof for proof in proofs)
+
+
 def _global_prepare_failure_reason(spine_result: object) -> str | None:
     if getattr(spine_result, "global_family", None) is not None:
         return None
@@ -12568,6 +12680,77 @@ def _build_event_bound_no_submit_receipt_core(
     # raised after this point. Observability only; never read back into a gate.
     if provenance_capture is not None and row is not None:
         provenance_capture["snapshot_row"] = row
+    if (
+        row is None
+        and global_candidate is not None
+        and family_snapshot_refresher is not None
+    ):
+        try:
+            refresh_condition_ids, refresh_token_id = (
+                _global_candidate_snapshot_refresh_target(global_candidate)
+            )
+            try:
+                trade_conn.commit()
+            except Exception:  # noqa: BLE001 - release the read snapshot boundary
+                pass
+            refreshed = bool(
+                family_snapshot_refresher(
+                    city=str(payload.get("city") or ""),
+                    target_date=str(payload.get("target_date") or ""),
+                    metric=str(
+                        payload.get("metric")
+                        or payload.get("temperature_metric")
+                        or ""
+                    ),
+                    condition_ids=refresh_condition_ids,
+                    selected_token_id=refresh_token_id,
+                    force_refresh=True,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - refresh failure stays fail-closed
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "global winner snapshot refresh failed; selected row remains "
+                "unavailable: %s",
+                exc,
+            )
+            refreshed = False
+        if refreshed:
+            refreshed_family_rows = _latest_snapshot_rows_for_event_family(
+                trade_conn,
+                event,
+                condition_ids=family_condition_ids,
+                fresh_at=None,
+                require_fresh=False,
+            )
+            if refreshed_family_rows:
+                family_rows = refreshed_family_rows
+                snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
+                try:
+                    topology = tuple(
+                        _topology_candidate_from_market_event(
+                            topology_row,
+                            snapshot_token_maps.get(
+                                str(topology_row.get("condition_id") or "")
+                            ),
+                            payload,
+                        )
+                        for topology_row in family_topology_rows
+                    )
+                except ValueError as exc:
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
+                    )
+                row = _global_candidate_snapshot_row(
+                    family_rows,
+                    global_candidate,
+                )
+                if provenance_capture is not None and row is not None:
+                    provenance_capture["snapshot_row"] = row
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
@@ -12818,6 +13001,28 @@ def _build_event_bound_no_submit_receipt_core(
             source_status="MATCH",
             family_complete=True,
         )
+    if global_actuation is not None and current_actuation_family is not None:
+        try:
+            proofs = _global_actuation_current_admission_proofs(
+                proofs=proofs,
+                global_actuation=global_actuation,
+                prepared_global_family=current_actuation_family,
+                family=family,
+            )
+        except ValueError as exc:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=(
+                    "GLOBAL_ACTUATION_CURRENT_ADMISSION_REBIND_FAILED:"
+                    f"{exc}"
+                ),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+            )
     # S4 (operator directive 2026-06-08): the pre-selection scalar-Kelly sizing
     # (_candidate_selection_kelly_size_usd_by_id) is RETIRED. Exposure-aware sizing
     # now comes from RobustCandidateScore.optimal_stake_usd inside the marginal-
@@ -22426,14 +22631,20 @@ def _native_side_cost_curve_from_execution_price(
         return None
     execution_price = getattr(proof, "execution_price", None)
     price_value = _optional_float(getattr(execution_price, "value", None))
-    if price_value is None or not (0.0 < price_value < 1.0):
+    if price_value is None:
+        return None
+    try:
+        assert_live_order_unit_price(price_value)
+    except ValueError:
         return None
     if not bool(getattr(proof, "native_quote_available", False)):
         return None
 
     # Land the all-in price on a tick grid fine enough to represent it exactly.
     price = Decimal(str(price_value)).quantize(Decimal("0.0001"))
-    if not (Decimal("0") < price < Decimal("1")):
+    try:
+        assert_live_order_unit_price(price)
+    except ValueError:
         return None
     min_tick = Decimal("0.0001")
 
@@ -24890,6 +25101,15 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = capital_efficiency_reason
+            absolute_price_reason = None
+            if execution_price is not None:
+                try:
+                    assert_live_order_unit_price(execution_price.value)
+                except ValueError as exc:
+                    absolute_price_reason = f"LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:{exc}"
+                    score = 0.0
+                    if missing_reason is None:
+                        missing_reason = absolute_price_reason
             def _lcb_source(value: object) -> str | None:
                 source = getattr(value, "calibration_source", None)
                 return str(source) if source else None
@@ -24950,6 +25170,7 @@ def _generate_candidate_proofs(
             # concern is telemetry-only now and is deliberately NOT a prefilter trigger.)
             if (
                 capital_efficiency_reason is not None
+                or absolute_price_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
             ):
