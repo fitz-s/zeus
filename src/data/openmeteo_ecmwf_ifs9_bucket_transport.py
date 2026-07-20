@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -433,15 +434,67 @@ def _read_om_point(s3_uri: str, flat_index: int, *, cache_dir: str) -> float:
         blockcache={"cache_storage": cache_dir},
     )
     with OmFileReader(backend) as root:
-        var = root.get_child_by_name(TEMPERATURE_VARIABLE)
-        # var.shape == (1, 6599680); slice the single point on the spatial axis.
-        value = var[0:1, flat_index : flat_index + 1]
+        return _read_point_from_om_reader(root, flat_index)
+
+
+def _read_point_from_om_reader(root: Any, flat_index: int) -> float:
+    var = root.get_child_by_name(TEMPERATURE_VARIABLE)
+    # var.shape == (1, 6599680); slice the single point on the spatial axis.
+    value = var[0:1, flat_index : flat_index + 1]
     import numpy as np
 
     arr = np.asarray(value).reshape(-1)
     if arr.size != 1:
-        raise ValueError(f"expected one point, got {arr.size} from {s3_uri}")
+        raise ValueError(f"expected one point, got {arr.size}")
     return float(arr[0])
+
+
+class BucketPointReaderPool:
+    """Reuse one open OM reader per valid-time object for one download wave."""
+
+    def __init__(
+        self,
+        *,
+        cache_dir: str = "/tmp/zeus_om_bucket_cache",
+        open_reader: Callable[[str, str], Any] | None = None,
+    ) -> None:
+        self._cache_dir = cache_dir
+        self._open_reader = open_reader or self._open
+        self._readers: dict[str, Any] = {}
+
+    @staticmethod
+    def _open(s3_uri: str, cache_dir: str) -> Any:
+        import fsspec
+        from omfiles import OmFileReader
+
+        backend = fsspec.open(
+            f"blockcache::{s3_uri}",
+            mode="rb",
+            s3={"anon": True, "default_block_size": 65536},
+            blockcache={"cache_storage": cache_dir},
+        )
+        return OmFileReader(backend)
+
+    def __enter__(self) -> Callable[[str, int], float]:
+        return self.read
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        for reader in self._readers.values():
+            try:
+                reader.close()
+            except Exception:  # noqa: BLE001 - best-effort handle cleanup
+                pass
+        self._readers.clear()
+
+    def read(self, s3_uri: str, flat_index: int) -> float:
+        reader = self._readers.get(s3_uri)
+        if reader is None:
+            reader = self._open_reader(s3_uri, self._cache_dir)
+            self._readers[s3_uri] = reader
+        return _read_point_from_om_reader(reader, flat_index)
 
 
 def _check_deadline(deadline_monotonic: float | None) -> None:

@@ -233,6 +233,7 @@ def _try_bucket_rung_three(
     single_runs_exc: Exception,
     deadline_monotonic: float | None = None,
     bucket_manifest_provider: Callable[[], dict] | None = None,
+    bucket_read_point: Callable[[str, int], float] | None = None,
 ) -> tuple[dict, dict]:
     """Rung-3 admission gate: serve from the S3 data_spatial bucket, or re-raise rung-2.
 
@@ -308,6 +309,7 @@ def _try_bucket_rung_three(
                 timezone_name=timezone_name,
                 needed_valid_times=needed,
                 manifest=manifest,
+                read_point=bucket_read_point,
                 deadline_monotonic=deadline_monotonic,
             )
         else:  # "raw"
@@ -318,6 +320,7 @@ def _try_bucket_rung_three(
                 timezone_name=timezone_name,
                 needed_valid_times=needed,
                 manifest=manifest,
+                read_point=bucket_read_point,
                 deadline_monotonic=deadline_monotonic,
             )
     except ValueError as admission_exc:
@@ -357,6 +360,7 @@ def _resolve_anchor_payload(
     timezone_name: str,
     deadline_monotonic: float | None = None,
     bucket_manifest_provider: Callable[[], dict] | None = None,
+    bucket_read_point: Callable[[str, int], float] | None = None,
     client: httpx.Client | None = None,
     meta_wave_failure: Exception | None = None,
 ) -> tuple[dict, dict]:
@@ -465,6 +469,8 @@ def _resolve_anchor_payload(
         rung_three_kwargs["deadline_monotonic"] = deadline_monotonic
     if bucket_manifest_provider is not None:
         rung_three_kwargs["bucket_manifest_provider"] = bucket_manifest_provider
+    if bucket_read_point is not None:
+        rung_three_kwargs["bucket_read_point"] = bucket_read_point
     return _try_bucket_rung_three(
         **rung_three_kwargs,
     )
@@ -763,6 +769,9 @@ def download_current_target_raw_inputs(
         downloaded["openmeteo_transport_fetch_count"] = len(wave_resolved)
         downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
 
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketPointReaderPool
+
+    bucket_pool = BucketPointReaderPool()
     try:
         for target in targets:
             target_key = (target.city, target.target_date)
@@ -806,6 +815,7 @@ def download_current_target_raw_inputs(
                             timezone_name=city_config.timezone,
                             deadline_monotonic=deadline_monotonic,
                             bucket_manifest_provider=current_bucket_manifests,
+                            bucket_read_point=bucket_pool.read,
                             client=openmeteo_client,
                             meta_wave_failure=meta_wave_failures.get(target_key),
                         )
@@ -885,6 +895,7 @@ def download_current_target_raw_inputs(
             )
             processed_target_count += 1
     finally:
+        bucket_pool.close()
         openmeteo_client.close()
 
     written_manifests: list[str] = []

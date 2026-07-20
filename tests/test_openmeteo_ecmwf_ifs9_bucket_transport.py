@@ -33,6 +33,7 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
 )
 from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
     RUN_AUTHORITY_BUCKET_UNVERIFIED,
+    BucketPointReaderPool,
     BucketRunManifest,
     check_partial_run_admission,
     fetch_bucket_anchor_payload,
@@ -44,6 +45,42 @@ from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
 )
 
 UTC = timezone.utc
+
+
+def test_bucket_point_reader_pool_reuses_valid_time_reader_and_closes() -> None:
+    opened: list[tuple[str, str]] = []
+    readers: list[object] = []
+
+    class _Variable:
+        def __getitem__(self, key):
+            return [[float(key[1].start)]]
+
+    class _Reader:
+        closed = False
+
+        def get_child_by_name(self, name: str):
+            assert name == "temperature_2m"
+            return _Variable()
+
+        def close(self) -> None:
+            self.closed = True
+
+    def _open(uri: str, cache_dir: str):
+        opened.append((uri, cache_dir))
+        reader = _Reader()
+        readers.append(reader)
+        return reader
+
+    with BucketPointReaderPool(cache_dir="cache", open_reader=_open) as read:
+        assert read("s3://bucket/hour-1.om", 11) == 11.0
+        assert read("s3://bucket/hour-1.om", 12) == 12.0
+        assert read("s3://bucket/hour-2.om", 13) == 13.0
+
+    assert opened == [
+        ("s3://bucket/hour-1.om", "cache"),
+        ("s3://bucket/hour-2.om", "cache"),
+    ]
+    assert all(reader.closed for reader in readers)
 
 
 def _manifest(
