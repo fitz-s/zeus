@@ -242,7 +242,6 @@ def _execute_force_exit_sweep(
                             order_type="GTC",
                             post_only=False,
                             captured_at=now_iso,
-                            intent_kind=IntentKind.CANCEL.value,
                         )
                         insert_command(
                             conn,

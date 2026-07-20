@@ -1835,20 +1835,20 @@ class TestExecutor:
     @pytest.mark.parametrize(
         "price,tick,expected",
         [
-            (0.05, "0.01", 0.05),
+            (0.004, "0.001", 0.004),
             (0.50, "0.01", 0.50),
-            (0.95, "0.01", 0.95),
+            (0.996, "0.001", 0.996),
         ],
     )
-    def test_reduce_only_exit_alignment_preserves_absolute_band_price(
+    def test_reduce_only_exit_alignment_preserves_strict_binary_domain_price(
         self, price, tick, expected
     ):
         from src.execution.executor import _align_sell_limit_price_to_tick
 
         assert _align_sell_limit_price_to_tick(price, Decimal(tick)) == pytest.approx(expected)
 
-    def test_reduce_only_boundary_exit_persists_before_fake_sdk_submit(self, monkeypatch):
-        token_id = "yes-token-boundary-exit"
+    def test_reduce_only_tail_exit_persists_before_fake_sdk_submit(self, monkeypatch):
+        token_id = "yes-token-tail-exit"
         captured = {}
 
         class DummyClient:
@@ -1867,7 +1867,7 @@ class TestExecutor:
                     JOIN venue_submission_envelopes e ON e.envelope_id = c.envelope_id
                     WHERE c.position_id = ?
                     """,
-                    ("trade-boundary-exit",),
+                    ("trade-tail-exit",),
                 ).fetchone()
                 captured.update(
                     token_id=token_id,
@@ -1881,7 +1881,7 @@ class TestExecutor:
                 )
                 return _final_submit_result(
                     self.bound_envelope,
-                    order_id="sell-boundary-exit-1",
+                    order_id="sell-tail-exit-1",
                 )
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
@@ -1902,38 +1902,38 @@ class TestExecutor:
 
         result = execute_exit_order(
             create_exit_order_intent(
-                trade_id="trade-boundary-exit",
+                trade_id="trade-tail-exit",
                 token_id=token_id,
                 shares=12.349,
-                current_price=0.95,
-                best_bid=0.95,
-                exact_limit_price=0.95,
+                current_price=0.996,
+                best_bid=0.996,
+                exact_limit_price=0.996,
                 **_snapshot_kwargs(
                     token_id,
                     direction="sell_yes",
-                    min_tick_size=Decimal("0.01"),
-                    final_limit_price=Decimal("0.95"),
-                    snapshot_top_ask=Decimal("0.96"),
-                    snapshot_top_bid=Decimal("0.95"),
+                    min_tick_size=Decimal("0.001"),
+                    final_limit_price=Decimal("0.996"),
+                    snapshot_top_ask=Decimal("0.999"),
+                    snapshot_top_bid=Decimal("0.996"),
                 ),
             ),
             conn=_TEST_CONN,
-            decision_id="decision-boundary-exit",
+            decision_id="decision-tail-exit",
         )
 
         assert result.status == "pending"
         assert result.command_state == "ACKED"
-        assert result.order_id == "sell-boundary-exit-1"
-        assert captured["price"] == pytest.approx(0.95)
+        assert result.order_id == "sell-tail-exit-1"
+        assert captured["price"] == pytest.approx(0.996)
         assert captured["side"] == "SELL"
-        assert captured["bound_price"] == Decimal("0.95")
-        assert captured["bound_tick_size"] == Decimal("0.01")
+        assert captured["bound_price"] == Decimal("0.996")
+        assert captured["bound_tick_size"] == Decimal("0.001")
         assert captured["persisted_before_sdk"] == {
             "state": "SUBMITTING",
             "side": "SELL",
-            "price": pytest.approx(0.95),
-            "envelope_price": "0.95",
-            "envelope_tick_size": "0.01",
+            "price": pytest.approx(0.996),
+            "envelope_price": "0.996",
+            "envelope_tick_size": "0.001",
         }
         command = _TEST_CONN.execute(
             """
@@ -1941,15 +1941,15 @@ class TestExecutor:
             FROM venue_commands
             WHERE decision_id = ?
             """,
-            ("decision-boundary-exit",),
+            ("decision-tail-exit",),
         ).fetchone()
         assert dict(command) == {
             "state": "ACKED",
-            "venue_order_id": "sell-boundary-exit-1",
+            "venue_order_id": "sell-tail-exit-1",
         }
 
-    @pytest.mark.parametrize("price", [0.0, 0.049, 0.951, 0.998, 1.0])
-    def test_execute_exit_order_rejects_out_of_band_price_before_persistence(
+    @pytest.mark.parametrize("price", [0.0, 1.0])
+    def test_execute_exit_order_rejects_non_binary_price_before_persistence(
         self, price
     ):
         before = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]

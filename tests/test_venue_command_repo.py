@@ -77,42 +77,6 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
     )
 
 
-class TestAbsoluteLivePriceBand:
-    @pytest.mark.parametrize(
-        ("intent_kind", "side", "price"),
-        (("ENTRY", "BUY", 0.05), ("EXIT", "SELL", 0.95)),
-    )
-    def test_inclusive_boundaries_persist(self, conn, intent_kind, side, price):
-        _insert(conn, intent_kind=intent_kind, side=side, price=price)
-
-        row = conn.execute(
-            "SELECT intent_kind, side, price FROM venue_commands WHERE command_id = 'cmd-001'"
-        ).fetchone()
-        assert dict(row) == {
-            "intent_kind": intent_kind,
-            "side": side,
-            "price": pytest.approx(price),
-        }
-
-    @pytest.mark.parametrize(
-        ("intent_kind", "side", "price"),
-        (
-            ("ENTRY", "BUY", 0.0499),
-            ("ENTRY", "BUY", 0.998),
-            ("EXIT", "SELL", 0.0499),
-            ("EXIT", "SELL", 0.9501),
-            ("DERISK", "SELL", 0.998),
-        ),
-    )
-    def test_out_of_band_command_is_rejected_before_persistence(
-        self, conn, intent_kind, side, price
-    ):
-        with pytest.raises(ValueError, match=r"inclusive \[0\.05, 0\.95\]"):
-            _insert(conn, intent_kind=intent_kind, side=side, price=price)
-
-        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
-
-
 def _attribution_row(c, position_id: str):
     """position_decision_attribution row for position_id, or None.
 

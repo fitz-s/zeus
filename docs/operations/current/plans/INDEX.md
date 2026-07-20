@@ -4,7 +4,6 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 
 | Plan | Status | Purpose |
 |------|--------|---------|
-| [`live_unit_price_band_incident/PLAN.md`](live_unit_price_band_incident/PLAN.md) | IMPLEMENTING | Non-waivable inclusive `[0.05,0.95]` live BUY/SELL boundary at persistence, envelope, and SDK seams; entries stay paused through deployment proof. |
 | [`hourly_capital_gains_improvement_loop.md`](hourly_capital_gains_improvement_loop.md) | ACTIVE | Forward journal — the single work-state surface. Read this first. |
 | [`upstream_data_physical_2026-07-17.md`](upstream_data_physical_2026-07-17.md) | EXECUTING | Upstream forecast-layer体检:3 live bugs fixed (low-ENS quarantine, ENS age bound, degF postmortem hardening), consult verdict folded, D2-D6 design queue open |
 | [`gate_stack_simplification_2026-07-06.md`](gate_stack_simplification_2026-07-06.md) | EXECUTING | Gate collapse; Phase 1+2 deployed 2026-07-07, C1 sole-authority design pass open |
