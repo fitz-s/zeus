@@ -3171,6 +3171,54 @@ def _calibration_auto_promote_tick():
 
 
 # ---------------------------------------------------------------------------
+# Weekly fitted-artifact refit — source-clock weights, staleness variance,
+# shape-age sigma, ens member dependence
+# ---------------------------------------------------------------------------
+
+_ARTIFACT_FIT_SCRIPTS = (
+    "fit_source_clock_city_weights.py",
+    "fit_model_staleness_variance.py",
+    "fit_shape_age_sigma.py",
+    "fit_ens_member_dependence.py",
+)
+
+
+@_scheduler_job("ingest_artifact_refit")
+def _artifact_refit_tick():
+    """Weekly walk-forward refit of the four fitted serving artifacts.
+
+    Each fitter is read-only over zeus-forecasts.db (registered read_only_ro_uri in
+    db_writer_lock) and writes only its state/<name>/ artifact + ACTIVE.json pointer.
+    Consumers hot-reload on the pointer's mtime (loader wrappers, 2021b8bea), so a
+    refit lands in live serving on the next call — no daemon restart. Fail-soft
+    per-script: one fitter failing must not block the others; the stale artifact
+    simply stays active (fail-open consumers already price that)."""
+    import subprocess
+
+    venv_python = _etl_subprocess_python()
+    scripts_dir = Path(__file__).parent.parent / "scripts"
+    for script in _ARTIFACT_FIT_SCRIPTS:
+        script_path = scripts_dir / script
+        if not script_path.exists():
+            logger.warning("[ARTIFACT_REFIT] missing fitter: %s", script)
+            continue
+        try:
+            r = subprocess.run(
+                [venv_python, str(script_path)],
+                capture_output=True, text=True, timeout=900,
+            )
+            if r.returncode == 0:
+                logger.info("[ARTIFACT_REFIT] %s OK: %s", script, (r.stdout or "").strip()[-300:])
+            else:
+                logger.warning(
+                    "[ARTIFACT_REFIT] %s FAILED (exit=%d): %s",
+                    script, r.returncode, (r.stderr or "")[-500:],
+                )
+        except Exception as e:
+            logger.warning("[ARTIFACT_REFIT] %s ERROR: %s", script, e)
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -3288,6 +3336,10 @@ def _ingest_main_job_specs() -> list[tuple]:
             misfire_grace_time=None, executor="fast")),
         (_calibration_auto_promote_tick, "cron", dict(day_of_week="sun", hour=4, minute=30,
             id="ingest_calibration_auto_promote", max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        # Weekly Mon 06:00 UTC (post-weekend settlements graded; mirrors the consult's
+        # "activate weekly" cadence for the fitted serving artifacts).
+        (_artifact_refit_tick, "cron", dict(day_of_week="mon", hour=6, minute=0,
+            id="ingest_artifact_refit", max_instances=1, coalesce=True, misfire_grace_time=3600)),
     ]
     return specs
 

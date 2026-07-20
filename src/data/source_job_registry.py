@@ -227,6 +227,13 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   notes="multi-source: Gamma topology + CLOB snapshots"),
     SourceJobSpec("ingest_calibration_auto_promote", "ingest_main", "derived", "default", True,
                   callable_ref="_calibration_auto_promote_tick"),
+    SourceJobSpec("ingest_artifact_refit", "ingest_main", "derived", "default", False,
+                  callable_ref="_artifact_refit_tick", file_only=True,
+                  notes="weekly Mon 06:00 UTC walk-forward refit of the four fitted serving "
+                        "artifacts (source-clock weights, staleness variance, shape-age sigma, "
+                        "ens member dependence); fitter subprocesses are read-only over "
+                        "zeus-forecasts.db and write only state/<name>/ artifact + ACTIVE.json; "
+                        "consumers hot-reload on pointer mtime"),
 )
 
 _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
