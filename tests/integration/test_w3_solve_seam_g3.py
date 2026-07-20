@@ -467,6 +467,12 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED"
             )
         },
+        buy_disabled_reason_by_family={
+            "family-sell": (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:ENTRY_Q_MISSING"
+            )
+        },
         book_epoch_identity="book-current",
         book_asset_count=2,
         book_asset_states=book_asset_states,
@@ -603,6 +609,13 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
             "FamilyAuthorityUnavailable:"
             "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED"
+        )
+    }
+    assert summary["buy_disabled_family_count"] == 1
+    assert summary["buy_disabled_reason_by_family"] == {
+        "family-sell": (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            "FamilyAuthorityUnavailable:ENTRY_Q_MISSING"
         )
     }
     assert summary["candidate_coverage_complete"] is True
@@ -14253,6 +14266,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         held_shares=Decimal("5"),
     )
     selected_kwargs = {}
+    stored_kwargs = {}
     monkeypatch.setattr(
         global_batch_runtime,
         "scan_current_global_auction_scope",
@@ -14293,10 +14307,15 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         "_complete_holding_coverage",
         lambda coverage, **_: tuple(coverage),
     )
+
+    def store_receipt(*_args, **kwargs):
+        stored_kwargs.update(kwargs)
+        return 1
+
     monkeypatch.setattr(
         global_batch_runtime,
         "_store_global_auction_receipt",
-        lambda *_args, **_kwargs: 1,
+        store_receipt,
     )
     monkeypatch.setattr(
         global_batch_runtime,
@@ -14364,6 +14383,12 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     )
 
     assert selected_kwargs["buy_disabled_family_keys"] == frozenset({family_key})
+    assert stored_kwargs["buy_disabled_reason_by_family"] == {
+        family_key: (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            "FamilyAuthorityUnavailable:test"
+        )
+    }
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES"
     )
