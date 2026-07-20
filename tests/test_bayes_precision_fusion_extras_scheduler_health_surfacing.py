@@ -47,6 +47,7 @@ _BASE_CFG = {
     "seed_discovery_limit": 1,
     "seed_limit": 1,
     "limit": 1,
+    "poll_batch_limit": 1,
     "request_dir": None,
     "processed_dir": None,
     "failed_dir": None,
@@ -238,5 +239,5 @@ def test_download_cycle_drains_known_work_before_global_discovery():
 
     assert queue.call_args_list == [
         call(_BASE_CFG, discover=False),
-        call(_BASE_CFG, discover=True),
+        call(_BASE_CFG, discover=True, limit=1),
     ]
