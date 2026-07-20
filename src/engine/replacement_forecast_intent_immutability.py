@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.contracts.venue_submission_envelope import assert_live_order_unit_price
-
 
 PASS_STATUS = "PASS"
 BLOCK_STATUS = "BLOCK"
@@ -36,7 +34,8 @@ class ReplacementForecastIntentSurface:
             value = float(getattr(self, field_name))
             if value < 0.0:
                 raise ValueError(f"{field_name} must be non-negative")
-        assert_live_order_unit_price(self.limit_price)
+        if not 0.0 < self.limit_price < 1.0:
+            raise ValueError("limit_price must be in (0, 1)")
 
 
 @dataclass(frozen=True)
