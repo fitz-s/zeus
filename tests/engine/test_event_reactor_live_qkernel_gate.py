@@ -1919,7 +1919,7 @@ def test_deterministic_day0_witness_rejects_certificate_probability_drift():
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_current_entry_feasibility_is_native_side_symmetric_without_price_floor(side):
+def test_global_current_entry_feasibility_enforces_absolute_band_symmetrically(side):
     def candidate(*, action="BUY", price="0.10"):
         return SimpleNamespace(
             action=action,
@@ -1929,14 +1929,13 @@ def test_global_current_entry_feasibility_is_native_side_symmetric_without_price
             ),
         )
 
-    assert era._global_current_entry_feasibility_rejection_reason(
-        candidate(price="0.004")
-    ) is None
-    assert (
-        era._global_current_entry_feasibility_rejection_reason(
-            candidate(price="0.996")
-        )
-        is None
+    assert era._global_current_entry_feasibility_rejection_reason(candidate(price="0.05")) is None
+    assert era._global_current_entry_feasibility_rejection_reason(candidate(price="0.95")) is None
+    assert era._global_current_entry_feasibility_rejection_reason(candidate(price="0.004")) == (
+        "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(candidate(price="0.996")) == (
+        "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
     )
     assert (
         era._global_current_entry_feasibility_rejection_reason(
@@ -3168,8 +3167,8 @@ def test_live_entry_qkernel_authority_accepts_low_price_with_current_state_econo
     _assert_live_entry_submit_authority(payload)
 
 
-@pytest.mark.parametrize("price", (0.0, 1.0, float("nan")))
-def test_live_entry_unit_price_rejects_nonexecutable_binary_domain(price):
+@pytest.mark.parametrize("price", (0.0, 0.0499, 0.9501, 0.998, 1.0, float("nan")))
+def test_live_entry_unit_price_rejects_outside_absolute_band(price):
     with pytest.raises(ValueError):
         era.assert_live_order_unit_price(price)
 
