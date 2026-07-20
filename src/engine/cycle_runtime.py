@@ -3168,10 +3168,10 @@ def _emit_day0_window_entered_canonical_if_available(
             ).fetchone()
             latest_type = str(latest[0] if latest else "")
             latest_phase_after = str((latest[1] if latest and len(latest) > 1 else "") or "")
-            if (
-                latest_type != "DAY0_WINDOW_ENTERED"
-                or latest_phase_after != LifecyclePhase.DAY0_WINDOW.value
-            ):
+            if latest_phase_after not in {
+                LifecyclePhase.ACTIVE.value,
+                LifecyclePhase.DAY0_WINDOW.value,
+            }:
                 raise ValueError(
                     "existing DAY0_WINDOW_ENTERED is superseded by latest "
                     f"canonical event {latest_type or '<missing>'}/{latest_phase_after or '<missing>'}; "

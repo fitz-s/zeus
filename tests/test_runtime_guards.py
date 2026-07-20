@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-19; last_reused=2026-07-20
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-20
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -13202,10 +13202,85 @@ def test_day0_existing_canonical_event_repairs_position_current_projection(tmp_p
         day0_entered_at=replay_position.day0_entered_at,
         previous_phase="active",
         deps=types.SimpleNamespace(logger=logging.getLogger(__name__)),
-    ) is True
+    ) is False
 
     after_events = _raw_position_event_rows(conn, position_id)
     assert after_events == before_events
+    repaired_phase = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    assert repaired_phase == "day0_window"
+
+
+def test_day0_existing_canonical_event_repairs_after_active_chain_correction(tmp_path):
+    """A no-op chain correction must not hide established Day0 truth."""
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+
+    from src.engine.lifecycle_events import (
+        build_chain_size_corrected_canonical_write,
+        build_day0_window_entered_canonical_write,
+    )
+    from src.state.db import append_many_and_project
+
+    position_id = "day0-after-active-chain-correction"
+    day0_position = _position(
+        trade_id=position_id,
+        state="day0_window",
+        order_id="entry-order-1",
+        entered_at="2026-03-30T00:00:00Z",
+        order_posted_at="2026-03-29T23:59:00Z",
+        day0_entered_at="2026-04-01T00:00:00Z",
+        decision_snapshot_id="snap-day0-chain-correction",
+    )
+    day0_events, day0_projection = build_day0_window_entered_canonical_write(
+        day0_position,
+        day0_entered_at=day0_position.day0_entered_at,
+        sequence_no=1,
+        previous_phase="active",
+        source_module="tests/test_runtime_guards:seed_day0_chain_correction",
+    )
+    append_many_and_project(conn, day0_events, day0_projection)
+
+    active_position = _position(
+        trade_id=position_id,
+        state="holding",
+        order_id="entry-order-1",
+        entered_at="2026-03-30T00:00:00Z",
+        order_posted_at="2026-03-29T23:59:00Z",
+        day0_entered_at="",
+        decision_snapshot_id="snap-day0-chain-correction",
+    )
+    active_position.chain_verified_at = "2026-04-01T00:05:00Z"
+    chain_events, chain_projection = build_chain_size_corrected_canonical_write(
+        active_position,
+        local_shares_before=active_position.shares,
+        sequence_no=2,
+        phase_after="active",
+        source_module="tests/test_runtime_guards:active_chain_correction",
+    )
+    append_many_and_project(conn, chain_events, chain_projection)
+    before_events = _raw_position_event_rows(conn, position_id)
+
+    replay_position = _position(
+        trade_id=position_id,
+        state="day0_window",
+        order_id="entry-order-1",
+        entered_at="2026-03-30T00:00:00Z",
+        order_posted_at="2026-03-29T23:59:00Z",
+        day0_entered_at="2026-04-01T00:00:00Z",
+        decision_snapshot_id="snap-day0-chain-correction",
+    )
+    assert cycle_runtime._emit_day0_window_entered_canonical_if_available(
+        conn,
+        replay_position,
+        day0_entered_at=replay_position.day0_entered_at,
+        previous_phase="active",
+        deps=types.SimpleNamespace(logger=logging.getLogger(__name__)),
+    ) is False
+
+    assert _raw_position_event_rows(conn, position_id) == before_events
     repaired_phase = conn.execute(
         "SELECT phase FROM position_current WHERE position_id = ?",
         (position_id,),

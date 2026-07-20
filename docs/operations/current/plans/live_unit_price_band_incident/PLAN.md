@@ -42,6 +42,7 @@ files_may_change:
   - src/contracts/venue_submission_envelope.py
   - src/data/polymarket_client.py
   - src/engine/cycle_runner.py
+  - src/engine/cycle_runtime.py
   - src/execution/executor.py
   - src/state/venue_command_repo.py
   - src/venue/polymarket_v2_adapter.py
@@ -51,6 +52,7 @@ files_may_change:
   - tests/test_executor.py
   - tests/test_v2_adapter.py
   - tests/test_venue_command_repo.py
+  - tests/test_runtime_guards.py
 files_may_not_change:
   - state/zeus-world.db
   - state/zeus-forecasts.db
@@ -67,6 +69,7 @@ acceptance:
   - "CANCEL can still remove an existing tail-priced resting order because it creates no trade."
   - "Official live restart preflight blocks if config, envelope, persistence, or SDK-boundary behavior drifts."
   - "Production boots the exact repair SHA while entries remain paused and produces a current SDK-free rejection receipt."
+  - "Post-start monitoring refreshes every open position; a later non-transition event cannot hide an existing Day0 transition, while pending-exit and terminal lifecycle truth remain absorbing."
 ---
 
 # Live unit-price band incident repair V2
