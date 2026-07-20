@@ -138,8 +138,8 @@ def _run(with_fusion_center: bool = True):
     return {(p.candidate.condition_id, p.direction): p for p in proofs}
 
 
-def test_day0_absorbing_no_at_999_reaches_current_economics():
-    """A 0.999 quote is not a semantic veto; current economics owns selection."""
+def test_day0_absorbing_no_at_999_is_blocked_before_selection():
+    """Even an absorbing Day0 belief cannot waive the absolute price band."""
 
     candidate = MarketTopologyCandidate(
         city="Shanghai",
@@ -197,9 +197,10 @@ def test_day0_absorbing_no_at_999_reaches_current_economics():
     assert no_proof.q_lcb_5pct == 1.0
     assert no_proof.execution_price is not None
     assert float(no_proof.execution_price.value) == 0.999
-    assert no_proof.missing_reason is None
-    assert no_proof.trade_score > 0.0
-    assert no_proof.passed_prefilter is True
+    assert no_proof.missing_reason is not None
+    assert no_proof.missing_reason.startswith("LIVE_ORDER_UNIT_PRICE_OUT_OF_BOUNDS:")
+    assert no_proof.trade_score == 0.0
+    assert no_proof.passed_prefilter is False
 
 
 def test_incident_24c_buy_yes_is_not_killed_by_legacy_direction_law():
