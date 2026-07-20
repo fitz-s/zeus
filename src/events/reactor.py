@@ -967,18 +967,47 @@ class GlobalBatchSubmitResult:
 class GlobalEpochOutcome:
     """What one ``_process_global_event_batch`` epoch did, for the caller loop.
 
-    ``attempted`` is the event-count budget consumed (unchanged semantics from
-    the prior bare-int return). ``submitted`` is whether this epoch placed a
-    venue order (``GlobalBatchSubmitResult.venue_submit_count == 1``) — the
-    multi-winner loop's natural, no-caps terminator: an epoch with no positive
-    winner is retried identically only by a submit that moved cash/holdings,
-    so ``submitted is False`` means the current cash/cap cut is exhausted and
-    the loop must stop (docs/operations/current/plans/
+    ``attempted`` is the number of events this epoch SCANNED (informational
+    only — see ``claimed_event_ids`` for the caller's actual budget debit; a
+    scanned-but-never-claimed event, e.g. a claim-lock bounce, must not drain
+    the loop's event-count budget every time it gets rescanned in a later
+    epoch).
+
+    ``submitted`` is whether this epoch placed a venue order
+    (``GlobalBatchSubmitResult.venue_submit_count == 1``) — the multi-winner
+    loop's natural, no-caps terminator: an epoch with no positive winner is
+    retried identically only by a submit that moved cash/holdings, so
+    ``submitted is False`` means the current cash/cap cut is exhausted and the
+    loop must stop (docs/operations/current/plans/
     auction_multiwinner_plan_2026-07-19.md §4.1).
+
+    ``finalized`` is True only when the epoch's winner (if any) had its
+    world-side disposition committed WITHOUT ERROR by
+    ``_finalize_deferred_event_unit`` — a Window-B lock/requeue failure (the
+    winner event goes back to PENDING, not durable) or an unexpected
+    exception (the winner event is dead-lettered) both count as finalization
+    failure, since neither leaves epoch K's authoritative winner disposition
+    durable as the loop's continuation claim requires. ``finalized`` is
+    vacuously True when the epoch had no winner (``submitted`` is already
+    False in that case, so it does not gate anything).
+
+    ``claimed_event_ids`` is the set of events this epoch actually claimed (a
+    subset of the scanned events) — see ``attempted``.
+
+    BLOCKER FIX (2026-07-19 external review,
+    ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md,
+    reactor.py:967-981,1216-1279,1313-1482): the multi-winner loop must
+    continue to epoch K+1 ONLY when ``submitted and finalized`` are both
+    True — venue_call_started is an audit fact, not a durable-progress fact,
+    and starting K+1 before K's winner world disposition is durable makes the
+    K→K+1 crash boundary an in-memory control-flow fact instead of a durable
+    one.
     """
 
     attempted: int
     submitted: bool
+    finalized: bool
+    claimed_event_ids: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -1067,6 +1096,17 @@ class OpportunityEventReactor:
         # single family monopolizes the per-cycle refresh fan-out and ALL blocked families are
         # covered across a bounded number of cycles (no numeric drop-cap on the candidate set).
         self._family_refresh_cursor: int = 0
+        # BLOCKER FIX (2026-07-19 external review,
+        # ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md):
+        # instance-scoped side channel, NOT part of any public return contract.
+        # ``_finalize_deferred_event_unit`` swallows every exception internally
+        # (it never lets one escape to its caller), so this is the only way for
+        # ``_process_global_event_batch`` to distinguish "the winner's world
+        # disposition committed with no error" from "an unexpected exception was
+        # caught and the winner was dead-lettered instead" — both return True
+        # from that method, but only the former is a durable, error-free winner
+        # finalization the multi-winner loop may treat as a durable epoch.
+        self._unknown_dead_letter_calls: int = 0
         # DecisionProvenanceEnvelope (operator law 2026-06-11): an OPTIONAL fail-soft accessor
         # returning (bundle, forecast_conn) for the event being rejected, so the regret envelope
         # can carry the full forecast data-combination + per-input ages. None => the envelope is
@@ -1229,6 +1269,14 @@ class OpportunityEventReactor:
                 # consecutive 1-min cycles.
                 epochs_run = 0
                 submits_made = 0
+                # BLOCKER FIX (2026-07-19 external review,
+                # ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md,
+                # §BLOCKER "progress and ordering"): events already charged against
+                # `remaining` this wake, so a claimed event that gets rescanned (a
+                # requeued lock-busy loser, or a lock-bounced-then-later-claimed
+                # candidate) is debited from the budget exactly once, not once per
+                # rescan.
+                claimed_event_ids_seen: set[str] = set()
                 while True:
                     epoch = self._process_global_event_batch(
                         events,
@@ -1241,7 +1289,17 @@ class OpportunityEventReactor:
                     )
                     epochs_run += 1
                     if remaining is not None:
-                        remaining -= epoch.attempted
+                        # Debit by CLAIMED events, deduped across epochs — not by
+                        # `epoch.attempted` (raw scanned count). The prior debit
+                        # conflated page scanning with auction progress: a full
+                        # first page could consume the whole production allowance
+                        # even though only one candidate ever became real auction
+                        # work, and a claim-lock-bounced (scanned but never
+                        # claimed) event was charged again every time it was
+                        # rescanned in a later epoch.
+                        new_claims = epoch.claimed_event_ids - claimed_event_ids_seen
+                        remaining -= len(new_claims)
+                        claimed_event_ids_seen |= epoch.claimed_event_ids
                     if epoch.submitted:
                         submits_made += 1
                     # STOP 1: no winner this epoch. A full-universe auction sized
@@ -1251,6 +1309,16 @@ class OpportunityEventReactor:
                     # winner. This is the loop's natural, no-caps terminator.
                     if not epoch.submitted:
                         break
+                    # STOP 1b: epoch K's winner did not durably finalize (a
+                    # Window-B lock/requeue failure left it retryable, or an
+                    # unexpected exception dead-lettered it) — venue_call_started
+                    # is an audit fact, not a durable-progress fact. Starting K+1
+                    # here would make the K→K+1 crash boundary an in-memory
+                    # control-flow fact instead of a durable one. Break; the
+                    # pre-existing single-epoch semantics (retry next wake) take
+                    # over.
+                    if not epoch.finalized:
+                        break
                     # STOP 2: preemption (existing hook, same guard a single wake
                     # already honors).
                     if cycle_cancelled():
@@ -1258,9 +1326,16 @@ class OpportunityEventReactor:
                     # STOP 3: per-wake wall-clock budget (existing guard).
                     if budget is not None and (time.monotonic() - cycle_start) >= budget:
                         break
-                    # STOP 4: per-wake event-count budget (existing guard).
-                    if remaining is not None and remaining <= 0:
-                        break
+                    # The event-count budget is intentionally NOT a continuation
+                    # stop here (removed 2026-07-19; was STOP 4): it debits a
+                    # semantic measure now (claimed events, deduped), but it is
+                    # still an artificial opportunity cap, not a progress
+                    # predicate, so it must not independently end a wake that is
+                    # otherwise making durable progress. `remaining` still bounds
+                    # each epoch's own scan/claim size (passed to
+                    # ``_process_global_event_batch`` above), which keeps a
+                    # pathological page from running away.
+                    #
                     # Re-fetch: winner #1's family is now held (position_current ->
                     # _current_held_weather_families) and its reservation is in the
                     # wealth witness, so the next epoch's scope scan and wealth cut
@@ -1323,8 +1398,9 @@ class OpportunityEventReactor:
     ) -> GlobalEpochOutcome:
         """Claim/gate all epoch events, then let one opaque adapter auction act once.
 
-        Returns whether this epoch submitted, so the caller (``process_pending``'s
-        multi-winner loop) knows whether to run another epoch or stop.
+        Returns whether this epoch submitted AND whether that submit's winner
+        finalized durably, so the caller (``process_pending``'s multi-winner
+        loop) knows whether to run another epoch or stop.
         """
 
         claimed: list[OpportunityEvent] = []
@@ -1351,7 +1427,12 @@ class OpportunityEventReactor:
             if cancelled():
                 break
         if not claimed:
-            return GlobalEpochOutcome(attempted=attempted, submitted=False)
+            return GlobalEpochOutcome(
+                attempted=attempted,
+                submitted=False,
+                finalized=False,
+                claimed_event_ids=frozenset(),
+            )
 
         process_batch = getattr(self._submit, "process_global_batch")
 
@@ -1433,7 +1514,12 @@ class OpportunityEventReactor:
                     decision_time=_finalization_time(event),
                     result=result,
                 )
-            return GlobalEpochOutcome(attempted=attempted, submitted=False)
+            return GlobalEpochOutcome(
+                attempted=attempted,
+                submitted=False,
+                finalized=False,
+                claimed_event_ids=frozenset(event.event_id for event in claimed),
+            )
 
         # A real venue call creates a must-settle result. Persist that winner
         # before side-effect-free losers, regardless of the claim/page order.
@@ -1446,6 +1532,14 @@ class OpportunityEventReactor:
             )
 
         finalization_lock_busy = False
+        # BLOCKER FIX (2026-07-19 external review,
+        # ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md,
+        # §BLOCKER "progress and ordering"): vacuously True when there is no
+        # winner this epoch (submitted is already False then, so it gates
+        # nothing); otherwise True only if the WINNER's own finalize call
+        # both returned True (no Window-B lock/requeue failure) AND did not
+        # route through the unknown-exception dead-letter path.
+        winner_finalized = True
         for event in finalization_events:
             receipt = batch_result.receipts[event.event_id]
             side_effect_possible = bool(
@@ -1467,6 +1561,11 @@ class OpportunityEventReactor:
                 result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
                 result.retried += 1
                 continue
+            is_winner = (
+                batch_result.venue_submit_count == 1
+                and event.event_id == batch_result.winner_event_id
+            )
+            dead_letters_before = self._unknown_dead_letter_calls
             finalized = self._finalize_deferred_event_unit(
                 event,
                 receipt,
@@ -1476,9 +1575,16 @@ class OpportunityEventReactor:
             )
             if not finalized:
                 finalization_lock_busy = True
+            if is_winner:
+                winner_finalized = (
+                    finalized
+                    and self._unknown_dead_letter_calls == dead_letters_before
+                )
         return GlobalEpochOutcome(
             attempted=attempted,
             submitted=batch_result.venue_submit_count == 1,
+            finalized=winner_finalized,
+            claimed_event_ids=frozenset(event.event_id for event in claimed),
         )
 
     def _queue_global_winner_for_claim(
@@ -2623,6 +2729,7 @@ class OpportunityEventReactor:
         is safe both from Window A's open savepoint (after rollback) and from a
         freshly-acquired mutex with no open txn.
         """
+        self._unknown_dead_letter_calls += 1
         with contextlib.suppress(Exception):
             self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
             self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")

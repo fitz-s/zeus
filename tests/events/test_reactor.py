@@ -4633,6 +4633,36 @@ def _requeue_losers_finalize(reactor):
     return _finalize
 
 
+def _terminal_losers_finalize(reactor):
+    """A ``_finalize_deferred_event_unit`` fake for the production-lifecycle
+    antibodies below (2026-07-19 external review,
+    ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md,
+    BLOCKER "non-adversarial validation" — tests/events/test_reactor.py:
+    test_multiwinner_*): winners count as accepted and stay claimed
+    (consumed), matching the real reactor's terminal winner disposition.
+    Losers are marked PROCESSED (terminal) — the production disposition for
+    a real ``GLOBAL_NOT_SELECTED`` receipt (src/engine/global_batch_runtime.py
+    :3394-3405) — NOT requeued under a fabricated transient reason. A
+    terminalized loser is unavailable to any later epoch's re-fetch, exactly
+    like production; ``_requeue_losers_finalize`` above instead requeues
+    losers so the SAME candidate set can fake K sequential winners from a
+    pool production would actually exhaust after one epoch. Isolates these
+    tests from the certificate/proof-bundle plumbing
+    ``_process_one_post_submit`` requires for a real accept, which is covered
+    elsewhere."""
+
+    def _finalize(event, receipt, *, decision_time, result, wait_ms=None):
+        del decision_time, wait_ms
+        if receipt.submitted:
+            result.proof_accepted += 1
+        else:
+            reactor._store.mark_processed(event.event_id)
+            result.rejected += 1
+        return True
+
+    return _finalize
+
+
 def _multiwinner_reactor(store, process_global_batch):
     def _direct_submit(*_args, **_kwargs):
         pytest.fail("global batch path must not invoke per-event submit")
@@ -4806,4 +4836,229 @@ def test_multiwinner_loop_stops_on_elapsed_wall_clock_budget(monkeypatch):
     assert sorted(statuses.values()) == ["pending", "pending", "processing"], (
         "an elapsed wake budget must stop after exactly one submitting epoch, "
         f"leaving the rest PENDING for the next wake: {statuses}"
+    )
+
+
+# --- BLOCKER FIX antibodies (2026-07-19 external review, -------------------------------------
+# ~/cgc-answers/2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md,
+# §BLOCKER "progress and ordering", reactor.py:967-981,1216-1279,1313-1482 +
+# BLOCKER "non-adversarial validation", tests/events/test_reactor.py:test_multiwinner_*).
+# The three tests above prove the loop's per-epoch isolation using a fabricated transient
+# loser-requeue and an unbounded limit=None — exactly what the review flags as
+# non-adversarial: production terminalizes losers (GLOBAL_NOT_SELECTED) and runs with a
+# finite process limit, and venue_call_started ("submitted") alone let epoch K+1 start even
+# when K's winner world-side finalization never durably committed. The two tests below drive
+# process_pending with the PRODUCTION disposition classifier (a real GLOBAL_NOT_SELECTED
+# terminal receipt for losers, not a fabricated requeue reason) and a finite, production-like
+# limit, closing the two gaps the fix makes testable.
+
+
+def test_multiwinner_loop_breaks_when_winner_finalization_is_not_durable(monkeypatch):
+    """Epoch K's winner receipt/finalization write does not commit here:
+    ``_process_one_post_submit`` (the call inside the REAL, unmodified
+    ``_finalize_deferred_event_unit`` Window-B save-point) raises a genuine
+    ``sqlite3.OperationalError("database is locked")`` — the exact
+    exception, and the exact real exception-handling machinery (classified
+    by ``_is_sqlite_lock_error``, rolled back, requeued via the real
+    ``EventStore.requeue_pending``), that a real Window-B world-write lock
+    produces; only the trigger is injected, not the outcome. Before the fix,
+    ``submitted`` (venue_call_started) alone let the loop continue to epoch
+    K+1 regardless of whether K's winner world disposition ever became
+    durable.
+
+    Two candidates exist so the test can PROVE "no K+1 auction ran" rather
+    than merely "no more candidates existed": the fetch PAGE is forced to
+    exactly one row (``ZEUS_REACTOR_FETCH_BATCH_LIMIT=1``) with
+    ``limit=None`` (no event-count budget at all — remaining stays None the
+    whole wake, so nothing about the event-count budget can explain a stop),
+    so epoch #1 claims and auctions ONLY the first candidate; the second
+    candidate is never even fetched. The fix must BREAK the loop after
+    epoch #1: no second ``process_global_batch`` call (which would have
+    re-fetched and reached the second candidate), and the winner event is
+    requeued to PENDING — not durably processed, not dead-lettered."""
+    monkeypatch.setenv("ZEUS_REACTOR_FETCH_BATCH_LIMIT", "1")
+    conn, store = _store()
+    events = _multiwinner_events("finalize-lock", 2)
+    for event in events:
+        store.insert_or_ignore(event)
+
+    batch_calls = {"n": 0}
+    winner_holder: dict[str, str] = {}
+
+    def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        batch_calls["n"] += 1
+        if batch_calls["n"] > 1:
+            pytest.fail(
+                "process_global_batch must not run a second epoch after "
+                "epoch #1's winner finalization failed to commit"
+            )
+        assert len(claimed) == 1, (
+            "the forced 1-row fetch page must hand exactly one candidate to "
+            f"epoch #1: got {[event.event_id for event in claimed]}"
+        )
+        winner = claimed[0]
+        winner_holder["event_id"] = winner.event_id
+        return GlobalBatchSubmitResult(
+            receipts={
+                winner.event_id: EventSubmissionReceipt(
+                    submitted=True,
+                    event_id=winner.event_id,
+                    causal_snapshot_id=winner.causal_snapshot_id,
+                    side_effect_status="VENUE_SUBMIT_ACKED",
+                    venue_call_started=True,
+                    venue_ack_received=True,
+                    reason="TEST_WINNER_SUBMITTED",
+                )
+            },
+            winner_event_id=winner.event_id,
+            venue_submit_count=1,
+        )
+
+    def _direct_submit(*_a, **_k):
+        pytest.fail("global batch path must not invoke per-event submit")
+
+    _direct_submit.process_global_batch = _batch  # type: ignore[attr-defined]
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_direct_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(reactor_mode="live_no_submit"),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    def _raise_world_write_lock_busy(_event, _submit_result, *, decision_time, result):
+        del decision_time, result
+        raise sqlite3.OperationalError("database is locked")
+
+    reactor._process_one_post_submit = _raise_world_write_lock_busy
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=None)
+
+    assert batch_calls["n"] == 1, (
+        "the loop must break after epoch #1's winner finalization failed to "
+        "commit durably — no epoch #2 auction"
+    )
+    winner_id = winner_holder["event_id"]
+    untouched_id = next(
+        event.event_id for event in events if event.event_id != winner_id
+    )
+    assert _processing_status(conn, untouched_id) == "pending", (
+        "the second candidate must never even be fetched — proving the loop "
+        "stopped because K's finalization failed, not because no more "
+        "candidates existed"
+    )
+    assert result.processed == 0 and result.dead_lettered == 0, (
+        "the winner event must NOT be durably closed (processed or "
+        f"dead-lettered) when its world-side finalization failed to commit: {result}"
+    )
+    assert _processing_status(conn, winner_id) == "pending", (
+        "the winner event must be requeued to PENDING (claimable next "
+        "wake), never left in a durably closed disposition, when its "
+        f"world-side finalization did not commit: {result}"
+    )
+
+
+def test_multiwinner_loop_debits_finite_budget_once_per_claimed_event():
+    """The pre-fix debit (``remaining -= epoch.attempted``, the raw SCANNED
+    count) drains a finite, production-like process limit on an event that
+    was scanned but never claimed (e.g. a transient claim-lock bounce),
+    stranding it PENDING and unreachable for the rest of the wake even
+    though the epoch's real claimed work used less than the whole budget.
+    Here candidate #2 bounces its FIRST claim attempt (a real, transient
+    miss via the SAME ``result.claim_lock_bounces``/retry accounting
+    production uses — not a hand-picked winner), while the other two
+    candidates are claimed, auctioned, and finalized through the PRODUCTION
+    disposition classifier: one submitted winner, one real terminal
+    ``GLOBAL_NOT_SELECTED`` loser (not the fabricated transient
+    loser-requeue the earlier fixtures use). With a finite ``limit`` sized
+    exactly to the 3 real candidates, the fixed debit (claimed events,
+    deduped across epochs) must still leave enough budget for the bounced
+    candidate's second, successful claim to run as its own epoch — the loop
+    must not be unable to page past the budget."""
+    conn, store = _store()
+    events = _multiwinner_events("pagebudget", 3)
+    for event in events:
+        store.insert_or_ignore(event)
+    bounce_id = events[1].event_id
+
+    batch_calls = {"n": 0}
+
+    def _batch(claimed, _decision_time, *, claim_unpaged_winner=None):
+        del claim_unpaged_winner
+        batch_calls["n"] += 1
+        winner = min(claimed, key=lambda event: event.event_id)
+        receipts = {
+            winner.event_id: EventSubmissionReceipt(
+                submitted=True,
+                event_id=winner.event_id,
+                causal_snapshot_id=winner.causal_snapshot_id,
+                side_effect_status="VENUE_SUBMIT_ACKED",
+                venue_call_started=True,
+                venue_ack_received=True,
+                reason="TEST_WINNER_SUBMITTED",
+            )
+        }
+        for event in claimed:
+            if event.event_id == winner.event_id:
+                continue
+            receipts[event.event_id] = EventSubmissionReceipt(
+                submitted=False,
+                event_id=event.event_id,
+                causal_snapshot_id=event.causal_snapshot_id,
+                reason=f"GLOBAL_NOT_SELECTED:{winner.event_id}",
+                proof_accepted=False,
+            )
+        return GlobalBatchSubmitResult(
+            receipts=receipts,
+            winner_event_id=winner.event_id,
+            venue_submit_count=1,
+        )
+
+    def _direct_submit(*_a, **_k):
+        pytest.fail("global batch path must not invoke per-event submit")
+
+    _direct_submit.process_global_batch = _batch  # type: ignore[attr-defined]
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_direct_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(reactor_mode="live_no_submit"),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    reactor._finalize_deferred_event_unit = _terminal_losers_finalize(reactor)
+
+    real_process_event_unit = reactor._process_event_unit
+    bounced = {"done": False}
+
+    def _bounce_once_then_real(event, *, decision_time, result, defer_submit=False):
+        if event.event_id == bounce_id and not bounced["done"]:
+            bounced["done"] = True
+            result.claim_lock_bounces += 1
+            result.retried += 1
+            return None
+        return real_process_event_unit(
+            event, decision_time=decision_time, result=result, defer_submit=defer_submit
+        )
+
+    reactor._process_event_unit = _bounce_once_then_real
+
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=3)
+
+    assert batch_calls["n"] == 2, (
+        "the bounced candidate's second, successful claim must still run as "
+        "its own epoch within the SAME finite limit=3 budget: the fixed "
+        "debit must not already have spent the whole allowance on epoch "
+        "#1's 3 SCANS when only 2 were ever actually claimed"
+    )
+    statuses = {event.event_id: _processing_status(conn, event.event_id) for event in events}
+    assert statuses[bounce_id] == "processing", (
+        "the bounced candidate must have been reclaimed and consumed as its "
+        f"own winner in epoch #2: {statuses}"
     )
