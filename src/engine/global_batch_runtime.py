@@ -2976,10 +2976,13 @@ def process_current_global_batch(
         )
 
     try:
+        selection_connections = tuple(selection_snapshot_connections)
+        if isinstance(world_conn, sqlite3.Connection):
+            selection_connections = (*selection_connections, world_conn)
         release_selection_snapshot = _begin_selection_read_snapshot(
-            selection_snapshot_connections
+            selection_connections
         )
-        release_schema = prime_frozen_schema_reads(selection_snapshot_connections)
+        release_schema = prime_frozen_schema_reads(selection_connections)
         release_snapshot_only = release_selection_snapshot
         released_schema = False
 
@@ -3662,6 +3665,14 @@ def process_current_global_batch(
                     "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
                     next_claim_event=next_claim,
                 )
+            # Selection owns one immutable cut. Preflight has the opposite job:
+            # re-read submit-time probability truth and refute that cut when a
+            # newer posterior or Day0 observation landed during book/solve work.
+            # Keeping the SQLite snapshot open here made the JIT resolver read
+            # the old cut again, so a probability reversal could appear stable.
+            # The prepared witnesses and book epoch below are already immutable
+            # values; release only their backing DB view before current recheck.
+            release_selection_snapshot()
             winner_id = winner.event_id
             attempt_book_epoch = book_epoch_fence
             auction_deadline = (

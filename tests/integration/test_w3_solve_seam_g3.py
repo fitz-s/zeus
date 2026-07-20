@@ -17350,6 +17350,199 @@ def test_global_batch_freezes_cut_then_releases_before_winner_jit(
     writer.close()
 
 
+def test_global_batch_releases_selection_cut_before_probability_preflight(
+    monkeypatch, tmp_path
+):
+    import src.data.replacement_input_hwm as input_hwm
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    witness = SimpleNamespace(
+        family_key=scope.family_keys[0],
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="probability-a",
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    candidate = SimpleNamespace(
+        action="BUY",
+        family_key=scope.family_keys[0],
+        bin_id="bin-a",
+        condition_id="condition-a",
+        side="YES",
+        token_id="token-a",
+        candidate_id="candidate-a",
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-a",
+            wealth_witness_identity="wealth-certificate",
+        ),
+    )
+    forecast_path = tmp_path / "preflight-current-forecast.db"
+    forecast_seed = sqlite3.connect(forecast_path)
+    assert forecast_seed.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    forecast_seed.commit()
+    forecast_seed.close()
+    forecast = sqlite3.connect(forecast_path)
+    world_path = tmp_path / "preflight-current-day0.db"
+    world_seed = sqlite3.connect(world_path)
+    assert world_seed.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    world_seed.execute("CREATE TABLE current_probability (value TEXT NOT NULL)")
+    world_seed.execute("INSERT INTO current_probability VALUES ('selection-cut')")
+    world_seed.commit()
+    world_seed.close()
+    world = sqlite3.connect(world_path)
+    writer = sqlite3.connect(world_path)
+    venue_calls = [0]
+    stages = []
+
+    def scan(**_kwargs):
+        assert world.execute(
+            "SELECT value FROM current_probability"
+        ).fetchone()[0] == "selection-cut"
+        writer.execute(
+            "UPDATE current_probability SET value='submit-current'"
+        )
+        writer.commit()
+        return scope
+
+    def prepare(current, _at):
+        assert input_hwm._FROZEN_INPUT_HWM.get() is not None
+        assert forecast.in_transaction is True
+        assert world.execute(
+            "SELECT value FROM current_probability"
+        ).fetchone()[0] == "selection-cut"
+        return EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        )
+
+    def preflight(*_args):
+        stages.append("preflight")
+        assert input_hwm._FROZEN_INPUT_HWM.get() is None
+        assert forecast.in_transaction is False
+        assert world.execute(
+            "SELECT value FROM current_probability"
+        ).fetchone()[0] == "submit-current"
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE",
+            binding_token="binding-a",
+        )
+
+    def actuate(current, _actuation, _at, token, _authority):
+        stages.append("actuation")
+        assert token == "binding-a"
+        venue_calls[0] += 1
+        return EventSubmissionReceipt(
+            True,
+            current.event_id,
+            current.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", scan
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "probe_inflight_buy_ambiguity", lambda _conn: False
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_current_held_weather_families", lambda _conn: ()
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda *_, **__: selected,
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=world,
+        forecast_conn=forecast,
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=prepare,
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue_calls[0],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            _global_test_book("book", price="0.40", captured_at=decision_at),
+        ),
+        selection_snapshot_connections=(forecast,),
+    )
+
+    assert stages == ["preflight", "actuation"]
+    assert result.venue_submit_count == 1
+    assert result.receipts[event.event_id].submitted is True
+    assert forecast.in_transaction is False
+    assert world.in_transaction is False
+    assert input_hwm._FROZEN_INPUT_HWM.get() is None
+    forecast.close()
+    world.close()
+    writer.close()
+
+
+def test_global_batch_rejects_caller_owned_world_probability_transaction():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    world = sqlite3.connect(":memory:")
+    world.execute("BEGIN")
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=world,
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda _event: pytest.fail("selection must not start"),
+        prepare_event=lambda *_: pytest.fail("selection must not start"),
+        actuate_winner=lambda *_: pytest.fail("selection must not start"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: None,
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_FAILED:RuntimeError:"
+        "GLOBAL_SELECTION_SNAPSHOT_CALLER_TXN_OPEN"
+    )
+    assert world.in_transaction is True
+    world.rollback()
+    world.close()
+
+
 def test_global_batch_rejects_mixed_probability_manifest(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
