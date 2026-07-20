@@ -2242,16 +2242,9 @@ def _replacement_forecast_download_cycle() -> None:
     # actual fusion-capture state.
     if bayes_precision_fusion_capture_report is not None:
         _record_bayes_precision_fusion_capture_health(cfg, bayes_precision_fusion_capture_report)
-    # STATION-CALIBRATED forecast ingest (operator "加数据"): the national met agency's OWN
-    # published daily-max forecast for the settlement district — CWA township (Taipei/RCSS),
-    # HKO nine-day (Hong Kong) — lands in raw_model_forecasts here on the SAME download lane as
-    # the gridded raw inputs (publish-time cron + boot catch-up). It is DATA PRECISION, not a
-    # de-bias: each source contributes to its city's served center ONLY via the per-city
-    # source-clock scheme weight downstream. Config-driven + fail-soft; a provider outage never
-    # touches the gridded capture above.
-    station_report = _ingest_station_forecasts_live(cfg)
-    if station_report:
-        logger.info("station-forecast live ingest wrote rows: %s", station_report)
+    # STATION-CALIBRATED forecast ingest (CWA township / HKO fnd) runs on ingest_main's availability
+    # poll via _ingest_station_forecasts_if_due — NOT here. This cycle is unscheduled (diagnostics
+    # only), so it must not duplicate that ingest: doing so would double-fetch the provider APIs.
     # Release the queue lock after one micro-batch so a newly arrived source can
     # preempt old catch-up debt on the 1s poll lane. Discovery consumes existing
     # explicit requests and newly discovered seeds in the same priority sort.
