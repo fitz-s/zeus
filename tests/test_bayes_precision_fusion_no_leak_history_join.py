@@ -1,7 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-07-20
-# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causal fixed-lead history; previous-runs
-#   for gridded models; positive-lead named-station single-runs exception with local-day cutoff;
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causality: previous-runs fixed-lead train ONLY;
 #   run_time != source_available_at), §5 (walk-forward, no same-day leak), §7 antibodies
 #   ("top-K-uses-target-truth (walk-forward only)", "previous-runs-for-live-decision",
 #   "C/F unit mix (settlement-unit residual)"); CONTINUITY_AND_WIRING.md §4 step 4 + IRON
@@ -14,9 +13,8 @@ The cross-module invariant under test (raw_model_forecasts -> settlement_outcome
   (1) NO LEAK: only rows with target_date STRICTLY < decision_date enter the history.
   (2) PROVENANCE GATE: only settlement authority='VERIFIED' rows contribute (UNVERIFIED /
       DISPUTED excluded).
-  (3) ENDPOINT GATE: gridded models train only on previous_runs. The named station products
-      without a previous-runs archive may use positive-lead single_runs, latest issue per date;
-      Day0 single_runs remain excluded because decision time-of-day is unavailable.
+  (3) ENDPOINT GATE: only endpoint='previous_runs' (fixed-lead) rows train; single_runs
+      (live-capture, variable-lead) NEVER enter the train window (run_time != available_at).
   (4) UNIT COHERENCE: residual = forecast_value_c - settlement_in_C; an F-settlement city's
       settlement_value (degF) is converted to degC before the residual (no C/F mix).
   (5) FAIL-SOFT: the provider NEVER raises; any failure -> {} (anchor fallback / equal-weight).
@@ -56,7 +54,6 @@ def _insert_raw(
     endpoint: str = "previous_runs",
     lead_days: int = 1,
     source_cycle_time: str | None = None,
-    source_available_at: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -68,7 +65,7 @@ def _insert_raw(
         (
             model, city, target_date, metric,
             source_cycle_time or (target_date + "T00:00:00+00:00"),
-            source_available_at or (target_date + "T06:00:00+00:00"),
+            target_date + "T06:00:00+00:00",
             target_date + "T07:00:00+00:00",
             lead_days, forecast_value_c, endpoint,
         ),
@@ -162,100 +159,6 @@ def test_history_excludes_single_runs_endpoint() -> None:
     provider = BayesPrecisionFusionHistoryProvider(conn)
     hist = provider(city="Paris", metric="high", lead_days=1, target_date=date(2026, 5, 1), models=["gfs_global"])
     assert hist["gfs_global"].n_train == 1, "single_runs rows must never enter the fixed-lead train window"
-
-
-def test_gridded_model_without_previous_rows_does_not_fallback_to_single_runs() -> None:
-    """Missing previous-runs data is not proof that a gridded product lacks that archive."""
-    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
-
-    conn = _conn()
-    _insert_raw(
-        conn, model="gfs_global", city="Paris", target_date="2026-04-01",
-        metric="high", forecast_value_c=20.0, endpoint="single_runs",
-        source_cycle_time="2026-03-31T06:00:00+00:00",
-    )
-    _insert_settlement(
-        conn, city="Paris", target_date="2026-04-01", metric="high",
-        settlement_value=19.0,
-    )
-
-    hist = BayesPrecisionFusionHistoryProvider(conn)(
-        city="Paris", metric="high", lead_days=1,
-        target_date=date(2026, 5, 1), models=["gfs_global"],
-    )
-    assert hist == {}
-
-
-def test_station_positive_lead_uses_latest_single_runs_issue_per_date() -> None:
-    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
-
-    conn = _conn()
-    for cycle, available, value in (
-        ("2026-03-31T00:00:00+00:00", "2026-03-31T01:00:00+00:00", 18.0),
-        ("2026-03-31T06:00:00+00:00", "2026-03-31T07:00:00+00:00", 20.0),
-    ):
-        _insert_raw(
-            conn, model="cwa_township", city="Taipei", target_date="2026-04-01",
-            metric="high", forecast_value_c=value, endpoint="single_runs",
-            source_cycle_time=cycle, source_available_at=available,
-        )
-    _insert_settlement(
-        conn, city="Taipei", target_date="2026-04-01", metric="high",
-        settlement_value=19.0,
-    )
-
-    hist = BayesPrecisionFusionHistoryProvider(conn)(
-        city="Taipei", metric="high", lead_days=1,
-        target_date=date(2026, 5, 1), models=["cwa_township"],
-    )["cwa_township"]
-    assert hist.n_train == 1
-    assert hist.forecast_values == (20.0,)
-    assert hist.residuals == pytest.approx((1.0,))
-
-
-def test_station_day0_single_runs_do_not_train_without_issue_time_alignment() -> None:
-    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
-
-    conn = _conn()
-    _insert_raw(
-        conn, model="hko_fnd", city="Hong Kong", target_date="2026-04-01",
-        metric="high", forecast_value_c=30.0, endpoint="single_runs", lead_days=0,
-        source_cycle_time="2026-04-01T12:00:00+00:00",
-    )
-    _insert_settlement(
-        conn, city="Hong Kong", target_date="2026-04-01", metric="high",
-        settlement_value=29.0,
-    )
-
-    hist = BayesPrecisionFusionHistoryProvider(conn)(
-        city="Hong Kong", metric="high", lead_days=0,
-        target_date=date(2026, 5, 1), models=["hko_fnd"],
-    )
-    assert hist == {}
-
-
-def test_station_positive_lead_rejects_after_local_day_start() -> None:
-    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
-
-    conn = _conn()
-    _insert_raw(
-        conn, model="cwa_township", city="Taipei", target_date="2026-04-01",
-        metric="high", forecast_value_c=30.0, endpoint="single_runs", lead_days=1,
-        source_cycle_time="2026-03-31T12:00:00+00:00",
-        # Taipei local 2026-04-01 starts at 2026-03-31T16:00Z. This issue is still
-        # March 31 in UTC but is already four hours into the target local day.
-        source_available_at="2026-03-31T20:00:00+00:00",
-    )
-    _insert_settlement(
-        conn, city="Taipei", target_date="2026-04-01", metric="high",
-        settlement_value=29.0,
-    )
-
-    hist = BayesPrecisionFusionHistoryProvider(conn)(
-        city="Taipei", metric="high", lead_days=1,
-        target_date=date(2026, 5, 1), models=["cwa_township"],
-    )
-    assert hist == {}
 
 
 # =====================================================================================
