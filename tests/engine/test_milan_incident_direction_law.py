@@ -138,8 +138,8 @@ def _run(with_fusion_center: bool = True):
     return {(p.candidate.condition_id, p.direction): p for p in proofs}
 
 
-def test_day0_absorbing_no_at_999_reaches_current_economics():
-    """A 0.999 quote is not a semantic veto; current economics owns selection."""
+def test_day0_absorbing_no_at_999_is_blocked_before_selection():
+    """Even an absorbing Day0 belief cannot waive the absolute price band."""
 
     candidate = MarketTopologyCandidate(
         city="Shanghai",
