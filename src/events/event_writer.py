@@ -28,6 +28,8 @@ class EventWriter:
 
     def write(self, event: OpportunityEvent) -> EventWriteResult:
         inserted = self._store.insert_or_ignore(event)
+        if inserted and event.event_type == "DAY0_EXTREME_UPDATED":
+            self._store.archive_superseded_day0_family(event)
         return EventWriteResult(
             event_id=event.event_id,
             inserted=inserted,

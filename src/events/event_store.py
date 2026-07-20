@@ -64,6 +64,13 @@ _TERMINAL_PENDING_LAST_ERROR_PREFIXES = (
 _RECENT_RECAPTURE_EDGE_REVERSED_REASON = "SUBMIT_ABORTED_EDGE_REVERSED"
 _MISSING_PROCESSING_REPAIR_LOOKBACK_HOURS = 48
 _DAY0_PAUSE_REQUEUE_LOOKBACK_HOURS = 48
+_DAY0_EXTREME_VALUE_SQL = (
+    "CAST(COALESCE("
+    "json_extract(e.payload_json, '$.rounded_value'), "
+    "json_extract(e.payload_json, '$.high_so_far'), "
+    "json_extract(e.payload_json, '$.low_so_far')"
+    ") AS REAL)"
+)
 _FamilyNormalizer = Callable[[object, object, object], tuple[str, str, str]]
 
 
@@ -203,6 +210,114 @@ class EventStore:
             ),
         )
         return inserted
+
+    def archive_superseded_day0_family(self, event: OpportunityEvent) -> int:
+        """Expire older pending work for one Day0 family in the append transaction."""
+
+        try:
+            payload = json.loads(event.payload_json)
+        except (TypeError, json.JSONDecodeError):
+            return 0
+        city = str(payload.get("city") or "").strip()
+        target_date = str(payload.get("target_date") or "").strip()
+        metric = str(payload.get("metric") or "").strip().lower()
+        if not city or not target_date or metric not in {"high", "low"}:
+            return 0
+
+        keeper_id = self._day0_family_keeper_id(city, target_date, metric)
+        if keeper_id is None:
+            return 0
+
+        now = _utc_now()
+        cur = self.conn.execute(
+            """
+            UPDATE opportunity_event_processing
+               SET processing_status = 'expired',
+                   processed_at = ?,
+                   last_error = 'DAY0_FAMILY_SUPERSEDED',
+                   updated_at = ?
+             WHERE consumer_name = ?
+               AND processing_status = 'pending'
+               AND event_id != ?
+               AND event_id IN (
+                    SELECT e.event_id
+                      FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
+                     WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+                       AND json_extract(e.payload_json, '$.city') = ?
+                       AND json_extract(e.payload_json, '$.target_date') = ?
+                       AND json_extract(e.payload_json, '$.metric') = ?
+               )
+            """,
+            (
+                now,
+                now,
+                self.consumer_name,
+                keeper_id,
+                city,
+                target_date,
+                metric,
+            ),
+        )
+        return int(cur.rowcount)
+
+    def _day0_family_keeper_id(
+        self,
+        city: str,
+        target_date: str,
+        metric: str,
+    ) -> str | None:
+        """Return one deterministic trigger for the family's absorbing extreme."""
+
+        order = "DESC" if metric == "high" else "ASC"
+        extreme_row = self.conn.execute(
+            f"""
+            SELECT {_DAY0_EXTREME_VALUE_SQL} AS extreme_value,
+                   e.available_at
+              FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
+             WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(e.payload_json, '$.city') = ?
+               AND json_extract(e.payload_json, '$.target_date') = ?
+               AND json_extract(e.payload_json, '$.metric') = ?
+               AND {_DAY0_EXTREME_VALUE_SQL} IS NOT NULL
+             ORDER BY {_DAY0_EXTREME_VALUE_SQL} {order}, e.available_at DESC
+             LIMIT 1
+            """,
+            (city, target_date, metric),
+        ).fetchone()
+        if extreme_row is None:
+            return None
+        try:
+            extreme_value = float(extreme_row[0])
+        except (TypeError, ValueError):
+            return None
+        available_at = str(extreme_row[1] or "")
+        keeper_rows = self.conn.execute(
+            f"""
+            SELECT e.event_id, e.received_at
+              FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
+             WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(e.payload_json, '$.city') = ?
+               AND json_extract(e.payload_json, '$.target_date') = ?
+               AND json_extract(e.payload_json, '$.metric') = ?
+               AND {_DAY0_EXTREME_VALUE_SQL} = ?
+               AND e.available_at = ?
+            """,
+            (
+                city,
+                target_date,
+                metric,
+                extreme_value,
+                available_at,
+            ),
+        ).fetchall()
+        if not keeper_rows:
+            return None
+        return str(
+            max(
+                keeper_rows,
+                key=lambda row: (str(row[1] or ""), str(row[0] or "")),
+            )[0]
+        )
 
     def repair_missing_processing_rows(
         self,
@@ -1272,12 +1387,14 @@ class EventStore:
         lane every cycle.
 
         INVARIANT (superseded-keep-latest): for each ``(city, target_date, metric)``
-        family in the active working set (``pending``/``processing`` only), keep the
-        row(s) carrying the absorbing extreme across the full persisted family:
+        family represented in the active working set, derive the absorbing extreme
+        across the full immutable family and keep at most one active row carrying it:
         ``MAX(rounded_value)`` for high and ``MIN(rounded_value)`` for low. Day0 carries
         NO ``token_id``, so the family tuple is the supersession key (the token-keyed
-        channel sweep does not apply). Ties at the absorbing extreme are all kept
-        (never archive on a duplicate-value ambiguity).
+        channel sweep does not apply). Equal-value duplicates retain immutable event
+        provenance, but only the latest ``(available_at, received_at, event_id)``
+        trigger may remain active for this consumer. If that keeper was already
+        processed, a later regressed or duplicate observation does not replay it.
 
         Past-LOCAL-DAY day0 events are removed separately by
         ``archive_expired_candidates`` (which now covers day0); this sweep dedups the
@@ -1326,57 +1443,11 @@ class EventStore:
             for row in candidate_rows
             if row[1] is not None and row[2] is not None and row[3] is not None
         }
-        value_expr = (
-            "CAST(COALESCE("
-            "json_extract(e.payload_json, '$.rounded_value'), "
-            "json_extract(e.payload_json, '$.high_so_far'), "
-            "json_extract(e.payload_json, '$.low_so_far')"
-            ") AS REAL)"
-        )
         keeper_ids: set[str] = set()
         for city, target_date, metric in candidate_keys:
-            order = "DESC" if metric == "high" else "ASC"
-            extreme_row = self.conn.execute(
-                f"""
-                SELECT {value_expr} AS extreme_value
-                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
-                  JOIN opportunity_event_processing p
-                    ON p.event_id = e.event_id
-                   AND p.consumer_name = ?
-                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
-                   AND json_extract(e.payload_json, '$.city') = ?
-                   AND json_extract(e.payload_json, '$.target_date') = ?
-                   AND json_extract(e.payload_json, '$.metric') = ?
-                   AND {value_expr} IS NOT NULL
-                   AND p.processing_status IN ('pending', 'processing')
-                 ORDER BY {value_expr} {order}
-                 LIMIT 1
-                """,
-                (self.consumer_name, city, target_date, metric),
-            ).fetchone()
-            if extreme_row is None:
-                continue
-            try:
-                extreme_value = float(extreme_row[0])
-            except (TypeError, ValueError):
-                continue
-            keeper_rows = self.conn.execute(
-                f"""
-                SELECT e.event_id
-                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family_extreme
-                  JOIN opportunity_event_processing p
-                    ON p.event_id = e.event_id
-                   AND p.consumer_name = ?
-                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
-                   AND json_extract(e.payload_json, '$.city') = ?
-                   AND json_extract(e.payload_json, '$.target_date') = ?
-                   AND json_extract(e.payload_json, '$.metric') = ?
-                   AND {value_expr} = ?
-                   AND p.processing_status IN ('pending', 'processing')
-                """,
-                (self.consumer_name, city, target_date, metric, extreme_value),
-            ).fetchall()
-            keeper_ids.update(str(row[0]) for row in keeper_rows)
+            keeper_id = self._day0_family_keeper_id(city, target_date, metric)
+            if keeper_id is not None:
+                keeper_ids.add(keeper_id)
 
         superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
 

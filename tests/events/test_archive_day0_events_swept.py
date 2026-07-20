@@ -1,5 +1,5 @@
 # Created: 2026-06-15
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-07-20
 # Authority basis: GOAL #83 / task #118 — DAY0_EXTREME_UPDATED events were in NEITHER
 #   drain sweep (archive_expired_candidates filtered FORECAST_SNAPSHOT_READY only;
 #   _CHANNEL_EVENT_TYPES is token-keyed and excludes day0). Live 2026-06-15: 1972 pending
@@ -24,6 +24,7 @@ import sqlite3
 
 from src.events import reactor
 from src.events.event_store import EventStore
+from src.events.event_writer import EventWriter
 from src.events.opportunity_event import (
     Day0ExtremeUpdatedPayload,
     ForecastSnapshotReadyPayload,
@@ -317,6 +318,87 @@ def test_both_types_swept_in_one_pass():
 # ---------------------------------------------------------------------------
 
 
+def test_day0_insert_immediately_expires_older_pending_family_work():
+    """A fresher absorbing extreme must not wait for reactor maintenance pruning."""
+    conn = _world_conn()
+    store = EventStore(conn)
+    writer = EventWriter(conn)
+    old = _day0_event(
+        "Tokyo",
+        "2026-07-20",
+        "high",
+        available_at="2026-07-20T03:38:09+00:00",
+        seq=34,
+    )
+    fresh = _day0_event(
+        "Tokyo",
+        "2026-07-20",
+        "high",
+        available_at="2026-07-20T04:05:33+00:00",
+        seq=35,
+    )
+
+    writer.write(old)
+    writer.write(fresh)
+
+    assert _status_of(conn, old.event_id) == "expired"
+    assert _status_of(conn, fresh.event_id) == "pending"
+
+
+def test_day0_insert_does_not_resurrect_below_persisted_absorbing_extreme():
+    """A shorter later source window cannot revive work below a processed daily high."""
+    conn = _world_conn()
+    store = EventStore(conn)
+    writer = EventWriter(conn)
+    high = _day0_event(
+        "Tokyo",
+        "2026-07-20",
+        "high",
+        available_at="2026-07-20T04:05:33+00:00",
+        seq=35,
+    )
+    regressed = _day0_event(
+        "Tokyo",
+        "2026-07-20",
+        "high",
+        available_at="2026-07-20T04:06:33+00:00",
+        seq=34,
+    )
+    writer.write(high)
+    store.mark_processed(high.event_id)
+
+    writer.write(regressed)
+
+    assert _status_of(conn, high.event_id) == "processed"
+    assert _status_of(conn, regressed.event_id) == "expired"
+
+
+def test_day0_insert_coalesces_equal_extreme_trigger_immediately():
+    """Repeated publication of one fact must leave only the newest trigger pending."""
+    conn = _world_conn()
+    writer = EventWriter(conn)
+    first = _day0_event(
+        "Hong Kong",
+        "2026-07-20",
+        "low",
+        available_at="2026-07-20T04:30:01+00:00",
+        seq=26,
+    )
+    repeated = _day0_event(
+        "Hong Kong",
+        "2026-07-20",
+        "low",
+        available_at="2026-07-20T04:31:01+00:00",
+        seq=26,
+    )
+
+    writer.write(first)
+    writer.write(repeated)
+
+    assert _status_of(conn, first.event_id) == "expired"
+    assert _status_of(conn, repeated.event_id) == "pending"
+
+
 def test_day0_superseded_keep_absorbing_extreme_per_family():
     """N day0 readings for one family -> only the absorbing extreme survives pending."""
     conn = _world_conn()
@@ -485,8 +567,8 @@ def test_day0_supersession_failclosed_missing_metric():
     assert _status_of(conn, event_id) == "pending", "missing-metric day0 must be kept (fail-closed)"
 
 
-def test_day0_supersession_tied_latest_all_kept():
-    """Distinct readings sharing the absorbing extreme are all kept (no arbitrary archive)."""
+def test_day0_supersession_tied_extreme_keeps_one_latest_trigger():
+    """Equal-value facts retain provenance while only the latest trigger stays active."""
     conn = _world_conn()
     store = EventStore(conn)
     older = _day0_event("Seoul", "2026-06-15", "low", available_at="2026-06-15T10:00:00+00:00", seq=0)
@@ -496,9 +578,9 @@ def test_day0_supersession_tied_latest_all_kept():
         store.insert_or_ignore(ev)
 
     archived = store.archive_superseded_day0_events()
-    assert archived == 1
+    assert archived == 2
     assert _status_of(conn, older.event_id) == "expired"
-    assert _status_of(conn, tie_a.event_id) == "pending"
+    assert _status_of(conn, tie_a.event_id) == "expired"
     assert _status_of(conn, tie_b.event_id) == "pending"
 
 
