@@ -9,6 +9,7 @@ from decimal import Decimal, ROUND_FLOOR
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -2008,6 +2009,69 @@ def _selection_epoch_identity_with_preflight_exclusions(
     return digest.hexdigest()
 
 
+def _prepared_candidate_payoff_q_lcb_caps(
+    prepared_by_event: Mapping[str, object],
+) -> dict[tuple[str, str, str, str], float]:
+    """Collect immutable candidate-local BUY caps from prepared family authority."""
+
+    caps: dict[tuple[str, str, str, str], float] = {}
+    for prepared in prepared_by_event.values():
+        witness = getattr(prepared, "probability_witness", None)
+        witness_family = str(getattr(witness, "family_key", "") or "")
+        binding_by_claim = {
+            (
+                str(getattr(binding, "condition_id", "") or "").strip(),
+                str(getattr(binding, "bin_id", "") or "").strip(),
+            ): binding
+            for binding in tuple(getattr(witness, "bindings", ()) or ())
+        }
+        for row in tuple(
+            getattr(prepared, "candidate_payoff_q_lcb_caps", ()) or ()
+        ):
+            if not isinstance(row, tuple) or len(row) != 5:
+                raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_SHAPE_INVALID")
+            family_key, condition_id, bin_id, side, raw_cap = row
+            claim_key = (
+                str(condition_id or "").strip(),
+                str(bin_id or "").strip(),
+            )
+            binding = binding_by_claim.get(claim_key)
+            normalized_side = str(side or "").strip().upper()
+            if normalized_side not in {"YES", "NO"} or binding is None:
+                raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_INVALID")
+            token_id = str(
+                getattr(
+                    binding,
+                    "yes_token_id" if normalized_side == "YES" else "no_token_id",
+                    "",
+                )
+                or ""
+            ).strip()
+            if not token_id:
+                continue
+            key = (
+                str(family_key or "").strip(),
+                claim_key[1],
+                normalized_side,
+                token_id,
+            )
+            cap = float(raw_cap)
+            if (
+                not all(key)
+                or key[0] != witness_family
+                or not math.isfinite(cap)
+                or not 0.0 <= cap <= 1.0
+            ):
+                raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_INVALID")
+            prior = caps.get(key)
+            if prior is not None and not math.isclose(
+                prior, cap, rel_tol=0.0, abs_tol=1e-15
+            ):
+                raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_CONFLICT")
+            caps[key] = cap
+    return caps
+
+
 def _next_claim_carrier(
     event: OpportunityEvent,
     *,
@@ -2759,12 +2823,6 @@ def process_current_global_batch(
             for witness in probabilities.values()
         ):
             return reject("GLOBAL_PROBABILITY_EPOCH_MIXED_CUT")
-        selection_epoch_identity = _selection_epoch_identity(
-            full_scope=decision_scope,
-            eligible_scope=(scope if eligible_family_keys else None),
-            probability_witnesses=probabilities,
-            ineligible_by_family=ineligible_by_family,
-        )
         if selection_wealth is None:
             selection_state, selection_wealth = capture_selection_wealth()
             holding_obligations = (
@@ -2796,6 +2854,27 @@ def process_current_global_batch(
                 )
                 for event_id, prepared in prepared_by_event.items()
             }
+        selection_epoch_base_identity = _selection_epoch_identity(
+            full_scope=decision_scope,
+            eligible_scope=(scope if eligible_family_keys else None),
+            probability_witnesses=probabilities,
+            ineligible_by_family=ineligible_by_family,
+        )
+        try:
+            initial_payoff_q_lcb_by_candidate = (
+                _prepared_candidate_payoff_q_lcb_caps(prepared_by_event)
+            )
+        except (TypeError, ValueError) as exc:
+            return reject(f"GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAPS_INVALID:{exc}")
+        selection_epoch_identity = (
+            _selection_epoch_identity_with_preflight_exclusions(
+                selection_epoch_base_identity,
+                {},
+                payoff_q_lcb_by_candidate=initial_payoff_q_lcb_by_candidate,
+            )
+            if initial_payoff_q_lcb_by_candidate
+            else selection_epoch_base_identity
+        )
         if cancelled("book_epoch_fence"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         # The complete q/book/wealth cut is immutable from this point forward.
@@ -3056,7 +3135,14 @@ def process_current_global_batch(
                 )
             return selected
 
-        selected = select_once(probabilities, book_epoch, prepared_by_event)
+        selected = select_once(
+            probabilities,
+            book_epoch,
+            prepared_by_event,
+            payoff_q_lcb_by_candidate=(
+                initial_payoff_q_lcb_by_candidate or None
+            ),
+        )
         initial_select_stage = (
             "select_fence" if preflight_winner is not None else "select_initial"
         )
@@ -3116,7 +3202,7 @@ def process_current_global_batch(
             ] = {}
             payoff_q_lcb_by_candidate: dict[
                 tuple[str, str, str, str], float
-            ] = {}
+            ] = dict(initial_payoff_q_lcb_by_candidate)
             while True:
                 if cancelled("winner_preflight_start"):
                     return reject(
@@ -3270,7 +3356,7 @@ def process_current_global_batch(
                     )
                 fallthrough_epoch_identity = (
                     _selection_epoch_identity_with_preflight_exclusions(
-                        selection_epoch_identity,
+                        selection_epoch_base_identity,
                         excluded_by_family,
                         excluded_by_candidate,
                         payoff_q_lcb_by_candidate,

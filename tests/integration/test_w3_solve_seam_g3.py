@@ -99,6 +99,7 @@ from src.solve.solver import (
     executable_curve_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
+    _score_global_single_order,
     validate_family_decision_contract,
 )
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
@@ -2550,6 +2551,99 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
                 },
             },
         )
+
+
+def test_global_day0_candidate_caps_preserve_immature_finite_yes_before_auction():
+    decision_at = _dt.datetime(2026, 7, 19, 23, 39, tzinfo=_dt.timezone.utc)
+    bins = (
+        Bin(low=27.0, high=27.0, unit="C", label="27C"),
+        Bin(low=28.0, high=28.0, unit="C", label="28C"),
+    )
+    family = SimpleNamespace(
+        family_id="Hong Kong|2026-07-20|low",
+        city="Hong Kong",
+        target_date="2026-07-20",
+        metric="low",
+        candidates=(
+            SimpleNamespace(condition_id="condition-27", bin=bins[0]),
+            SimpleNamespace(condition_id="condition-28", bin=bins[1]),
+        ),
+    )
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="27C",
+            condition_id="condition-27",
+            yes_token_id="yes-27",
+            no_token_id="no-27",
+        ),
+        OutcomeTokenBinding(
+            bin_id="28C",
+            condition_id="condition-28",
+            yes_token_id="yes-28",
+            no_token_id="no-28",
+        ),
+    )
+    samples = np.tile(
+        np.asarray([[0.21169239668021228, 0.7883076033197877]]),
+        (100, 1),
+    )
+    payload = {
+        "metric": "low",
+        "rounded_value": 28.0,
+        "observation_time": decision_at.isoformat(),
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_exit_authority_status": "immature",
+        "_edli_day0_exit_authority_reason": "hours_remaining=16.7",
+    }
+
+    rows = era._day0_global_candidate_payoff_q_lcb_caps(
+        payload=payload,
+        family=family,
+        bindings=bindings,
+        samples=samples,
+        point_q=np.asarray([0.21169239668021228, 0.7883076033197877]),
+        band_alpha=0.05,
+        decision_time=decision_at,
+    )
+    caps = {row[:4]: row[4] for row in rows}
+
+    assert caps[(family.family_id, "condition-27", "27C", "YES")] == pytest.approx(
+        0.21169239668021228
+    )
+    assert caps[(family.family_id, "condition-28", "28C", "YES")] == pytest.approx(
+        0.7883076033197877
+    )
+    assert caps[(family.family_id, "condition-27", "27C", "NO")] == pytest.approx(
+        0.7883076033197877
+    )
+    assert payload["_edli_day0_lcb_transform"][
+        "immature_finite_yes_suppressed_conditions"
+    ] == []
+    candidate = _global_test_buy_candidate(
+        family_key=family.family_id,
+        probability_witness_identity="hk-current-witness",
+        book_identity="hk-current-book",
+        price="0.12",
+        captured_at=decision_at,
+        candidate_id="hk-low-27-yes",
+        bin_id="27C",
+        condition_id="condition-27",
+        side="YES",
+        token_id="yes-27",
+    )
+    scored = _score_global_single_order(
+        candidate,
+        q_samples=samples[:, 0],
+        band_alpha=0.05,
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("500"),
+        capital_limit_usd=Decimal("500"),
+        fractional_kelly_multiplier=Decimal("1"),
+        payoff_q_lcb=caps[(family.family_id, "condition-27", "27C", "YES")],
+    )
+    assert scored.candidate is not None
+    assert scored.no_trade_reason is None
 
 
 def test_global_day0_components_never_parse_full_day_members_when_remaining_vectors_exist(
@@ -7626,6 +7720,101 @@ def test_global_probability_tightening_keeps_candidate_identity_and_bound():
     assert tightening.payoff_q_lcb == 0.71
 
 
+def test_global_current_state_economics_tightens_on_current_candidate_cap():
+    at = _dt.datetime(2026, 7, 19, 23, 39, tzinfo=_dt.timezone.utc)
+    candidate = _global_test_buy_candidate(
+        family_key="Hong Kong|2026-07-20|low",
+        probability_witness_identity="current-witness",
+        book_identity="current-book",
+        price="0.12",
+        captured_at=at,
+        bin_id="27C",
+        condition_id="condition-27",
+        side="YES",
+        token_id="yes-27",
+    )
+    decision = _score_global_single_order(
+        candidate,
+        q_samples=np.full(400, 0.21, dtype=np.float64),
+        band_alpha=0.05,
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("500"),
+        capital_limit_usd=Decimal("500"),
+        fractional_kelly_multiplier=Decimal("1"),
+        payoff_q_lcb=0.21,
+    )
+    assert decision.candidate is not None
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=candidate.family_key,
+            bindings=(
+                OutcomeTokenBinding(
+                    bin_id=candidate.bin_id,
+                    condition_id=candidate.condition_id,
+                    yes_token_id=candidate.token_id,
+                    no_token_id="no-27",
+                ),
+            ),
+        ),
+        candidate_payoff_q_lcb_caps=(
+            (
+                candidate.family_key,
+                candidate.condition_id,
+                candidate.bin_id,
+                candidate.side,
+                0.10,
+            ),
+        ),
+    )
+    current_cap = era._prepared_candidate_payoff_q_lcb_cap(prepared, candidate)
+
+    with pytest.raises(era._GlobalProbabilityTightened) as caught:
+        era._global_current_state_execution_economics(
+            {"payoff_q_point": 0.21},
+            decision=decision,
+            witness=SimpleNamespace(),
+            payoff_q_lcb_cap=current_cap,
+        )
+
+    assert caught.value.payoff_q_lcb == pytest.approx(0.10)
+    with pytest.raises(
+        ValueError, match="GLOBAL_CURRENT_STATE_CANDIDATE_BINDING_INVALID"
+    ):
+        era._prepared_candidate_payoff_q_lcb_cap(
+            prepared,
+            replace(candidate, token_id="wrong-token"),
+        )
+
+
+def test_time_dependent_candidate_caps_are_not_probability_cached(monkeypatch):
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    prepared = SimpleNamespace(
+        candidate_payoff_q_lcb_caps=(
+            ("family", "condition", "bin", "YES", 0.4),
+        ),
+    )
+
+    era._store_global_probability_family_cache(
+        "namespace",
+        family_key="family",
+        event_id="event",
+        family_binding_hash="binding",
+        prepared=prepared,
+    )
+
+    assert era._GLOBAL_PROBABILITY_FAMILY_CACHE == {}
+    with pytest.raises(ValueError, match="GLOBAL_PROBABILITY_CACHE_TIME_DEPENDENT"):
+        era._reissue_cached_global_probability_family(
+            prepared,
+            event_id="event",
+            causal_snapshot_id="snapshot",
+            family_binding_hash="binding",
+            captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        )
+
+
 def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
     family_key = "Paris|2026-07-14|high"
@@ -7675,6 +7864,14 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     )
     witness = SimpleNamespace(
         family_key=family_key,
+        bindings=(
+            OutcomeTokenBinding(
+                bin_id="35C",
+                condition_id="condition-35c",
+                yes_token_id="yes-35c",
+                no_token_id="no-35c",
+            ),
+        ),
         q_version="q-current",
         resolution_identity="resolution-current",
         topology_identity="topology-current",
@@ -7725,8 +7922,9 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     )
     captured = {}
 
-    def bind_current(cert, **_kwargs):
+    def bind_current(cert, **kwargs):
         captured.update(cert)
+        captured["current_candidate_cap"] = kwargs["payoff_q_lcb_cap"]
         return dict(cert)
 
     monkeypatch.setattr(era, "_global_current_state_execution_economics", bind_current)
@@ -7746,7 +7944,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
 
     selected, cert = era._global_actuation_selected_proof(
         global_actuation=actuation,
-        prepared_global_family=SimpleNamespace(probability_witness=witness),
+        prepared_global_family=SimpleNamespace(
+            probability_witness=witness,
+            candidate_payoff_q_lcb_caps=(
+                (family_key, "condition-35c", "35C", "NO", 0.42),
+            ),
+        ),
         family=SimpleNamespace(family_id=family_key),
         event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
         all_proofs=(proof,),
@@ -7758,6 +7961,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     assert selected is proof
     assert cert["global_actuation_identity"] == "actuation-current"
     assert captured["cost"] == 0.027666
+    assert captured["current_candidate_cap"] == pytest.approx(0.42)
 
     proof.missing_reason = None
     with pytest.raises(
@@ -15150,8 +15354,37 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         captured_at_utc=decision_at,
         posterior_identity_hash="run-a",
         witness_identity="q-run-a",
+        bindings=(
+            OutcomeTokenBinding(
+                bin_id="bin-a",
+                condition_id="condition-a",
+                yes_token_id=None,
+                no_token_id=None,
+            ),
+        ),
     )
-    prepared = SimpleNamespace(probability_witness=witness)
+    rebound_witness = SimpleNamespace(
+        **(
+            vars(witness)
+            | {
+                "bindings": (
+                    OutcomeTokenBinding(
+                        bin_id="bin-a",
+                        condition_id="condition-a",
+                        yes_token_id="token-yes-a",
+                        no_token_id="token-no-a",
+                    ),
+                )
+            }
+        )
+    )
+    initial_cap = 0.72
+    prepared = SimpleNamespace(
+        probability_witness=witness,
+        candidate_payoff_q_lcb_caps=(
+            (family_key, "condition-a", "bin-a", "NO", initial_cap),
+        ),
+    )
     candidate = SimpleNamespace(
         family_key=family_key,
         bin_id="bin-a",
@@ -15164,7 +15397,9 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
             SimpleNamespace(
                 decision=SimpleNamespace(
                     candidate=candidate,
-                    terminal_wealth=SimpleNamespace(win_probability_lcb=0.90),
+                    terminal_wealth=SimpleNamespace(
+                        win_probability_lcb=initial_cap
+                    ),
                     no_trade_reason=None,
                 ),
                 winner_event_id=event.event_id,
@@ -15281,14 +15516,14 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         venue_submit_count=lambda: calls["venue"],
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
-        current_book_epoch_provider=lambda probabilities, _at: (
-            probabilities,
+        current_book_epoch_provider=lambda _probabilities, _at: (
+            {family_key: rebound_witness},
             _global_test_book("book-q", price="0.40"),
         ),
     )
 
     key = (family_key, "bin-a", "NO", "token-no-a")
-    assert calls["select_q"] == [None, {key: 0.71}]
+    assert calls["select_q"] == [{key: initial_cap}, {key: 0.71}]
     assert calls["selection_epoch"][1] != calls["selection_epoch"][0]
     assert calls["preflight"] == 2
     assert calls["venue"] == 1

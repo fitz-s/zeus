@@ -356,6 +356,9 @@ class PreparedGlobalFamily:
     holdings_snapshot: Optional[Any] = None
     solution_plan: Optional[Any] = None
     solution_projection: Optional[Any] = None
+    candidate_payoff_q_lcb_caps: tuple[
+        tuple[str, str, str, float], ...
+    ] = ()
 
 
 @dataclass(frozen=True)

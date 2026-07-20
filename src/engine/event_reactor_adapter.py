@@ -486,6 +486,8 @@ def _reissue_cached_global_probability_family(
 ) -> object:
     from src.solve.solver import reissue_family_payoff_witness
 
+    if tuple(getattr(prepared, "candidate_payoff_q_lcb_caps", ()) or ()):
+        raise ValueError("GLOBAL_PROBABILITY_CACHE_TIME_DEPENDENT")
     witness = getattr(prepared, "probability_witness", None)
     previous_at = getattr(witness, "captured_at_utc", None)
     if (
@@ -568,7 +570,13 @@ def _store_global_probability_family_cache(
 ) -> None:
     global _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE
 
-    if not namespace or not family_key or not event_id or not family_binding_hash:
+    if (
+        not namespace
+        or not family_key
+        or not event_id
+        or not family_binding_hash
+        or tuple(getattr(prepared, "candidate_payoff_q_lcb_caps", ()) or ())
+    ):
         return
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
@@ -11467,6 +11475,7 @@ def _global_current_state_execution_economics(
     *,
     decision: object,
     witness: object,
+    payoff_q_lcb_cap: float | None = None,
 ) -> dict[str, Any]:
     """Bind actuation to the current source-clock band and order certificate."""
 
@@ -11613,12 +11622,27 @@ def _global_current_state_execution_economics(
     if not served_lcb.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_SERVED_LCB_INVALID")
     # ``served_lcb`` and ``prior_payoff_lcb`` are pre-W3 provenance and may
-    # include historical coverage shrinkage.  Keep them in the certificate for
-    # diagnosis, but source-clock execution is governed by the current joint
-    # witness and immutable point probability only.
+    # include historical coverage shrinkage. Source-clock execution uses the
+    # current joint witness plus any candidate-local current-evidence cap.
+    current_cap = None
+    if payoff_q_lcb_cap is not None:
+        try:
+            current_cap = Decimal(str(payoff_q_lcb_cap))
+        except (ArithmeticError, ValueError) as exc:
+            raise ValueError("GLOBAL_CURRENT_STATE_CANDIDATE_CAP_INVALID") from exc
+        if (
+            not current_cap.is_finite()
+            or not Decimal("0") <= current_cap <= Decimal("1")
+        ):
+            raise ValueError("GLOBAL_CURRENT_STATE_CANDIDATE_CAP_INVALID")
     payoff_q_lcb = min(
-        current_band_payoff_q_lcb,
-        point_q,
+        value
+        for value in (
+            current_band_payoff_q_lcb,
+            point_q,
+            current_cap,
+        )
+        if value is not None
     )
     edge_lcb = payoff_q_lcb - unit_cost
     if not all(
@@ -12167,6 +12191,10 @@ def _global_actuation_selected_proof(
         cert,
         decision=decision,
         witness=witness,
+        payoff_q_lcb_cap=_prepared_candidate_payoff_q_lcb_cap(
+            prepared_global_family,
+            candidate,
+        ),
     )
     if not all(
         str(cert.get(field) or "").strip()
@@ -28709,6 +28737,150 @@ def _day0_remaining_global_probability_components(
     return samples, point_q, _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
 
 
+def _day0_global_candidate_payoff_q_lcb_caps(
+    *,
+    payload: dict[str, object],
+    family: object,
+    bindings: tuple[object, ...],
+    samples: np.ndarray,
+    point_q: np.ndarray,
+    band_alpha: float,
+    decision_time: datetime,
+) -> tuple[tuple[str, str, str, str, float], ...]:
+    """Derive BUY submit-license caps from the same current global witness."""
+
+    from src.calibration.qlcb_provenance import _qlcb_float
+    from src.solve.solver import _lower_cvar
+
+    candidates = tuple(getattr(family, "candidates", ()) or ())
+    matrix = np.asarray(samples, dtype=np.float64)
+    point = np.asarray(point_q, dtype=np.float64)
+    if (
+        matrix.ndim != 2
+        or matrix.shape[1] != len(candidates)
+        or point.shape != (len(candidates),)
+        or len(bindings) != len(candidates)
+    ):
+        raise ValueError("GLOBAL_DAY0_CANDIDATE_CAP_SHAPE_INVALID")
+    weights = np.ones(matrix.shape[0], dtype=np.float64)
+    q_by_condition: dict[str, float] = {}
+    lcb_by_condition: dict[tuple[str, str], float] = {}
+    binding_by_condition: dict[str, object] = {}
+    for index, (candidate, binding) in enumerate(
+        zip(candidates, bindings, strict=True)
+    ):
+        condition_id = str(getattr(candidate, "condition_id", "") or "").strip()
+        if (
+            not condition_id
+            or condition_id != str(getattr(binding, "condition_id", "") or "")
+            or condition_id in binding_by_condition
+        ):
+            raise ValueError("GLOBAL_DAY0_CANDIDATE_CAP_BINDING_INVALID")
+        q_by_condition[condition_id] = float(point[index])
+        yes_samples = matrix[:, index]
+        lcb_by_condition[(condition_id, "buy_yes")] = _lower_cvar(
+            yes_samples,
+            weights,
+            band_alpha,
+        )
+        lcb_by_condition[(condition_id, "buy_no")] = _lower_cvar(
+            1.0 - yes_samples,
+            weights,
+            band_alpha,
+        )
+        binding_by_condition[condition_id] = binding
+
+    _, transformed = _apply_day0_mask_to_generated_probabilities(
+        payload=payload,
+        family=family,
+        q_by_condition=q_by_condition,
+        lcb_by_condition=lcb_by_condition,
+        decision_time=decision_time,
+    )
+    family_key = str(getattr(family, "family_id", "") or "").strip()
+    if not family_key:
+        raise ValueError("GLOBAL_DAY0_CANDIDATE_CAP_FAMILY_MISSING")
+    caps: list[tuple[str, str, str, str, float]] = []
+    for condition_id, binding in binding_by_condition.items():
+        bin_id = str(getattr(binding, "bin_id", "") or "").strip()
+        for side, direction in (
+            ("YES", "buy_yes"),
+            ("NO", "buy_no"),
+        ):
+            cap = _qlcb_float(
+                transformed.get((condition_id, direction), 0.0)
+            )
+            if not math.isfinite(cap) or not 0.0 <= cap <= 1.0:
+                raise ValueError("GLOBAL_DAY0_CANDIDATE_CAP_INVALID")
+            caps.append((family_key, condition_id, bin_id, side, cap))
+    return tuple(sorted(caps))
+
+
+def _prepared_candidate_payoff_q_lcb_cap(
+    prepared: object,
+    candidate: object,
+) -> float | None:
+    """Resolve one current claim cap after exact witness/token validation."""
+
+    rows = tuple(
+        getattr(prepared, "candidate_payoff_q_lcb_caps", ()) or ()
+    )
+    if not rows:
+        return None
+    key = (
+        str(getattr(candidate, "family_key", "") or "").strip(),
+        str(getattr(candidate, "condition_id", "") or "").strip(),
+        str(getattr(candidate, "bin_id", "") or "").strip(),
+        str(getattr(candidate, "side", "") or "").strip().upper(),
+    )
+    witness = getattr(prepared, "probability_witness", None)
+    bindings = {
+        (
+            str(getattr(binding, "condition_id", "") or "").strip(),
+            str(getattr(binding, "bin_id", "") or "").strip(),
+        ): binding
+        for binding in tuple(getattr(witness, "bindings", ()) or ())
+    }
+    binding = bindings.get((key[1], key[2]))
+    token_attr = "yes_token_id" if key[3] == "YES" else "no_token_id"
+    expected_token = str(getattr(binding, token_attr, "") or "").strip()
+    if (
+        key[3] not in {"YES", "NO"}
+        or binding is None
+        or not expected_token
+        or expected_token
+        != str(getattr(candidate, "token_id", "") or "").strip()
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_CANDIDATE_BINDING_INVALID")
+    matches: list[float] = []
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) != 5:
+            raise ValueError("GLOBAL_CURRENT_STATE_CANDIDATE_CAP_SHAPE_INVALID")
+        family_key, condition_id, bin_id, side, raw_cap = row
+        row_key = (
+            str(family_key or "").strip(),
+            str(condition_id or "").strip(),
+            str(bin_id or "").strip(),
+            str(side or "").strip().upper(),
+        )
+        if (
+            not all(row_key)
+            or row_key[0] != str(getattr(witness, "family_key", "") or "")
+            or row_key[3] not in {"YES", "NO"}
+            or (row_key[1], row_key[2]) not in bindings
+        ):
+            raise ValueError("GLOBAL_CURRENT_STATE_CANDIDATE_CAP_INVALID")
+        if row_key != key:
+            continue
+        cap = float(raw_cap)
+        if not math.isfinite(cap) or not 0.0 <= cap <= 1.0:
+            raise ValueError("GLOBAL_CURRENT_STATE_CANDIDATE_CAP_INVALID")
+        matches.append(cap)
+    if len(matches) != 1:
+        raise ValueError("GLOBAL_CURRENT_STATE_CANDIDATE_CAP_MISSING")
+    return matches[0]
+
+
 def _prepare_current_global_probability_family(
     event: OpportunityEvent,
     *,
@@ -29282,6 +29454,21 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     f"GLOBAL_DAY0_DETERMINISTIC_PAYOFF_CONFLICT:{bin_id}"
                 )
+    candidate_payoff_q_lcb_caps: tuple[
+        tuple[str, str, str, str, float], ...
+    ] = ()
+    if current_day0_payload is not None and final_daily_observation is None:
+        candidate_payoff_q_lcb_caps = (
+            _day0_global_candidate_payoff_q_lcb_caps(
+                payload=payload,
+                family=family,
+                bindings=bindings,
+                samples=samples,
+                point_q=point_q,
+                band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
+                decision_time=decision_time,
+            )
+        )
     if (
         current_day0_payload is not None
         and final_daily_observation is None
@@ -29417,6 +29604,7 @@ def _prepare_current_global_probability_family(
         candidate_seeds=(),
         posterior_id=(int(bundle.posterior_id) if bundle is not None else None),
         probability_authority=("replacement_0_1" if bundle is not None else None),
+        candidate_payoff_q_lcb_caps=candidate_payoff_q_lcb_caps,
     )
 
 
@@ -34201,39 +34389,6 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
         return True
 
 
-def _day0_immature_finite_yes_suppressed(
-    *,
-    payload: dict[str, object],
-    metric: str,
-    rounded: float,
-    bin_value,
-) -> bool:
-    """Suppress live buy-YES LCB for immature Day0 finite bins.
-
-    A same-day running HIGH is a lower bound until the peak has passed; a same-day
-    running LOW is an upper bound until the terminal low window. Any finite HIGH
-    bin that is still alive can be killed by one later higher tick; any finite LOW
-    bin that is still alive can be killed by one later lower tick. That state can
-    carry a point q, but it is not a lower-bound submit license until the
-    remaining-day authority lane has stamped the bound as mature.
-    """
-    if str(payload.get("_edli_q_source") or "") != "day0_remaining_day":
-        return False
-    status = str(payload.get("_edli_day0_exit_authority_status") or "").strip().lower()
-    if status == "mature":
-        return False
-    try:
-        if metric == "high":
-            high = getattr(bin_value, "high", None)
-            return high is not None and math.isfinite(float(high))
-        if metric == "low":
-            low = getattr(bin_value, "low", None)
-            return low is not None and math.isfinite(float(low))
-    except (TypeError, ValueError):
-        return False
-    return False
-
-
 # Wave-1 2026-06-12: the DAY0 per-family $25 notional cap (_DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
 # + _day0_family_notional_cap_usd) is DELETED (operator no-caps law "不允许设置任何的cap").
 # Day0 sizing is governed by q_lcb + fractional Kelly + free-cash + concentration ONLY.
@@ -34472,7 +34627,6 @@ def _apply_day0_mask_to_generated_probabilities(
     # point estimate); only the submit-licensing LCB is suppressed. Fail-closed:
     # unparseable obs time or unknown city => maximum margin / conservative budget.
     staleness_uncertain: list[bool] = [False] * len(list(family.candidates))
-    immature_finite_yes: list[bool] = [False] * len(list(family.candidates))
     _obs_age_min = _budget_min = _margin = None  # audit fields (PR#404 P1 lcb-transform)
     if _day0_stale_obs_boundary_guard_enabled():
         from src.signal.day0_obs_latency import (
@@ -34515,32 +34669,6 @@ def _apply_day0_mask_to_generated_probabilities(
                     "None" if _obs_age_min is None else f"{_obs_age_min:.1f}",
                     _budget_min, _margin, _unit, sum(staleness_uncertain), len(_bins),
                 )
-    for _index, _bin in enumerate([candidate.bin for candidate in family.candidates]):
-        if mask[_index] <= 0.0:
-            continue
-        immature_finite_yes[_index] = _day0_immature_finite_yes_suppressed(
-            payload=payload,
-            metric=metric,
-            rounded=float(rounded),
-            bin_value=_bin,
-        )
-    if any(immature_finite_yes):
-        try:
-            import logging as _logging
-
-            _logging.getLogger("zeus.day0_maturity_guard").info(
-                "DAY0_IMMATURE_FINITE_YES_LCB_SUPPRESSED city=%s metric=%s rounded=%s "
-                "status=%s reason=%s suppressed_bins=%d/%d",
-                getattr(family, "city", "?"),
-                metric,
-                rounded,
-                payload.get("_edli_day0_exit_authority_status"),
-                payload.get("_edli_day0_exit_authority_reason"),
-                sum(immature_finite_yes),
-                len(immature_finite_yes),
-            )
-        except Exception:  # noqa: BLE001 - audit logging only
-            pass
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
 
     prior = tuple(max(q_by_condition[str(candidate.condition_id or "")], 1e-9) for candidate in family.candidates)
@@ -34584,7 +34712,7 @@ def _apply_day0_mask_to_generated_probabilities(
                 1.0
                 if absorbing_yes[index]
                 else 0.0
-                if (absorbing_no[index] or staleness_uncertain[index] or immature_finite_yes[index])
+                if (absorbing_no[index] or staleness_uncertain[index])
                 else min(yes_lcb, q_value)
             ),
             source="FORECAST_BOOTSTRAP",
@@ -34638,11 +34766,7 @@ def _apply_day0_mask_to_generated_probabilities(
             for index, candidate in enumerate(family.candidates)
             if staleness_uncertain[index]
         ],
-        "immature_finite_yes_suppressed_conditions": [
-            str(candidate.condition_id or "")
-            for index, candidate in enumerate(family.candidates)
-            if immature_finite_yes[index]
-        ],
+        "immature_finite_yes_suppressed_conditions": [],
         "day0_exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
         "day0_exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
         "obs_age_minutes": _obs_age_min,

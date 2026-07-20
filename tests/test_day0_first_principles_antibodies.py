@@ -668,8 +668,8 @@ class TestStaleObsBoundaryGuard:
         assert 0.0 < staleness_budget_minutes("Seoul") <= DEFAULT_STALENESS_BUDGET_MIN
 
 
-class TestDay0RemainingDayMaturityEntryGuard:
-    def test_immature_high_boundary_point_yes_has_no_submit_lcb(self):
+class TestDay0RemainingDayEntrySymmetry:
+    def test_immature_high_boundary_point_yes_keeps_submit_lcb(self):
         fam = _seoul_high_family()
         payload = _payload("high", 25.0, obs_age_minutes=10.0)
         payload["_edli_q_source"] = "day0_remaining_day"
@@ -687,18 +687,16 @@ class TestDay0RemainingDayMaturityEntryGuard:
         )
 
         assert q["cond2"] > 0.0
-        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) > 0.0
         assert (
             payload["_edli_day0_lcb_transform"][
                 "immature_finite_yes_suppressed_conditions"
             ]
-            == ["cond2", "cond3"]
+            == []
         )
 
-    def test_immature_high_non_boundary_point_yes_has_no_submit_lcb(self):
-        """Manila/Wellington class: an immature finite YES above the current
-        running high is still killable by a later higher reading, so it cannot
-        receive a live submit LCB just because the remaining-window point q is high."""
+    def test_immature_high_non_boundary_point_yes_keeps_submit_lcb(self):
+        """Remaining-day samples price later higher readings before maturity."""
         fam = _seoul_high_family()
         payload = _payload("high", 24.0, obs_age_minutes=10.0)
         payload["_edli_q_source"] = "day0_remaining_day"
@@ -716,13 +714,13 @@ class TestDay0RemainingDayMaturityEntryGuard:
         )
 
         assert q["cond2"] > 0.0
-        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
-        assert _qlcb_float(lcb[("cond3", "buy_yes")]) == 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) > 0.0
+        assert _qlcb_float(lcb[("cond3", "buy_yes")]) > 0.0
         assert (
             payload["_edli_day0_lcb_transform"][
                 "immature_finite_yes_suppressed_conditions"
             ]
-            == ["cond1", "cond2", "cond3"]
+            == []
         )
 
     def test_mature_high_finite_point_yes_keeps_submit_lcb(self):
@@ -748,7 +746,7 @@ class TestDay0RemainingDayMaturityEntryGuard:
             == []
         )
 
-    def test_immature_low_boundary_point_yes_has_no_submit_lcb(self):
+    def test_immature_low_boundary_point_yes_keeps_submit_lcb(self):
         fam = _family(
             "Seoul",
             [_bin(None, 21.0), _bin(22.0, 22.0), _bin(23.0, 23.0), _bin(24.0, None)],
@@ -774,13 +772,13 @@ class TestDay0RemainingDayMaturityEntryGuard:
         )
 
         assert q["cond2"] > 0.0
-        assert _qlcb_float(lcb[("cond1", "buy_yes")]) == 0.0
-        assert _qlcb_float(lcb[("cond2", "buy_yes")]) == 0.0
+        assert _qlcb_float(lcb[("cond1", "buy_yes")]) > 0.0
+        assert _qlcb_float(lcb[("cond2", "buy_yes")]) > 0.0
         assert (
             payload["_edli_day0_lcb_transform"][
                 "immature_finite_yes_suppressed_conditions"
             ]
-            == ["cond1", "cond2"]
+            == []
         )
 
 
