@@ -2172,7 +2172,8 @@ def _replacement_bayes_precision_fusion_override(
                 except (TypeError, ValueError):
                     continue
                 # Station-calibrated source raw_m2 from its OWN walk-forward residual history — the
-                # provider reads single_runs for sources with no previous_runs archive, so the source
+                # provider reads positive-lead single_runs for the named sources with no previous-runs
+                # archive (Day0 stays cold-start unless time-aligned history becomes available), so the source
                 # enters the precision center at its MEASURED precision (raw mean(r²), degC², the same
                 # convention as the gridded instruments; downstream raw_second_moment_weights EB-shrinks
                 # a thin history toward the equal prior). NEVER a flat equal weight: equal-weight would
