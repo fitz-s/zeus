@@ -5,6 +5,7 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 | Plan | Status | Purpose |
 |------|--------|---------|
 | [`hourly_capital_gains_improvement_loop.md`](hourly_capital_gains_improvement_loop.md) | ACTIVE | Forward journal — the single work-state surface. Read this first. |
+| [`live_branch_workflow_2026-07-20.md`](live_branch_workflow_2026-07-20.md) | ACTIVE | main = live; worktree → cherry-pick/PR → live; branch hygiene. Promote binding clauses to AGENTS §5 at operator discretion. |
 | [`upstream_data_physical_2026-07-17.md`](upstream_data_physical_2026-07-17.md) | EXECUTING | Upstream forecast-layer体检:3 live bugs fixed (low-ENS quarantine, ENS age bound, degF postmortem hardening), consult verdict folded, D2-D6 design queue open |
 | [`gate_stack_simplification_2026-07-06.md`](gate_stack_simplification_2026-07-06.md) | EXECUTING | Gate collapse; Phase 1+2 deployed 2026-07-07, C1 sole-authority design pass open |
 | [`allday_improvement_loop_v3_codex_2026-07-09.md`](allday_improvement_loop_v3_codex_2026-07-09.md) | ACTIVE | 24/7 loop v3:codex 沙箱执行体、单 tick、INTERVAL 旋钮、查询 escrow、自进化棘轮;执行件 loop/ + loop_guard.py |
