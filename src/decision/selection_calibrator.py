@@ -510,7 +510,11 @@ def _artifact_armed_sides(meta: Mapping, cells: Mapping, *, min_n: int) -> froze
                 support = int(cell.get("n_selected", cell.get("n", 0)) or 0)
             except (TypeError, ValueError):
                 support = 0
-            if support >= int(min_n):
+            # PRESENCE arms the side, not a sample floor: a side the artifact graded at all is armed;
+            # per-cell thinness is handled downstream by the cascade-pool (a whole side is never gated
+            # on first accumulating min_n samples, which it never could while blocked). Sparse
+            # bookkeeping rows with zero support still do not arm.
+            if support >= 1:
                 inferred.add(side)
         return frozenset(inferred)
     if isinstance(raw, str):
@@ -558,6 +562,64 @@ def _artifact_armed_metrics(meta: Mapping) -> frozenset[str]:
     return frozenset(metrics) if len(metrics) == 1 else frozenset()
 
 
+def _thin_cell_pooled_lower_bound(
+    cells: Mapping, key: str, min_n: int
+) -> Optional[tuple[float, int, str]]:
+    """Cascade a THIN cell to progressively broader pools of the SAME artifact's realized (wins, n)
+    and return the Beta-95 lower bound of the narrowest pool that clears ``min_n`` — else the broadest
+    (global) pool, whatever it has. Thin is NOT missing: a present-but-few-samples cell must be USED
+    (EB/pool-shrunk toward the claimed-prob structure), never fail-closed to a no-trade. Mirrors the
+    settlement-coverage cascade pattern (LOCAL -> broader -> GLOBAL, serve the first sufficient level,
+    never block). Returns ``(L_g, pool_n, pool_basis)`` or ``None`` only when the artifact carries no
+    v1 (wins, n) evidence at all (a genuinely empty table — the real fail-closed case).
+    """
+    parts = key.split("|")  # SIDE|LEAD|BINCLASS|PROBBUCKET
+    if len(parts) != 4:
+        return None
+    side, _lead, _binc, pb = parts
+
+    def _pool(pred) -> tuple[int, int]:
+        w = n = 0
+        for ck, cv in cells.items():
+            if not isinstance(cv, Mapping):
+                continue
+            cp = str(ck).split("|")
+            if len(cp) != 4 or not pred(cp):
+                continue
+            try:
+                n_c = int(cv.get("n", 0))
+                hr = float(cv.get("hit_rate", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if n_c <= 0 or not (0.0 <= hr <= 1.0):
+                continue
+            # hits from hit_rate * n (the SAME basis the deep-cell path uses, robust to a cell that
+            # carries hit_rate but not a separate wins field).
+            w += int(round(hr * n_c))
+            n += n_c
+        return w, n
+
+    # Narrowest-informative first (respect the claimed-prob structure), broaden only if a level is
+    # itself too thin; the last level (GLOBAL) always has every cell's evidence.
+    cascade = (
+        (lambda cp: cp[0] == side and cp[3] == pb, "POOL_SIDE_PROBBUCKET"),
+        (lambda cp: cp[3] == pb, "POOL_PROBBUCKET"),
+        (lambda cp: cp[0] == side, "POOL_SIDE"),
+        (lambda cp: True, "POOL_GLOBAL"),
+    )
+    global_pool: Optional[tuple[int, int]] = None
+    for pred, basis in cascade:
+        w, n = _pool(pred)
+        if basis == "POOL_GLOBAL":
+            global_pool = (w, n)
+        if n >= min_n:
+            return (beta_lower_bound_95(w, n), n, basis)
+    if global_pool is not None and global_pool[1] > 0:
+        w, n = global_pool
+        return (beta_lower_bound_95(w, n), n, "POOL_GLOBAL")
+    return None
+
+
 def apply_selection_calibrator(
     *,
     raw_side_prob: float,
@@ -576,10 +638,13 @@ def apply_selection_calibrator(
     q_safe — price is context, never a probability target (operator law: raw q is the single
     probability authority).
 
-    Fail-closed everywhere absence/staleness/thinness is detected: the live admission path emits
-    NO new entries (q_safe=0, trade=False) rather than falling back to the raw center-bootstrap
-    q_lcb. On a deep known cell it serves the conservative beta/Wilson 95% lower bound of the cell's
-    realized settlement hit-rate as the admission lower bound.
+    Fail-closed on ABSENCE / STALENESS (no artifact, malformed, stale posterior, side or metric not
+    armed, missing cell) — you cannot admit on data that is not there. THINNESS is treated differently
+    and deliberately: a present-but-few-samples cell is USED, cascade-pooled to the claimed-prob
+    structure of the same artifact (never a no-trade block — a blocked cell never trades, never
+    settles, and so could never earn the samples that would unblock it). On a deep known cell it
+    serves the conservative beta/Wilson 95% lower bound of the cell's realized settlement hit-rate; on
+    a thin cell it serves the same 95% lower bound of the narrowest pool that clears ``min_n``.
     """
     art = artifact if artifact is not None else load_artifact()
     key = cell_key(side=side, lead_days=lead_days, bin_class=bin_class, raw_side_prob=raw_side_prob)
@@ -630,10 +695,14 @@ def apply_selection_calibrator(
         if not (math.isfinite(q_safe_lb) and 0.0 <= q_safe_lb <= 1.0):
             return _fail_closed(key, "FAIL_CLOSED_MALFORMED")
         if n_selected < min_n:
-            # Thin SELECTED support -> fail-closed even though a corpus prior exists.
+            # Thin SELECTED support -> USE the precomputed EB lower bound (it already folds the corpus
+            # prior for this claimed-prob cell), capped at the raw side point, rather than blocking.
+            # Thin is not missing: the bound exists and is conservative, so the cell is admitted at it
+            # immediately rather than gated on first accumulating min_n of its own settled samples.
+            q_safe = float(min(max(q_safe_lb, 0.0), max(min(raw_side_prob, 1.0), 0.0)))
             return CalibratorVerdict(
-                q_safe=0.0, trade=False, abstained=True, cell_key=key,
-                L_g=float(q_safe_lb), n_g=n_selected, basis="EB_THIN_SELECTED",
+                q_safe=q_safe, trade=True, abstained=False, cell_key=key,
+                L_g=float(q_safe_lb), n_g=n_selected, basis="SELECTION_EB_BETA_THIN",
             )
         q_safe = float(min(max(q_safe_lb, 0.0), max(min(raw_side_prob, 1.0), 0.0)))
         return CalibratorVerdict(
@@ -650,12 +719,21 @@ def apply_selection_calibrator(
     if not (math.isfinite(hit_rate) and 0.0 <= hit_rate <= 1.0 and n_g > 0):
         return _fail_closed(key, "FAIL_CLOSED_MALFORMED")
 
-    # THIN cell -> fail-closed (never serve a thin-cell rate).
+    # THIN cell -> cascade-pool (never block). A present-but-few-samples cell is USED at the Beta-95
+    # lower bound of the narrowest pool of the same artifact's realized settlement rates that clears
+    # min_n (the claimed-prob structure carries the winner's-curse haircut), so the source is admitted
+    # immediately at a conservative pooled bound rather than gated on accumulating its own N samples.
     if n_g < min_n:
-        return CalibratorVerdict(
-            q_safe=0.0, trade=False, abstained=True, cell_key=key,
-            L_g=0.0, n_g=n_g, basis="ACTIVE_THIN_CELL",
-        )
+        pooled = _thin_cell_pooled_lower_bound(cells, key, min_n)
+        if pooled is not None:
+            L_pool, _pool_n, pool_basis = pooled
+            q_safe = float(min(max(L_pool, 0.0), max(min(raw_side_prob, 1.0), 0.0)))
+            return CalibratorVerdict(
+                q_safe=q_safe, trade=True, abstained=False, cell_key=key,
+                L_g=float(L_pool), n_g=n_g, basis=f"SELECTION_BETA_95_{pool_basis}",
+            )
+        # Genuinely empty table (no realized evidence anywhere in the artifact) — real fail-closed.
+        return _fail_closed(key, "FAIL_CLOSED_EMPTY_TABLE")
 
     # Deep cell: serve the conservative lower bound of the realized settlement hit-rate.
     hits = int(round(hit_rate * n_g))

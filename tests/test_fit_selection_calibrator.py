@@ -164,9 +164,11 @@ def test_fit_eb_cells_persists_q_safe_lb_and_blocks_toxic_no():
     assert v.q_safe - 0.70 <= 0.0  # blocks the ~0.70-cost toxic NO
 
 
-def test_fit_eb_cells_fail_closed_when_selected_support_thin():
-    # Corpus deep, but the SELECTED cell has < min_n -> the v2 cell must NOT license (corpus alone
-    # is only a prior). The runtime returns EB_THIN_SELECTED no-trade.
+def test_fit_eb_cells_thin_only_side_arms_by_presence_and_serves_eb_bound():
+    # Corpus deep, the ONLY selected cell for NO is thin (< min_n). The fitter arms no deep cell, but
+    # the runtime does NOT block: a present cell arms its side by PRESENCE and the thin cell is USED at
+    # its conservative EB lower bound (which already folds the corpus prior), capped at the raw point —
+    # never a no-trade block on present-but-thin data (operator law).
     corpus = [_row("2026-06-09T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 170) for i in range(200)]
     selected = [_row("2026-06-10T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 4) for i in range(5)]
     artifact = fsc.fit_eb_cells(
@@ -175,15 +177,15 @@ def test_fit_eb_cells_fail_closed_when_selected_support_thin():
     )
     key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=0.87)
     assert artifact["cells"][key]["n_selected"] == 5
-    assert "NO" not in artifact["_meta"]["armed_sides"]
     sc.reset_artifact_cache()
     v = sc.apply_selection_calibrator(
         raw_side_prob=0.87, side="NO", lead_days=1.0, bin_class="nonmodal", artifact=artifact,
     )
-    assert v.trade is False and v.q_safe == 0.0 and v.basis == "SIDE_NOT_ARMED"
+    assert v.trade is True and v.abstained is False
+    assert 0.0 < v.q_safe <= 0.87 and v.basis == "SELECTION_EB_BETA_THIN"
 
 
-def test_fit_eb_cells_thin_cell_fails_closed_when_side_has_other_deep_support():
+def test_fit_eb_cells_thin_cell_serves_eb_bound_when_side_has_other_deep_support():
     corpus = (
         [_row("2026-06-09T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 170) for i in range(200)]
         + [_row("2026-06-09T00:00:00+00:00", "NO", 1.0, "modal", 0.55, i < 70) for i in range(100)]
@@ -200,7 +202,10 @@ def test_fit_eb_cells_thin_cell_fails_closed_when_side_has_other_deep_support():
     v = sc.apply_selection_calibrator(
         raw_side_prob=0.87, side="NO", lead_days=1.0, bin_class="nonmodal", artifact=artifact,
     )
-    assert v.trade is False and v.q_safe == 0.0 and v.basis == "EB_THIN_SELECTED"
+    # NO armed by the deep modal cell; the thin nonmodal cell is USED at its conservative EB lower
+    # bound (not blocked) — thin is not missing.
+    assert v.trade is True and v.abstained is False
+    assert 0.0 < v.q_safe <= 0.87 and v.basis == "SELECTION_EB_BETA_THIN"
 
 
 def test_learn_tau_returns_grid_value_by_prequential_score():
