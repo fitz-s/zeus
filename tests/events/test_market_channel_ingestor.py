@@ -3353,10 +3353,11 @@ def test_market_channel_refresh_queue_keeps_slow_work_off_caller_thread():
     assert service.refresh_action_count == 1
 
 
-def test_market_channel_refresh_queue_coalesces_identical_pending_work():
+def test_market_channel_refresh_queue_coalesces_identical_inflight_work_without_reinvalidating():
     _conn, writer = _conn_writer()
     started = threading.Event()
     release = threading.Event()
+    invalidated: list[MarketChannelAction] = []
     refreshed: list[MarketChannelAction] = []
 
     def refresh(action: MarketChannelAction) -> None:
@@ -3366,6 +3367,7 @@ def test_market_channel_refresh_queue_coalesces_identical_pending_work():
 
     service = MarketChannelOnlineService(
         MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        invalidate_snapshot=invalidated.append,
         refresh_snapshot=refresh,
     )
     action = MarketChannelAction(
@@ -3382,10 +3384,11 @@ def test_market_channel_refresh_queue_coalesces_identical_pending_work():
     release.set()
 
     assert service.wait_refresh_idle(timeout=1.0)
+    assert invalidated == [action]
     assert refreshed == [action, action]
     assert service.refresh_action_count == 2
     assert service.refresh_action_dropped_count == 0
-    assert service.refresh_action_coalesced_count == 1
+    assert service.refresh_action_coalesced_count == 2
 
 
 def test_market_channel_refresh_queue_retries_deferred_work_without_reinvalidating():

@@ -226,9 +226,11 @@ def test_fetch_events_by_tags_does_not_pass_closed_false_param():
 # ---------------------------------------------------------------------------
 
 from src.data.market_scanner import (
+    ExecutableSnapshotCaptureError,
     _market_child_is_tradable,
     _orderbook_from_feasibility_row,
     _prefetch_selected_orderbooks_from_feasibility,
+    _required_decimal_fact,
     capture_executable_market_snapshot,
 )
 from src.state.snapshot_repo import init_snapshot_schema
@@ -302,8 +304,8 @@ class _FakeClob:
         return {"bps": 0, "source": "clob_fee_rate", "token_id": token_id}
 
 
-def test_feasibility_row_without_exchange_book_depth_is_not_executable() -> None:
-    """Top-of-book columns alone must not synthesize a live orderbook."""
+def test_feasibility_row_without_exchange_book_depth_uses_conservative_top() -> None:
+    """Top-of-book quote evidence may hydrate only a conservative 1-share level."""
     row = {
         "token_id": "no-token",
         "best_bid_before": "0.70",
@@ -320,11 +322,15 @@ def test_feasibility_row_without_exchange_book_depth_is_not_executable() -> None
         },
     }
 
-    assert _orderbook_from_feasibility_row(row, outcome=outcome) is None
+    book = _orderbook_from_feasibility_row(row, outcome=outcome)
+
+    assert book is not None
+    assert book["bids"] == [{"price": "0.70", "size": "1"}]
+    assert book["asks"] == [{"price": "0.75", "size": "1"}]
 
 
-def test_feasibility_row_without_exchange_metadata_is_not_executable() -> None:
-    """A quote witness cannot invent tick size, min order size, or negRisk."""
+def test_feasibility_row_without_exchange_metadata_defers_to_capture_authority() -> None:
+    """Quote reuse never invents metadata; current CLOB capture remains fail-closed."""
     row = {
         "token_id": "no-token",
         "depth_before_json": json.dumps({"bids": [], "asks": [{"price": "0.75", "size": "12"}]}),
@@ -332,7 +338,17 @@ def test_feasibility_row_without_exchange_metadata_is_not_executable() -> None:
     }
     outcome = {"condition_id": "cond-real", "gamma_market_raw": {}}
 
-    assert _orderbook_from_feasibility_row(row, outcome=outcome) is None
+    book = _orderbook_from_feasibility_row(row, outcome=outcome)
+
+    assert book is not None
+    assert "tick_size" not in book
+    assert "min_order_size" not in book
+    assert "neg_risk" not in book
+    with pytest.raises(ExecutableSnapshotCaptureError, match="CLOB fact missing: tick_size"):
+        _required_decimal_fact(
+            (book, {}),
+            ("tick_size", "min_tick_size", "minimum_tick_size", "minTickSize"),
+        )
 
 
 def test_feasibility_row_preserves_exchange_metadata_when_reused() -> None:

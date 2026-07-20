@@ -1311,6 +1311,9 @@ class MarketChannelOnlineService:
     _pending_refresh_actions: dict[
         tuple[str, str], _PendingRefreshAction
     ] = field(default_factory=dict, init=False, repr=False)
+    _inflight_refresh_actions: dict[
+        tuple[str, str], _PendingRefreshAction
+    ] = field(default_factory=dict, init=False, repr=False)
     _refresh_action_generation: int = field(default=0, init=False, repr=False)
     _refresh_worker_running: bool = field(default=False, init=False, repr=False)
     _refresh_worker_idle: threading.Event = field(
@@ -2626,7 +2629,9 @@ class MarketChannelOnlineService:
         start = False
         key = self._refresh_action_key(action)
         with self._refresh_worker_lock:
-            previous = self._pending_refresh_actions.get(key)
+            queued = self._pending_refresh_actions.get(key)
+            inflight = self._inflight_refresh_actions.get(key)
+            previous = queued or inflight
             if previous is not None:
                 self.refresh_action_coalesced_count += 1
             self._refresh_action_generation += 1
@@ -2668,10 +2673,12 @@ class MarketChannelOnlineService:
                 wait_seconds = pending.not_before_monotonic - time.monotonic()
                 if wait_seconds <= 0.0:
                     self._pending_refresh_actions.pop(key)
+                    self._inflight_refresh_actions[key] = pending
             if wait_seconds > 0.0:
                 time.sleep(min(wait_seconds, 0.05))
                 continue
             try:
+                pending = self._invalidate_inflight_refresh_action(key, pending)
                 status, pending = self._attempt_refresh_action(pending)
             except Exception as exc:  # noqa: BLE001 - refresh failure must not kill quote ingest
                 _logger.warning(
@@ -2681,6 +2688,8 @@ class MarketChannelOnlineService:
                     exc_info=True,
                 )
                 status = "deferred"
+            with self._refresh_worker_lock:
+                self._inflight_refresh_actions.pop(key, None)
             if status != "deferred":
                 continue
             retry_count = pending.retry_count + 1
@@ -2703,6 +2712,47 @@ class MarketChannelOnlineService:
                 current = self._pending_refresh_actions.get(key)
                 if current is None or current.generation < retried.generation:
                     self._pending_refresh_actions[key] = retried
+
+    def _invalidate_inflight_refresh_action(
+        self,
+        key: tuple[str, str],
+        pending: _PendingRefreshAction,
+    ) -> _PendingRefreshAction:
+        """Publish one successful invalidation to same-key in-flight arrivals."""
+
+        if pending.invalidated or self.invalidate_snapshot is None:
+            return pending
+        marked = _PendingRefreshAction(
+            action=pending.action,
+            generation=pending.generation,
+            invalidated=True,
+            retry_count=pending.retry_count,
+            not_before_monotonic=pending.not_before_monotonic,
+        )
+        with self._refresh_worker_lock:
+            self._inflight_refresh_actions[key] = marked
+        try:
+            self.invalidate_snapshot(pending.action)
+        except Exception:
+            with self._refresh_worker_lock:
+                current = self._inflight_refresh_actions.get(key)
+                if current is not None and current.generation == pending.generation:
+                    self._inflight_refresh_actions[key] = pending
+                queued = self._pending_refresh_actions.get(key)
+                if (
+                    queued is not None
+                    and queued.invalidated
+                    and queued.action.reason == pending.action.reason
+                ):
+                    self._pending_refresh_actions[key] = _PendingRefreshAction(
+                        action=queued.action,
+                        generation=queued.generation,
+                        invalidated=False,
+                        retry_count=queued.retry_count,
+                        not_before_monotonic=queued.not_before_monotonic,
+                    )
+            raise
+        return marked
 
     def wait_refresh_idle(self, timeout: float | None = None) -> bool:
         return self._refresh_worker_idle.wait(timeout)

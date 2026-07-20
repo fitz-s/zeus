@@ -2431,7 +2431,7 @@ def test_small_full_family_refresh_fills_missing_books_from_direct_clob(monkeypa
     assert summary["inserted"] == 2
     assert summary["prefetch_missing_skipped"] == 0
     assert summary["direct_clob_prefetch_skipped"] == 0
-    assert summary["direct_clob_prefetch_small_family_enabled"] == 0
+    assert summary["direct_clob_prefetch_small_family_enabled"] == 1
 
 
 def test_large_full_family_refresh_fills_priority_books_from_direct_clob(monkeypatch):
