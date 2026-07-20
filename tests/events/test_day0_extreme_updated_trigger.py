@@ -17,6 +17,7 @@ from src.events.triggers.day0_extreme_updated import (
     authority_row_to_observation,
     build_day0_extreme_updated_event,
     observation_context_to_live_observation,
+    observation_instant_row_to_day0_observation,
 )
 from src.state.db import init_schema
 
@@ -688,6 +689,62 @@ def test_scan_observation_instants_rows_accepts_hko_runtime_monitoring_day0_even
     assert {payload["metric"] for payload in payloads} == {"high", "low"}
     assert all(payload["live_authority_status"] == "live" for payload in payloads)
     assert all(payload["source_authorized_status"] == "AUTHORIZED" for payload in payloads)
+    conn.row_factory = sqlite3.Row
+    instant = dict(conn.execute("SELECT * FROM observation_instants").fetchone())
+    assert observation_instant_row_to_day0_observation(instant)["rounding_rule"] == (
+        "oracle_truncate"
+    )
+
+
+def test_observation_context_live_hook_uses_hko_station_and_rounding_semantics():
+    city = SimpleNamespace(
+        name="Hong Kong",
+        timezone="Asia/Hong_Kong",
+        settlement_unit="C",
+        settlement_source_type="hko",
+        wu_station="",
+    )
+    context = SimpleNamespace(
+        source="hko_hourly_accumulator",
+        station_id="HKO",
+        observation_time="2026-06-26T01:00:00+00:00",
+        observation_available_at="2026-06-26T01:05:00+00:00",
+        high_so_far=27.4,
+        low_so_far=25.8,
+        current_temp=26.1,
+        unit="C",
+        coverage_status="OK",
+    )
+
+    observation = observation_context_to_live_observation(
+        city=city,
+        target_date="2026-06-26",
+        metric="low",
+        observation=context,
+    )
+
+    assert observation["station_match_status"] == "MATCH"
+    assert observation["live_authority_status"] == "live"
+    assert observation["rounding_rule"] == "oracle_truncate"
+
+    from src.events.reactor import _edli_day0_settlement_semantics
+
+    semantics = _edli_day0_settlement_semantics(observation)
+    assert semantics.rounding_rule == "oracle_truncate"
+    assert semantics.round_single(25.8) == 25.0
+
+
+def test_day0_settlement_semantics_rejects_payload_contract_drift():
+    from src.events.reactor import _edli_day0_settlement_semantics
+
+    with pytest.raises(ValueError, match="DAY0_SETTLEMENT_ROUNDING_MISMATCH"):
+        _edli_day0_settlement_semantics(
+            {
+                "city": "Hong Kong",
+                "settlement_unit": "C",
+                "rounding_rule": "wmo_half_up",
+            }
+        )
 
 
 def test_scan_observation_instants_keeps_west_of_utc_target_day_after_midnight_z():

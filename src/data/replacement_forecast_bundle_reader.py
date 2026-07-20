@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
 from src.config import cities_by_name
+from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.replacement_forecast_cycle_policy import (
     REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
     cycle_age_exceeds_bound,
@@ -325,17 +326,19 @@ def _market_bin_topology_payload_from_rows(
     )
     if not ordered:
         return None
+    city_cfg = cities_by_name.get(city)
+    if city_cfg is None:
+        return None
+    rounding_rule = SettlementSemantics.for_city(city_cfg).rounding_rule
     topology: list[dict[str, object]] = []
     for row in ordered:
         label = str(row.get("range_label") or row.get("outcome") or "").strip()
         if not label:
             return None
-        city_cfg = cities_by_name.get(city)
         settlement_unit = str(getattr(city_cfg, "settlement_unit", "") or getattr(city_cfg, "unit", "") or "").strip().upper()
         if settlement_unit not in {"C", "F"}:
             settlement_unit = _display_unit_for_label(label, fallback="C")
         display_unit = _display_unit_for_label(label, fallback=settlement_unit)
-        rounding_rule = "oracle_truncate" if str(getattr(city_cfg, "settlement_source_type", "") or "") == "hko" else "wmo_half_up"
         settlement_step_c = 5.0 / 9.0 if settlement_unit == "F" else 1.0
         lower_c = _temperature_bound_to_c(row.get("range_low"), unit=display_unit)
         upper_c = _temperature_bound_to_c(row.get("range_high"), unit=display_unit)

@@ -7756,29 +7756,23 @@ def _edli_day0_emit_lock_retry_delays() -> tuple[float, ...]:
     return tuple(delays)
 
 def _edli_day0_settlement_semantics(observation: dict):
-    """Resolve Day0 settlement semantics from authority payload fields."""
+    """Resolve Day0 settlement semantics from the configured city contract."""
 
+    from src.config import runtime_cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
 
-    station = str(observation.get("station_id") or observation.get("city") or "UNKNOWN")
-    unit = str(observation.get("settlement_unit") or "F").upper()
-    rounding_rule = str(observation.get("rounding_rule") or "wmo_half_up")
-    precision_raw = observation.get("settlement_precision")
-    try:
-        precision = float(precision_raw) if precision_raw is not None else 1.0
-    except (TypeError, ValueError):
-        precision = 1.0
-    if unit not in {"F", "C"}:
-        unit = "F"
-    if rounding_rule not in {"wmo_half_up", "floor", "ceil", "oracle_truncate"}:
-        rounding_rule = "wmo_half_up"
-    return SettlementSemantics(
-        resolution_source=f"EDLI_DAY0_{station}",
-        measurement_unit=unit,
-        precision=precision,
-        rounding_rule=rounding_rule,
-        finalization_time="12:00:00Z",
-    )
+    city_name = str(observation.get("city") or "").strip()
+    city = runtime_cities_by_name().get(city_name)
+    if city is None:
+        raise ValueError(f"DAY0_SETTLEMENT_CITY_UNKNOWN:{city_name}")
+    semantics = SettlementSemantics.for_city(city)
+    payload_unit = str(observation.get("settlement_unit") or "").upper()
+    payload_rule = str(observation.get("rounding_rule") or "")
+    if payload_unit and payload_unit != semantics.measurement_unit:
+        raise ValueError(f"DAY0_SETTLEMENT_UNIT_MISMATCH:{city_name}")
+    if payload_rule and payload_rule != semantics.rounding_rule:
+        raise ValueError(f"DAY0_SETTLEMENT_ROUNDING_MISMATCH:{city_name}")
+    return semantics
 
 def _edli_pre_submit_inner_io_timeout_seconds() -> float:
     """Network timeout used inside the outer pre-submit timeout guard.

@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 from src.config import runtime_cities_by_name
+from src.contracts.settlement_semantics import SettlementSemantics
 from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_priority import day0_emit_priority
 from src.events.event_writer import EventWriter, EventWriteResult
@@ -554,7 +555,11 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
         "live_authority_status": live_authority,
         "settlement_unit": unit,
         "settlement_precision": 1.0,
-        "rounding_rule": "wmo_half_up",
+        "rounding_rule": (
+            SettlementSemantics.for_city(city_config).rounding_rule
+            if city_config is not None
+            else None
+        ),
         "observation_context_id": str(
             row.get("observation_context_id")
             or f"observation_instants:{city}:{target_date}:{source}:{station_id}:{available_at}"
@@ -581,7 +586,7 @@ def observation_context_to_live_observation(
     observation_time = str(getattr(observation, "observation_time", "") or "")
     available_at = str(getattr(observation, "observation_available_at", "") or "")
     station_id = str(getattr(observation, "station_id", "") or "").strip().upper()
-    expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    expected_station = _expected_station_for_city(city)
     source = str(getattr(observation, "source", "") or "")
     coverage_status = str(getattr(observation, "coverage_status", "") or "").upper()
     unit = str(getattr(observation, "unit", "") or "").upper()
@@ -657,7 +662,7 @@ def observation_context_to_live_observation(
         "live_authority_status": live_authority_status,
         "settlement_unit": unit or city_unit,
         "settlement_precision": 1.0,
-        "rounding_rule": "wmo_half_up",
+        "rounding_rule": SettlementSemantics.for_city(city).rounding_rule,
         "observation_context_id": observation_context_id,
     }
 

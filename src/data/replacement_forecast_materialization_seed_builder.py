@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from src.config import cities_by_name
 from src.contracts.replacement_pipeline_files import validate_materialization_seed
+from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
 from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
@@ -191,13 +192,15 @@ def build_replacement_forecast_materialization_seed(
     if metric not in {"high", "low"}:
         raise ValueError("temperature_metric must be high or low")
     city_config = cities_by_name.get(city_name)
+    if city_config is None:
+        raise ValueError("city configuration is required")
     city_timezone = str(baseline_coverage.get("city_timezone") or getattr(city_config, "timezone", "") or "")
     if not city_timezone:
         raise ValueError("city timezone is required")
     settlement_unit = str(getattr(city_config, "settlement_unit", "") or baseline_coverage.get("settlement_unit") or "")
     if not settlement_unit:
         raise ValueError("settlement unit is required")
-    rounding_rule = "oracle_truncate" if str(getattr(city_config, "settlement_source_type", "") or "") == "hko" else "wmo_half_up"
+    rounding_rule = SettlementSemantics.for_city(city_config).rounding_rule
     expected = expected_replacement_dependency_identity_by_role(metric)
     baseline_expected = expected["baseline_b0"]
     reasons: list[str] = []
