@@ -38,8 +38,13 @@ is logged and skipped; the function never raises into the poll.
 """
 from __future__ import annotations
 
+import json
 import logging
+import queue
 import sqlite3
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
@@ -55,6 +60,104 @@ UTC = timezone.utc
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 _HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
+_DAY0_BRIDGE_STOP = object()
+_DAY0_BRIDGE_CONDITION = threading.Condition()
+_DAY0_BRIDGE_QUEUES: dict[bool, queue.Queue[object]] = {
+    True: queue.Queue(),
+    False: queue.Queue(),
+}
+_DAY0_BRIDGE_CLASSIFY_QUEUE: queue.Queue[object] = queue.Queue()
+_DAY0_BRIDGE_THREADS: tuple[threading.Thread, ...] = ()
+_DAY0_BRIDGE_CLOSED = False
+
+
+@dataclass
+class _Day0BridgePending:
+    city: str
+    target_date: str
+    metric: str
+    computed_at: datetime | None
+    held_position: bool | None
+    generation: int = 1
+    running: bool = False
+    lane: bool | None = None
+    enqueued_monotonic: float = 0.0
+    failures: int = 0
+
+
+_DAY0_BRIDGE_PENDING: dict[tuple[str, str, str], _Day0BridgePending] = {}
+_DAY0_BRIDGE_RETRY_BASE_SECONDS = 0.5
+_DAY0_BRIDGE_RETRY_MAX_SECONDS = 30.0
+
+
+def _family_manifests_from_db(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    identity,
+    computed_at: datetime,
+    limit: int = 96,
+) -> tuple[RawForecastArtifactManifest, ...]:
+    """Read only one family's recent canonical manifests, newest first."""
+
+    rows = conn.execute(
+        """
+        SELECT source_id, product_id, data_version, artifact_path, sha256,
+               byte_size, source_cycle_time, source_available_at, captured_at,
+               request_url, request_params_json, artifact_metadata_json,
+               training_allowed
+        FROM raw_forecast_artifacts
+        WHERE source_id = ?
+          AND product_id = ?
+          AND data_version = ?
+          AND json_extract(artifact_metadata_json, '$.city') = ?
+          AND julianday(source_available_at) <= julianday(?)
+        ORDER BY source_cycle_time DESC, captured_at DESC, artifact_id DESC
+        LIMIT ?
+        """,
+        (
+            identity.source_id,
+            identity.product_id,
+            identity.data_version,
+            str(city),
+            computed_at.astimezone(UTC).isoformat(),
+            int(limit),
+        ),
+    ).fetchall()
+    manifests: list[RawForecastArtifactManifest] = []
+    decision_cut = computed_at.astimezone(UTC)
+    for row in rows:
+        try:
+            source_available_at = str(row["source_available_at"])
+            available_at = _parse_cycle(source_available_at)
+            if available_at is None or available_at > decision_cut:
+                continue
+            manifests.append(
+                RawForecastArtifactManifest(
+                    source_id=str(row["source_id"]),
+                    product_id=str(row["product_id"]),
+                    data_version=str(row["data_version"]),
+                    artifact_path=str(row["artifact_path"]),
+                    sha256=str(row["sha256"]),
+                    byte_size=int(row["byte_size"]),
+                    source_cycle_time=str(row["source_cycle_time"]),
+                    source_available_at=source_available_at,
+                    captured_at=str(row["captured_at"]),
+                    request_url=str(row["request_url"] or ""),
+                    request_params=json.loads(row["request_params_json"] or "{}"),
+                    product_metadata=json.loads(row["artifact_metadata_json"] or "{}"),
+                    training_allowed=bool(row["training_allowed"]),
+                )
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            _LOG.warning(
+                "invalid canonical raw manifest skipped city=%s source=%s cycle=%s: %s",
+                city,
+                row["source_id"],
+                row["source_cycle_time"],
+                exc,
+            )
+    return tuple(manifests)
 
 
 def _parse_cycle(value: object) -> datetime | None:
@@ -911,7 +1014,6 @@ def enqueue_single_family_cycle_advance_reseed(
     )
     from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
         _latest_manifest,
-        _load_manifests,
         _manifest_base_dir,
         _manifest_path_value,
         _resolve_path,
@@ -948,11 +1050,17 @@ def enqueue_single_family_cycle_advance_reseed(
         report["status"] = "CYCLE_ADVANCE_METRIC_INVALID"
         return report
 
-    manifests = _load_manifests(raw_dir, computed_at=now)
     conn = _connect(forecast_db, write_class="live")
     conn.row_factory = sqlite3.Row
     try:
         ensure_replacement_forecast_live_schema(conn)
+        expected = expected_replacement_dependency_identity_by_role(metric)
+        manifests = _family_manifests_from_db(
+            conn,
+            city=city,
+            identity=expected["openmeteo_ifs9_anchor"],
+            computed_at=now,
+        )
         freshest = freshest_materializable_cycle(conn)
         if freshest is None:
             report["status"] = "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE"
@@ -972,7 +1080,7 @@ def enqueue_single_family_cycle_advance_reseed(
             city=city,
             target_date=target_date,
             metric=metric,
-            expected_identity=expected_replacement_dependency_identity_by_role,
+            expected_identity=lambda _metric: expected,
             latest_manifest=_latest_manifest,
         )
         if missing_legs:
@@ -1010,6 +1118,93 @@ def enqueue_single_family_cycle_advance_reseed(
             return report
         if not verdict["needs_advance"]:
             if verdict.get("consumed_cycle") is not None:
+                if has_day0_observed_extreme:
+                    if (
+                        family_cycle is None
+                        or family_cycle < consumed_cycle_dt(consumed_cycle_iso)
+                    ):
+                        report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
+                        report["consumed_cycle"] = consumed_cycle_iso
+                        return report
+                    target_cycle_iso = family_cycle.isoformat()
+                    if _already_enqueued(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        target_cycle_iso=target_cycle_iso,
+                        allow_missing_seed_file_reenqueue=True,
+                        day0_observed_extreme_observation_time=(
+                            day0_observed_extreme_observation_time
+                        ),
+                    ):
+                        report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
+                        report["consumed_cycle"] = consumed_cycle_iso
+                        report["target_cycle"] = target_cycle_iso
+                        return report
+                    seed_file = _build_and_write_advance_seed(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        manifests=manifests,
+                        raw_dir=raw_dir,
+                        seed_path=seed_path,
+                        computed_at=now,
+                        build_seed=build_replacement_forecast_materialization_seed,
+                        latest_baseline_coverage=(
+                            latest_baseline_coverage_for_replacement_seed
+                        ),
+                        market_bins=market_bins_for_replacement_seed,
+                        write_seed=write_seed,
+                        latest_manifest=_latest_manifest,
+                        manifest_path_value=_manifest_path_value,
+                        manifest_base_dir=_manifest_base_dir,
+                        resolve_path=_resolve_path,
+                        seed_name=_seed_name,
+                        expected_identity=(
+                            expected_replacement_dependency_identity_by_role
+                        ),
+                        upgrade_trigger="day0_observation_advanced",
+                        day0_observed_extreme_c=day0_observed_extreme_c,
+                        day0_observed_extreme_source=day0_observed_extreme_source,
+                        day0_observed_extreme_observation_time=(
+                            day0_observed_extreme_observation_time
+                        ),
+                        day0_observed_extreme_sample_count=(
+                            day0_observed_extreme_sample_count
+                        ),
+                        day0_observed_extreme_unit=day0_observed_extreme_unit,
+                    )
+                    if seed_file is None:
+                        report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
+                        return report
+                    inserted = _record_enqueue(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        consumed_cycle_iso=consumed_cycle_iso,
+                        target_cycle_iso=target_cycle_iso,
+                        held_position=held_position,
+                        seed_file=str(seed_file),
+                        reason="DAY0_OBSERVATION_ADVANCED",
+                        replace_existing_seed_file=True,
+                        day0_observed_extreme_observation_time=(
+                            day0_observed_extreme_observation_time
+                        ),
+                    )
+                    conn.commit()
+                    report["enqueued"] = bool(inserted)
+                    report["status"] = (
+                        "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
+                        if inserted
+                        else "CYCLE_ADVANCE_ALREADY_ENQUEUED"
+                    )
+                    report["seed_file"] = str(seed_file)
+                    report["consumed_cycle"] = consumed_cycle_iso
+                    report["target_cycle"] = target_cycle_iso
+                    return report
                 # No newer cycle than the one the posterior already consumed: the staleness is not a
                 # missed-cycle gap this lane can cure. Honest no-op.
                 report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
@@ -1178,7 +1373,7 @@ def enqueue_single_family_cycle_advance_reseed(
     return report
 
 
-def enqueue_day0_extreme_updated_materialization_seed(
+def _materialize_day0_extreme_updated_seed(
     *,
     city: str,
     target_date: str,
@@ -1277,6 +1472,276 @@ def enqueue_day0_extreme_updated_materialization_seed(
         report["status"] = "DAY0_EXTREME_BRIDGE_FAILSOFT_SKIPPED"
         report["error"] = str(exc)
         return report
+
+
+def _day0_bridge_status_retryable(status: object) -> bool:
+    value = str(status or "")
+    return value.startswith("WORKER_FAILED:") or value in {
+        "CYCLE_ADVANCE_FAILSOFT_SKIPPED",
+        "CYCLE_ADVANCE_FORECAST_DB_MISSING",
+        "CYCLE_ADVANCE_LEG_ARTIFACT_MISSING",
+        "CYCLE_ADVANCE_MANIFEST_MISSING",
+        "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE",
+        "DAY0_EXTREME_BRIDGE_FAILSOFT_SKIPPED",
+        "DAY0_EXTREME_BRIDGE_NO_OBSERVED_EXTREME",
+        "DAY0_EXTREME_BRIDGE_NOT_CONFIGURED",
+    }
+
+
+def _requeue_day0_bridge_pending(
+    key: tuple[str, str, str],
+) -> None:
+    with _DAY0_BRIDGE_CONDITION:
+        pending = _DAY0_BRIDGE_PENDING.get(key)
+        if pending is None or pending.running or _DAY0_BRIDGE_CLOSED:
+            return
+        pending.enqueued_monotonic = time.monotonic()
+        _DAY0_BRIDGE_QUEUES[pending.lane].put_nowait(key)
+        _DAY0_BRIDGE_CONDITION.notify_all()
+
+
+def _day0_bridge_worker(held_lane: bool) -> None:
+    bridge_queue = _DAY0_BRIDGE_QUEUES[held_lane]
+    while True:
+        item = bridge_queue.get()
+        try:
+            if item is _DAY0_BRIDGE_STOP:
+                return
+            key = item
+            with _DAY0_BRIDGE_CONDITION:
+                pending = _DAY0_BRIDGE_PENDING.get(key)
+                if pending is None or pending.running or pending.lane != held_lane:
+                    continue
+                pending.running = True
+                generation = pending.generation
+                computed_at = pending.computed_at
+                held_position = pending.held_position
+                queued_at = pending.enqueued_monotonic
+            started_at = time.monotonic()
+            try:
+                report = _materialize_day0_extreme_updated_seed(
+                    city=pending.city,
+                    target_date=pending.target_date,
+                    metric=pending.metric,
+                    computed_at=computed_at,
+                    held_position=held_position,
+                )
+                status = report.get("status")
+            except Exception as exc:  # noqa: BLE001 - durable event remains retry authority
+                status = f"WORKER_FAILED:{type(exc).__name__}"
+                _LOG.exception(
+                    "day0 materialization worker failed city=%s target_date=%s metric=%s",
+                    pending.city,
+                    pending.target_date,
+                    pending.metric,
+                )
+            runtime_ms = (time.monotonic() - started_at) * 1000.0
+            _LOG.info(
+                "day0 materialization worker city=%s target_date=%s metric=%s "
+                "held_lane=%s status=%s queue_wait_ms=%.1f runtime_ms=%.1f",
+                pending.city,
+                pending.target_date,
+                pending.metric,
+                held_lane,
+                status,
+                (started_at - queued_at) * 1000.0,
+                runtime_ms,
+            )
+            with _DAY0_BRIDGE_CONDITION:
+                current = _DAY0_BRIDGE_PENDING.get(key)
+                if current is pending and current.generation == generation:
+                    if _day0_bridge_status_retryable(status):
+                        current.running = False
+                        current.failures += 1
+                        delay = min(
+                            _DAY0_BRIDGE_RETRY_MAX_SECONDS,
+                            _DAY0_BRIDGE_RETRY_BASE_SECONDS
+                            * (2 ** min(current.failures - 1, 8)),
+                        )
+                        retry = threading.Timer(
+                            delay,
+                            _requeue_day0_bridge_pending,
+                            args=(key,),
+                        )
+                        retry.daemon = True
+                        retry.start()
+                    else:
+                        del _DAY0_BRIDGE_PENDING[key]
+                elif current is pending:
+                    current.running = False
+                    current.failures = 0
+                    current.lane = current.held_position is not False
+                    current.enqueued_monotonic = time.monotonic()
+                    _DAY0_BRIDGE_QUEUES[current.lane].put_nowait(key)
+                _DAY0_BRIDGE_CONDITION.notify_all()
+        finally:
+            bridge_queue.task_done()
+
+
+def _day0_bridge_held_position_keys(
+    keys: tuple[tuple[str, str, str], ...],
+) -> set[tuple[str, str, str]]:
+    """Classify a coalesced batch off the fact-publication thread."""
+
+    try:
+        from src.events.reactor import _edli_current_held_position_family_keys
+
+        held = _edli_current_held_position_family_keys()
+    except Exception:  # noqa: BLE001 - priority failure degrades to entry lane
+        return set()
+    return set(keys) & set(held)
+
+
+def _day0_bridge_classifier() -> None:
+    while True:
+        first = _DAY0_BRIDGE_CLASSIFY_QUEUE.get()
+        items = [first]
+        stop = first is _DAY0_BRIDGE_STOP
+        while not stop:
+            try:
+                item = _DAY0_BRIDGE_CLASSIFY_QUEUE.get_nowait()
+            except queue.Empty:
+                break
+            items.append(item)
+            stop = item is _DAY0_BRIDGE_STOP
+        keys = tuple(item for item in items if item is not _DAY0_BRIDGE_STOP)
+        try:
+            held_keys = _day0_bridge_held_position_keys(keys)
+            with _DAY0_BRIDGE_CONDITION:
+                for key in keys:
+                    pending = _DAY0_BRIDGE_PENDING.get(key)
+                    if pending is None or pending.running or pending.lane is not None:
+                        continue
+                    is_held = key in held_keys
+                    pending.held_position = is_held
+                    pending.lane = is_held
+                    pending.enqueued_monotonic = time.monotonic()
+                    _DAY0_BRIDGE_QUEUES[is_held].put_nowait(key)
+                _DAY0_BRIDGE_CONDITION.notify_all()
+        finally:
+            for _item in items:
+                _DAY0_BRIDGE_CLASSIFY_QUEUE.task_done()
+        if stop:
+            return
+
+
+def _start_day0_bridge_workers_locked() -> None:
+    global _DAY0_BRIDGE_THREADS
+
+    if _DAY0_BRIDGE_THREADS:
+        return
+    workers = tuple(
+        threading.Thread(
+            target=_day0_bridge_worker,
+            args=(held_lane,),
+            name=f"day0-materialization-{'held' if held_lane else 'entry'}",
+            daemon=True,
+        )
+        for held_lane in (True, False)
+    )
+    _DAY0_BRIDGE_THREADS = (
+        threading.Thread(
+            target=_day0_bridge_classifier,
+            name="day0-materialization-classifier",
+            daemon=True,
+        ),
+        *workers,
+    )
+    for thread in _DAY0_BRIDGE_THREADS:
+        thread.start()
+
+
+def enqueue_day0_extreme_updated_materialization_seed(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    computed_at: datetime | None = None,
+    held_position: bool | None = None,
+) -> dict[str, object]:
+    """Queue Day0 posterior work without running materialization inline."""
+
+    key = (str(city), str(target_date), str(metric))
+    with _DAY0_BRIDGE_CONDITION:
+        if _DAY0_BRIDGE_CLOSED:
+            return {
+                "status": "DAY0_EXTREME_BRIDGE_CLOSED",
+                "city": key[0],
+                "target_date": key[1],
+                "metric": key[2],
+            }
+        pending = _DAY0_BRIDGE_PENDING.get(key)
+        if pending is not None:
+            pending.generation += 1
+            pending.computed_at = computed_at
+            if held_position is True:
+                pending.held_position = True
+                if not pending.running and pending.lane is not True:
+                    pending.lane = True
+                    _DAY0_BRIDGE_QUEUES[True].put_nowait(key)
+            elif held_position is False and not pending.running and pending.lane is None:
+                pending.held_position = False
+                pending.lane = False
+                _DAY0_BRIDGE_QUEUES[False].put_nowait(key)
+            return {
+                "status": "DAY0_EXTREME_BRIDGE_COALESCED",
+                "city": key[0],
+                "target_date": key[1],
+                "metric": key[2],
+                "held_lane": pending.lane,
+                "priority_classification_pending": pending.lane is None,
+            }
+        lane = bool(held_position) if held_position is not None else None
+        pending = _Day0BridgePending(
+            city=key[0],
+            target_date=key[1],
+            metric=key[2],
+            computed_at=computed_at,
+            held_position=held_position,
+            lane=lane,
+            enqueued_monotonic=time.monotonic(),
+        )
+        _DAY0_BRIDGE_PENDING[key] = pending
+        _start_day0_bridge_workers_locked()
+        if lane is None:
+            _DAY0_BRIDGE_CLASSIFY_QUEUE.put_nowait(key)
+        else:
+            _DAY0_BRIDGE_QUEUES[lane].put_nowait(key)
+    return {
+        "status": "DAY0_EXTREME_BRIDGE_QUEUED",
+        "city": key[0],
+        "target_date": key[1],
+        "metric": key[2],
+        "held_lane": lane,
+        "priority_classification_pending": lane is None,
+    }
+
+
+def _wait_for_day0_materialization_bridge_idle(timeout_s: float) -> bool:
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    with _DAY0_BRIDGE_CONDITION:
+        while _DAY0_BRIDGE_PENDING:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _DAY0_BRIDGE_CONDITION.wait(remaining)
+        return True
+
+
+def close_day0_materialization_bridge() -> None:
+    global _DAY0_BRIDGE_CLOSED
+
+    with _DAY0_BRIDGE_CONDITION:
+        if _DAY0_BRIDGE_CLOSED:
+            return
+        _DAY0_BRIDGE_CLOSED = True
+        _DAY0_BRIDGE_PENDING.clear()
+        _DAY0_BRIDGE_CONDITION.notify_all()
+        if not _DAY0_BRIDGE_THREADS:
+            return
+        _DAY0_BRIDGE_CLASSIFY_QUEUE.put_nowait(_DAY0_BRIDGE_STOP)
+        for bridge_queue in _DAY0_BRIDGE_QUEUES.values():
+            bridge_queue.put_nowait(_DAY0_BRIDGE_STOP)
 
 
 def _build_and_write_advance_seed(

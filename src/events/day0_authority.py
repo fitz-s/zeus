@@ -34,6 +34,15 @@ DAY0_DETERMINISTIC_BIN_PAYOFF_GLOBAL_AUTHORITY = (
 )
 DAY0_REPLACEMENT_Q_SOURCE = "replacement_0_1"
 DAY0_REPLACEMENT_GLOBAL_AUTHORITY = "replacement_current_global_probability_v1"
+DAY0_PROVISIONAL_REPLACEMENT_GLOBAL_AUTHORITY = (
+    "replacement_provisional_day0_global_probability_v1"
+)
+DAY0_REPLACEMENT_GLOBAL_AUTHORITIES = frozenset(
+    {
+        DAY0_REPLACEMENT_GLOBAL_AUTHORITY,
+        DAY0_PROVISIONAL_REPLACEMENT_GLOBAL_AUTHORITY,
+    }
+)
 DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS = "CURRENT_POSTERIOR_BAND"
 DAY0_OBSERVATION_HARD_FACT_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
 DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
@@ -386,7 +395,7 @@ def _assert_replacement_global_day0_probability_authority(
     """Validate one current replacement posterior conditioned on current Day0 truth."""
 
     authority = str(block.get("probability_authority") or "").strip()
-    if authority != DAY0_REPLACEMENT_GLOBAL_AUTHORITY:
+    if authority not in DAY0_REPLACEMENT_GLOBAL_AUTHORITIES:
         raise Day0AuthorityError(
             "replacement_day0_probability_authority required:"
             f"{authority or 'missing'}"
@@ -426,6 +435,19 @@ def _assert_replacement_global_day0_probability_authority(
             f"selected={posterior_id or 'missing'}:"
             f"authority={block_posterior_id or 'missing'}:"
             f"bound={bound_posterior_id or 'missing'}"
+        )
+    block_identity = str(block.get("probability_base_identity") or "").strip()
+    bound_identity = str(
+        binding.get("probability_base_identity") or ""
+    ).strip()
+    if (
+        not block_identity
+        or block_identity != bound_identity
+    ):
+        raise Day0AuthorityError(
+            "replacement_day0_posterior_identity mismatch:"
+            f"authority={block_identity or 'missing'}:"
+            f"bound={bound_identity or 'missing'}"
         )
 
     for field_name in ("city", "target_date"):

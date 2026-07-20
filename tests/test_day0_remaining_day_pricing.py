@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-16
+# Last reused or audited: 2026-07-19
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
@@ -683,7 +683,11 @@ class TestRemainingDayMembers:
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
             lambda **kw: vectors,
         )
-        payload = {"metric": "high", "rounded_value": 25.0}
+        payload = {
+            "metric": "high",
+            "rounded_value": 25.0,
+            "settlement_source": "wu_api",
+        }
         members = era._day0_remaining_day_members(
             payload=payload, family=self._family(), unit="C",
             decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
@@ -714,6 +718,7 @@ class TestRemainingDayMembers:
             "metric": "high",
             "rounded_value": 25.0,
             "observation_time": "2026-06-10T21:20:00+00:00",
+            "settlement_source": "wu_api",
         }
 
         members = era._day0_remaining_day_members(
@@ -784,7 +789,12 @@ class TestRemainingDayMembers:
         import src.engine.event_reactor_adapter as era
 
         members = era._day0_remaining_day_members(
-            payload={"metric": "high", "rounded_value": 25.0}, family=self._family(),
+            payload={
+                "metric": "high",
+                "rounded_value": 25.0,
+                "settlement_source": "wu_api",
+            },
+            family=self._family(),
             unit="C", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
         )
         assert sorted(members.tolist()) == [25.0, 27.5]
@@ -871,6 +881,147 @@ class TestRemainingDayMembers:
 
         assert members is None
         assert payload["_edli_day0_remaining_unavailable_reason"] == "city_config_missing_for_hourly_bundle"
+
+
+    def test_hko_provisional_day0_event_uses_replacement_probability_path(
+        self,
+        monkeypatch,
+    ):
+        import src.engine.event_reactor_adapter as era
+
+        payload = {
+            "city": "Hong Kong",
+            "target_date": "2026-07-20",
+            "metric": "low",
+            "rounded_value": 25,
+            "observation_time": "2026-07-20T07:20:00+00:00",
+            "settlement_source": "hko_hourly_accumulator",
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+
+        replacement = (
+            {"condition": 0.73},
+            {},
+            {},
+            {},
+            {"probability_authority": "replacement_0_1"},
+        )
+        calls = []
+        bundle = SimpleNamespace(
+            posterior_id=77,
+            provenance_json={
+                "day0_provisional_observation": {
+                    "active": True,
+                    "support_truncation": False,
+                    "source": "hko_hourly_accumulator",
+                    "observation_time": "2026-07-20T07:20:00+00:00",
+                    "observed_extreme_c": 25.0,
+                }
+            },
+        )
+
+        def replacement_probability(**kwargs):
+            calls.append(kwargs)
+            kwargs["payload"]["_edli_spine_posterior_id"] = 77
+            kwargs["payload"]["_edli_spine_posterior_identity_hash"] = (
+                "posterior-77"
+            )
+            kwargs["provenance_capture"]["replacement_bundle"] = bundle
+            return replacement
+
+        monkeypatch.setattr(
+            era,
+            "_replacement_authority_probability_and_fdr_proof",
+            replacement_probability,
+        )
+
+        def current_observation(**kwargs):
+            binding = {
+                "city": "Hong Kong",
+                "target_date": "2026-07-20",
+                "metric": "low",
+                "observation_time": "2026-07-20T07:20:00+00:00",
+                "observation_available_at": "2026-07-20T07:30:00+00:00",
+                "observed_extreme_native": 25.0,
+                "rounded_value": 25,
+                "sample_count": 8,
+                "station_id": "HKO",
+                "settlement_source": "hko_hourly_accumulator",
+                "settlement_unit": "C",
+                "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+            }
+            if kwargs["posterior_id"] is not None:
+                binding["posterior_id"] = kwargs["posterior_id"]
+            binding["probability_base_identity"] = kwargs[
+                "probability_base_identity"
+            ]
+            return {
+                "city": "Hong Kong",
+                "target_date": "2026-07-20",
+                "metric": "low",
+                "observation_time": binding["observation_time"],
+                "observation_available_at": binding["observation_available_at"],
+                "raw_value": 25.0,
+                "rounded_value": 25,
+                "low_so_far": 25.0,
+                "sample_count": 8,
+                "samples_count": 8,
+                "station_id": "HKO",
+                "settlement_source": "hko_hourly_accumulator",
+                "settlement_unit": "C",
+                "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+                "source_match_status": "MATCH",
+                "local_date_status": "MATCH",
+                "station_match_status": "MATCH",
+                "dst_status": "UNAMBIGUOUS",
+                "metric_match_status": "MATCH",
+                "rounding_status": "MATCH",
+                "source_authorized_status": "AUTHORIZED",
+                "live_authority_status": "live",
+                "_edli_global_day0_binding": binding,
+            }
+
+        monkeypatch.setattr(
+            era,
+            "_global_day0_execution_payload",
+            lambda *args, **kwargs: current_observation(**kwargs),
+        )
+
+        result = era._live_yes_probabilities(
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            payload=payload,
+            family=SimpleNamespace(city="Hong Kong", target_date="2026-07-20"),
+            conn=sqlite3.connect(":memory:"),
+            calibration_conn=sqlite3.connect(":memory:"),
+            native_costs={},
+            decision_time=datetime(2026, 7, 20, 8, 0, tzinfo=UTC),
+        )
+
+        assert result is replacement
+        assert len(calls) == 1
+        assert payload["posterior_id"] == 77
+        assert payload["day0_probability_authority"]["probability_authority"] == (
+            "replacement_provisional_day0_global_probability_v1"
+        )
+        from src.events.day0_authority import (
+            assert_live_day0_probability_authority,
+        )
+
+        assert_live_day0_probability_authority(
+            payload,
+            direction="buy_no",
+            condition_id="condition",
+            q_live=0.73,
+            q_lcb=0.70,
+        )
 
     def test_monitor_read_requires_expected_hourly_bundle(self, monkeypatch):
         import src.engine.monitor_refresh as monitor_refresh

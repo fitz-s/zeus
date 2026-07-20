@@ -439,6 +439,7 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
         assert kwargs["topology_conn"] is forecasts
         assert kwargs["observation_conn"] is world
         assert kwargs["required_condition_id"] == condition_id
+        assert kwargs["allow_provisional_day0_replacement"] is True
         kwargs["day0_payload_out"].update(
             {
                 "_edli_global_day0_binding": {
@@ -624,6 +625,65 @@ def test_unobserved_prefix_monitor_uses_global_sample_mean_not_scalar_point() ->
         "replacement_unobserved_day0_prefix_global_probability_v1"
     )
     assert receipt["remaining_window"] is None
+
+
+def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact_stamp() -> None:
+    import numpy as np
+
+    condition_id = "0x" + "74" * 32
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                bin_id="25C",
+                condition_id=condition_id,
+                yes_token_id="yes-25",
+                no_token_id="no-25",
+            ),
+        ),
+        yes_q_samples=np.array([[0.72], [0.84]]),
+        witness_identity="hko-provisional-replacement-witness",
+        q_version="hko-provisional-replacement-q",
+        source_truth_identity="hko-provisional-replacement-truth",
+        band_basis="current_coherent_settlement_simplex_v1",
+        band_alpha=0.05,
+    )
+    snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=((condition_id, "yes-25", "no-25"),),
+        deterministic_condition_ids=frozenset(),
+        day0_payload={
+            "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
+        },
+        metric="low",
+        probability_authority=(
+            "replacement_provisional_day0_global_probability_v1"
+        ),
+    )
+    pos = _make_position()
+    pos.condition_id = condition_id
+    pos.direction = "buy_no"
+    pos.token_id = "yes-25"
+    pos.no_token_id = "no-25"
+
+    probability, refreshed, fresh = (
+        monitor_refresh_module._materialize_current_global_day0_probability(
+            pos,
+            snapshot,
+        )
+    )
+
+    assert probability == pytest.approx(0.22)
+    assert fresh is True
+    assert refreshed.selected_method == "replacement_posterior"
+    receipt = refreshed._day0_monitor_probability_receipt
+    assert receipt["probability_authority"] == (
+        "replacement_provisional_day0_global_probability_v1"
+    )
+    assert receipt["remaining_window"] is None
+    assert all(
+        "day0_absorbing_hard_fact" not in validation
+        for validation in refreshed.applied_validations
+    )
 
 
 def test_day0_family_cache_keeps_partial_exact_witness_condition_local() -> None:

@@ -7573,10 +7573,22 @@ def _edli_bridge_day0_extreme_materialization_seeds(event_ids: tuple[str, ...]) 
         for row in rows
         if row[0] and row[1] and row[2]
     }
+    try:
+        held_families = _edli_current_held_position_family_keys()
+    except Exception as exc:  # noqa: BLE001 — priority lookup is best-effort
+        _log.warning(
+            "day0-extreme-updated materialization bridge HELD LOOKUP FAILED "
+            "(entry lane fallback): %s",
+            exc,
+        )
+        held_families = set()
     for city, target_date, metric in sorted(families):
         try:
             report = enqueue_day0_extreme_updated_materialization_seed(
-                city=city, target_date=target_date, metric=metric,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                held_position=(city, target_date, metric) in held_families,
             )
             _log.info(
                 "day0-extreme-updated materialization bridge (catch-up) city=%s "

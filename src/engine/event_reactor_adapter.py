@@ -159,6 +159,7 @@ import time as _time
 import zlib
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 from decimal import Decimal, ROUND_FLOOR
 from collections.abc import Iterable, Mapping
@@ -368,6 +369,13 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
         "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
         "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
+        "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
+        "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
+        "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
+        "GLOBAL_DAY0_SOURCE_CYCLE_INVALID",
         "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
     }
 )
@@ -378,6 +386,13 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING",
         "GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING",
         "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+        "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
+        "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
+        "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
+        "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
+        "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
+        "GLOBAL_DAY0_SOURCE_CYCLE_INVALID",
         "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
     }
 )
@@ -2731,10 +2746,28 @@ def _is_day0_lane_event_type(event_type: object) -> bool:
     return str(event_type or "").strip() in _DAY0_LANE_EVENT_TYPES
 
 
+def _uses_replacement_probability_authority(
+    payload: Mapping[str, object],
+) -> bool:
+    """Whether this decision is priced by the current replacement posterior."""
+
+    authority = str(payload.get("probability_authority") or "").strip()
+    q_source = str(
+        payload.get("_edli_q_source") or payload.get("q_source") or ""
+    ).strip()
+    return q_source == "replacement_0_1" and authority in {
+        "replacement_0_1",
+        "replacement_current_global_probability_v1",
+        "replacement_provisional_day0_global_probability_v1",
+    }
+
+
 def _day0_maker_only_required(actionable_payload: Mapping[str, object]) -> bool:
     """Current live Day0 entries are maker-only; the proof path must rank that reality."""
 
-    return _is_day0_lane_event_type(actionable_payload.get("event_type"))
+    return _is_day0_lane_event_type(
+        actionable_payload.get("event_type")
+    ) and not _uses_replacement_probability_authority(actionable_payload)
 
 
 def _event_allows_same_family_monitor_owned(event_type: object) -> bool:
@@ -6795,6 +6828,7 @@ def event_bound_live_adapter_from_trade_conn(
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 cache_metadata_out=cache_metadata_out,
+                allow_provisional_day0_replacement=True,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
             failure_type = type(exc).__name__
@@ -7826,6 +7860,7 @@ def event_bound_live_adapter_from_trade_conn(
                     decision_time=at,
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                     allow_unobserved_day0_replacement=True,
+                    allow_provisional_day0_replacement=True,
                 )
             except Exception as exc:  # noqa: BLE001 - held authority remains fail closed
                 failure_type = type(exc).__name__
@@ -12046,7 +12081,17 @@ def _bind_global_selected_probability_parent(
 ) -> "_CandidateProof":
     """Bind a forecast winner to the exact posterior generation it ranked."""
 
-    if event.event_type not in _FORECAST_DECISION_EVENT_TYPES:
+    replacement_day0 = (
+        event.event_type == "DAY0_EXTREME_UPDATED"
+        and str(
+            getattr(prepared_global_family, "probability_authority", None) or ""
+        ).strip()
+        == "replacement_0_1"
+    )
+    if (
+        event.event_type not in _FORECAST_DECISION_EVENT_TYPES
+        and not replacement_day0
+    ):
         return proof
     raw_posterior_id = getattr(prepared_global_family, "posterior_id", None)
     authority = str(
@@ -12558,6 +12603,9 @@ def _current_global_actuation_prepared_family(
         allow_unobserved_day0_replacement=(
             str(getattr(candidate, "action", "BUY") or "BUY").upper()
             == "SELL"
+        ),
+        allow_provisional_day0_replacement=(
+            getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED"
         ),
     )
     current_witness = getattr(current, "probability_witness", None)
@@ -16832,6 +16880,8 @@ def _day0_live_submit_admission_rejection_reason(
     event_type = str(actionable_payload.get("event_type") or "").strip()
     if event_type != "DAY0_EXTREME_UPDATED":
         return None
+    if _uses_replacement_probability_authority(actionable_payload):
+        return None
     from src.engine.day0_admission import (
         Day0AdmissionContext,
         day0_live_admission_rejection_reason,
@@ -17810,7 +17860,10 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
     """Fail closed unless the event's live entry lane has its own executable authority."""
 
     event_type = str(actionable_payload.get("event_type") or "").strip()
-    if event_type in _FORECAST_DECISION_EVENT_TYPES:
+    if event_type in _FORECAST_DECISION_EVENT_TYPES or (
+        event_type in _DAY0_LANE_EVENT_TYPES
+        and _uses_replacement_probability_authority(actionable_payload)
+    ):
         _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
         return
     if event_type in _DAY0_LANE_EVENT_TYPES:
@@ -19790,15 +19843,19 @@ def _day0_live_source_parent_certificates(
 
     if event.event_type != "DAY0_EXTREME_UPDATED":
         return ()
+    if _uses_replacement_probability_authority(payload):
+        return ()
 
     from src.events.day0_authority import (
         Day0AuthorityError,
+        assert_absorbing_day0_payload_authority,
         assert_live_day0_payload_authority,
         normalize_day0_live_authority_status,
     )
 
     try:
         assert_live_day0_payload_authority(payload)
+        assert_absorbing_day0_payload_authority(payload)
     except Day0AuthorityError as exc:
         raise ValueError(f"DAY0_SOURCE_PARENT_AUTHORITY_BLOCKED:{exc}") from None
 
@@ -19931,7 +19988,7 @@ def _final_intent_decision_source_context_payload(
     """
 
     forecast_payload = dict(forecast_authority.payload)
-    if event.event_type != "DAY0_EXTREME_UPDATED":
+    if event.event_type != "DAY0_EXTREME_UPDATED" or not day0_source_certs:
         return forecast_payload
 
     day0_authority = next(
@@ -27550,7 +27607,103 @@ def _live_yes_probabilities(
             native_costs=native_costs,
             decision_time=decision_time,
         )
-    if event.event_type == "DAY0_EXTREME_UPDATED":
+    if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
+        # A family-scoped source-truth pause outranks every probability carrier,
+        # including provisional replacement. No q is authority while the
+        # settlement-source comparison for this city/date is disputed.
+        from src.data.day0_oracle_anomaly import is_day0_family_paused
+
+        if is_day0_family_paused(str(family.city), str(family.target_date)):
+            raise ValueError(
+                f"DAY0_ORACLE_ANOMALY_PAUSED:{family.city}:{family.target_date}"
+            )
+
+        from src.events.day0_authority import (
+            DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
+            day0_evidence_finality,
+        )
+
+        if day0_evidence_finality(payload) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT:
+            city = runtime_cities_by_name().get(str(family.city))
+            if city is None:
+                raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
+            unit = str(getattr(city, "settlement_unit", "") or "").strip()
+            resolution = SimpleNamespace(measurement_unit=unit)
+            current_observation = _global_day0_execution_payload(
+                event,
+                family=family,
+                resolution=resolution,
+                conditioning=None,
+                observation_conn=calibration_conn,
+                decision_time=decision_time,
+                posterior_id=None,
+                probability_base_identity="provisional_replacement_pending",
+            )
+            payload.update(current_observation)
+            capture = provenance_capture if provenance_capture is not None else {}
+            replacement = _replacement_authority_probability_and_fdr_proof(
+                event=event,
+                payload=payload,
+                family=family,
+                conn=conn,
+                native_costs=native_costs,
+                decision_time=decision_time,
+                promotion_evidence=promotion_evidence,
+                capital_objective_evidence=capital_objective_evidence,
+                provenance_capture=capture,
+            )
+            if replacement is None:
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
+                )
+            posterior_id = payload.get("_edli_spine_posterior_id")
+            posterior_identity = str(
+                payload.get("_edli_spine_posterior_identity_hash") or ""
+            ).strip()
+            if posterior_id in (None, "") or not posterior_identity:
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING"
+                )
+            current_observation = _global_day0_execution_payload(
+                event,
+                family=family,
+                resolution=resolution,
+                conditioning=None,
+                observation_conn=calibration_conn,
+                decision_time=decision_time,
+                posterior_id=posterior_id,
+                probability_base_identity=posterior_identity,
+            )
+            current_observation.update(
+                {
+                    "posterior_id": int(posterior_id),
+                    "probability_authority": (
+                        "replacement_provisional_day0_global_probability_v1"
+                    ),
+                    "q_source": "replacement_0_1",
+                    "_edli_q_source": "replacement_0_1",
+                    "_edli_day0_q_mode": (
+                        "provisional_current_snapshot_replacement"
+                    ),
+                }
+            )
+            replacement_bundle = capture.get("replacement_bundle")
+            if replacement_bundle is None:
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
+                )
+            _assert_provisional_day0_replacement_bundle(
+                replacement_bundle,
+                current_observation,
+            )
+            payload.update(current_observation)
+            probability_block = _global_day0_probability_authority_payload(
+                current_observation
+            )
+            payload["day0_probability_authority"] = probability_block
+            capture["day0_probability_authority"] = probability_block
+            return replacement
+
         # ORACLE ANOMALY PAUSE (day0 review 2026-06-10 item E, Paris-CDG class):
         # when the WU-vs-METAR divergence detector has flagged this family's
         # (city, target_date), no day0 q may be built — the running extreme's
@@ -27558,12 +27711,6 @@ def _live_yes_probabilities(
         # converts to a deterministic no-submit receipt at the
         # _generate_candidate_proofs ValueError boundary
         # (LIVE_INFERENCE_INPUTS_MISSING:DAY0_ORACLE_ANOMALY_PAUSED:...).
-        from src.data.day0_oracle_anomaly import is_day0_family_paused
-
-        if is_day0_family_paused(str(family.city), str(family.target_date)):
-            raise ValueError(
-                f"DAY0_ORACLE_ANOMALY_PAUSED:{family.city}:{family.target_date}"
-            )
         generated = _canonical_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -27682,6 +27829,63 @@ _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
         _REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL,
     }
 )
+
+
+def _assert_provisional_day0_replacement_bundle(
+    replacement_bundle: object,
+    payload: Mapping[str, object],
+) -> None:
+    """Bind a provisional Day0 event to the posterior that observed that fact."""
+
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    provisional = (
+        provenance.get("day0_provisional_observation")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if not isinstance(provisional, Mapping):
+        raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING")
+
+    expected_source = str(
+        payload.get("settlement_source")
+        or payload.get("observation_source")
+        or payload.get("source")
+        or ""
+    ).strip()
+    expected_time = str(payload.get("observation_time") or "").strip()
+    metric = str(
+        payload.get("metric") or payload.get("temperature_metric") or ""
+    ).strip().lower()
+    raw_value = payload.get("high_so_far" if metric == "high" else "low_so_far")
+    if raw_value in (None, ""):
+        raw_value = payload.get("raw_value")
+    if raw_value in (None, ""):
+        raw_value = payload.get("observed_extreme_native")
+    try:
+        expected_value_c = float(raw_value)
+        observed_value_c = float(provisional["observed_extreme_c"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING"
+        ) from None
+    if str(payload.get("settlement_unit") or "C").strip().upper() == "F":
+        expected_value_c = (expected_value_c - 32.0) * 5.0 / 9.0
+    if (
+        provisional.get("active") is not True
+        or bool(provisional.get("support_truncation"))
+        or not expected_source
+        or not expected_time
+        or str(provisional.get("source") or "").strip() != expected_source
+        or str(provisional.get("observation_time") or "").strip()
+        != expected_time
+        or not math.isclose(
+            observed_value_c,
+            expected_value_c,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    ):
+        raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH")
 
 
 def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bool, str]:
@@ -29205,6 +29409,7 @@ def _prepare_current_global_probability_family(
     required_condition_id: str | None = None,
     allow_partial_deterministic: bool | None = None,
     allow_unobserved_day0_replacement: bool = False,
+    allow_provisional_day0_replacement: bool = False,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -29241,6 +29446,8 @@ def _prepare_current_global_probability_family(
         raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
     if not isinstance(allow_unobserved_day0_replacement, bool):
         raise ValueError("GLOBAL_UNOBSERVED_DAY0_REPLACEMENT_POLICY_INVALID")
+    if not isinstance(allow_provisional_day0_replacement, bool):
+        raise ValueError("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
     rows = _event_family_market_topology_rows(topology_conn, payload)
@@ -29274,6 +29481,8 @@ def _prepare_current_global_probability_family(
     day0_observation_conn = observation_conn or forecast_conn
     day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
+    provisional_day0_observation = False
+    provisional_day0_fact: Mapping[str, object] | None = None
     final_daily_observation = None
     source_available_at = ""
     bundle = None
@@ -29295,6 +29504,57 @@ def _prepare_current_global_probability_family(
             conn=forecast_conn,
         )
         if final_daily_observation is None:
+            from src.data.replacement_forecast_current_target_plan import (
+                _latest_authorized_day0_fact,
+            )
+            from src.events.day0_authority import (
+                DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
+                day0_evidence_finality,
+            )
+
+            day0_fact_columns = {
+                str(column[1])
+                for column in day0_observation_conn.execute(
+                    "PRAGMA table_info(observation_instants)"
+                ).fetchall()
+            }
+            day0_fact_required = {
+                "running_min" if str(family.metric) == "low" else "running_max",
+                "utc_timestamp",
+                "local_timestamp",
+                "source",
+                "causality_status",
+                "authority",
+                "source_role",
+                "training_allowed",
+            }
+            if day0_fact_required <= day0_fact_columns:
+                provisional_day0_fact = _latest_authorized_day0_fact(
+                    day0_observation_conn,
+                    city=str(family.city),
+                    target_date=str(family.target_date),
+                    temperature_metric=str(family.metric),
+                    decision_time=decision_time,
+                    require_settlement_channel=True,
+                )
+            provisional_day0_observation = bool(
+                provisional_day0_fact is not None
+                and day0_evidence_finality(
+                    {
+                        "settlement_source": provisional_day0_fact.get(
+                            "observation_source"
+                        )
+                    }
+                )
+                == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+            )
+            if (
+                provisional_day0_observation
+                and not allow_provisional_day0_replacement
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
+                )
             if local_target < local_now.date():
                 raise ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
             observation_table = day0_observation_conn.execute(
@@ -29333,7 +29593,7 @@ def _prepare_current_global_probability_family(
                     )
                 )
         local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
-        if use_unobserved_day0_replacement:
+        if use_unobserved_day0_replacement or provisional_day0_observation:
             readiness = _latest_replacement_readiness(
                 forecast_conn,
                 city=family.city,
@@ -29372,6 +29632,23 @@ def _prepare_current_global_probability_family(
                 raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
             source_cycle_raw = bundle.source_cycle_time
             source_available_at = str(bundle.source_available_at or "").strip()
+            day0_base_identity = posterior_identity_hash
+            if provisional_day0_observation:
+                _assert_provisional_day0_replacement_bundle(
+                    bundle,
+                    {
+                        "settlement_source": (provisional_day0_fact or {}).get(
+                            "observation_source"
+                        ),
+                        "observation_time": (provisional_day0_fact or {}).get(
+                            "observation_time"
+                        ),
+                        "observed_extreme_native": (
+                            provisional_day0_fact or {}
+                        ).get("observed_extreme_native"),
+                        "settlement_unit": getattr(city, "settlement_unit", "C"),
+                    },
+                )
         elif final_daily_observation is not None:
             source_cycle_raw = final_daily_observation.fetched_at.isoformat()
             source_available_at = source_cycle_raw
@@ -29504,9 +29781,22 @@ def _prepare_current_global_probability_family(
                 conditioning=None,
                 observation_conn=day0_observation_conn,
                 decision_time=decision_time,
-                posterior_id=None,
+                posterior_id=(
+                    bundle.posterior_id
+                    if provisional_day0_observation and bundle is not None
+                    else None
+                ),
                 probability_base_identity=day0_base_identity,
             )
+            if provisional_day0_observation:
+                if bundle is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
+                    )
+                _assert_provisional_day0_replacement_bundle(
+                    bundle,
+                    current_day0_payload,
+                )
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
@@ -29547,6 +29837,25 @@ def _prepare_current_global_probability_family(
         )
         probability_authority = (
             "final_daily_observation_exact_global_probability_v1"
+        )
+    elif current_day0_payload is not None and provisional_day0_observation:
+        if bundle is None:
+            raise ValueError("GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING")
+        components = _replacement_global_probability_components(
+            bundle,
+            candidates=family.candidates,
+            bindings=bindings,
+        )
+        probability_authority = (
+            "replacement_provisional_day0_global_probability_v1"
+        )
+        payload.update(
+            {
+                "probability_authority": probability_authority,
+                "q_source": "replacement_0_1",
+                "_edli_q_source": "replacement_0_1",
+                "_edli_day0_q_mode": "provisional_current_snapshot_replacement",
+            }
         )
     elif current_day0_payload is not None:
         components = _day0_absorbing_exact_probability_components(
@@ -29768,7 +30077,11 @@ def _prepare_current_global_probability_family(
     candidate_payoff_q_lcb_caps: tuple[
         tuple[str, str, str, str, float], ...
     ] = ()
-    if current_day0_payload is not None and final_daily_observation is None:
+    if (
+        current_day0_payload is not None
+        and final_daily_observation is None
+        and not provisional_day0_observation
+    ):
         candidate_payoff_q_lcb_caps = (
             _day0_global_candidate_payoff_q_lcb_caps(
                 payload=payload,
@@ -29834,14 +30147,15 @@ def _prepare_current_global_probability_family(
             ),
         }
         source_truth_identity = stable_hash(source_truth)
-        posterior_identity_hash = stable_hash(
-            {
-                "probability_authority": probability_authority,
-                "source_truth_identity": source_truth_identity,
-                "sample_matrix_identity": sample_identity,
-                "point_q": [float(value) for value in point_q],
-            }
-        )
+        if not provisional_day0_observation:
+            posterior_identity_hash = stable_hash(
+                {
+                    "probability_authority": probability_authority,
+                    "source_truth_identity": source_truth_identity,
+                    "sample_matrix_identity": sample_identity,
+                    "point_q": [float(value) for value in point_q],
+                }
+            )
     else:
         source_truth = {
             "dependency_hash": dependency_hash,
@@ -29980,7 +30294,11 @@ def current_global_probability_authority(
         != weather_family_id(city=city, target_date=target_date, metric=metric)
     ):
         return None
-    if event.event_type == "DAY0_EXTREME_UPDATED":
+    if (
+        getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED"
+        and str(getattr(witness, "band_basis", ""))
+        != _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+    ):
         # The actuation path has already rebuilt this complete Day0 witness from
         # current observation truth + current remaining-hour vectors in
         # _current_global_actuation_prepared_family and compared every content
@@ -30166,6 +30484,17 @@ def _replacement_authority_probability_and_fdr_proof(
     if not bundle_result.ok or bundle_result.bundle is None:
         raise ValueError(f"REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED:{bundle_result.reason_code}")
     replacement_bundle = bundle_result.bundle
+    if event.event_type == "DAY0_EXTREME_UPDATED":
+        from src.events.day0_authority import (
+            DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
+            day0_evidence_finality,
+        )
+
+        if day0_evidence_finality(payload) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT:
+            _assert_provisional_day0_replacement_bundle(
+                replacement_bundle,
+                payload,
+            )
     posterior_identity_row = conn.execute(
         "SELECT posterior_identity_hash FROM forecast_posteriors WHERE posterior_id = ?",
         (replacement_bundle.posterior_id,),

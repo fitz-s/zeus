@@ -45,6 +45,17 @@ DAY0_ACTIONABLE_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
 FORECAST_ACTIONABLE_EVENT_TYPES = frozenset(
     {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}
 )
+
+
+def _uses_replacement_probability_authority(payload: Mapping[str, object]) -> bool:
+    return (
+        str(payload.get("probability_authority") or "").strip()
+        == "replacement_0_1"
+        and str(
+            payload.get("_edli_q_source") or payload.get("q_source") or ""
+        ).strip()
+        == "replacement_0_1"
+    )
 # mx2t3 carrier-decouple (GATE-1 C): the members_json_source value a posterior-provenance
 # FORECAST_AUTHORITY carries when belief is sourced from the multi-model raw_model_forecasts
 # fusion (via forecast_posteriors) instead of the cold ensemble_snapshots daily extrema. A cert
@@ -214,17 +225,62 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
     event_type = cert.payload.get("event_type")
     if event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
         source_required = {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
-    elif event_type == DAY0_ACTIONABLE_EVENT_TYPE:
+    elif event_type == DAY0_ACTIONABLE_EVENT_TYPE and not (
+        _uses_replacement_probability_authority(cert.payload)
+    ):
         source_required = {claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY}
+    elif event_type == DAY0_ACTIONABLE_EVENT_TYPE:
+        source_required = {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
     else:
         raise CertificateVerificationError(f"unsupported actionable event_type: {event_type!r}")
     missing_source = source_required - parent_types
     if missing_source:
         raise CertificateVerificationError(f"actionable trade missing source parents: {sorted(missing_source)}")
-    if event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
+    if event_type in FORECAST_ACTIONABLE_EVENT_TYPES or (
+        event_type == DAY0_ACTIONABLE_EVENT_TYPE
+        and _uses_replacement_probability_authority(cert.payload)
+    ):
         _verify_actionable_live_calibration(parent_tuple)
+    _verify_replacement_day0_posterior_parent_identity(cert, parent_tuple)
     _forbid_public_market_channel_fill(parent_tuple)
     _verify_actionable_parent_consistency(cert, parent_tuple)
+
+
+def _verify_replacement_day0_posterior_parent_identity(
+    cert: DecisionCertificate,
+    parent_tuple: tuple[DecisionCertificate, ...],
+) -> None:
+    payload = cert.payload
+    if not (
+        str(payload.get("event_type") or "") == DAY0_ACTIONABLE_EVENT_TYPE
+        and _uses_replacement_probability_authority(payload)
+    ):
+        return
+    block = payload.get("day0_probability_authority")
+    if not isinstance(block, dict):
+        raise CertificateVerificationError(
+            "replacement day0 probability authority missing"
+        )
+    observation = block.get("global_current_observation_payload")
+    binding = (
+        observation.get("_edli_global_day0_binding")
+        if isinstance(observation, dict)
+        else None
+    )
+    parent = _parents_by_type(parent_tuple).get(claims.FORECAST_AUTHORITY)
+    expected = str(
+        parent.payload.get("posterior_identity_hash") if parent is not None else ""
+    ).strip()
+    block_identity = str(block.get("probability_base_identity") or "").strip()
+    bound_identity = str(
+        binding.get("probability_base_identity")
+        if isinstance(binding, dict)
+        else ""
+    ).strip()
+    if not expected or block_identity != expected or bound_identity != expected:
+        raise CertificateVerificationError(
+            "replacement day0 posterior identity does not match forecast parent"
+        )
 
 
 def _verify_actionable_live_calibration(parent_tuple: tuple[DecisionCertificate, ...]) -> None:
@@ -474,7 +530,8 @@ def _verify_actionable_probability_authority(
 ) -> None:
     event_type = str(payload.get("event_type") or "").strip()
     if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
-        _verify_day0_observation_payload_authority(payload, label="actionable")
+        if not _uses_replacement_probability_authority(payload):
+            _verify_day0_observation_payload_authority(payload, label="actionable")
         _verify_day0_probability_payload_authority(
             payload,
             q_live=q_live,
@@ -1163,7 +1220,8 @@ def _verify_pre_submit_probability_authority(
 ) -> None:
     event_type = str(pre_submit.get("event_type") or "").strip()
     if event_type == DAY0_ACTIONABLE_EVENT_TYPE:
-        _verify_day0_observation_payload_authority(pre_submit, label="pre-submit")
+        if not _uses_replacement_probability_authority(pre_submit):
+            _verify_day0_observation_payload_authority(pre_submit, label="pre-submit")
         _verify_day0_probability_payload_authority(
             pre_submit,
             q_live=q_live,
@@ -2080,7 +2138,10 @@ def _verify_pre_submit_qkernel_economics(
     if explicit_non_direct:
         return
     _verify_qkernel_selection_guard(economics, label="pre-submit qkernel")
-    if str(pre_submit.get("event_type") or "").strip() == DAY0_ACTIONABLE_EVENT_TYPE:
+    if (
+        str(pre_submit.get("event_type") or "").strip()
+        == DAY0_ACTIONABLE_EVENT_TYPE
+    ):
         try:
             assert_live_day0_qkernel_guard_authority(
                 economics,

@@ -4424,12 +4424,16 @@ def _materialize_current_global_day0_probability(
         snapshot.probability_authority
         == "replacement_unobserved_day0_prefix_global_probability_v1"
     )
+    is_provisional_observation_replacement = (
+        snapshot.probability_authority
+        == "replacement_provisional_day0_global_probability_v1"
+    )
     if is_final_daily:
         selected_method = SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
         probability_authority = (
             "final_daily_observation_exact_global_probability_v1"
         )
-    elif is_unobserved_prefix_replacement:
+    elif is_unobserved_prefix_replacement or is_provisional_observation_replacement:
         selected_method = "replacement_posterior"
         probability_authority = snapshot.probability_authority
     else:
@@ -4455,6 +4459,12 @@ def _materialize_current_global_day0_probability(
         _append_monitor_validation(
             refreshed,
             "day0_unobserved_prefix_within_start_grace:"
+            "replacement_global_probability_authority",
+        )
+    elif is_provisional_observation_replacement:
+        _append_monitor_validation(
+            refreshed,
+            "day0_provisional_observation_probability_only:"
             "replacement_global_probability_authority",
         )
     else:
@@ -4486,7 +4496,11 @@ def _materialize_current_global_day0_probability(
             },
             "observation": dict(observation) if isinstance(observation, dict) else {},
             "remaining_window": None
-            if is_final_daily or is_unobserved_prefix_replacement
+            if (
+                is_final_daily
+                or is_unobserved_prefix_replacement
+                or is_provisional_observation_replacement
+            )
             else {
                 "source": "current_global_probability_builder",
                 "finite_evidence_member_count": snapshot.day0_payload.get(
@@ -4585,6 +4599,7 @@ def _build_current_global_day0_family_snapshot(
                 cache_metadata_out=cache_metadata,
                 required_condition_id=condition_id,
                 allow_unobserved_day0_replacement=unobserved_prefix,
+                allow_provisional_day0_replacement=True,
             )
         except ValueError as exc:
             if (
@@ -4667,10 +4682,13 @@ def _build_current_global_day0_family_snapshot(
         deterministic_condition_ids=deterministic_condition_ids,
         day0_payload=day0_payload,
         metric=metric,
-        probability_authority=(
-            "replacement_unobserved_day0_prefix_global_probability_v1"
-            if unobserved_prefix
-            else "day0_remaining_day_global_probability_v1"
+        probability_authority=str(
+            day0_payload.get("probability_authority")
+            or (
+                "replacement_unobserved_day0_prefix_global_probability_v1"
+                if unobserved_prefix
+                else "day0_remaining_day_global_probability_v1"
+            )
         ),
     )
 

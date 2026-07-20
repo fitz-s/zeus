@@ -1,5 +1,5 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-07-19
 # Authority basis: Operator 2026-06-07 live cutover directive: replacement 0.1
 #   posterior is the live forecast authority; NO probabilities must not be
 #   inferred from YES complements.
@@ -18,6 +18,7 @@ from src.calibration.qlcb_provenance import _qlcb_float
 from src.contracts.execution_price import ExecutionPrice
 from src.engine import event_reactor_adapter as adapter
 from src.events.candidate_binding import weather_family_id
+from src.events.opportunity_event import make_opportunity_event
 from src.solve.solver import (
     JointOutcomeProbabilityWitness,
     OutcomeTokenBinding,
@@ -382,6 +383,51 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
     assert current is not None
     assert current.posterior_identity_hash == posterior_identity
 
+    # A provisional Day0 replacement witness has the ordinary current
+    # settlement-simplex basis. It must re-read the canonical posterior here,
+    # not take the hard-fact Day0 age-only shortcut.
+    day0_basis = adapter._GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+    day0_identity = joint_probability_witness_identity(
+        family_key=family_key,
+        bindings=bindings,
+        q_version="q-current",
+        resolution_identity="resolution-current",
+        topology_identity="topology-current",
+        posterior_identity_hash=posterior_identity,
+        source_truth_identity="source-current",
+        authority_certificate_hash="certificate-current",
+        band_alpha=0.05,
+        band_basis=day0_basis,
+        yes_q_samples=samples,
+        captured_at_utc=decision_time,
+    )
+    day0_witness = JointOutcomeProbabilityWitness(
+        family_key=family_key,
+        bindings=bindings,
+        yes_q_samples=samples,
+        q_version="q-current",
+        resolution_identity="resolution-current",
+        topology_identity="topology-current",
+        posterior_identity_hash=posterior_identity,
+        source_truth_identity="source-current",
+        authority_certificate_hash="certificate-current",
+        band_alpha=0.05,
+        band_basis=day0_basis,
+        captured_at_utc=decision_time,
+        max_age=timedelta(seconds=30),
+        witness_identity=day0_identity,
+    )
+    day0_event = SimpleNamespace(
+        event_type="DAY0_EXTREME_UPDATED",
+        payload_json=event.payload_json,
+    )
+    assert adapter.current_global_probability_authority(
+        conn,
+        day0_event,
+        day0_witness,
+        decision_time=decision_time,
+    ) is not None
+
     conn.execute(
         "UPDATE forecast_posteriors SET posterior_identity_hash = ? WHERE posterior_id = ?",
         ("posterior-superseded", 123),
@@ -392,7 +438,204 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
         witness,
         decision_time=decision_time,
     ) is None
+    assert adapter.current_global_probability_authority(
+        conn,
+        day0_event,
+        day0_witness,
+        decision_time=decision_time,
+    ) is None
     conn.close()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
+        "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
+        "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
+        "GLOBAL_DAY0_SOURCE_CYCLE_INVALID",
+    ),
+)
+def test_current_probability_failure_is_family_local(reason: str) -> None:
+    assert adapter._is_global_probability_family_unavailable(
+        ValueError(reason)
+    ) is True
+
+
+def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_forecast_current_target_plan as target_plan
+    from src.engine import replacement_forecast_hook_factory as hook_factory
+    from src.execution import day0_hard_fact_exit
+
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        "CREATE TABLE market_events ("
+        "city TEXT, target_date TEXT, temperature_metric TEXT, "
+        "condition_id TEXT, token_id TEXT, market_slug TEXT, "
+        "range_label TEXT, range_low REAL, range_high REAL)"
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "Hong Kong",
+                "2026-06-09",
+                "high",
+                "cond-27",
+                "yes-27",
+                "test-27",
+                "27C or below",
+                None,
+                27.0,
+            ),
+            (
+                "Hong Kong",
+                "2026-06-09",
+                "high",
+                "cond-28",
+                "yes-28",
+                "test-28",
+                "28C or above",
+                28.0,
+                None,
+            ),
+        ),
+    )
+    observations = sqlite3.connect(":memory:")
+    observations.execute(
+        "CREATE TABLE observation_instants ("
+        "city TEXT, target_date TEXT, running_max REAL, utc_timestamp TEXT, "
+        "local_timestamp TEXT, source TEXT, causality_status TEXT, "
+        "authority TEXT, source_role TEXT, training_allowed INTEGER)"
+    )
+    observations.execute(
+        "INSERT INTO observation_instants VALUES "
+        "('Hong Kong','2026-06-09',27.0,'2026-06-09T10:00:00+00:00',"
+        "'2026-06-09T10:00:00+00:00','hko_hourly_accumulator','CAUSAL',"
+        "'VERIFIED','settlement_channel',0)"
+    )
+
+    fact_a = {
+        "observation_source": "hko_hourly_accumulator",
+        "observation_time": "2026-06-09T10:00:00+00:00",
+        "observed_extreme_native": 27.0,
+    }
+    returned_b = {
+        "settlement_source": "hko_hourly_accumulator",
+        "observation_time": "2026-06-09T10:01:00+00:00",
+        "observed_extreme_native": 28.0,
+        "settlement_unit": "C",
+    }
+    bundle = SimpleNamespace(
+        posterior_id=123,
+        posterior_identity_hash="posterior-a",
+        dependency_hash="dependency-a",
+        posterior_config_hash="config-a",
+        source_cycle_time="2026-06-09T00:00:00+00:00",
+        source_available_at="2026-06-09T06:00:00+00:00",
+        provenance_json={
+            "day0_provisional_observation": {
+                "active": True,
+                "support_truncation": False,
+                "source": fact_a["observation_source"],
+                "observation_time": fact_a["observation_time"],
+                "observed_extreme_c": fact_a["observed_extreme_native"],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        adapter,
+        "runtime_cities_by_name",
+        lambda: {
+            "Hong Kong": SimpleNamespace(
+                timezone="UTC",
+                settlement_unit="C",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_final_daily_observation_extreme",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: fact_a,
+    )
+    monkeypatch.setattr(
+        hook_factory,
+        "_latest_replacement_readiness",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        reader,
+        "read_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            bundle=bundle,
+            reason_code="READY",
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_global_day0_execution_payload",
+        lambda *_args, **_kwargs: returned_b,
+    )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Hong Kong|2026-06-09|high",
+        source="test",
+        observed_at=fact_a["observation_time"],
+        available_at=fact_a["observation_time"],
+        received_at=fact_a["observation_time"],
+        payload={
+            "city": "Hong Kong",
+            "target_date": "2026-06-09",
+            "metric": "high",
+            "unit": "C",
+            "settlement_source": "hko_hourly_accumulator",
+            "settlement_unit": "C",
+            "observation_time": fact_a["observation_time"],
+            "raw_value": 27.0,
+            "rounded_value": 27,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        },
+        causal_snapshot_id="day0-a",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+    ):
+        adapter._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=datetime(
+                2026,
+                6,
+                9,
+                12,
+                tzinfo=timezone.utc,
+            ),
+            max_age=timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+        )
+    forecast.close()
+    observations.close()
 
 
 def test_replacement_yes_lcb_ignores_aifs_provenance_fallback() -> None:

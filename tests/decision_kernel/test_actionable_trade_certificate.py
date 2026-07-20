@@ -746,6 +746,7 @@ def _replacement_global_day0_probability_authority(
         "settlement_unit": "F",
         "_edli_global_day0_binding": {
             "posterior_id": posterior_id,
+            "probability_base_identity": "1" * 64,
             "city": "Chicago",
             "target_date": "2026-05-25",
             "metric": "high",
@@ -760,9 +761,12 @@ def _replacement_global_day0_probability_authority(
         },
     }
     return {
-        "probability_authority": "replacement_current_global_probability_v1",
+        "probability_authority": (
+            "replacement_provisional_day0_global_probability_v1"
+        ),
         "q_source": "replacement_0_1",
         "posterior_id": posterior_id,
+        "probability_base_identity": "1" * 64,
         "global_current_observation_payload": observation_payload,
     }
 
@@ -876,14 +880,16 @@ def _replacement_day0_actionable_fixture(direction: str):
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_actionable_accepts_current_replacement_day0_symmetrically(direction):
-    action_payload, parent_overrides, extra_parents = (
+def test_actionable_accepts_provisional_replacement_day0_without_hard_fact_parents(
+    direction,
+):
+    action_payload, parent_overrides, _extra_parents = (
         _replacement_day0_actionable_fixture(direction)
     )
     parents, action = actionable_graph(
         action_payload=action_payload,
         parent_overrides=parent_overrides,
-        extra_parent_payloads=extra_parents,
+        extra_parent_payloads={},
     )
 
     verify_actionable_trade(action, parents)
@@ -907,6 +913,31 @@ def test_actionable_rejects_replacement_day0_posterior_binding_mismatch():
     )
 
     with pytest.raises(CertificateVerificationError, match="posterior_id mismatch"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_replacement_day0_posterior_identity_parent_mismatch():
+    action_payload, parent_overrides, _extra_parents = (
+        _replacement_day0_actionable_fixture("buy_yes")
+    )
+    authority = dict(action_payload["day0_probability_authority"])
+    authority["probability_base_identity"] = "forged-not-current-posterior-hash"
+    observation = dict(authority["global_current_observation_payload"])
+    binding = dict(observation["_edli_global_day0_binding"])
+    binding["probability_base_identity"] = "forged-not-current-posterior-hash"
+    observation["_edli_global_day0_binding"] = binding
+    authority["global_current_observation_payload"] = observation
+    action_payload["day0_probability_authority"] = authority
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads={},
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="posterior identity",
+    ):
         verify_actionable_trade(action, parents)
 
 
