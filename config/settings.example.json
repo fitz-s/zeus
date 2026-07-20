@@ -199,6 +199,8 @@
   },
   "execution": {
     "order_type": "limit_only",
+    "absolute_live_unit_price_min": 0.05,
+    "absolute_live_unit_price_max": 0.95,
     "limit_offset_pct": 0.02,
     "fill_timeout_seconds": 600,
     "cancel_if_not_filled": true

@@ -133,6 +133,23 @@ def test_red_emits_cancel_command_within_same_cycle():
     ]
 
 
+def test_red_cancel_preserves_tail_order_cancellability():
+    conn = _conn()
+    position = _position(last_monitor_best_bid=0.99)
+
+    summary = _execute_force_exit_sweep(
+        PortfolioState(positions=[position]),
+        conn=conn,
+        now=NOW,
+    )
+
+    assert summary["cancel_commands_inserted"] == 1
+    assert summary["cancel_command_errors"] == 0
+    row = _red_command(conn)
+    assert row["intent_kind"] == "CANCEL"
+    assert row["price"] == 0.99
+
+
 def test_red_emit_grammar_bound_to_cancel_or_derisk_only():
     conn = _conn()
     _execute_force_exit_sweep(PortfolioState(positions=[_position()]), conn=conn, now=NOW)

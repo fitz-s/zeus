@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -20,6 +21,72 @@ from src.state.fact_revocation import (
     DECISION_CERTIFICATES_TABLE,
     REASON_INVALID_LIVE_ACTIONABLE,
 )
+
+
+def _absolute_price_band_cfg(
+    *, minimum: float = 0.05, maximum: float = 0.95
+) -> dict[str, object]:
+    return {
+        "execution": {
+            "absolute_live_unit_price_min": minimum,
+            "absolute_live_unit_price_max": maximum,
+        }
+    }
+
+
+def test_absolute_live_unit_price_band_restart_check_passes_current_contract():
+    result = preflight._absolute_live_unit_price_band_check(_absolute_price_band_cfg())
+
+    assert result.ok is True
+    assert result.restart_blocking is True
+    assert result.evidence["failures"] == []
+
+
+def test_absolute_live_unit_price_band_restart_check_blocks_config_drift():
+    result = preflight._absolute_live_unit_price_band_check(
+        _absolute_price_band_cfg(maximum=0.99)
+    )
+
+    assert result.ok is False
+    assert "operator law" in result.detail
+
+
+def test_absolute_live_unit_price_band_restart_check_blocks_guard_removal(monkeypatch):
+    from src.venue import polymarket_v2_adapter
+
+    monkeypatch.setattr(
+        polymarket_v2_adapter,
+        "_assert_absolute_live_price_before_sdk",
+        lambda price: Decimal(str(price)),
+    )
+
+    result = preflight._absolute_live_unit_price_band_check(_absolute_price_band_cfg())
+
+    assert result.ok is False
+    assert any(
+        "sdk_boundary accepted forbidden price" in failure
+        for failure in result.evidence["failures"]
+    )
+
+
+def test_absolute_live_unit_price_band_restart_check_blocks_envelope_wiring_removal(
+    monkeypatch,
+):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    monkeypatch.setattr(
+        VenueSubmissionEnvelope,
+        "assert_live_submit_bound",
+        lambda self: self.assert_live_market_bound(),
+    )
+
+    result = preflight._absolute_live_unit_price_band_check(_absolute_price_band_cfg())
+
+    assert result.ok is False
+    assert any(
+        "envelope_method accepted forbidden price" in failure
+        for failure in result.evidence["failures"]
+    )
 
 
 def _qlcb_meta() -> dict[str, object]:
@@ -584,6 +651,10 @@ def _patch_paths(monkeypatch, tmp_path):
                     "live_execution_mode": "edli_live",
                     "reactor_mode": "live",
                     "real_order_submit_enabled": True,
+                },
+                "execution": {
+                    "absolute_live_unit_price_min": 0.05,
+                    "absolute_live_unit_price_max": 0.95,
                 },
                 "feature_flags": {"qkernel_spine_enabled": True},
             }
@@ -4678,6 +4749,10 @@ def test_preflight_blocks_qkernel_cutover_flag_off(monkeypatch, tmp_path):
         json.dumps(
             {
                 "edli": {"real_order_submit_enabled": True},
+                "execution": {
+                    "absolute_live_unit_price_min": 0.05,
+                    "absolute_live_unit_price_max": 0.95,
+                },
                 "feature_flags": {"qkernel_spine_enabled": False},
             }
         )
@@ -8055,6 +8130,10 @@ def _write_settings_with_edli(settings_path, *, real_order_submit_enabled, react
                     "reactor_mode": reactor_mode,
                     "live_execution_mode": live_execution_mode,
                 },
+                "execution": {
+                    "absolute_live_unit_price_min": 0.05,
+                    "absolute_live_unit_price_max": 0.95,
+                },
                 "feature_flags": {"qkernel_spine_enabled": True},
             }
         )
@@ -8161,6 +8240,10 @@ def test_preflight_blocks_missing_live_execution_mode_instead_of_legacy_default(
                 "edli": {
                     "real_order_submit_enabled": True,
                     "reactor_mode": "live",
+                },
+                "execution": {
+                    "absolute_live_unit_price_min": 0.05,
+                    "absolute_live_unit_price_max": 0.95,
                 },
                 "feature_flags": {"qkernel_spine_enabled": True},
             }

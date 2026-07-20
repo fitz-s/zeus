@@ -923,6 +923,31 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
         return False, f"live restart preflight could not run: {exc}"
     output = (res.stdout or res.stderr or "").strip()
     if res.returncode == 0:
+        try:
+            payload = json.loads(output)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            return False, f"live restart preflight returned invalid JSON: {exc}"
+        if not isinstance(payload, dict) or not isinstance(payload.get("checks"), list):
+            return False, "live restart preflight returned invalid attestation shape"
+        price_band = next(
+            (
+                check
+                for check in payload["checks"]
+                if isinstance(check, dict)
+                if check.get("name") == "absolute_live_unit_price_band"
+            ),
+            None,
+        )
+        if not isinstance(price_band, dict):
+            return False, (
+                "live restart preflight omitted required "
+                "absolute_live_unit_price_band attestation"
+            )
+        if price_band.get("ok") is not True or price_band.get("restart_blocking") is not True:
+            return False, (
+                "live restart preflight absolute_live_unit_price_band attestation "
+                f"is not restart-blocking PASS: {price_band}"
+            )
         return True, "live restart preflight passed"
     tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
     return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"

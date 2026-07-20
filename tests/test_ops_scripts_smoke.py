@@ -2002,6 +2002,84 @@ def test_deploy_live_trading_restart_requires_preflight(monkeypatch, tmp_path):
     assert calls
 
 
+def test_deploy_live_trading_restart_requires_price_band_attestation(monkeypatch, tmp_path):
+    dl = _load("deploy_live_price_band_attestation_missing", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            '{"ok": true, "checks": []}',
+            "",
+        )
+
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._run_restart_preflight_if_needed(["com.zeus.live-trading"])
+
+    assert ok is False
+    assert "omitted required absolute_live_unit_price_band" in detail
+
+
+@pytest.mark.parametrize("payload", ("[]", '{"ok": true, "checks": {}}'))
+def test_deploy_live_trading_restart_rejects_malformed_attestation_shape(
+    monkeypatch, tmp_path, payload
+):
+    dl = _load("deploy_live_price_band_attestation_malformed", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        return subprocess.CompletedProcess(cmd, 0, payload, "")
+
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._run_restart_preflight_if_needed(["com.zeus.live-trading"])
+
+    assert ok is False
+    assert detail == "live restart preflight returned invalid attestation shape"
+
+
+def test_deploy_live_trading_restart_accepts_price_band_attestation(monkeypatch, tmp_path):
+    dl = _load("deploy_live_price_band_attestation_present", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps(
+                {
+                    "ok": True,
+                    "checks": [
+                        {
+                            "name": "absolute_live_unit_price_band",
+                            "ok": True,
+                            "restart_blocking": True,
+                        }
+                    ],
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._run_restart_preflight_if_needed(["com.zeus.live-trading"])
+
+    assert ok is True
+    assert detail == "live restart preflight passed"
+
+
 def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     dl = _load("deploy_live_restart_recovery", "deploy_live.py")
     dl.LIVE_REPO = str(tmp_path)

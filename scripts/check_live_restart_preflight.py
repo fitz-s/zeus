@@ -26,6 +26,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -6381,6 +6382,135 @@ def _failed_check_groups(
     return blockers, entry_blockers
 
 
+def _absolute_live_unit_price_band_check(cfg: dict[str, Any]) -> CheckResult:
+    """Refuse restart if any independent live-order price guard has regressed."""
+
+    expected_min = Decimal("0.05")
+    expected_max = Decimal("0.95")
+    evidence: dict[str, Any] = {
+        "required_min": str(expected_min),
+        "required_max": str(expected_max),
+        "accepted_boundaries": [str(expected_min), str(expected_max)],
+        "rejected_samples": ["0.049", "0.951", "0.999"],
+    }
+    execution_cfg = cfg.get("execution") or {}
+    try:
+        configured_min = Decimal(str(execution_cfg["absolute_live_unit_price_min"]))
+        configured_max = Decimal(str(execution_cfg["absolute_live_unit_price_max"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        evidence["config_error"] = str(exc)
+        return CheckResult(
+            "absolute_live_unit_price_band",
+            False,
+            "absolute live unit-price config is missing or invalid",
+            evidence,
+        )
+    evidence["configured_min"] = str(configured_min)
+    evidence["configured_max"] = str(configured_max)
+    if (configured_min, configured_max) != (expected_min, expected_max):
+        return CheckResult(
+            "absolute_live_unit_price_band",
+            False,
+            "absolute live unit-price config does not match operator law",
+            evidence,
+        )
+
+    try:
+        from src.contracts.venue_submission_envelope import (
+            VenueSubmissionEnvelope,
+            assert_live_order_unit_price,
+        )
+        from src.state.venue_command_repo import (
+            _assert_persistable_live_unit_price,
+        )
+        from src.venue.polymarket_v2_adapter import (
+            _assert_absolute_live_price_before_sdk,
+        )
+    except Exception as exc:  # noqa: BLE001 - a missing guard must block restart.
+        evidence["import_error"] = str(exc)
+        return CheckResult(
+            "absolute_live_unit_price_band",
+            False,
+            "one or more required live unit-price guards are unavailable",
+            evidence,
+        )
+
+    envelope = VenueSubmissionEnvelope(
+        sdk_package="restart-preflight",
+        sdk_version="restart-preflight",
+        host="https://clob.polymarket.com",
+        chain_id=137,
+        funder_address="0x" + "1" * 40,
+        condition_id="restart-preflight-condition",
+        question_id="restart-preflight-question",
+        yes_token_id="restart-preflight-yes",
+        no_token_id="restart-preflight-no",
+        selected_outcome_token_id="restart-preflight-yes",
+        outcome_label="YES",
+        side="BUY",
+        price=expected_min,
+        size=Decimal("1"),
+        order_type="GTC",
+        post_only=False,
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        neg_risk=False,
+        fee_details={},
+        canonical_pre_sign_payload_hash="0" * 64,
+        signed_order=None,
+        signed_order_hash=None,
+        raw_request_hash="0" * 64,
+        raw_response_json=None,
+        order_id=None,
+        trade_ids=(),
+        transaction_hashes=(),
+        error_code=None,
+        error_message=None,
+        captured_at="1970-01-01T00:00:00+00:00",
+    )
+
+    def _assert_envelope_method(price: Decimal) -> Decimal:
+        candidate = envelope.with_updates(price=price)
+        candidate.assert_live_submit_bound()
+        return candidate.price
+
+    guards = {
+        "envelope_helper": assert_live_order_unit_price,
+        "envelope_method": _assert_envelope_method,
+        "persistence": _assert_persistable_live_unit_price,
+        "sdk_boundary": _assert_absolute_live_price_before_sdk,
+    }
+    failures: list[str] = []
+    for name, guard in guards.items():
+        for boundary in (expected_min, expected_max):
+            try:
+                observed = Decimal(str(guard(boundary)))
+            except Exception as exc:  # noqa: BLE001 - restart admission is fail-closed.
+                failures.append(f"{name} rejected boundary {boundary}: {exc}")
+                continue
+            if observed != boundary:
+                failures.append(f"{name} rewrote boundary {boundary} to {observed}")
+        for rejected in (Decimal("0.049"), Decimal("0.951"), Decimal("0.999")):
+            try:
+                guard(rejected)
+            except ValueError:
+                continue
+            except Exception as exc:  # noqa: BLE001 - wrong exception is still fail-closed.
+                failures.append(f"{name} raised {type(exc).__name__} for {rejected}: {exc}")
+            else:
+                failures.append(f"{name} accepted forbidden price {rejected}")
+    evidence["guards"] = sorted(guards)
+    evidence["failures"] = failures
+    return CheckResult(
+        "absolute_live_unit_price_band",
+        not failures,
+        "all independent live unit-price guards enforce inclusive [0.05, 0.95]"
+        if not failures
+        else "live unit-price guard regression detected",
+        evidence,
+    )
+
+
 def evaluate() -> dict[str, Any]:
     cfg = _settings()
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
@@ -6398,6 +6528,7 @@ def evaluate() -> dict[str, Any]:
         _live_trading_launchagent_installed_check(),
         _live_trading_launchagent_bootstrapable_check(),
         _live_trading_process_absent_check(),
+        _absolute_live_unit_price_band_check(cfg),
         CheckResult(
             "submit_authority_config",
             submit_ok,

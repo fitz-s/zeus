@@ -19,10 +19,12 @@ from typing import Any, ClassVar, Optional
 
 _DECIMAL_FIELDS = {"tick_size", "min_order_size", "price", "size"}
 _BYTES_FIELDS = {"signed_order"}
+LIVE_ORDER_MIN_UNIT_PRICE = Decimal("0.05")
+LIVE_ORDER_MAX_UNIT_PRICE = Decimal("0.95")
 
 
 def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
-    """Return a finite binary-contract price strictly inside ``(0, 1)``."""
+    """Return a finite live-order price inside the absolute inclusive band."""
 
     try:
         value = price if isinstance(price, Decimal) else Decimal(str(price))
@@ -30,9 +32,9 @@ def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
         raise ValueError(f"live order unit price must be decimal, got {price!r}") from exc
     if not value.is_finite():
         raise ValueError(f"live order unit price must be finite, got {price!r}")
-    if not Decimal("0") < value < Decimal("1"):
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= value <= LIVE_ORDER_MAX_UNIT_PRICE:
         raise ValueError(
-            "live order unit price outside strict open (0, 1) submit domain: "
+            "live order unit price outside absolute inclusive [0.05, 0.95] submit band: "
             f"price={value}"
         )
     return value
@@ -121,10 +123,9 @@ class VenueSubmissionEnvelope:
     def is_compatibility_placeholder(self) -> bool:
         return bool(self.compatibility_placeholder_reason)
 
-    def assert_live_submit_bound(self) -> None:
+    def assert_live_market_bound(self) -> None:
         """Fail closed unless the envelope is bound to real market identity."""
 
-        assert_live_order_unit_price(self.price)
         reason = self.compatibility_placeholder_reason
         if reason:
             raise ValueError(
@@ -139,6 +140,12 @@ class VenueSubmissionEnvelope:
             raise ValueError(
                 "selected_outcome_token_id does not match outcome_label token"
             )
+
+    def assert_live_submit_bound(self) -> None:
+        """Fail closed unless a trade envelope is price-safe and market-bound."""
+
+        assert_live_order_unit_price(self.price)
+        self.assert_live_market_bound()
 
     def to_dict(self) -> dict[str, Any]:
         return {

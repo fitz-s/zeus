@@ -15,6 +15,7 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 | [`../../../rebuild/representation_contract_2026-07-08.md`](../../../rebuild/representation_contract_2026-07-08.md) | PROPOSED | 表示层契约(agent-first):注释/命名/元数据/锚点四法 + 实测底账 + 逐 surface 判决;R-wave 第四维,落地包 = R0-h |
 | [`percity_representativeness_debias.md`](percity_representativeness_debias.md) | OPEN | Per-city representativeness de-bias |
 | [`live_redecision_repair/PLAN.md`](live_redecision_repair/PLAN.md) | IMPLEMENTING | Held-position redecision + exit readiness repair |
+| [`live_unit_price_band_incident/PLAN.md`](live_unit_price_band_incident/PLAN.md) | IMPLEMENTING | Reopened live-money incident: restore absolute submit band and make regressions restart-blocking |
 | [`data_temporal_kernel/PLAN.md`](data_temporal_kernel/PLAN.md) | DORMANT | Ingest temporal control plane (additive; no commits since 2026-06) |
 | [`ci_topology_refactor_refined.md`](ci_topology_refactor_refined.md) | DORMANT | CI topology refactor (proposed 2026-05-26, untouched since) |
 | [`zeus_home_repo_migration.md`](zeus_home_repo_migration.md) | DONE-EXCEPT | Migration complete (daemons run from ~/zeus); one residue: heartbeat-sensor plist still points at old workspace-venus/bin |

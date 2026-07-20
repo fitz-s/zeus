@@ -561,7 +561,7 @@ scripts:
     reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
   check_live_restart_preflight.py:
     # Created: 2026-06-18
-    # Last reused or audited: 2026-07-14
+    # Last reused or audited: 2026-07-20
     # Authority basis: AGENTS.md live-money restart proof gates
     class: diagnostic
     lifecycle: long_lived
@@ -578,7 +578,7 @@ scripts:
     promotion_barrier: "Read-only pre-restart diagnostic; cannot submit/cancel orders, mutate DB truth, start daemons, or authorize live trading by itself."
     required_helpers: [src.engine.position_belief.load_replacement_belief]
     required_tests: [tests/test_check_live_restart_preflight.py]
-    reason: "Separates process state, submit config, posterior freshness, pending-exit risk, and held-position belief coverage before an armed live daemon restart; Day0 semantic debt is a restart recovery obligation only when src.main is absent, and remains fail-closed when a running daemon fails to refresh it."
+    reason: "Separates process state, submit config, absolute [0.05,0.95] live-order guard attestation, posterior freshness, pending-exit risk, and held-position belief coverage before an armed live daemon restart; any missing/widened price guard or config drift is restart-blocking."
   repair_dust_exit_projection.py:
     # Created: 2026-06-18
     # Last reused or audited: 2026-07-09
@@ -844,7 +844,7 @@ scripts:
     external_inputs: [position_current, position_events, outcome_fact, settlement_attribution]
     promotion_barrier: "Read-only diagnostic; output cannot authorize live trading, live restart, submit/cancel, or DB truth mutation."
     required_tests: [tests/test_ops_scripts_smoke.py]
-  deploy_live.py: {class: runtime_support, required_tests: [tests/test_ops_scripts_smoke.py], reuse_when: "Restart live launchd daemons safely: stop the live mesh, run bounded schema/command recovery, verify prerequisite identity and preflight, then bootstrap and verify runtime progress; refuses a dirty or unpushed runtime tree unless explicitly overridden.", do_not_use_when: "Do not use to deploy untested code; the gate is a tree-cleanliness and stopped-recovery protocol, not a correctness proof.", canonical_command: "python3 scripts/deploy_live.py status|restart <daemon|all>"}
+  deploy_live.py: {class: runtime_support, required_tests: [tests/test_ops_scripts_smoke.py], reuse_when: "Restart live launchd daemons safely: stop the live mesh, run bounded schema/command recovery, verify prerequisite identity and preflight, require the restart-blocking absolute_live_unit_price_band attestation, then bootstrap and verify runtime progress; refuses a dirty or unpushed runtime tree unless explicitly overridden.", do_not_use_when: "Do not use to deploy untested code; the gate is a tree-cleanliness and stopped-recovery protocol, not a correctness proof.", canonical_command: "python3 scripts/deploy_live.py status|restart <daemon|all>"}
   restore_live_trading_launchagent.py:
     class: repair
     dangerous_if_run: false
