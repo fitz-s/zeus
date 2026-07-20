@@ -624,6 +624,29 @@ class TestRemainingDaySelection:
             [incomplete], target_date="2026-10-25", now=now, metric="high"
         ) == []
 
+    def test_fall_back_boundary_distinguishes_the_two_repeated_hours(self):
+        times = tuple(
+            ["2026-10-25T00:00", "2026-10-25T01:00", "2026-10-25T01:00"]
+            + [f"2026-10-25T{hour:02d}:00" for hour in range(2, 24)]
+        )
+        temps = [10.0, 99.0, 77.0] + [10.0] * 22
+        v = Day0HourlyVector(
+            model="ukmo_global_deterministic_10km",
+            city="London",
+            target_date="2026-10-25",
+            timezone_name="Europe/London",
+            captured_at="2026-10-24T22:30:00+00:00",
+            times=times,
+            temps_c=tuple(temps),
+        )
+
+        assert remaining_day_extremes_c(
+            [v],
+            target_date="2026-10-25",
+            now=datetime(2026, 10, 25, 0, 30, tzinfo=UTC),
+            metric="high",
+        ) == [77.0]
+
     def test_low_metric_takes_min(self):
         temps = [18.0, 12.0, 11.0] + [15.0] * 21
         v = _vector(temps=temps)

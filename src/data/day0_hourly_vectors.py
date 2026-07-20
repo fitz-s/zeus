@@ -559,25 +559,35 @@ def _target_day_hour_grid_utc(*, target: date, tz: ZoneInfo) -> tuple[datetime, 
     return tuple(out)
 
 
-def _vector_target_hour_counts(
+def _vector_target_hour_values(
     vector: Day0HourlyVector,
     *,
     target: date,
     tz: ZoneInfo,
-) -> Counter[str] | None:
-    """Normalize provider timestamps to a local wall-hour multiset."""
+) -> tuple[tuple[datetime, float], ...] | None:
+    """Map provider local hours to exact UTC instants, including DST folds."""
 
-    counts: Counter[str] = Counter()
+    grid = _target_day_hour_grid_utc(target=target, tz=tz)
+    by_label: dict[str, list[datetime]] = {}
+    for instant in grid:
+        label = instant.astimezone(tz).strftime("%Y-%m-%dT%H:%M")
+        by_label.setdefault(label, []).append(instant)
+    label_uses: Counter[str] = Counter()
+    seen_instants: set[datetime] = set()
+    values: list[tuple[datetime, float]] = []
     for raw_time, temp in zip(vector.times, vector.temps_c):
         try:
-            local = datetime.fromisoformat(str(raw_time))
-            if local.tzinfo is None:
-                local = local.replace(tzinfo=tz)
-            else:
-                local = local.astimezone(tz)
+            parsed = datetime.fromisoformat(str(raw_time))
             value = float(temp)
         except (TypeError, ValueError):
             return None
+        local = (
+            parsed.replace(tzinfo=tz)
+            if parsed.tzinfo is None
+            else parsed.astimezone(tz)
+        )
+        if local.date() != target:
+            continue
         if (
             not math.isfinite(value)
             or local.minute != 0
@@ -585,9 +595,23 @@ def _vector_target_hour_counts(
             or local.microsecond != 0
         ):
             return None
-        if local.date() == target:
-            counts[local.strftime("%Y-%m-%dT%H:%M")] += 1
-    return counts
+        if parsed.tzinfo is None:
+            label = local.strftime("%Y-%m-%dT%H:%M")
+            choices = by_label.get(label, [])
+            use_index = label_uses[label]
+            if use_index >= len(choices):
+                return None
+            instant = choices[use_index]
+            label_uses[label] += 1
+        else:
+            instant = parsed.astimezone(UTC)
+            if instant not in grid:
+                return None
+        if instant in seen_instants:
+            return None
+        seen_instants.add(instant)
+        values.append((instant, value))
+    return tuple(values)
 
 
 def day0_hourly_vectors_cover_remaining_window(
@@ -599,11 +623,11 @@ def day0_hourly_vectors_cover_remaining_window(
     """Prove every model covers the causal boundary through local-day end.
 
     Open-Meteo serves a local hourly grid. Expected instants are generated in
-    UTC and compared as a local-label multiset so 23/25-hour DST days remain
-    exact even when provider timestamps omit offsets. When the causal boundary
-    is inside the terminal sub-hour, the final elapsed grid point is required
-    as the interval anchor instead of pretending that an empty future grid is
-    complete.
+    UTC and provider-local duplicate labels are assigned in chronological order,
+    so 23/25-hour DST days remain exact even when timestamps omit offsets. When
+    the causal boundary is inside the terminal sub-hour, the final elapsed grid
+    point is required as the interval anchor instead of pretending that an empty
+    future grid is complete.
     """
 
     if not vectors or window_start.tzinfo is None:
@@ -622,22 +646,18 @@ def day0_hourly_vectors_cover_remaining_window(
         if boundary_local.date() != target:
             return False
         grid = _target_day_hour_grid_utc(target=target, tz=tz)
-        counts = _vector_target_hour_counts(vector, target=target, tz=tz)
-        if not grid or counts is None:
+        values = _vector_target_hour_values(vector, target=target, tz=tz)
+        if not grid or values is None:
             return False
-        required = Counter(
-            instant.astimezone(tz).strftime("%Y-%m-%dT%H:%M")
-            for instant in grid
-            if instant >= boundary_utc
-        )
+        counts = Counter(instant for instant, _value in values)
+        required = tuple(instant for instant in grid if instant >= boundary_utc)
         if required:
-            if any(counts[key] < count for key, count in required.items()):
+            if any(counts[instant] != 1 for instant in required):
                 return False
             continue
         final_grid = grid[-1]
-        final_key = final_grid.astimezone(tz).strftime("%Y-%m-%dT%H:%M")
         if (
-            counts[final_key] < 1
+            counts[final_grid] != 1
             or not timedelta(0) <= boundary_utc - final_grid <= timedelta(hours=1)
         ):
             return False
@@ -678,6 +698,7 @@ def remaining_day_extremes_c(
     ):
         return []
     out: list[float] = []
+    start_utc = start.astimezone(UTC)
     for vector in vectors:
         try:
             tz = ZoneInfo(vector.timezone_name)
@@ -686,21 +707,14 @@ def remaining_day_extremes_c(
         start_local = start.astimezone(tz)
         if start_local.date() != target:
             continue
+        target_values = _vector_target_hour_values(vector, target=target, tz=tz)
+        if target_values is None:
+            return []
         values: list[float] = []
         elapsed_target_points: list[tuple[datetime, float]] = []
-        for raw_time, temp in zip(vector.times, vector.temps_c):
-            try:
-                local = datetime.fromisoformat(str(raw_time))
-                if local.tzinfo is None:
-                    local = local.replace(tzinfo=tz)
-                else:
-                    local = local.astimezone(tz)
-            except ValueError:
-                continue
-            if local.date() != target:
-                continue
-            if local < start_local:
-                elapsed_target_points.append((local, float(temp)))
+        for instant, temp in target_values:
+            if instant < start_utc:
+                elapsed_target_points.append((instant, float(temp)))
                 continue
             values.append(float(temp))
         if (
@@ -716,8 +730,8 @@ def remaining_day_extremes_c(
                 elapsed_target_points,
                 key=lambda item: item[0],
             )
-            anchor_age = start_local - anchor_time
-            time_to_day_end = local_day_end - start_local
+            anchor_age = start_utc - anchor_time
+            time_to_day_end = local_day_end.astimezone(UTC) - start_utc
             if (
                 timedelta(0) < time_to_day_end <= timedelta(hours=1)
                 and timedelta(0) <= anchor_age <= timedelta(hours=1)
