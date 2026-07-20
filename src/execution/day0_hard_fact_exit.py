@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-07-20
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md MUST-FIX
 #   #1 (hard-fact bin-death exit lane) + #3-wiring (resting-order cancel on bin
 #   death) — operator requirement "新高出现时能否立即drop". Calibration artifact:
@@ -28,8 +28,10 @@ Verdicts (both directions, both metrics):
     (not a hard fact for either side: a max can still leave upward / min downward;
      that is estimator territory and stays behind the maturity gate)
 
-Settlement-grade extreme sources (provenance-ordered):
-  1. WU live obs (THE settlement reference) — throttled per (city, date); margin 0.
+Settlement-grade extreme sources (source-family routed, provenance-ordered):
+  1. Current official source evidence — WU bucket observations for WU contracts,
+     HKO official cumulative extrema for HKO contracts — throttled per
+     (source family, city, date); margin 0.
   2. Same-station fast-tail memo (same physical station, ~3-9 min fresh) — admitted only
      for settlement-faithful cities (config/wu_metar_divergence.json), with a
      divergence margin derived from the SAME calibration artifact:
@@ -61,13 +63,16 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
-#: Throttle for the WU live-obs source (per city+date) — WU's own cadence is
-#: 30-60 min; the same-station memo carries the fast path.
-_WU_FETCH_INTERVAL_S = 600.0
+#: Throttle for the current official observation source. The source family is
+#: part of the memo key: WU and HKO facts have different semantics and must not
+#: share cached authority merely because city/date match.
+_CURRENT_SOURCE_FETCH_INTERVAL_S = 600.0
 SAME_STATION_FAST_TAIL_SOURCE = "same_station_fast_tail"
 COMBINED_WU_FAST_TAIL_SOURCE = f"wu_api+{SAME_STATION_FAST_TAIL_SOURCE}"
-_WU_MEMO: dict[tuple[str, str], tuple[float, Optional[float], Optional[float]]] = {}
-_WU_MEMO_LOCK = threading.Lock()
+_CURRENT_SOURCE_MEMO: dict[
+    tuple[str, str, str], tuple[float, Optional[float], Optional[float]]
+] = {}
+_CURRENT_SOURCE_MEMO_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -76,7 +81,7 @@ class HardFactVerdict:
     reason: str
     metric: str
     rounded_extreme: float
-    source: str  # "wu_api" | "same_station_fast_tail" | "wu_api+same_station_fast_tail"
+    source: str  # source-family evidence labels, possibly + same_station_fast_tail
 
 
 @dataclass(frozen=True)
@@ -411,17 +416,21 @@ def _metar_kill_margin_units(city_name: str, unit: str) -> Optional[float]:
     return metar_margin_units_for_city(city_name, unit)
 
 
-def _wu_rounded_extremes(
-    city: Any, target_date: str, *, now: datetime
+def _current_source_rounded_extremes(
+    city: Any,
+    target_date: str,
+    *,
+    now: datetime,
+    source_family: str,
+    accepted_sources: Collection[str],
 ) -> tuple[Optional[float], Optional[float]]:
-    """(rounded_high_so_far, rounded_low_so_far) from the WU settlement reference,
-    throttled per (city, date). (None, None) on any failure — fail-soft: the lane
-    simply has no WU source this cycle."""
-    key = (str(getattr(city, "name", "")), str(target_date))
+    """Read and round extrema only when the observation matches its source family."""
+    city_name = str(getattr(city, "name", ""))
+    key = (source_family, city_name, str(target_date))
     monotonic_now = time.monotonic()
-    with _WU_MEMO_LOCK:
-        cached = _WU_MEMO.get(key)
-        if cached is not None and monotonic_now - cached[0] < _WU_FETCH_INTERVAL_S:
+    with _CURRENT_SOURCE_MEMO_LOCK:
+        cached = _CURRENT_SOURCE_MEMO.get(key)
+        if cached is not None and monotonic_now - cached[0] < _CURRENT_SOURCE_FETCH_INTERVAL_S:
             return cached[1], cached[2]
     high = low = None
     try:
@@ -429,6 +438,12 @@ def _wu_rounded_extremes(
         from src.data.observation_client import get_current_observation
 
         obs = get_current_observation(city, target_date=target_date, reference_time=now)
+        observed_source = str(getattr(obs, "source", "") or "").strip().lower()
+        allowed = {str(source).strip().lower() for source in accepted_sources}
+        if observed_source not in allowed:
+            raise ValueError(
+                f"{source_family} observation source mismatch: {observed_source or '<missing>'}"
+            )
         semantics = SettlementSemantics.for_city(city)
         raw_high = getattr(obs, "high_so_far", None)
         raw_low = getattr(obs, "low_so_far", None)
@@ -437,10 +452,42 @@ def _wu_rounded_extremes(
         if raw_low is not None:
             low = float(semantics.round_single(float(raw_low)))
     except Exception as exc:  # noqa: BLE001 — source fail-soft, lane holds
-        logger.debug("day0 hard-fact WU source unavailable for %s/%s: %s", key[0], key[1], exc)
-    with _WU_MEMO_LOCK:
-        _WU_MEMO[key] = (monotonic_now, high, low)
+        logger.debug(
+            "day0 hard-fact %s source unavailable for %s/%s: %s",
+            source_family,
+            city_name,
+            target_date,
+            exc,
+        )
+    with _CURRENT_SOURCE_MEMO_LOCK:
+        _CURRENT_SOURCE_MEMO[key] = (monotonic_now, high, low)
     return high, low
+
+
+def _wu_rounded_extremes(
+    city: Any, target_date: str, *, now: datetime
+) -> tuple[Optional[float], Optional[float]]:
+    """Rounded WU bucket extrema for a WU-settled contract."""
+    return _current_source_rounded_extremes(
+        city,
+        target_date,
+        now=now,
+        source_family="wu",
+        accepted_sources=("wu_api", "wu_icao_history"),
+    )
+
+
+def _hko_rounded_extremes(
+    city: Any, target_date: str, *, now: datetime
+) -> tuple[Optional[float], Optional[float]]:
+    """Rounded latest official HKO cumulative extrema for an HKO contract."""
+    return _current_source_rounded_extremes(
+        city,
+        target_date,
+        now=now,
+        source_family="hko",
+        accepted_sources=("hko_hourly_accumulator",),
+    )
 
 
 def _metar_rounded_extreme(
@@ -575,11 +622,11 @@ def settlement_grade_effective_extreme(
 ) -> tuple[Optional[float], str]:
     """(effective_extreme, source) for hard-fact decisions, margin-adjusted.
 
-    WU contributes at face value (it IS the settlement reference). METAR
-    contributes shifted by the calibration margin in the NON-kill direction
-    (HIGH: minus margin; LOW: plus margin) so a METAR-only crossing must clear
-    the measured divergence allowance. The two compose by the absorbing law
-    (HIGH max / LOW min). None when no source is available.
+    Current evidence is routed by ``settlement_source_type``. WU contracts may
+    compose WU live/durable bucket facts with calibrated same-station METAR.
+    HKO contracts consume only HKO's official cumulative extrema; the diagnostic
+    current temperature and WU/METAR families are not substitutes. None when no
+    matching source is available.
 
     ``world_conn`` is threaded from the monitoring-phase composite connection so
     the METAR kill-memo recovery (cold-start path) does not open an independent
@@ -587,54 +634,62 @@ def settlement_grade_effective_extreme(
     """
     city_name = str(getattr(city, "name", "") or "")
     unit = str(getattr(city, "settlement_unit", "F") or "F").upper()
-    wu_high, wu_low = (
-        (None, None)
-        if durable_only
-        else _wu_rounded_extremes(city, target_date, now=now)
-    )
-    durable_high, durable_low, durable_source = _durable_observation_instants_extremes(
-        city=city,
-        target_date=target_date,
-        now=now,
-        world_conn=world_conn,
-    )
+    source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+    current_high = current_low = None
+    current_source = ""
+    if not durable_only and source_type == "wu_icao":
+        current_high, current_low = _wu_rounded_extremes(city, target_date, now=now)
+        current_source = "wu_api"
+    elif not durable_only and source_type == "hko":
+        current_high, current_low = _hko_rounded_extremes(city, target_date, now=now)
+        current_source = "hko_hourly_accumulator"
 
-    wu_values = []
-    wu_sources = []
-    api_value = wu_high if metric == "high" else wu_low
+    durable_high = durable_low = None
+    durable_source = ""
+    if source_type == "wu_icao":
+        durable_high, durable_low, durable_source = _durable_observation_instants_extremes(
+            city=city,
+            target_date=target_date,
+            now=now,
+            world_conn=world_conn,
+        )
+
+    reference_values = []
+    reference_sources = []
+    api_value = current_high if metric == "high" else current_low
     durable_value = durable_high if metric == "high" else durable_low
     if api_value is not None:
-        wu_values.append(float(api_value))
-        wu_sources.append("wu_api")
+        reference_values.append(float(api_value))
+        reference_sources.append(current_source)
     if durable_value is not None:
-        wu_values.append(float(durable_value))
-        wu_sources.append(durable_source)
-    if wu_values:
-        wu_value = max(wu_values) if metric == "high" else min(wu_values)
-        wu_source = "+".join(dict.fromkeys(wu_sources))
+        reference_values.append(float(durable_value))
+        reference_sources.append(durable_source)
+    if reference_values:
+        reference_value = max(reference_values) if metric == "high" else min(reference_values)
+        reference_source = "+".join(dict.fromkeys(reference_sources))
     else:
-        wu_value = None
-        wu_source = ""
+        reference_value = None
+        reference_source = ""
 
     from src.data.day0_fast_obs import fast_obs_source_for_city
 
     metar_value = None
-    fast_source = fast_obs_source_for_city(city)
+    fast_source = fast_obs_source_for_city(city) if source_type == "wu_icao" else None
     margin = _metar_kill_margin_units(city_name, unit) if fast_source is not None else None
     if margin is not None:
         raw = _metar_rounded_extreme(city_name, target_date, metric, world_conn=world_conn)
         if raw is not None:
             metar_value = raw - margin if metric == "high" else raw + margin
 
-    if wu_value is None and metar_value is None:
+    if reference_value is None and metar_value is None:
         return None, ""
     if metar_value is None:
-        return float(wu_value), wu_source
-    if wu_value is None:
+        return float(reference_value), reference_source
+    if reference_value is None:
         return float(metar_value), SAME_STATION_FAST_TAIL_SOURCE
     if metric == "high":
-        return float(max(wu_value, metar_value)), f"{wu_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
-    return float(min(wu_value, metar_value)), f"{wu_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
+        return float(max(reference_value, metar_value)), f"{reference_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
+    return float(min(reference_value, metar_value)), f"{reference_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
 
 
 def day0_entry_bin_still_alive(
@@ -1166,5 +1221,5 @@ def cancel_day0_dead_bin_resting_entries(
 
 
 def _reset_wu_memo_for_tests() -> None:
-    with _WU_MEMO_LOCK:
-        _WU_MEMO.clear()
+    with _CURRENT_SOURCE_MEMO_LOCK:
+        _CURRENT_SOURCE_MEMO.clear()

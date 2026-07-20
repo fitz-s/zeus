@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-18
+# Last reused or audited: 2026-07-20
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -39,6 +39,7 @@ import pytest
 from src.execution.day0_hard_fact_exit import (
     HardFactVerdict,
     _final_daily_observation_extreme,
+    _hko_rounded_extremes,
     _reset_wu_memo_for_tests,
     cancel_day0_dead_bin_resting_entries,
     day0_entry_bin_still_alive,
@@ -62,9 +63,13 @@ NOW = datetime(2026, 6, 10, 18, 0, tzinfo=UTC)
 def _clean_state(monkeypatch):
     _reset_registry_for_tests()
     _reset_wu_memo_for_tests()
-    # Default: no WU source (tests opt in); no METAR memo (tests opt in).
+    # Default: no current official source (tests opt in); no METAR memo.
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
+        lambda city, target_date, now: (None, None),
+    )
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit._hko_rounded_extremes",
         lambda city, target_date, now: (None, None),
     )
     yield
@@ -398,6 +403,49 @@ class TestVerdictMatrix:
 # ===========================================================================
 
 class TestSourceDiscipline:
+    def test_hko_contract_routes_to_hko_current_extrema(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit._hko_rounded_extremes",
+            lambda city, target_date, now: (29.0, 25.0),
+        )
+
+        effective, source = settlement_grade_effective_extreme(
+            city=_hong_kong(),
+            target_date="2026-07-20",
+            metric="high",
+            now=NOW,
+        )
+
+        assert effective == pytest.approx(29.0)
+        assert source == "hko_hourly_accumulator"
+
+    def test_hko_current_extrema_rejects_cross_family_source(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.data.observation_client.get_current_observation",
+            lambda city, target_date, reference_time: SimpleNamespace(
+                source="wu_api", high_so_far=30.0, low_so_far=25.0
+            ),
+        )
+        _reset_wu_memo_for_tests()
+
+        assert _hko_rounded_extremes(
+            _hong_kong(), "2026-07-20", now=NOW
+        ) == (None, None)
+
+    def test_hko_current_extrema_apply_hko_truncation(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.data.observation_client.get_current_observation",
+            lambda city, target_date, reference_time: SimpleNamespace(
+                source="hko_hourly_accumulator", high_so_far=29.7, low_so_far=25.7
+            ),
+        )
+        _reset_wu_memo_for_tests()
+
+        high, low = _hko_rounded_extremes(_hong_kong(), "2026-07-20", now=NOW)
+
+        assert high == pytest.approx(29.0)
+        assert low == pytest.approx(25.0)
+
     def _observation_instants_conn(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

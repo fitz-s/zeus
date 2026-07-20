@@ -1,5 +1,5 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-07-18 (M-2/H-3 gap detector)
+# Last reused/audited: 2026-07-20 (source-specific HKO cumulative snapshots)
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
 #   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §5;
 #   docs/evidence/upstream_physical_2026_07_17/day0_mechanism_first_principles_audit.md §M-2/§H-3
@@ -13,14 +13,10 @@ NOAA-settled Ogimet METAR stations such as Moscow/UUWW and Tel Aviv/LLBG. WU and
 HKO fetch paths remain in ``observation_client``; this reader is the DB-backed
 canonical observation surface for the monitor path, not an experimental helper.
 
-Root C fix: observation_instants.running_max is a PER-HOUR BUCKET maximum
-(non-monotonic across the day).  The live writer stores the hourly max for that
-observation window, NOT a cumulative day-so-far monotone.  The naive approach of
-reading the latest row's running_max gives the WRONG answer whenever the peak
-occurred earlier in the day (e.g. 25 at 15:00, 17 at 23:00 → naive returns 17).
-
-The correct approach: MAX(running_max) over ALL qualifying rows for the city/date
-up to the decision timestamp.
+Root C fix: WU ``running_max`` is a PER-HOUR BUCKET maximum, so WU requires MAX
+over all qualifying rows. HKO ``running_max`` is an official cumulative snapshot,
+so HKO requires the latest qualifying snapshot. Treating both shapes alike either
+forgets an earlier WU peak or makes a provisional HKO value falsely absorbing.
 
 Physical law (from authority doc, §Physical law):
     H_D = settle(max_{t in local day} T(t))
@@ -270,6 +266,30 @@ _LATEST_CONTEXT_SQL = """
     LIMIT 1
 """
 
+_LATEST_EXTREMA_SQL = """
+    SELECT running_max, running_min
+    FROM {table_ref}
+    WHERE city = ?
+      AND target_date = ?
+      AND source = ?
+      AND datetime(utc_timestamp) <= datetime(?)
+      AND authority IN ({auth_placeholders})
+      AND COALESCE(causality_status, '') = 'OK'
+      AND (
+            (
+                COALESCE(source_role, '') = 'historical_hourly'
+                AND COALESCE(training_allowed, 0) = 1
+            )
+            OR (
+                COALESCE(source_role, '') = 'runtime_monitoring'
+                AND COALESCE(training_allowed, 0) = 0
+            )
+      )
+      {source_semantics}
+    ORDER BY datetime(utc_timestamp) DESC, id DESC
+    LIMIT 1
+"""
+
 
 # Timestamps of the qualifying rows, for the M-2/H-3 gap detector. A separate
 # query (not GROUP_CONCAT on the aggregate) was chosen deliberately: SQLite's
@@ -432,11 +452,12 @@ def read_day0_observed_extrema(
     source_priority: Sequence[str] = _DEFAULT_SOURCE_PRIORITY,
     table_ref: str = "observation_instants",
 ) -> Day0ObservedExtrema:
-    """Read day-0 observed extrema using semantics-correct MAX aggregation.
+    """Read day-0 observed extrema using source-specific aggregation.
 
-    The key invariant: high_so_far = MAX(running_max) over all qualifying
-    rows, NOT the latest row's running_max.  This is the only correct
-    reading of the misnamed column (see module docstring).
+    WU/hourly rows are bucket facts and aggregate with MAX/MIN across the local
+    day. HKO rows are cumulative official snapshots; the latest qualifying
+    snapshot replaces earlier provisional snapshots and must not be aggregated
+    again across time.
 
     Parameters
     ----------
@@ -511,12 +532,26 @@ def read_day0_observed_extrema(
         ).fetchone()
         if row is None or row[2] == 0:
             continue
-        # row[2] is COUNT(*); row[0] is MAX(running_max), row[1] is MIN(running_min)
+        # WU/hourly rows are bucket facts. HKO rows are cumulative provider
+        # snapshots, so current decision-time truth is the latest snapshot.
         chosen_source = source
         agg_high = row[0]  # may be None if all running_max were NULL
         agg_low = row[1]   # may be None if all running_min were NULL
         n_rows = int(row[2])
         last_observation_time_utc = str(row[3]) if row[3] is not None else None
+        if source == _HKO_SOURCE:
+            latest_extrema_sql = _LATEST_EXTREMA_SQL.format(
+                auth_placeholders=auth_ph,
+                source_semantics=source_sql,
+                table_ref=table_ref,
+            )
+            latest_extrema = conn.execute(
+                latest_extrema_sql,
+                (city, target_date, source, decision_str) + auth_vals + source_vals,
+            ).fetchone()
+            if latest_extrema is None:
+                continue
+            agg_high, agg_low = latest_extrema[0], latest_extrema[1]
         break
 
     # M-2/H-3: qualifying-row timeline for the chosen source only (never mixed).
@@ -575,9 +610,18 @@ def read_day0_observed_extrema(
     else:
         coverage_status = COVERAGE_OK
 
+    hko_snapshot = chosen_source == _HKO_SOURCE
     provenance = {
-        "running_max_semantics": "hour_bucket_max_aggregated_by_MAX",
-        "aggregation": "MAX(running_max) / MIN(running_min) over qualifying rows",
+        "running_max_semantics": (
+            "cumulative_snapshot_latest"
+            if hko_snapshot
+            else "hour_bucket_max_aggregated_by_MAX"
+        ),
+        "aggregation": (
+            "latest qualifying HKO cumulative snapshot"
+            if hko_snapshot
+            else "MAX(running_max) / MIN(running_min) over qualifying rows"
+        ),
         "authority_filter": sorted(_TRUSTED_AUTHORITIES),
         "decision_cutoff_utc": decision_str,
         "timezone_name": timezone_name,

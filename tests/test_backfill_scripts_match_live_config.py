@@ -1,8 +1,8 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-04-21; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Purpose: Keep backfill scripts aligned with live config and obs_v2 provenance identity contracts.
 # Reuse: Inspect config/cities.json, tier_resolver, script manifest, and current source-validity posture first.
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-20
 # Authority basis: plan v3 antibody A7; P1 obs_v2 provenance identity packet.
 """Antibody A7: backfill scripts must match the live config.
 
@@ -395,13 +395,10 @@ def test_hko_ingest_row_stamps_provenance_identity(hko_ingest_tick_module):
     assert row.running_min == 24.1
 
 
-def test_hko_type_specimen_spot_reading_lifts_running_max(hko_ingest_tick_module):
-    """2026-07-16 (day0 defect-4) type specimen: Hong Kong 2026-07-15, HKO's
-    official since-midnight field (a 1-minute-mean extremum) sat at 28.8C
-    while the same row's spot reading (temp_current) was 29.0C — and
-    running_max stayed 28.8 for the rest of the day because it was never
-    folded with temp_current. The spot reading must lift running_max to
-    29.0, the absorbing-direction lower bound the day0 belief must track."""
+def test_hko_spot_reading_remains_diagnostic_not_official_extreme(hko_ingest_tick_module):
+    """HKO current temperature and official 1-minute-mean max are different
+    statistics. A higher spot reading stays diagnostic and cannot fabricate an
+    absorbing official cumulative maximum."""
     snapshot = hko_ingest_tick_module.HkoExtremaSnapshot(
         target_date="2026-07-15",
         observed_at_utc="2026-07-15T02:20:00+00:00",
@@ -417,13 +414,16 @@ def test_hko_type_specimen_spot_reading_lifts_running_max(hko_ingest_tick_module
         imported_at="2026-07-15T02:20:15+00:00",
     )
     assert row.temp_current == 29.0
-    assert row.running_max == 29.0
+    assert row.running_max == 28.8
     assert row.running_min == 24.0  # low side untouched, spot is above it
+    provenance = json.loads(row.provenance_json)
+    assert provenance["official_running_high_c"] == 28.8
+    assert provenance["diagnostic_current_temperature_c"] == 29.0
 
 
-def test_hko_low_metric_mirror_spot_reading_lowers_running_min(hko_ingest_tick_module):
-    """LOW-metric mirror: a spot reading colder than HKO's official
-    since-midnight low must lower running_min, same absorbing law."""
+def test_hko_low_spot_reading_remains_diagnostic_not_official_extreme(hko_ingest_tick_module):
+    """LOW mirror: a colder spot reading cannot replace HKO's official
+    since-midnight 1-minute-mean minimum."""
     snapshot = hko_ingest_tick_module.HkoExtremaSnapshot(
         target_date="2026-07-15",
         observed_at_utc="2026-07-15T14:20:00+00:00",  # 22:20 HK local (UTC+8), still 07-15
@@ -439,7 +439,7 @@ def test_hko_low_metric_mirror_spot_reading_lowers_running_min(hko_ingest_tick_m
         imported_at="2026-07-15T14:20:15+00:00",
     )
     assert row.temp_current == 16.5
-    assert row.running_min == 16.5
+    assert row.running_min == 18.0
     assert row.running_max == 28.8  # high side untouched, spot is below it
 
 

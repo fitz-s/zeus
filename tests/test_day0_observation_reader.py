@@ -1,7 +1,7 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-20
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
-# Lifecycle: created=2026-05-22; last_reviewed=2026-07-08; last_reused=2026-07-08
+# Lifecycle: created=2026-05-22; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Purpose: Regression antibody for Root C — high_so_far must be MAX(running_max) not latest row's value.
 # Reuse: Run when day0_observation_reader.read_day0_high_so_far or observation_instants schema changes.
 """Tests for src/data/day0_observation_reader.py — Root C regression antibody.
@@ -290,6 +290,61 @@ def test_reader_uses_only_official_hko_extrema_when_legacy_rows_are_mixed():
     assert out.high_so_far == 33.0
     assert out.low_so_far == 29.0
     assert out.current_temp == 33.0
+
+
+def test_reader_uses_latest_hko_cumulative_snapshot_not_cross_time_max():
+    """A provisional HKO cumulative maximum may be corrected by its provider.
+
+    HKO snapshots are not independent hourly buckets, so MAX across snapshots
+    would make an earlier provisional value falsely absorbing.
+    """
+    conn = _make_conn()
+    common = {
+        "city": "Hong Kong",
+        "target_date": "2026-07-20",
+        "source": "hko_hourly_accumulator",
+        "timezone_name": "Asia/Hong_Kong",
+        "authority": "ICAO_STATION_NATIVE",
+        "training_allowed": 0,
+        "causality_status": "OK",
+        "source_role": "runtime_monitoring",
+        "station_id": "HKO",
+        "provenance_json": _HKO_OFFICIAL_PROVENANCE,
+    }
+    _insert(
+        conn,
+        **common,
+        local_timestamp="2026-07-20T00:20:00+08:00",
+        utc_timestamp="2026-07-19T16:20:00+00:00",
+        imported_at="2026-07-19T16:20:10+00:00",
+        temp_current=30.0,
+        running_max=30.0,
+        running_min=29.5,
+    )
+    _insert(
+        conn,
+        **common,
+        local_timestamp="2026-07-20T01:20:00+08:00",
+        utc_timestamp="2026-07-19T17:20:00+00:00",
+        imported_at="2026-07-19T17:20:10+00:00",
+        temp_current=29.0,
+        running_max=29.7,
+        running_min=29.0,
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-20",
+        timezone_name="Asia/Hong_Kong",
+        decision_time_utc=datetime(2026, 7, 19, 17, 30, tzinfo=timezone.utc),
+        source_priority=("hko_hourly_accumulator",),
+    )
+
+    assert out.high_so_far == pytest.approx(29.7)
+    assert out.low_so_far == pytest.approx(29.0)
+    assert out.provenance["running_max_semantics"] == "cumulative_snapshot_latest"
+    assert out.provenance["aggregation"] == "latest qualifying HKO cumulative snapshot"
 
 
 def test_context_reader_builds_executable_wu_context_without_temp_current():

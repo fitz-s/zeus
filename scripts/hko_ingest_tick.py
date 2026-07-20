@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-23; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-23; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Purpose: Ingest HKO accumulator readings and project them into observation_instants.
 # Reuse: Keep HKO source identity separate from WU/VHHH and preserve writer provenance identity.
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-25
+# Last reused/audited: 2026-07-20
 # Authority basis: .omc/plans/observation-instants-migration-iter3.md Phase 1
 #                  L95 ("HK: no backfill; write accumulator-forward-only
 #                  starting now with data_version='v1.wu-native' + authority=
@@ -215,33 +215,23 @@ def _build_hko_extrema_row(
     data_version: str,
     imported_at: str,
 ) -> ObsV2Row:
-    """Build one HKO row whose extrema absorb both the official field and
-    the current spot reading.
+    """Build one HKO row with source-typed official and diagnostic fields.
 
     Schema semantics:
     - source='hko_hourly_accumulator' (A6 pinned for HK)
     - authority='ICAO_STATION_NATIVE' per plan v3 L95
     - data_version='v1.wu-native' to match the corpus family
     - temp_current comes from rhrread — the diagnostic current reading
-    - running_max/running_min are max/min(HKO's official since-midnight
-      1-minute-mean extrema, temp_current) — see 2026-07-16 note below
+    - running_max/running_min are HKO's official since-midnight 1-minute-mean
+      extrema only
     - observation_count=1, station_id='HKO' (Observatory HQ)
     - provenance_json makes the two source roles explicit.
 
-    2026-07-16 (day0 defect-4, operator directive): running_max/running_min
-    used to be snapshot.high_c/low_c verbatim, never folding in temp_current
-    at all. HKO's official since-midnight field is a 1-MINUTE-MEAN extremum,
-    not a max of instantaneous readings — a spot reading (temp_current) can
-    genuinely exceed it, and did (Hong Kong 2026-07-15: temp_current=29.0 in
-    the same row as running_max=28.8, which then stayed 28.8 all day). A
-    published spot reading is real evidence the true day max is >= that
-    value, in the SAME raw-Celsius domain as the official field (same
-    station, same unit, no rounding applied yet — rounding to the HKO
-    truncation settlement domain happens later, at settlement time, from a
-    DIFFERENT source entirely: harvester.py reads hko_daily_api, never this
-    table). Folding temp_current in here is the day0 LIVE RUNNING BELIEF,
-    not a settlement value — it does not touch what the harvester settles
-    against.
+    ``temp_current`` is a different observation statistic from HKO's official
+    since-midnight 1-minute-mean extrema. It remains diagnostic and must never
+    create an absorbing settlement fact. Combining the two fabricated a 30.0C
+    running maximum on 2026-07-20 while the official HKO maximum remained
+    29.7C, which incorrectly collapsed the 29C NO belief to q=1.
     """
     utc_dt = datetime.fromisoformat(snapshot.observed_at_utc.replace("Z", "+00:00"))
     if utc_dt.tzinfo is None:
@@ -257,6 +247,9 @@ def _build_hko_extrema_row(
             "source_table": "hko_hourly_accumulator",
             "source_url": HKO_EXTREMA_URL,
             "observation_basis": HKO_EXTREMA_BASIS,
+            "official_running_high_c": snapshot.high_c,
+            "official_running_low_c": snapshot.low_c,
+            "diagnostic_current_temperature_c": temperature_c,
             "accumulator_fetched_at": accumulator_fetched_at,
             "extrema_fetched_at": snapshot.fetched_at_utc,
             "payload_hash": _sha256_json(
@@ -289,8 +282,8 @@ def _build_hko_extrema_row(
         is_missing_local_hour=0,
         time_basis="station_local",
         temp_current=temperature_c,
-        running_max=max(snapshot.high_c, temperature_c),
-        running_min=min(snapshot.low_c, temperature_c),
+        running_max=snapshot.high_c,
+        running_min=snapshot.low_c,
         temp_unit="C",
         station_id="HKO",
         observation_count=1,
