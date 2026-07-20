@@ -87,6 +87,7 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_claim = threading.Lock()
+_held_position_monitor_handoff_pending = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
 _day0_urgent_wake_pending = threading.Event()
 _day0_exit_monitor_attempts_lock = threading.Lock()
@@ -224,20 +225,19 @@ def _utc_run_time_after(seconds: float) -> datetime:
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
-    """Return True when the held-position monitor should pre-empt discretionary jobs.
+    """Return True while the monitor is claiming the reactor handoff boundary.
 
-    The monitor itself is non-reentrant, but it must not globally stop the live
-    money path. Jobs that do not compete for the reactor handoff stay on the
-    continuous decision line. A new entry-reactor cycle must yield after the
-    monitor claims priority; the in-flight auction already observes the monitor
-    cancellation probe and releases the shared reactor lock at a safe boundary.
+    The monitor itself is non-reentrant, but its network and per-position work
+    must not globally stop the live money path. A new entry-reactor cycle yields
+    only until the in-flight auction reaches a cancellation boundary and releases
+    the shared reactor lock; after that handoff both lanes may make progress.
     """
 
     if job_name not in _HELD_POSITION_MONITOR_DEFER_JOBS:
         return False
 
-    if _held_position_monitor_active.is_set():
-        logger.info("%s deferred: held-position monitor active", job_name)
+    if _held_position_monitor_handoff_pending.is_set():
+        logger.info("%s deferred: held-position monitor reactor handoff pending", job_name)
         return True
     if not _held_position_monitor_bootstrap_complete.is_set():
         logger.info(
@@ -3656,7 +3656,7 @@ def _edli_event_reactor_cycle(
         producer_wake_event_ids=producer_wake_event_ids,
         producer_wake_families=producer_wake_families,
         urgent_day0_pending=_unowned_day0_urgent_wake_pending,
-        held_position_monitor_pending=_held_position_monitor_active.is_set,
+        held_position_monitor_pending=_held_position_monitor_handoff_pending.is_set,
     )
 
 
@@ -3915,6 +3915,13 @@ def _day0_exit_monitor_attempt_state(wake_id: str) -> tuple[bool, bool | None]:
         return wake_id in _day0_exit_monitor_attempts, _day0_exit_monitor_attempts.get(
             wake_id
         )
+
+
+def _day0_exit_monitor_priority_pending() -> bool:
+    """Return whether an urgent held-family monitor owns Day0 priority."""
+
+    with _day0_exit_monitor_attempts_lock:
+        return any(result is None for result in _day0_exit_monitor_attempts.values())
 
 
 def _complete_day0_exit_monitor_attempt(wake_id: str, *, succeeded: bool) -> None:
@@ -6238,24 +6245,27 @@ def _exit_monitor_cycle(
     extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
     docstring for the held-position monitoring / exit-submit lane it runs.
 
-    The held-position-monitor Event and its completion callback are cross-job
-    scheduling coordination state (5 other EDLI jobs defer while this one
-    runs via ``_defer_for_held_position_monitor``), so they stay owned here
-    and are injected into the extracted function.
+    The active Event and completion callback keep this monitor non-reentrant.
+    Cross-job coordination uses the separate handoff Event only while the
+    monitor acquires and releases the reactor boundary; network work does not
+    hold that gate. The dispatcher owns both signals.
     """
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
     urgent_fact = urgent_day0 or urgent_forecast
-    if urgent_forecast and _day0_urgent_wake_pending.is_set():
+    if urgent_forecast and _day0_exit_monitor_priority_pending():
         logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
         return False
-    pending_before_claim = not urgent_fact and _day0_urgent_wake_pending.is_set()
+    if not urgent_fact and _day0_exit_monitor_priority_pending():
+        logger.info("periodic exit_monitor yielded to urgent Day0 held-family monitor")
+        return True
     if not _held_position_monitor_claim.acquire(blocking=False):
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
 
-    # Claim exit priority before waiting. New reactor ticks defer on this Event;
-    # the current reactor finishes without a competing SQLite traversal.
+    # Claim exit priority before waiting. New reactor ticks defer only through
+    # the handoff; monitor network work does not stop unrelated decisions.
+    _held_position_monitor_handoff_pending.set()
     _held_position_monitor_active.set()
     try:
         handoff_timeout = (
@@ -6271,19 +6281,15 @@ def _exit_monitor_cycle(
             )
             return False
         _edli_reactor_active_lock.release()
+        _held_position_monitor_handoff_pending.clear()
         if (
             not urgent_day0
-            and not pending_before_claim
-            and _day0_urgent_wake_pending.is_set()
+            and _day0_exit_monitor_priority_pending()
         ):
             logger.info(
-                "exit_monitor yielded after reactor handoff to pending Day0 urgent wake"
+                "exit_monitor yielded after reactor handoff to urgent Day0 held-family monitor"
             )
             return False if urgent_forecast else True
-        if pending_before_claim:
-            logger.info(
-                "periodic exit_monitor servicing full portfolio after bounded Day0 priority"
-            )
         should_preempt_for_urgent_day0 = None
         if urgent_forecast:
             from src.runtime.reactor_wake import read_reactor_wake
@@ -6316,7 +6322,7 @@ def _exit_monitor_cycle(
                 )
 
             should_preempt_for_urgent_day0 = _newer_day0_wake_pending
-        elif not pending_before_claim:
+        else:
             should_preempt_for_urgent_day0 = _day0_urgent_wake_pending.is_set
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
@@ -6331,6 +6337,7 @@ def _exit_monitor_cycle(
             _held_position_monitor_bootstrap_complete.set()
         return True
     finally:
+        _held_position_monitor_handoff_pending.clear()
         _held_position_monitor_active.clear()
         _held_position_monitor_claim.release()
 

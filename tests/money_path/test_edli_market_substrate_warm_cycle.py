@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-20
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -1951,14 +1951,19 @@ def test_held_position_monitor_only_pauses_lock_competing_decision_work():
     """
 
     was_active = main_module._held_position_monitor_active.is_set()
+    was_handoff_pending = main_module._held_position_monitor_handoff_pending.is_set()
     was_bootstrap_complete = main_module._held_position_monitor_bootstrap_complete.is_set()
     if was_active:
         main_module._held_position_monitor_active.clear()
     if was_bootstrap_complete:
         main_module._held_position_monitor_bootstrap_complete.clear()
+    if was_handoff_pending:
+        main_module._held_position_monitor_handoff_pending.clear()
 
     try:
         main_module._held_position_monitor_active.set()
+        main_module._held_position_monitor_handoff_pending.set()
+        main_module._held_position_monitor_bootstrap_complete.set()
         live_decision_jobs = {
             "edli_command_recovery",
             "c3_staleness_cancel",
@@ -1978,11 +1983,14 @@ def test_held_position_monitor_only_pauses_lock_competing_decision_work():
             assert main_module._defer_for_held_position_monitor(job_name) is True
     finally:
         main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
         main_module._held_position_monitor_bootstrap_complete.clear()
         if was_active:
             main_module._held_position_monitor_active.set()
         if was_bootstrap_complete:
             main_module._held_position_monitor_bootstrap_complete.set()
+        if was_handoff_pending:
+            main_module._held_position_monitor_handoff_pending.set()
 
 
 def test_trading_daemon_does_not_host_new_listing_discovery():

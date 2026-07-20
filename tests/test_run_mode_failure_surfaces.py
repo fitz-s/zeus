@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-18
+# Last reused or audited: 2026-07-20
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-18; last_reused=2026-07-18
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -5983,7 +5983,14 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
 
     class ReactorGate:
         def acquire(self, *, timeout: float) -> bool:
-            calls.append(("wait", timeout, main_module._held_position_monitor_active.is_set()))
+            calls.append(
+                (
+                    "wait",
+                    timeout,
+                    main_module._held_position_monitor_active.is_set(),
+                    main_module._held_position_monitor_handoff_pending.is_set(),
+                )
+            )
             return True
 
         def release(self) -> None:
@@ -5991,7 +5998,12 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
 
     def _run(**kwargs) -> bool:
         calls.append(
-            ("run", kwargs["monitor_claimed"], kwargs["target_families"])
+            (
+                "run",
+                kwargs["monitor_claimed"],
+                kwargs["target_families"],
+                main_module._held_position_monitor_handoff_pending.is_set(),
+            )
         )
         kwargs["mark_held_position_monitor_complete"]()
         return True
@@ -6004,20 +6016,43 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
     assert main_module._exit_monitor_cycle() is True
 
     assert calls == [
-        ("wait", main_module._EXIT_MONITOR_REACTOR_HANDOFF_SECONDS, True),
+        ("wait", main_module._EXIT_MONITOR_REACTOR_HANDOFF_SECONDS, True, True),
         "release",
-        ("run", True, None),
+        ("run", True, None, False),
     ]
     assert not main_module._held_position_monitor_active.is_set()
 
 
-def test_periodic_exit_monitor_services_full_book_after_pending_day0_wake(
+def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
     monkeypatch,
 ) -> None:
+    import src.main as main_module
+
+    class UnexpectedClaim:
+        def acquire(self, *, blocking: bool) -> bool:
+            pytest.fail("periodic monitor must not claim ahead of urgent Day0")
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._day0_urgent_wake_pending.set()
+    main_module._day0_exit_monitor_attempts["wake-held"] = None
+    monkeypatch.setattr(main_module, "_held_position_monitor_claim", UnexpectedClaim())
+    try:
+        assert main_module._exit_monitor_cycle() is True
+    finally:
+        main_module._day0_urgent_wake_pending.clear()
+        main_module._day0_exit_monitor_attempts.clear()
+
+    assert main_module._held_position_monitor_active.is_set() is False
+    assert main_module._held_position_monitor_handoff_pending.is_set() is False
+    assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+
+
+def test_day0_entry_wake_does_not_pause_unrelated_periodic_monitor(monkeypatch) -> None:
     import src.execution.exit_lifecycle as exit_module
     import src.main as main_module
 
-    calls: list[tuple[object, object]] = []
+    calls: list[str] = []
 
     class ReactorGate:
         def acquire(self, *, timeout: float) -> bool:
@@ -6027,17 +6062,12 @@ def test_periodic_exit_monitor_services_full_book_after_pending_day0_wake(
             pass
 
     def _run(**kwargs) -> bool:
-        calls.append(
-            (
-                kwargs["target_families"],
-                kwargs["should_preempt_for_urgent_day0"],
-            )
-        )
+        calls.append("run")
         kwargs["mark_held_position_monitor_complete"]()
         return True
 
     main_module._held_position_monitor_active.clear()
-    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._day0_exit_monitor_attempts.clear()
     main_module._day0_urgent_wake_pending.set()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
@@ -6046,9 +6076,7 @@ def test_periodic_exit_monitor_services_full_book_after_pending_day0_wake(
     finally:
         main_module._day0_urgent_wake_pending.clear()
 
-    assert calls == [(None, None)]
-    assert main_module._held_position_monitor_active.is_set() is False
-    assert main_module._held_position_monitor_bootstrap_complete.is_set() is True
+    assert calls == ["run"]
 
 
 def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
@@ -6193,6 +6221,7 @@ def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
     class ReactorGate:
         def acquire(self, *, timeout: float) -> bool:
             main_module._day0_urgent_wake_pending.set()
+            main_module._day0_exit_monitor_attempts["wake-during-handoff"] = None
             return True
 
         def release(self) -> None:
@@ -6210,6 +6239,7 @@ def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
         assert main_module._exit_monitor_cycle() is True
     finally:
         main_module._day0_urgent_wake_pending.clear()
+        main_module._day0_exit_monitor_attempts.clear()
 
     assert calls == ["release"]
     assert main_module._held_position_monitor_active.is_set() is False
@@ -6446,6 +6476,7 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
 
     assert calls == []
     assert not main_module._held_position_monitor_active.is_set()
+    assert not main_module._held_position_monitor_handoff_pending.is_set()
 
 
 def test_reactor_rechecks_monitor_priority_after_active_lock_claim() -> None:
@@ -6468,8 +6499,23 @@ def test_entry_reactor_monitor_defer_contract_is_effective(monkeypatch) -> None:
 
     monitor_active = threading.Event()
     monitor_active.set()
+    handoff_pending = threading.Event()
+    bootstrap_complete = threading.Event()
+    bootstrap_complete.set()
     monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_handoff_pending",
+        handoff_pending,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
 
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    handoff_pending.set()
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
 
 

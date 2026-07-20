@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-20
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -931,9 +931,9 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
         )
         assert captured["urgent_day0_pending"]() is False
         assert captured["held_position_monitor_pending"]() is False
-        main._held_position_monitor_active.set()
+        main._held_position_monitor_handoff_pending.set()
         assert captured["held_position_monitor_pending"]() is True
-        main._held_position_monitor_active.clear()
+        main._held_position_monitor_handoff_pending.clear()
         main._day0_urgent_wake_pending.set()
         assert captured["urgent_day0_pending"]() is True
         main._day0_exit_monitor_attempts["wake-owned"] = None
@@ -941,7 +941,7 @@ def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
         urgent_identity[0] = "wake-new"
         assert captured["urgent_day0_pending"]() is True
     finally:
-        main._held_position_monitor_active.clear()
+        main._held_position_monitor_handoff_pending.clear()
         main._day0_urgent_wake_pending.clear()
         main._day0_exit_monitor_attempts.clear()
 

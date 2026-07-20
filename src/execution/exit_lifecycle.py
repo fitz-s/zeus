@@ -7129,10 +7129,9 @@ def run_exit_monitor_cycle(
     order submission when ``real_order_submit_enabled`` is true.
 
     ``held_position_monitor_active``/``mark_held_position_monitor_complete``
-    are injected from src.main: they are cross-job scheduling-coordination
-    primitives (other EDLI jobs defer while this one runs), so main.py — the
-    dispatcher — retains ownership of the Event/callback; this module only
-    consumes them for its own run/complete signalling. ``monitor_claimed`` means
+    are injected from src.main for non-reentrant run/complete signalling. Reactor
+    handoff priority is a separate dispatcher-owned event and ends before this
+    function performs network work. ``monitor_claimed`` means
     the dispatcher already set the Event while waiting for an active reactor to
     finish; direct callers retain the original local claim behavior.
     ``target_families`` limits event-triggered runs to the families changed by
