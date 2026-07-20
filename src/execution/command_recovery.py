@@ -167,7 +167,6 @@ _EXIT_PENDING_PROJECTION_TRADE_STATES = frozenset({
     "MATCHED",
     "MINED",
 })
-_EXIT_FULL_CLOSE_DUST_TOLERANCE = Decimal("0.011")
 _EXIT_LIFECYCLE_REPAIR_COMMAND_STATES = frozenset({
     CommandState.ACKED.value,
     CommandState.POST_ACKED.value,
@@ -7387,9 +7386,11 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
         exit_fill AS (
             SELECT fact.command_id,
                    COUNT(*) AS fill_fact_count,
-                   SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)) AS filled_size,
-                   SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)
-                       * CAST(COALESCE(fact.fill_price, '0') AS REAL)) AS fill_notional,
+                   GROUP_CONCAT(
+                       COALESCE(fact.filled_size, '0') || '#'
+                       || COALESCE(fact.fill_price, '0'),
+                       '|'
+                   ) AS fill_pairs,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.observed_at) AS observed_at
               FROM economic_trade_fact fact
@@ -7407,12 +7408,7 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
                cmd.price AS cmd_price,
                cmd.updated_at AS cmd_updated_at,
                exit_fill.fill_fact_count AS fill_fact_count,
-               exit_fill.filled_size AS fill_filled_size,
-               CASE
-                   WHEN exit_fill.filled_size > 0
-                   THEN exit_fill.fill_notional / exit_fill.filled_size
-                   ELSE NULL
-               END AS fill_avg_price,
+               exit_fill.fill_pairs AS fill_pairs,
                exit_fill.fill_states AS fill_states,
                exit_fill.observed_at AS fill_observed_at,
                {pc_select}
@@ -7438,6 +7434,40 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
     return [_dict_row(row) for row in rows]
 
 
+def _accumulate_exact_fills(
+    fill_pairs: object,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Exact (filled_size, fill_notional) from GROUP_CONCAT'd ``size#price`` text.
+
+    Exit trade facts store filled_size/fill_price as canonical decimal TEXT. A
+    SQLite REAL ``SUM`` over them loses binary precision on the close/settlement
+    boundary and can mis-size the full-close comparison; accumulate the exact
+    Decimal atoms instead. Returns ``(None, None)`` when no positive fill
+    economics are present.
+    """
+
+    text = str(fill_pairs or "")
+    if not text:
+        return None, None
+    filled_total = Decimal("0")
+    notional_total = Decimal("0")
+    for pair in text.split("|"):
+        if not pair:
+            continue
+        size_text, sep, price_text = pair.partition("#")
+        if not sep:
+            continue
+        size = _positive_decimal_or_none(size_text)
+        price = _positive_decimal_or_none(price_text)
+        if size is None or price is None:
+            continue
+        filled_total += size
+        notional_total += size * price
+    if filled_total <= 0 or notional_total <= 0:
+        return None, None
+    return filled_total, notional_total
+
+
 def _exit_close_target_size(candidate: dict, current: dict) -> Decimal | None:
     sizes = [
         _positive_decimal_or_none(candidate.get("cmd_size")),
@@ -7451,17 +7481,25 @@ def _exit_close_target_size(candidate: dict, current: dict) -> Decimal | None:
 
 
 def _exit_trade_fact_covers_full_close(candidate: dict, current: dict) -> bool:
-    filled_size = _positive_decimal_or_none(candidate.get("fill_filled_size"))
-    fill_price = _positive_decimal_or_none(candidate.get("fill_avg_price"))
+    # C3: accumulate exact Decimal fill atoms (canonical TEXT). A SQLite REAL SUM
+    # would lose binary precision on the close/settlement boundary and mis-decide
+    # the full-close comparison below.
+    filled_size, fill_notional = _accumulate_exact_fills(candidate.get("fill_pairs"))
     command_size = _positive_decimal_or_none(candidate.get("cmd_size"))
     target_size = _exit_close_target_size(candidate, current)
+    # C2 (money-path): a full close is proven ONLY when the exact fill covers the
+    # ENTIRE on-record holding (target_size = max(command, chain_shares, shares)).
+    # _append_exit_filled_projection fabricates chain_shares/chain_avg_price/
+    # chain_cost_basis_usd to zero, so an underfill must NOT reach it: compare
+    # exact atomics with NO dust tolerance. target_size >= command_size, so
+    # `>= target_size` subsumes the command-fill guard; a residual is otherwise
+    # retired only by the chain-confirmed-zero reconciler.
     return (
         filled_size is not None
-        and fill_price is not None
+        and fill_notional is not None
         and command_size is not None
         and target_size is not None
-        and filled_size >= command_size
-        and filled_size + _EXIT_FULL_CLOSE_DUST_TOLERANCE >= target_size
+        and filled_size >= target_size
     )
 
 
@@ -7487,8 +7525,14 @@ def _append_exit_filled_projection(
             "exit fill projection only repairs active/day0/pending_exit positions; "
             f"got phase={phase_before!r}"
         )
-    filled_size = _positive_decimal_or_none(candidate.get("fill_filled_size"))
-    fill_price = _positive_decimal_or_none(candidate.get("fill_avg_price"))
+    # C3: exact Decimal fill atoms (see _accumulate_exact_fills); a REAL SUM
+    # would lose precision in the realized-pnl and share economics booked below.
+    filled_size, fill_notional = _accumulate_exact_fills(candidate.get("fill_pairs"))
+    fill_price = (
+        fill_notional / filled_size
+        if filled_size is not None and fill_notional is not None
+        else None
+    )
     if filled_size is None or fill_price is None:
         raise ValueError("exit fill projection requires positive fill size and price")
 
@@ -7628,6 +7672,7 @@ def _append_exit_pending_projection(
         )
     phase_after = fold_lifecycle_phase(phase_before, "pending_exit").value
     fill_states = str(candidate.get("fill_states") or "").strip()
+    filled_total, _ = _accumulate_exact_fills(candidate.get("fill_pairs"))
     event_id = f"{position_id}:exit_order_posted:{command_id}"
     projection = dict(current)
     projection.update(
@@ -7674,7 +7719,7 @@ def _append_exit_pending_projection(
                 "venue_order_id": venue_order_id,
                 "command_state": candidate.get("cmd_state"),
                 "fill_fact_count": candidate.get("fill_fact_count"),
-                "filled_size": candidate.get("fill_filled_size"),
+                "filled_size": _decimal_text(filled_total) if filled_total is not None else None,
                 "fill_states": fill_states,
                 "economic_close_written": False,
                 "semantic_guard": "matched_or_mined_exit_is_pending_not_economic_close",

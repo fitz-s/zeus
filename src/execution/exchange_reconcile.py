@@ -139,7 +139,6 @@ _REDEEM_PENDING_WALLET_HOLDING_STATES = frozenset(
 )
 _CLOSED_POSITION_WALLET_HOLDING_PHASES = frozenset({"settled", "admin_closed", "voided"})
 _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES = frozenset({"synced", "exit_pending_missing"})
-_EXIT_FULL_CLOSE_DUST_TOLERANCE = Decimal("0.011")
 # A terminal position whose CTF tokens left the wallet via an operator-confirmed
 # EXTERNAL close (the operator manually sold Zeus's position on the shared proxy
 # wallet). The tokens are provably no longer on-chain, so this chain_state is
@@ -4887,10 +4886,15 @@ def _ensure_exit_fill_position_event(
         _positive_decimal_or_none(current.get("chain_shares")),
     ]
     close_target = max(size for size in close_sizes if size is not None)
-    if (
-        shares_dec < command_size
-        or shares_dec + _EXIT_FULL_CLOSE_DUST_TOLERANCE < close_target
-    ):
+    # C2 (money-path): an underfill is NOT a full close. This economic-close
+    # projection fabricates chain_shares/chain_avg_price/chain_cost_basis_usd to
+    # zero below, which is safe ONLY when the venue fill covers the ENTIRE
+    # on-record holding. Compare exact fill atomics against the exact holding
+    # (no dust tolerance) so a partial fill preserves the positive residual for
+    # the chain-confirmed-zero reconciler instead of fabricating a zero. Because
+    # close_target = max(command, shares, chain_shares) >= command_size, this
+    # also subsumes the command-underfill guard.
+    if shares_dec < close_target:
         logger.warning(
             "exchange_reconcile: refuse partial exit economic close "
             "command_id=%s filled=%s command_size=%s close_target=%s order_id=%s",
