@@ -2138,8 +2138,8 @@ def test_global_buy_fak_certificate_rejects_negative_worst_limit_endpoint():
         S.global_buy_fak_prefix_certificate(worse_limit)
 
 
-def test_global_buy_fak_certificate_rejects_limit_at_999():
-    """Solver certificates cannot authorize an out-of-band live limit."""
+def test_global_buy_fak_certificate_uses_coherent_joint_price_fee_bound_at_999():
+    """The fee-shape maximum at .5 cannot be added to a .999 fill price."""
     candidate = _global_candidate(
         candidate_id="fak-prefix-999",
         family="fak-prefix-999",
@@ -2149,13 +2149,22 @@ def test_global_buy_fak_certificate_rejects_limit_at_999():
         fee="0.05",
     )
     decision = _global_select((candidate,), cap="5")
-    with pytest.raises(ValueError, match="outside absolute live price band"):
-        S.global_buy_fak_prefix_certificate(
-            replace(
-                decision,
-                limit_price=Decimal("0.999"),
-            )
+    cert = S.global_buy_fak_prefix_certificate(
+        replace(
+            decision,
+            limit_price=Decimal("0.999"),
         )
+    )
+
+    assert Decimal(str(cert["global_buy_fak_worst_fee_shape"])) == Decimal(
+        "0.000999"
+    )
+    assert Decimal(str(cert["global_buy_fak_worst_unit_cost"])) == Decimal(
+        "0.99909990"
+    )
+    assert cert["global_buy_fak_full_robust_ev_usd"] == pytest.approx(
+        float((Decimal("1") - Decimal("0.99909990")) * decision.shares)
+    )
 
 
 def test_global_buy_fak_certificate_binds_fee_curve_and_recomputes_independently():

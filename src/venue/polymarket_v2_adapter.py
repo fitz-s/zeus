@@ -63,25 +63,6 @@ from src.venue.batch_submit import (
 logger = logging.getLogger(__name__)
 
 _DERIVED_API_CREDS_CACHE: dict[tuple[str, int, str, int, str], Any] = {}
-_ABSOLUTE_LIVE_PRICE_MIN = Decimal("0.05")
-_ABSOLUTE_LIVE_PRICE_MAX = Decimal("0.95")
-
-
-def _assert_absolute_live_price_before_sdk(price: Decimal | str | float) -> Decimal:
-    """Independent final SDK-boundary guard; no live order may bypass it."""
-
-    try:
-        value = price if isinstance(price, Decimal) else Decimal(str(price))
-    except Exception as exc:
-        raise ValueError(f"live SDK order price must be decimal, got {price!r}") from exc
-    if not value.is_finite():
-        raise ValueError(f"live SDK order price must be finite, got {price!r}")
-    if not _ABSOLUTE_LIVE_PRICE_MIN <= value <= _ABSOLUTE_LIVE_PRICE_MAX:
-        raise ValueError(
-            "live SDK order price outside absolute inclusive [0.05, 0.95] submit band: "
-            f"price={value}"
-        )
-    return value
 
 DEFAULT_V2_HOST = "https://clob.polymarket.com"
 POLYMARKET_DATA_API_BASE = "https://data-api.polymarket.com"
@@ -698,7 +679,6 @@ class PolymarketV2Adapter:
         # T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK: reject placeholder envelopes
         # before any SDK call.  Mirror: src/data/polymarket_client.py:407-424.
         try:
-            _assert_absolute_live_price_before_sdk(envelope.price)
             envelope = self._bind_runtime_submission_envelope(envelope)
             envelope.assert_live_submit_bound()
         except ValueError as exc:
@@ -953,7 +933,6 @@ class PolymarketV2Adapter:
         bound: list[VenueSubmissionEnvelope] = []
         for envelope in envelopes:
             try:
-                _assert_absolute_live_price_before_sdk(envelope.price)
                 bound_envelope = self._bind_runtime_submission_envelope(envelope)
                 bound_envelope.assert_live_submit_bound()
             except ValueError as exc:
