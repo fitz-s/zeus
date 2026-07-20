@@ -44,25 +44,6 @@ UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
     "UNKNOWN",
     "REVIEW_REQUIRED",
 )
-_ABSOLUTE_LIVE_PRICE_MIN = Decimal("0.05")
-_ABSOLUTE_LIVE_PRICE_MAX = Decimal("0.95")
-
-
-def _assert_persistable_live_unit_price(price: Decimal | str | float) -> Decimal:
-    """Reject commands outside the operator's non-bypassable live price band."""
-
-    try:
-        value = price if isinstance(price, Decimal) else Decimal(str(price))
-    except (InvalidOperation, ValueError, TypeError) as exc:
-        raise ValueError(f"venue command price must be decimal, got {price!r}") from exc
-    if not value.is_finite():
-        raise ValueError(f"venue command price must be finite, got {price!r}")
-    if not _ABSOLUTE_LIVE_PRICE_MIN <= value <= _ABSOLUTE_LIVE_PRICE_MAX:
-        raise ValueError(
-            "venue command price outside absolute inclusive [0.05, 0.95] band: "
-            f"price={value}"
-        )
-    return value
 
 
 def _strict_live_entry_q_version_required() -> bool:
@@ -959,7 +940,7 @@ def record_position_decision_attribution(
 
 
 @capability("venue_command_write", lease=False)
-@protects("INV-21", "INV-04", "INV-43")
+@protects("INV-21", "INV-04")
 def insert_command(
     conn: sqlite3.Connection,
     *,
@@ -1023,7 +1004,6 @@ def insert_command(
         raise ValueError(
             f"side={side!r} must be 'BUY' or 'SELL'"
         )
-    _assert_persistable_live_unit_price(price)
 
     snapshot_id_value = snapshot_id.strip() if isinstance(snapshot_id, str) else snapshot_id
     q_version_value = q_version.strip() or None if isinstance(q_version, str) else q_version

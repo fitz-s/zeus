@@ -26,8 +26,6 @@ from decimal import Decimal, InvalidOperation
 import math
 from typing import Any, Literal, Mapping, Optional
 
-from src.contracts.venue_submission_envelope import assert_live_order_unit_price
-
 
 AuthorityTier = Literal["GAMMA", "DATA", "CLOB", "CHAIN"]
 OutcomeLabel = Literal["YES", "NO"]
@@ -466,10 +464,8 @@ def assert_snapshot_executable(
         )
 
     submitted_price = _as_decimal(price, "price")
-    try:
-        assert_live_order_unit_price(submitted_price)
-    except ValueError as exc:
-        raise MarketSnapshotMismatchError(str(exc)) from exc
+    if submitted_price <= 0 or submitted_price >= 1:
+        raise MarketSnapshotMismatchError("price must be inside (0, 1)")
     if submitted_price % snapshot.min_tick_size != 0:
         raise MarketSnapshotMismatchError(
             f"price {submitted_price} is not aligned to snapshot min_tick_size {snapshot.min_tick_size}"

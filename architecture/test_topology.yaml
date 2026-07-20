@@ -417,7 +417,7 @@ test_trust_policy:
     tests/test_entry_exit_symmetry.py: {created: "2026-04-07", last_used: "2026-04-23"}
 
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-29"}
-    tests/test_executor.py: {created: "2026-04-27", last_used: "2026-07-20", note: "Executor live-order safety, including INV-43 reduce-only exit rejection outside inclusive [0.05,0.95] before command persistence."}
+    tests/test_executor.py: {created: "2026-04-27", last_used: "2026-07-18", note: "Executor live-order safety, including INV-43 reduce-only exit rejection for non-binary prices before command persistence."}
     tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-07-11"}
     tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}
@@ -520,16 +520,16 @@ test_trust_policy:
     tests/test_z0_plan_lock.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_cutover_guard.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-07-11", note: "Heartbeat supervisor fail-closed and market-discovery scheduler antibodies. Extended 2026-07-11 to prove the external keeper runs the dead-proxy bypass before constructing its CLOB client, matching src.main startup semantics."}
-    tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-07-20", note: "Polymarket V2 adapter provenance and INV-43 symmetric BUY/SELL inclusive [0.05,0.95] band at both envelope and independent final SDK boundaries; tick/range remains cumulative."}
+    tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-07-18", note: "Polymarket V2 adapter provenance and INV-43 symmetric BUY/SELL strict (0,1) binary-price domain before SDK contact; tick/range remains a separate current-snapshot requirement."}
     tests/test_polymarket_request_governor.py: {created: "2026-07-18", last_used: "2026-07-18", note: "Cross-process Polymarket HTTP attempt governor: same-identity HELD takeover with lease fencing, generation-safe host recovery, full Retry-After preservation, official Gamma/CLOB/Data sliding budgets with reserved live-money capacity, and no response cache."}
     tests/test_collateral_ledger.py: {created: "2026-04-27", last_used: "2026-07-19", note: "R3 Z4 collateral-ledger antibodies. 2026-07-19: multi-winner loop reservation atomicity -- the CAS insert re-reads live committed reservation state, so K sequential winners in one wake never overspend a bounded wallet and the first overspending winner is rejected fail-closed, never partially committed, per auction_multiwinner_plan_2026-07-19.md."}
-    tests/test_executable_market_snapshot.py: {created: "2026-04-27", last_used: "2026-07-20", note: "Executable snapshot persistence/freshness/command antibodies, including INV-43 inclusive [0.05,0.95] submitted-command checks while preserving tail-priced market observations."}
+    tests/test_executable_market_snapshot.py: {created: "2026-04-27", last_used: "2026-06-26", note: "Executable snapshot persistence/freshness/command antibodies. Extended 2026-06-26 to prove executable_market_snapshot_latest upsert semantics and refresh-priority latest reads without append scans."}
     tests/test_provenance_5_projections.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-19", note: "Command recovery law, including live-tick nonblocking DB contention defer without in-cycle sleep while full/boot recovery preserves bounded retries. 2026-07-19: multi-winner loop antibody -- K sequential in-wake commands recover/terminalize independently through reconcile_terminal_entry_exposure_obligations (INV-42), no collapse or double-release across commands, per auction_multiwinner_plan_2026-07-19.md."}
-    tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-07-20", note: "Venue command journal invariants, including independent INV-43 inclusive [0.05,0.95] persistence guard for ENTRY/EXIT and BUY/SELL, plus q_version write-once stamping."}
+    tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-07-09", note: "SCH-W1.2-ORDER-STATE: extended with TestInsertCommandQVersionStamp — q_version write-once stamp, NULL default, whitespace normalization, survives state transitions, and live-mode ENTRY q_version fail-closed."}
     tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
