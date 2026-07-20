@@ -11,8 +11,6 @@ from __future__ import annotations
 import pytest
 
 from src.data.replacement_forecast_calibration_block import (
-    AIFS_PRODUCT_ID,
-    AIFS_SOURCE_ID,
     REPLACEMENT_PRODUCT_ID,
     REPLACEMENT_SOURCE_ID,
     ReplacementForecastCalibrationRequest,
@@ -66,16 +64,11 @@ def test_baseline_platt_emos_raw_and_sigma_floor_are_blocked() -> None:
         assert "REPLACEMENT_CALIBRATION_PRODUCT_IDENTITY_MISMATCH" in decision.reason_codes
 
 
-def test_aifs_sampled_2t_cannot_use_period_extrema_calibration() -> None:
+def test_replacement_sampled_2t_cannot_use_period_extrema_calibration() -> None:
     decision = evaluate_replacement_forecast_calibration_block(
         _request(
-            target_source_id=AIFS_SOURCE_ID,
-            target_product_id=AIFS_PRODUCT_ID,
-            target_data_version="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
-            calibration_source_id=AIFS_SOURCE_ID,
-            calibration_product_id=AIFS_PRODUCT_ID,
-            calibration_data_version="ecmwf_aifs_ens_mx2t3_period_extrema_local_calendar_day_max",
-            calibration_method="aifs_product_specific",
+            calibration_data_version="openmeteo_ecmwf_ifs9_aifs_mx2t3_period_extrema_local_calendar_day_max",
+            calibration_method="soft_anchor_period_extrema",
         )
     )
 

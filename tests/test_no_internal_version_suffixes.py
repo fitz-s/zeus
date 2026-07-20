@@ -163,7 +163,6 @@ GRANDFATHER: frozenset[str] = frozenset(
         "_write_snapshot_pairs_v2",
         "add_calibration_pair_v2",
         "after_v2",
-        "aifs_points_converted_to_materializer_samples_v1",
         "already_in_v2",
         "audit_observation_instants_v2",
         "backfill_manifest_obs_v2",

@@ -8,7 +8,6 @@ import json
 import re
 import sqlite3
 import sys
-from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,8 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.ecmwf_aifs_sampled_2t_localday import HIGH_DATA_VERSION as AIFS_HIGH_DATA_VERSION  # noqa: E402
-from src.data.ecmwf_aifs_sampled_2t_localday import LOW_DATA_VERSION as AIFS_LOW_DATA_VERSION  # noqa: E402
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION  # noqa: E402
 from src.data.openmeteo_ecmwf_ifs9_anchor import LOW_DATA_VERSION as OPENMETEO_LOW_DATA_VERSION  # noqa: E402
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest, write_manifest_to_db  # noqa: E402
@@ -27,7 +24,6 @@ from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema  
 
 
 OPENMETEO_RE = re.compile(r"^(?P<city>.+)_(?P<stamp>20\d{6}T\d{2})Z\.json$")
-METRIC_TO_AIFS_VERSION = {"high": AIFS_HIGH_DATA_VERSION, "low": AIFS_LOW_DATA_VERSION}
 METRIC_TO_OPENMETEO_VERSION = {"high": OPENMETEO_HIGH_DATA_VERSION, "low": OPENMETEO_LOW_DATA_VERSION}
 
 
@@ -93,32 +89,6 @@ def _load_eval_rows(path: Path) -> tuple[Mapping[str, Any], ...]:
     return tuple(row for row in rows if isinstance(row, Mapping))
 
 
-def _aifs_downloads(payload: Mapping[str, Any], *, eval_json: Path, raw_roots: tuple[Path, ...]) -> dict[datetime, Path]:
-    out: dict[datetime, Path] = {}
-    for item in payload.get("downloads", []):
-        if not isinstance(item, Mapping):
-            continue
-        if str(item.get("type") or "").lower() != "pf":
-            continue
-        path_text = str(item.get("path") or "")
-        if "aifs" not in path_text.lower():
-            continue
-        run = _to_utc(str(item.get("run") or ""))
-        candidates = []
-        raw_path = Path(path_text)
-        if raw_path.is_absolute():
-            candidates.append(raw_path)
-        candidates.append(eval_json.parent / raw_path)
-        for root in raw_roots:
-            candidates.append(root / raw_path.name)
-            candidates.append(root / "aifs_jun3_jun5_preday" / raw_path.name)
-        for candidate in candidates:
-            if candidate.exists():
-                out[run] = candidate
-                break
-    return out
-
-
 def _openmeteo_files(raw_roots: tuple[Path, ...]) -> dict[tuple[str, datetime], Path]:
     out: dict[tuple[str, datetime], Path] = {}
     for root in raw_roots:
@@ -172,11 +142,9 @@ def stage_downloaded_replacement_eval_raw_manifests(
         raise ValueError("eval JSON must decode to an object")
     rows = _load_eval_rows(eval_json)
     roots = _raw_roots(eval_json, raw_roots)
-    aifs_by_run = _aifs_downloads(payload, eval_json=eval_json, raw_roots=roots)
     openmeteo_by_city_run = _openmeteo_files(roots)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    aifs_scope: dict[tuple[str, datetime], dict[str, set[str]]] = defaultdict(lambda: {"cities": set(), "target_dates": set()})
     openmeteo_scope: dict[tuple[str, str, datetime], dict[str, str]] = {}
     skipped: list[dict[str, object]] = []
     for row in rows:
@@ -186,13 +154,6 @@ def stage_downloaded_replacement_eval_raw_manifests(
         if metric not in {"high", "low"} or not city or not target_date:
             continue
         decision = _decision_time(target_date, cutoff_hour_utc=decision_cutoff_hour_utc)
-        aifs_run = _latest_run_before(tuple(aifs_by_run), decision, release_lag_hours=release_lag_hours)
-        if aifs_run is None:
-            skipped.append({"city": city, "target_date": target_date, "metric": metric, "reason": "AIFS_RAW_RUN_NOT_FOUND"})
-        else:
-            key = (metric, aifs_run)
-            aifs_scope[key]["cities"].add(city)
-            aifs_scope[key]["target_dates"].add(target_date)
         om_city = _filename_city(city)
         om_runs = tuple(run for indexed_city, run in openmeteo_by_city_run if indexed_city == om_city)
         om_run = _latest_run_before(om_runs, decision, release_lag_hours=release_lag_hours)
@@ -202,28 +163,6 @@ def stage_downloaded_replacement_eval_raw_manifests(
             openmeteo_scope[(metric, om_city, om_run)] = {"city": city, "target_date": target_date}
 
     manifests: list[RawForecastArtifactManifest] = []
-    for (metric, run), scope in sorted(aifs_scope.items(), key=lambda item: (item[0][0], item[0][1])):
-        artifact = aifs_by_run[run]
-        source_available = _source_available_at(run, release_lag_hours=release_lag_hours)
-        manifests.append(
-            _manifest(
-                artifact,
-                source_id="ecmwf_aifs_ens",
-                product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
-                data_version=METRIC_TO_AIFS_VERSION[metric],
-                source_cycle_time=run,
-                source_available_at=source_available,
-                request_url="ecmwf-opendata://aifs-ens/2t/downloaded-eval",
-                request_params={"model": "aifs-ens", "param": "2t", "type": "pf", "run": run.isoformat(), "metric": metric},
-                product_metadata={
-                    "artifact_class": "aifs_sampled_2t_grib_downloaded_eval",
-                    "cities": sorted(scope["cities"]),
-                    "target_dates": sorted(scope["target_dates"]),
-                    "metric": metric,
-                    "source_run_id": f"aifs-downloaded-eval-{metric}-{run.strftime('%Y%m%dT%H%M%SZ')}",
-                },
-            )
-        )
     for (metric, om_city, run), scope in sorted(openmeteo_scope.items(), key=lambda item: (item[0][0], item[0][1], item[0][2])):
         artifact = openmeteo_by_city_run[(om_city, run)]
         source_available = _source_available_at(run, release_lag_hours=release_lag_hours)

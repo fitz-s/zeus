@@ -14,15 +14,13 @@ from typing import Mapping
 
 REPLACEMENT_SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
 REPLACEMENT_PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
-AIFS_SOURCE_ID = "ecmwf_aifs_ens"
-AIFS_PRODUCT_ID = "ecmwf_aifs_ens_sampled_2t_6h_v1"
 OPENMETEO_ANCHOR_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 OPENMETEO_ANCHOR_PRODUCT_ID = "openmeteo_ecmwf_ifs9_deterministic_anchor_v1"
 ALLOWED_STATUS = "ALLOWED"
 BLOCKED_STATUS = "BLOCKED"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
-_REPLACEMENT_PRODUCT_IDS = {REPLACEMENT_PRODUCT_ID, AIFS_PRODUCT_ID, OPENMETEO_ANCHOR_PRODUCT_ID}
-_REPLACEMENT_SOURCE_IDS = {REPLACEMENT_SOURCE_ID, AIFS_SOURCE_ID, OPENMETEO_ANCHOR_SOURCE_ID}
+_REPLACEMENT_PRODUCT_IDS = {REPLACEMENT_PRODUCT_ID, OPENMETEO_ANCHOR_PRODUCT_ID}
+_REPLACEMENT_SOURCE_IDS = {REPLACEMENT_SOURCE_ID, OPENMETEO_ANCHOR_SOURCE_ID}
 _B0_LINEAGE_TOKENS = ("ecmwf_open_data", "opendata", "tigge", "ifs_ens_0p25", "mx2t3", "mn2t3", "mx2t6", "mn2t6")
 _B0_METHODS = {"platt", "extended_platt", "emos", "raw_honest", "sigma_floor", "b0_sigma_floor"}
 

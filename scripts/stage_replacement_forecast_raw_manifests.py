@@ -15,8 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.ecmwf_aifs_sampled_2t_localday import HIGH_DATA_VERSION as AIFS_HIGH_DATA_VERSION  # noqa: E402
-from src.data.ecmwf_aifs_sampled_2t_localday import LOW_DATA_VERSION as AIFS_LOW_DATA_VERSION  # noqa: E402
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION  # noqa: E402
 from src.data.openmeteo_ecmwf_ifs9_anchor import LOW_DATA_VERSION as OPENMETEO_LOW_DATA_VERSION  # noqa: E402
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest  # noqa: E402
@@ -44,28 +42,6 @@ def _write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
-
-
-def _aifs_samples_payload(source: Path, *, metric: str) -> dict[str, Any]:
-    raw = json.loads(source.read_text(encoding="utf-8"))
-    points = raw.get("points")
-    if not isinstance(points, list):
-        raise ValueError("AIFS staged sample source must contain points[]")
-    samples: list[dict[str, Any]] = []
-    for point in points:
-        if not isinstance(point, dict) or str(point.get("metric")) != metric:
-            continue
-        samples.append(
-            {
-                "member_id": str(point["member"]),
-                "valid_time_utc": str(point["valid_at"]),
-                "temperature": float(point["value"]),
-                "temperature_unit": "F",
-            }
-        )
-    if not samples:
-        return {"samples": [], "source_schema": "aifs_points_converted_to_materializer_samples_v1"}
-    return {"samples": samples, "source_schema": "aifs_points_converted_to_materializer_samples_v1"}
 
 
 def _manifest(
@@ -105,14 +81,10 @@ def stage_replacement_forecast_raw_manifests(
     raw_dir = Path(live_raw_manifest_dir)
     source_dir = Path(source_raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
-    for pattern in (
-        "aifs_sampled_2t_*_20260605T00Z.manifest.json",
-        "openmeteo_ifs9_anchor_*_20260605T00Z.manifest.json",
-    ):
+    for pattern in ("openmeteo_ifs9_anchor_*_20260605T00Z.manifest.json",):
         for old_manifest in raw_dir.glob(pattern):
             old_manifest.unlink()
     captured = captured_at or datetime.now(UTC).isoformat()
-    source_aifs_samples = source_dir / "aifs_sample_points_from_implemented_materializer.json"
     source_openmeteo_payload = source_dir / "openmeteo_jun5_jun6" / "Shanghai_20260605T00Z.json"
     precision_metadata = _write_json(
         raw_dir / "openmeteo_ecmwf_ifs9_precision_metadata.json",
@@ -150,38 +122,6 @@ def stage_replacement_forecast_raw_manifests(
     source_available_at = "2026-06-05T02:30:00+00:00"
     written: list[str] = []
     copied_inputs: list[str] = [str(precision_metadata)]
-    for metric, data_version in (("high", AIFS_HIGH_DATA_VERSION), ("low", AIFS_LOW_DATA_VERSION)):
-        aifs_payload = _aifs_samples_payload(source_aifs_samples, metric=metric)
-        if not aifs_payload["samples"]:
-            continue
-        aifs_samples = _write_json(
-            raw_dir / f"aifs_sample_points_{metric}_from_implemented_materializer.json",
-            aifs_payload,
-        )
-        copied_inputs.append(str(aifs_samples))
-        manifest = _manifest(
-            aifs_samples,
-            raw_dir=raw_dir,
-            source_id="ecmwf_aifs_ens",
-            product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
-            data_version=data_version,
-            source_cycle_time=source_cycle_time,
-            source_available_at=source_available_at,
-            captured_at=captured,
-            request_url="ecmwf-opendata://aifs-ens/2t/sampled",
-            request_params={"model": "aifs-ens", "param": "2t", "metric": metric, "cycle": source_cycle_time},
-            product_metadata={
-                "artifact_class": "aifs_sampled_2t_points",
-                "cities": ["Chicago", "New York", "Austin", "Miami"],
-                "target_dates": ["2026-06-05"],
-                "metric": metric,
-                "source_run_id": f"aifs-sampled-2t-{metric}-20260605T000000Z",
-                "aifs_samples_json": aifs_samples.name,
-            },
-        )
-        path = raw_dir / f"aifs_sampled_2t_{metric}_20260605T00Z.manifest.json"
-        write_manifest(manifest, path)
-        written.append(str(path))
     for metric, data_version in (("high", OPENMETEO_HIGH_DATA_VERSION),):
         openmeteo_payload = _copy_as(source_openmeteo_payload, raw_dir, f"openmeteo_ecmwf_ifs9_anchor_{metric}_Shanghai_20260605T00Z.json")
         copied_inputs.append(str(openmeteo_payload))

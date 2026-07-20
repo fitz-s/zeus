@@ -14,7 +14,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from src.data.ecmwf_aifs_sampled_2t_localday import HIGH_DATA_VERSION as AIFS_HIGH_DATA_VERSION
+# ecmwf_aifs_ens is a deleted, BLOCKED-forever source (banned-source deletion order,
+# docs/evidence/capital_efficiency_2026_07_19/banned_source_deletion_audit.md); this fixture
+# label is retained verbatim (not imported from the now-deleted module) purely to exercise
+# generic multi-source manifest discovery below, not AIFS-specific behavior.
+AIFS_HIGH_DATA_VERSION = "ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max"
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest, write_manifest
 from src.data.replacement_forecast_materialization_preflight import build_replacement_forecast_materialization_preflight
@@ -267,19 +271,6 @@ def test_stage_raw_manifests_writes_replay_target_identity(tmp_path: Path) -> No
     source_raw_dir = tmp_path / "source_raw"
     live_raw_dir = tmp_path / "live_raw"
     _write_json(
-        source_raw_dir / "aifs_sample_points_from_implemented_materializer.json",
-        {
-            "points": [
-                {
-                    "metric": "high",
-                    "member": "pf001",
-                    "valid_at": "2026-06-05T00:00:00+00:00",
-                    "value": 80.0,
-                }
-            ]
-        },
-    )
-    _write_json(
         source_raw_dir / "openmeteo_jun5_jun6" / "Shanghai_20260605T00Z.json",
         {"hourly": {"time": ["2026-06-05T00:00"], "temperature_2m": [28.0]}},
     )
@@ -293,8 +284,6 @@ def test_stage_raw_manifests_writes_replay_target_identity(tmp_path: Path) -> No
     assert receipt["status"] == "RAW_MANIFESTS_STAGED"
     manifests = [read_manifest(Path(path)) for path in receipt["written_manifests"]]
     by_source = {manifest.source_id: manifest.product_metadata for manifest in manifests}
-    assert by_source["ecmwf_aifs_ens"]["cities"] == ["Chicago", "New York", "Austin", "Miami"]
-    assert by_source["ecmwf_aifs_ens"]["target_dates"] == ["2026-06-05"]
     openmeteo_metadata = by_source["openmeteo_ecmwf_ifs_9km"]
     assert openmeteo_metadata["city"] == "Shanghai"
     assert openmeteo_metadata["cities"] == ["Shanghai"]
