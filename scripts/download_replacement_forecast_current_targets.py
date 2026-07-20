@@ -765,9 +765,6 @@ def download_current_target_raw_inputs(
 
     try:
         for target in targets:
-            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-                timeboxed_incomplete = True
-                break
             target_key = (target.city, target.target_date)
             city_config = cities_by_name.get(target.city)
             if city_config is None:
@@ -796,6 +793,12 @@ def download_current_target_raw_inputs(
                         )
                     cached = resolved_payloads.get(target_key)
                     if cached is None:
+                        if (
+                            deadline_monotonic is not None
+                            and time.monotonic() >= deadline_monotonic
+                        ):
+                            timeboxed_incomplete = True
+                            continue
                         payload, anchor_transport_provenance = _resolve_anchor_payload(
                             request=request,
                             city=target.city,
@@ -831,7 +834,7 @@ def download_current_target_raw_inputs(
                     continue
                 except TimeoutError:
                     timeboxed_incomplete = True
-                    break
+                    continue
                 _write_json(payload_path, payload)
             _write_json(
                 precision_path,
