@@ -119,6 +119,33 @@ Update/fetch slices (each money-path — stages the served center; fitter + mode
 NOTE the config references `scripts/grade_cwa_township_forward.py` which DOES NOT EXIST (doc-code gap);
 the fitter's walk-forward paired-MAE IS the grading — no separate grader needed.
 
+## EXECUTION 2026-07-20 (first-principles pass)
+
+- **LANDED + DEPLOYED + VERIFIED — station ingest re-home** (08425d858 fix, 8c71d03db legacy-cleanup).
+  Root cause: the 2026-06-11 download-lane migration orphaned `_ingest_station_forecasts_live` (it
+  lived only in the descheduled forecast-live `_replacement_forecast_download_cycle`), so
+  cwa_township/hko_fnd went dark 2026-07-17 16:03. Re-homed onto `ingest_main._replacement_availability_poll_tick`
+  via due-gated `_ingest_station_forecasts_if_due` (~3h monotonic gate, fail-soft). The data-ingest
+  daemon picked it up 1m41s after commit; cwa/hko ingesting again (verified fresh to 2026-07-20 04:00).
+  Removed the orphaned duplicate call from the diagnostic cycle (single live owner).
+
+- **FITTER WIDENING — investigated, NOT done (correctly).** Adding cwa/hko (and the extended regionals
+  jma_msm/nam_conus/dmi_harmonie/knmi) to `fit_source_clock_city_weights.py::LIVE_SERVABLE_MODELS` is a
+  NO-OP right now and was reverted: (a) station sources are `single_runs` endpoint ONLY (no `previous_runs`
+  archive — they are official forecasts, not re-forecast gridded models), and the fitter's `_FIT_QUERY`
+  reads `endpoint='previous_runs'`; (b) every recently-added source has only ~20-25 settled days
+  (cwa ~20, jma_msm/nam/dmi ~23-24), FAR below the fitter's TIER1_MIN_N=60. The fitter's thin-sample
+  governance (MIN_SETTLED_N + 2·SE) correctly refuses to fit them — forcing them in would over-fit a
+  20-day sample, the exact failure the guard prevents (and NOT a "wait N days" gate: they are used NOW).
+- **Current correct serving**: cwa/hko reach Taipei/HK centres via the materializer ADD-DATA path
+  (`_station_live_omitted`, operator "加数据不禁数据") at EQUAL_WEIGHT — equal (not precision) because the
+  raw_m2/residual history also reads `previous_runs`, which station sources lack, so precision falls back
+  to equal. Verified live: Taipei/high `used_models=[icon_global, ukmo, cwa_township, ecmwf_ifs]`.
+- **The real granularity lever (future, careful, money-path)**: make the residual/precision history (and
+  optionally the fitter) read station `single_runs` walk-forward, with EB-shrinkage moderating the thin
+  sample — so cwa/hko graduate off equal-weight onto a precision weight reflecting their settlement-station
+  skill. Do NOT force it before the mechanism is built + staged; the thin-sample shrinkage is the crux.
+
 ## Dead residue (separate, low-risk cleanup — verify then delete)
 - `ecmwf_ifs_ens_0p1` 0.1° registry stub in `forecast_source_registry.py` — 0 rows ever, 0 live consumers.
 - `_legacy_coarse_unique_20260607T131448Z` archive tables (posteriors/anchors/shadow) — 0 code refs
