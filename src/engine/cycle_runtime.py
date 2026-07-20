@@ -38,6 +38,7 @@ from src.contracts.execution_intent import (
 from src.contracts.position_truth import (
     has_current_money_risk_chain_state,
 )
+from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     LifecyclePhase,
@@ -2877,7 +2878,9 @@ def _orange_favorable_exit_decision(pos, exit_context, exit_decision):
             return exit_decision
         planned_exit_price = best_bid
 
-    if not (math.isfinite(planned_exit_price) and 0.0 < planned_exit_price < 1.0):
+    try:
+        assert_live_order_unit_price(planned_exit_price)
+    except ValueError:
         return exit_decision
     clamped_fee_price = min(max(planned_exit_price, 1e-6), 1.0 - 1e-6)
     fee_per_share = polymarket_fee(clamped_fee_price, exit_fee_rate())
