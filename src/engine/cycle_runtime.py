@@ -7057,23 +7057,25 @@ def _rotation_candidates(conn, *, decision_time: datetime) -> tuple[list, list[s
             "created_at",
         ]
     )
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT {select_sql}
-              FROM {schema}.no_trade_regret_events
-             WHERE COALESCE(trade_score, 0) > 0
-             ORDER BY created_at DESC
-             LIMIT 200
-            """
-        ).fetchall()
-    except Exception as exc:
-        return [], [f"no_trade_regret_events_read_failed:{exc.__class__.__name__}"]
     lookback_hours = max(
         0.25,
         float(os.environ.get("ZEUS_PORTFOLIO_ROTATION_CANDIDATE_LOOKBACK_HOURS", "6.0")),
     )
     earliest = decision_time.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {select_sql}
+              FROM {schema}.no_trade_regret_events
+             WHERE created_at >= ?
+               AND trade_score > 0
+             ORDER BY created_at DESC
+             LIMIT 200
+            """,
+            (earliest.isoformat(),),
+        ).fetchall()
+    except Exception as exc:
+        return [], [f"no_trade_regret_events_read_failed:{exc.__class__.__name__}"]
     candidates: list = []
     skipped: list[str] = []
     for row in rows:

@@ -5,7 +5,10 @@ import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from src.engine.cycle_runtime import _emit_portfolio_rotation_evaluation_status
+from src.engine.cycle_runtime import (
+    _emit_portfolio_rotation_evaluation_status,
+    _rotation_candidates,
+)
 
 
 class _Logger:
@@ -73,6 +76,48 @@ def _create_world_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        "CREATE INDEX world.idx_no_trade_regret_created_at "
+        "ON no_trade_regret_events(created_at DESC)"
+    )
+
+
+def test_rotation_candidates_bounds_the_index_scan_by_lookback(tmp_path) -> None:
+    world_path = tmp_path / "world.db"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    _create_world_schema(conn)
+    conn.executemany(
+        """
+        INSERT INTO world.no_trade_regret_events VALUES (
+            ?, 'KELLY', 'KELLY_REJECTED:corr_budget', 'Seoul', '2026-05-01',
+            'high', 'old-bin', 'buy_no', 0.8, 0.5, 1.0, NULL,
+            'old-token', 'old-condition', ?
+        )
+        """,
+        [
+            (f"old-{index}", f"2026-05-01T00:{index % 60:02d}:00+00:00")
+            for index in range(5_000)
+        ],
+    )
+
+    progress_calls = 0
+
+    def stop_unbounded_scan() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 20)
+
+    conn.set_progress_handler(stop_unbounded_scan, 100)
+    candidates, missing = _rotation_candidates(
+        conn,
+        decision_time=datetime(2026, 6, 7, 6, 30, tzinfo=timezone.utc),
+    )
+
+    assert candidates == []
+    assert missing == []
+    assert progress_calls <= 20
 
 
 def test_portfolio_rotation_evaluation_status_reports_positive_value_without_actuator(tmp_path) -> None:
