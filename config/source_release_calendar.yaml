@@ -14,7 +14,7 @@ entries:
     metric: high
     period_semantics: max temperature at 2m in previous 6h ending at valid step
     expected_members: 51
-    expected_step_rule: local_day_6h_windows_up_to_282h
+    expected_step_rule: local_day_6h_windows_up_to_144h
     partial_policy: BLOCK_LIVE
     live_authorization: true
     source_transport_required: ensemble_snapshots_db_reader
@@ -25,7 +25,14 @@ entries:
       - cycle_hours_utc: [0, 12]
         horizon_profile: full
         max_step_hours: 360
-        live_max_step_hours: 282  # raised 276→282 (fix/#134): D+10 UTC+12 cities need ≤252h; 282h covers with buffer
+        # Corrected 282->144 (2026-07-20, cgc consult 2026-07-19_cycle-topology-fusion-anchor):
+        # tail steps 150-360h have not been fetched since 064b0a232 "drop OpenData fetch tail
+        # >144h (Polymarket 5-day cap)" (2026-05-29) — src/data/ecmwf_open_data.STEP_HOURS and
+        # OPENDATA_MAX_STEP_HOURS both stop at 144h for every cycle. Advertising 282h here bound
+        # consumers to coverage Zeus does not possess. Restore path: resume 150-360h ingestion
+        # and reintroduce a separate long-tail product profile, then raise this back with that
+        # evidence.
+        live_max_step_hours: 144
         safe_fetch:
           default_lag_minutes: 485
           min_partial_lag_minutes: 400
@@ -54,7 +61,7 @@ entries:
     metric: low
     period_semantics: min temperature at 2m in previous 6h ending at valid step
     expected_members: 51
-    expected_step_rule: local_day_6h_windows_up_to_282h
+    expected_step_rule: local_day_6h_windows_up_to_144h
     partial_policy: BLOCK_LIVE
     live_authorization: true
     source_transport_required: ensemble_snapshots_db_reader
@@ -65,7 +72,14 @@ entries:
       - cycle_hours_utc: [0, 12]
         horizon_profile: full
         max_step_hours: 360
-        live_max_step_hours: 282  # raised 276→282 (fix/#134): D+10 UTC+12 cities need ≤252h; 282h covers with buffer
+        # Corrected 282->144 (2026-07-20, cgc consult 2026-07-19_cycle-topology-fusion-anchor):
+        # tail steps 150-360h have not been fetched since 064b0a232 "drop OpenData fetch tail
+        # >144h (Polymarket 5-day cap)" (2026-05-29) — src/data/ecmwf_open_data.STEP_HOURS and
+        # OPENDATA_MAX_STEP_HOURS both stop at 144h for every cycle. Advertising 282h here bound
+        # consumers to coverage Zeus does not possess. Restore path: resume 150-360h ingestion
+        # and reintroduce a separate long-tail product profile, then raise this back with that
+        # evidence.
+        live_max_step_hours: 144
         safe_fetch:
           default_lag_minutes: 485
           min_partial_lag_minutes: 400

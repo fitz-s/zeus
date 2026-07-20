@@ -46,7 +46,7 @@ def test_cycle_profiles_exist_for_00_12_full_and_06_18_short() -> None:
     assert full_profile is not None
     assert full_profile.cycle_hours_utc == (0, 12)
     assert full_profile.horizon_profile == "full"
-    assert full_profile.live_max_step_hours == 282
+    assert full_profile.live_max_step_hours == 144
     assert full_profile.live_authorization is True
 
     assert short_profile is not None
@@ -61,7 +61,7 @@ def test_full_horizon_selection_requires_00_or_12_cycle() -> None:
         now_utc=_utc(9),
         source_id="ecmwf_open_data",
         track="mx2t6_high",
-        required_max_step_hours=276,
+        required_max_step_hours=144,
     )
 
     assert decision is FetchDecision.FETCH_ALLOWED
@@ -101,7 +101,7 @@ def test_safe_fetch_for_full_horizon_blocks_0730_before_0805() -> None:
         "mx2t6_high",
         _utc(0),
         _utc(7, 30),
-        required_max_step_hours=276,
+        required_max_step_hours=144,
     )
 
     assert decision is FetchDecision.SKIPPED_NOT_RELEASED
@@ -109,19 +109,21 @@ def test_safe_fetch_for_full_horizon_blocks_0730_before_0805() -> None:
 
 
 def test_required_target_horizon_is_input_to_safe_fetch() -> None:
-    # Use required_max_step_hours=283 (one above live_max=282) to test HORIZON_OUT_OF_RANGE.
-    # Previously used 282 vs live_max=276; updated for live_max=282 (G4 cluster K).
+    # Use required_max_step_hours=145 (one above live_max=144) to test HORIZON_OUT_OF_RANGE.
+    # live_max corrected 282->144 (cgc consult 2026-07-19_cycle-topology-fusion-anchor):
+    # the 150-360h tail has not been fetched since 064b0a232 (2026-05-29); the calendar must
+    # not advertise coverage Zeus does not possess.
     decision, metadata = evaluate_safe_fetch(
         "ecmwf_open_data",
         "mx2t6_high",
         _utc(0),
         _utc(9),
-        required_max_step_hours=283,
+        required_max_step_hours=145,
     )
 
     assert decision is FetchDecision.HORIZON_OUT_OF_RANGE
-    assert metadata["required_max_step_hours"] == 283
-    assert metadata["live_max_step_hours"] == 282
+    assert metadata["required_max_step_hours"] == 145
+    assert metadata["live_max_step_hours"] == 144
 
 
 def test_short_horizon_can_fetch_but_not_live_full_horizon() -> None:
@@ -231,3 +233,41 @@ def test_calendar_requires_aware_timestamps() -> None:
 
 def test_get_entry_returns_none_for_missing_track() -> None:
     assert get_entry("ecmwf_open_data", "missing_track") is None
+
+
+def test_advertised_live_coverage_never_exceeds_fetched_step_grid() -> None:
+    """Config must never advertise more live coverage than Zeus actually fetches.
+
+    cgc consult 2026-07-19_cycle-topology-fusion-anchor ("independent configuration
+    defect"): the 00z/12z profile advertised live_max_step_hours=282h while
+    src/events/triggers/forecast_snapshot_ready.py documented that the 150-360h tail
+    is no longer fetched (retired by 064b0a232, 2026-05-29). A consumer trusting the
+    advertised ceiling binds to coverage that does not exist — stale-as-fresh in
+    config form.
+
+    Both sides are derived from their real sources, not hardcoded: the advertised
+    side from the live config file, the fetched side from the actual STEP_HOURS grid
+    ecmwf_open_data.py requests. Re-adding a >144h advertised ceiling without also
+    restoring tail ingestion must turn this RED.
+    """
+    from src.data.ecmwf_open_data import STEP_HOURS
+
+    fetched_max_step_hours = max(STEP_HOURS)
+    entries = load_calendar_config()
+    for (source_id, track), entry in entries.items():
+        if source_id != "ecmwf_open_data":
+            continue
+        for profile in entry.cycle_profiles:
+            advertised = (
+                profile.live_max_step_hours
+                if profile.live_max_step_hours is not None
+                else profile.max_step_hours
+            )
+            if not profile.live_authorization:
+                continue
+            assert advertised <= fetched_max_step_hours, (
+                f"{source_id}:{track} cycle_hours_utc={profile.cycle_hours_utc} "
+                f"advertises live_max_step_hours={advertised} but Zeus only fetches "
+                f"through {fetched_max_step_hours}h (STEP_HOURS). Config is "
+                "stale-as-fresh: restore tail ingestion before raising this ceiling."
+            )
