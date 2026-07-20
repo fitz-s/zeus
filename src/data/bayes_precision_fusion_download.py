@@ -1314,8 +1314,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
           Injected single_runs_fetch / previous_runs_fetch (per-model signature) are still
           supported for tests that inject per-model stubs.
       R3: models absent from the cycle's publish cadence are excluded from the batched set.
-      R4a: previous_runs skip key is (model,city,target_date,metric) IGNORING cycle —
-           a fixed-lead historical value is immutable once captured (never re-fetched).
+      R4a: previous_runs skip key is (model,city,target_date,metric,lead_days) IGNORING
+           cycle — a fixed-lead historical value is immutable once captured (never
+           re-fetched AT THAT LEAD; other leads of the same target remain fetchable).
     """
     # Detect whether caller injected old-style per-model fetchers (test compat) or batched.
     _use_legacy_per_model = (single_runs_fetch is not None or previous_runs_fetch is not None)
@@ -1388,9 +1389,12 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     # the steady-state cost is only-missing fetches. Fail-open: any read error -> empty set ->
     # fetch everything (the persist layer is UNIQUE-idempotent anyway).
     #
-    # R4a (2026-06-13): previous_runs fixed-lead values are IMMUTABLE once captured — the skip
-    # key for previous_runs ignores source_cycle_time so a past target_date is never re-fetched
-    # under a new cycle stamp. single_runs KEEPS the per-cycle key (current value changes per cycle).
+    # R4a (2026-06-13; lead-aware 2026-07-20): previous_runs fixed-lead values are IMMUTABLE
+    # once captured — the skip key ignores source_cycle_time so a past (target_date, lead) is
+    # never re-fetched under a new cycle stamp. The key DOES carry lead_days: each distinct
+    # lead is its own immutable value, so a target is re-visited as its lead decays (0/1/2
+    # walk-forward history all accrue). single_runs KEEPS the per-cycle key (current value
+    # changes per cycle).
     if frozen_source_runs is not None:
         source_clock_single_runs: dict[str, _SourceClockSingleRunsRequest] = {}
         for model, source_run in frozen_source_runs.items():
@@ -1462,11 +1466,17 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     if source_cycle_time == cycle_iso
                 }
             # R4a: immutable previous_runs skip — ignore source_cycle_time entirely.
+            # LEAD-AWARE (2026-07-20): the immutable unit is the FIXED-LEAD value, so the
+            # done-key carries lead_days. A lead-blind key locked every target_date at the
+            # first lead ever captured, which starved lead-0/1 walk-forward history for ALL
+            # models (a lead-0 previous_day0 value only exists when queried ON the target
+            # day) and structurally zeroed it for domain-lead-capped models (jma_msm
+            # max_lead_days=2 ⇒ first sight is always lead 2, then locked forever).
             if include_previous_runs and requested_models and target_cities and target_dates:
                 prev_runs_done = {
                     tuple(r)
                     for r in _ro.execute(
-                        "SELECT DISTINCT model, city, target_date, metric"
+                        "SELECT DISTINCT model, city, target_date, metric, lead_days"
                         " FROM raw_model_forecasts"
                         " WHERE endpoint = 'previous_runs'"
                         f" AND model IN ({model_marks})"
@@ -1861,10 +1871,10 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             for model in all_models if include_previous_runs and not timeboxed else []:
                 if not _model_in_domain(model, lat=ref.latitude, lon=ref.longitude, lead_days=int(ref.lead_days)):
                     continue  # domain_excluded already logged above
-                # R4a: check both metrics already in immutable history.
+                # R4a: check both metrics already in immutable history AT THIS LEAD.
                 metrics_needed = [
                     met for met in ("high", "low")
-                    if (model, city, target_date, met) not in prev_runs_done
+                    if (model, city, target_date, met, int(ref.lead_days)) not in prev_runs_done
                 ]
                 if metrics_needed:
                     prev_models.append(model)
@@ -1909,7 +1919,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         continue
                     high_c, low_c = hilo
                     for t in city_targets:
-                        if (model, t.city, t.target_date, t.metric) in prev_runs_done:
+                        if (model, t.city, t.target_date, t.metric, int(t.lead_days)) in prev_runs_done:
                             continue
                         val = high_c if t.metric == "high" else low_c
                         if val is None:
