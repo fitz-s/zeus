@@ -894,6 +894,11 @@ class ReactorConfig:
 _EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
 _PRE_SUBMIT_WORLD_WRITE_LOCK_RETRY = "WORLD_WRITE_LOCK_BUSY_PRE_SUBMIT"
 _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY = "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
+# C1 (2026-07-20 review blocker): a post-side-effect finalize that timed out on
+# the world-writer mutex. Distinct from the plain retry reason because the venue
+# side effect may already be durable — the command is HANDED to the off-thread
+# edli_command_recovery reconciler, not cleanly rolled back.
+_POST_SUBMIT_WORLD_WRITE_LOCK_MUST_SETTLE = "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT_MUST_SETTLE"
 
 # K2.1: once-per-process-per-base warning dedup for unregistered rejection-reason
 # bases (see _write_regret). Module-level so every reactor instance shares it.
@@ -2089,12 +2094,48 @@ class OpportunityEventReactor:
         lock_wait_ms = (
             _reactor_claim_busy_timeout_ms() if wait_ms is None else max(0, wait_ms)
         )
-        acquired = (
-            mutex.acquire()
-            if wait_ms is None
-            else mutex.acquire(timeout=lock_wait_ms / 1000.0)
-        )
-        if not acquired:
+        # C1 (2026-07-20 review blocker): this world-writer acquire runs on the
+        # global decision-reactor thread, AFTER a venue call may have begun. It
+        # MUST be bounded. The pre-fix code took an UNBOUNDED ``mutex.acquire()``
+        # for the side-effect-possible winner (wait_ms is None), so a STALLED
+        # world-DB writer froze the whole reactor indefinitely. Always acquire
+        # under the monotonic busy budget; on timeout hand the possibly-side-
+        # effecting command to the existing off-thread reconciler, never block.
+        if not mutex.acquire(timeout=lock_wait_ms / 1000.0):
+            side_effect_possible = (
+                bool(submit_result.submitted)
+                or bool(submit_result.venue_call_started)
+                or submit_result.side_effect_status != "NO_SUBMIT"
+            )
+            if side_effect_possible:
+                # A venue side effect may already be durable. Its command lives in
+                # venue_commands (zeus_trades.db) in an IN_FLIGHT / SUBMIT_UNKNOWN_
+                # SIDE_EFFECT state and is owned by the edli_command_recovery
+                # reconciler (reconcile_unresolved_commands), which drains it OFF
+                # this thread. RETAIN the provisional reservation — never
+                # un-reserve possibly-committed in-flight capital
+                # (portfolio_reservation.py SAFETY DIRECTION) — and RETURN so the
+                # reactor thread is released, not frozen. The winner is left
+                # unfinalized (returns False); the caller's multi-winner loop
+                # stops (STOP 1b) and the next wake re-decides on the reconciled
+                # world.
+                result.rejection_reasons.append(
+                    _POST_SUBMIT_WORLD_WRITE_LOCK_MUST_SETTLE
+                )
+                result.retried += 1
+                logging.getLogger("zeus.events.reactor").warning(
+                    "reactor post-side-effect finalize mutex-bounce event_id=%s "
+                    "world_write_mutex_timeout_ms=%s side_effect_status=%s "
+                    "venue_call_started=%s (command retained for edli_command_"
+                    "recovery reconciler; reactor thread released, NOT blocked)",
+                    event.event_id,
+                    lock_wait_ms,
+                    submit_result.side_effect_status,
+                    submit_result.venue_call_started,
+                )
+                return False
+            # No side effect on this receipt (NO_SUBMIT loser): safe to roll back
+            # the provisional reserve and retry cleanly — unchanged pre-C1 path.
             with contextlib.suppress(Exception):
                 self._finalize_reservation(event, emitted=False)
             result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)

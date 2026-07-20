@@ -29996,6 +29996,23 @@ def _prepare_current_global_probability_family(
                 except ValueError as exc:
                     if str(exc) != "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE":
                         raise
+                    # D1 (2026-07-20 review, DEFERRED — no live economic bug):
+                    # this ``min(exact_bin_ids)`` is a BRITTLE SCALAR SENTINEL. It
+                    # is NOT a semantically-required bin (unlike the caller's
+                    # ``required_condition_id`` binding above); it is an ARBITRARY
+                    # representative chosen only to satisfy the gate below
+                    # (``required_bin_id in exact_bin_ids``) so the deterministic-
+                    # bin-payoff authority engages when remaining-day members are
+                    # unavailable. Safe today because the FULL payoff set is carried
+                    # by ``exact_yes_payoffs`` into the witness / q_version /
+                    # ``_edli_day0_exact_yes_payoffs`` payload — the sentinel drops
+                    # no economic information. HAZARD: a future reader could mistake
+                    # this ``min()`` for a meaningful "the required bin" and conflate
+                    # it with the required_condition_id case, silently narrowing the
+                    # deterministic scope. Replace with an explicit typed carrier
+                    # (e.g. a ``deterministic_scope`` union of REQUIRED_BIN vs
+                    # ANY_DETERMINISTIC) when the q_version-bearing path is next
+                    # touched; not done now to avoid churning that path.
                     required_bin_id = min(exact_bin_ids)
                     payload["_edli_day0_deterministic_scope_reason"] = str(exc)
             if (
