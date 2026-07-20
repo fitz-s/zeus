@@ -1940,9 +1940,10 @@ def _current_day0_events(
                json_extract(payload_json, '$.rounding_status') AS _day0_rounding,
                json_extract(payload_json, '$.source_authorized_status') AS _day0_source_authorized,
                json_extract(payload_json, '$.live_authority_status') AS _day0_live_authority
-          FROM opportunity_events
-          INDEXED BY idx_opportunity_events_fsr_target_date
+         FROM opportunity_events
+         INDEXED BY idx_opportunity_events_fsr_target_date
          WHERE event_type='DAY0_EXTREME_UPDATED'
+           AND source NOT LIKE 'global_auction_winner_target:%'
     """
     if restricted is None:
         cur = world_conn.execute(
@@ -1984,6 +1985,7 @@ def _current_day0_events(
                AND json_extract(e.payload_json, '$.target_date') = r.target_date
                AND json_extract(e.payload_json, '$.metric') = r.metric
              WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND e.source NOT LIKE 'global_auction_winner_target:%'
                AND e.available_at <= ?
                AND e.received_at <= ?
             """,

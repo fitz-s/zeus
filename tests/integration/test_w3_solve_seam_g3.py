@@ -9391,6 +9391,38 @@ def test_current_day0_query_restricts_result_to_requested_family(monkeypatch):
     ]
 
 
+def test_current_day0_query_excludes_auction_target_carriers(monkeypatch):
+    import src.config as config
+
+    decision_at = _dt.datetime(2026, 7, 10, 11, 30, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(
+        config,
+        "runtime_cities_by_name",
+        lambda: {"Paris": SimpleNamespace(timezone="Europe/Paris")},
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_opportunity_events_table(conn)
+    source_event = _current_day0_scope_event(
+        city="Paris",
+        target_date="2026-07-10",
+        available_at="2026-07-10T11:00:00+00:00",
+    )
+    target_carrier = replace(
+        source_event,
+        event_id="target-carrier",
+        source=f"global_auction_winner_target:{source_event.event_id}:economics",
+        idempotency_key="target-carrier-key",
+        created_at="2026-07-10T11:01:00+00:00",
+    )
+    _insert_event(conn, source_event)
+    _insert_event(conn, target_carrier)
+
+    events = _current_day0_events(conn, decision_at_utc=decision_at)
+
+    assert [event.event_id for event in events] == [source_event.event_id]
+
+
 def test_current_day0_scope_keeps_completed_family_only_when_still_held(
     monkeypatch,
 ):
