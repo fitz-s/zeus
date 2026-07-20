@@ -7,7 +7,8 @@
 """Read-only-on-chain ConditionalTokens payout observer (LX-T1).
 
 Reads on-chain ``payoutDenominator(conditionId)`` / ``payoutNumerators(conditionId,
-outcomeIndex)`` for conditions Zeus holds/held, via the SAME urllib JSON-RPC seam
+outcomeIndex)`` for conditions with current money risk or unresolved payout truth,
+via the SAME urllib JSON-RPC seam
 every other on-chain read in Zeus uses (``_json_rpc_call`` /
 ``POLYGON_CTF_ADDRESS`` in src.venue.polymarket_v2_adapter — reused here, not
 duplicated). Appends immutable observation rows to trades-DB
@@ -30,10 +31,9 @@ LAW (LX-T1 adjudication, non-negotiable):
   - NOT in the settlement-grading critical path this packet: nothing reads
     payout_observations for grading yet (SettlementSemantics / WU lane is
     untouched). Disagreement wiring to a DISPUTED lane is a later packet.
-  - Reorg-aware: every read is pinned to one explicit block (fetched first,
-    then used as the block tag for every eth_call in that sweep) so the
-    recorded block_number/block_hash is exactly the state the payout numbers
-    were read against.
+  - Reorg-safe: every read is pinned to one explicit finalized block (fetched
+    first, then used as the block tag for every eth_call in that condition
+    read) so terminal pruning cannot preserve a shallow-fork resolution.
 
 Table shape and immutability/supersession invariants are owned by
 src.state.schema.payout_observations_schema (see that module's docstring).
@@ -83,6 +83,8 @@ VALID_STATES = frozenset(
 # are the raw CTF array slot (0/1), NOT the Zeus 1=NO/2=YES bitmask label used
 # by the redeem balance probes — payoutNumerators is indexed by slot.
 DEFAULT_OUTCOME_INDICES: tuple[int, ...] = (0, 1)
+FINALIZED_SOURCE = "chain_rpc_finalized_v1"
+LEGACY_FINALITY_UPGRADE_BATCH_SIZE = 16
 
 
 def _eth_call_uint_strict(
@@ -108,15 +110,15 @@ def _eth_call_uint_strict(
 
 
 def _get_pinned_block_marker(rpc_call: RpcCall, rpc_url: str) -> tuple[int, str]:
-    """Fetch the latest block's (number, hash) to pin subsequent eth_call reads to.
+    """Fetch the finalized block's (number, hash) for subsequent eth_call reads.
 
     Pinning payoutDenominator + payoutNumerators reads to ONE explicit block tag
-    (rather than each independently hitting a moving "latest") means the
+    (rather than each independently hitting a moving ``latest``) means the
     block_number/block_hash recorded alongside an observation is exactly the
-    state the payout numbers were read against — the reorg-aware marker the
-    LX-T1 adjudication requires.
+    irreversible state the payout numbers were read against. Polygon PoS exposes
+    deterministic milestone finality through the standard ``finalized`` tag.
     """
-    result = rpc_call(rpc_url, "eth_getBlockByNumber", ["latest", False])
+    result = rpc_call(rpc_url, "eth_getBlockByNumber", ["finalized", False])
     if not isinstance(result, dict):
         raise V2AdapterError("eth_getBlockByNumber returned no block header")
     number_hex = result.get("number")
@@ -155,6 +157,7 @@ def read_condition_payout(
     rpc_url: str,
     rpc_call: RpcCall,
     outcome_indices: tuple[int, ...] = DEFAULT_OUTCOME_INDICES,
+    block_marker: Optional[tuple[int, str]] = None,
 ) -> list[dict[str, Any]]:
     """Read payoutDenominator + payoutNumerators[idx] for one condition.
 
@@ -186,7 +189,10 @@ def read_condition_payout(
         return _unknown_rows()
 
     try:
-        block_number, block_hash = _get_pinned_block_marker(rpc_call, rpc_url)
+        if block_marker is None:
+            block_number, block_hash = _get_pinned_block_marker(rpc_call, rpc_url)
+        else:
+            block_number, block_hash = block_marker
         block_tag = hex(block_number)
     except Exception as exc:  # noqa: BLE001 — any failure to pin a block => UNKNOWN
         logger.warning(
@@ -249,9 +255,9 @@ def read_condition_payout(
 
 def _latest_observation(
     conn: sqlite3.Connection, condition_id: str, outcome_index: int
-) -> Optional[tuple[int, Optional[int], Optional[int], str]]:
+) -> Optional[tuple[int, Optional[int], Optional[int], str, str]]:
     row = conn.execute(
-        "SELECT id, payout_numerator, payout_denominator, state "
+        "SELECT id, payout_numerator, payout_denominator, state, source "
         "FROM payout_observations "
         "WHERE condition_id = ? AND outcome_index = ? "
         "ORDER BY id DESC LIMIT 1",
@@ -271,14 +277,14 @@ def append_observation(
     block_number: Optional[int],
     block_hash: Optional[str],
     observed_at: str,
-    source: str = "chain_rpc",
+    source: str = FINALIZED_SOURCE,
 ) -> Optional[int]:
     """Append one observation row, superseding the prior row iff the fact changed.
 
-    Returns the new row id, or ``None`` if the classified fact is unchanged
-    from the latest existing observation for this (condition_id,
-    outcome_index) — no-op, keeps the append-only log from bloating under a
-    sustained RPC outage (repeated UNKNOWN) or a long-settled condition
+    Returns the new row id, or ``None`` if the classified fact and source
+    provenance are unchanged from the latest existing observation for this
+    (condition_id, outcome_index) — no-op, keeps the append-only log from
+    bloating under a sustained RPC outage (repeated UNKNOWN) or a long-settled condition
     (repeated identical RESOLVED_*).
     """
     if state not in VALID_STATES:
@@ -286,11 +292,12 @@ def append_observation(
 
     prior = _latest_observation(conn, condition_id, outcome_index)
     if prior is not None:
-        prior_id, prior_numerator, prior_denominator, prior_state = prior
+        prior_id, prior_numerator, prior_denominator, prior_state, prior_source = prior
         if (
             prior_state == state
             and prior_numerator == payout_numerator
             and prior_denominator == payout_denominator
+            and prior_source == source
         ):
             return None
     else:
@@ -323,10 +330,13 @@ def append_observation(
 
 
 def conditions_to_observe(conn: sqlite3.Connection) -> list[str]:
-    """Distinct non-empty condition_id values Zeus holds/held.
+    """Return current or unresolved condition ids that still need a chain read.
 
     Sourced from position_current + settlement_commands — both trade-DB
-    tables on the SAME connection (no cross-DB join / ATTACH needed).
+    tables on the SAME connection (no cross-DB join / ATTACH needed). A binary
+    condition whose latest finalized rows prove both outcomes resolved is
+    immutable payout history, not recurring work. Current-money-risk positions
+    are always retained; legacy terminal rows are upgraded in bounded batches.
     """
     rows = conn.execute(
         "SELECT condition_id FROM position_current "
@@ -335,7 +345,95 @@ def conditions_to_observe(conn: sqlite3.Connection) -> list[str]:
         "SELECT condition_id FROM settlement_commands "
         "WHERE condition_id IS NOT NULL AND condition_id != ''"
     ).fetchall()
-    return [str(r[0]) for r in rows]
+    candidates = {str(row[0]) for row in rows}
+    if not candidates:
+        return []
+
+    position_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+    if "phase" in position_columns:
+        current_rows = conn.execute(
+            "SELECT DISTINCT condition_id FROM position_current "
+            "WHERE condition_id IS NOT NULL AND condition_id != '' "
+            "AND phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')"
+        ).fetchall()
+        current_risk = {str(row[0]) for row in current_rows}
+    else:
+        # Compatibility for pre-lifecycle/test projections: without a phase
+        # column there is no proof a position is terminal, so keep it current.
+        current_risk = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT condition_id FROM position_current "
+                "WHERE condition_id IS NOT NULL AND condition_id != ''"
+            ).fetchall()
+        }
+
+    latest_ids: dict[str, int] = {}
+    latest_rows = conn.execute(
+        "WITH latest AS ("
+        "  SELECT id, condition_id, outcome_index,"
+        "         ROW_NUMBER() OVER ("
+        "           PARTITION BY condition_id, outcome_index ORDER BY id DESC"
+        "         ) AS row_rank "
+        "  FROM payout_observations WHERE outcome_index IN (0, 1)"
+        ") "
+        "SELECT id, condition_id FROM latest WHERE row_rank = 1"
+    ).fetchall()
+    for row_id, condition_id in latest_rows:
+        condition = str(condition_id)
+        latest_ids[condition] = max(latest_ids.get(condition, 0), int(row_id))
+
+    finalized_fact_counts: dict[str, int] = {}
+    finalized_terminal_counts: dict[str, int] = {}
+    finalized_rows = conn.execute(
+        "WITH latest AS ("
+        "  SELECT condition_id, outcome_index, state,"
+        "         ROW_NUMBER() OVER ("
+        "           PARTITION BY condition_id, outcome_index ORDER BY id DESC"
+        "         ) AS row_rank "
+        "  FROM payout_observations "
+        "  WHERE outcome_index IN (0, 1) AND source = ? AND state != 'UNKNOWN'"
+        ") "
+        "SELECT condition_id, outcome_index, state FROM latest WHERE row_rank = 1",
+        (FINALIZED_SOURCE,),
+    ).fetchall()
+    for condition_id, outcome_index, state in finalized_rows:
+        condition = str(condition_id)
+        bit = 1 << int(outcome_index)
+        finalized_fact_counts.setdefault(condition, 0)
+        finalized_fact_counts[condition] |= bit
+        if str(state) in {STATE_RESOLVED_ZERO, STATE_RESOLVED_NONZERO}:
+            finalized_terminal_counts.setdefault(condition, 0)
+            finalized_terminal_counts[condition] |= bit
+
+    historical_terminal_counts: dict[str, int] = {}
+    for condition_id, outcome_index in conn.execute(
+        "SELECT condition_id, outcome_index FROM payout_observations "
+        "WHERE outcome_index IN (0, 1) "
+        "AND state IN ('RESOLVED_ZERO', 'RESOLVED_NONZERO')"
+    ).fetchall():
+        condition = str(condition_id)
+        historical_terminal_counts.setdefault(condition, 0)
+        historical_terminal_counts[condition] |= 1 << int(outcome_index)
+
+    required = set(current_risk)
+    finality_retry: list[str] = []
+    for condition in candidates - current_risk:
+        facts = finalized_fact_counts.get(condition, 0)
+        if finalized_terminal_counts.get(condition, 0) == 0b11:
+            continue
+        if facts == 0b11 or historical_terminal_counts.get(condition, 0) != 0b11:
+            required.add(condition)
+        else:
+            finality_retry.append(condition)
+    # Upgrade old latest-block observations without recreating the former
+    # all-history RPC fanout in a single scheduler cycle. A failed upgrade
+    # remains in this bounded retry class instead of expanding required work.
+    finality_retry.sort(key=lambda condition: (latest_ids.get(condition, 0), condition))
+    required.update(finality_retry[:LEGACY_FINALITY_UPGRADE_BATCH_SIZE])
+    return sorted(required)
 
 
 def sweep_and_record(
@@ -346,7 +444,7 @@ def sweep_and_record(
     outcome_indices: tuple[int, ...] = DEFAULT_OUTCOME_INDICES,
     now: Optional[str] = None,
 ) -> dict[str, int]:
-    """Sweep every condition Zeus holds/held and append fresh observations.
+    """Sweep every current-risk or unresolved condition and append observations.
 
     All RPC reads finish before the first DML statement.  This ordering is
     load-bearing: one sweep can take many minutes, while the append phase is a
@@ -358,6 +456,11 @@ def sweep_and_record(
     """
     observed_at = now or datetime.now(timezone.utc).isoformat()
     condition_ids = conditions_to_observe(conn)
+    if not condition_ids:
+        return {"conditions": 0, "appended": 0, "unchanged": 0}
+    # One finalized snapshot makes the whole sweep one causal chain cut and
+    # removes one block-header RPC per condition. Failure aborts before DML.
+    block_marker = _get_pinned_block_marker(rpc_call, rpc_url)
     observations: list[tuple[str, dict[str, Any]]] = []
     for condition_id in condition_ids:
         observations.extend(
@@ -367,6 +470,7 @@ def sweep_and_record(
                 rpc_url=rpc_url,
                 rpc_call=rpc_call,
                 outcome_indices=outcome_indices,
+                block_marker=block_marker,
             )
         )
 

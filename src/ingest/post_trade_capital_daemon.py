@@ -91,6 +91,60 @@ _COLLATERAL_CHILD_CODE = (
     "collateral_snapshot_refresh_cycle()"
 )
 _COLLATERAL_CHILD_EXIT_GRACE_SECONDS = 2.0
+_CHAIN_SYNC_CHILD_CODE = (
+    "from src.execution.post_trade_capital import chain_sync_read_cycle; "
+    "chain_sync_read_cycle()"
+)
+_CHAIN_SYNC_CHILD_EXIT_GRACE_SECONDS = 2.0
+_PAYOUT_OBSERVER_CHILD_CODE = (
+    "from src.ingest.payout_observer import payout_observer_cycle; "
+    "payout_observer_cycle()"
+)
+_PAYOUT_OBSERVER_CHILD_EXIT_GRACE_SECONDS = 2.0
+
+
+def _chain_sync_child_deadline_seconds() -> float:
+    raw = os.environ.get("ZEUS_POST_TRADE_CHAIN_SYNC_DEADLINE_SECONDS")
+    if raw in (None, ""):
+        # Normal current-wallet reconciliation completes in about 30 seconds.
+        # Stay below the two-minute cadence while allowing one cold network path.
+        return 75.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid ZEUS_POST_TRADE_CHAIN_SYNC_DEADLINE_SECONDS=%r; using 75.0",
+            raw,
+        )
+        return 75.0
+    if value <= 0:
+        logger.warning(
+            "Invalid ZEUS_POST_TRADE_CHAIN_SYNC_DEADLINE_SECONDS=%r; using 75.0",
+            raw,
+        )
+        return 75.0
+    return value
+
+
+def _payout_observer_child_deadline_seconds() -> float:
+    raw = os.environ.get("ZEUS_POST_TRADE_PAYOUT_DEADLINE_SECONDS")
+    if raw in (None, ""):
+        return 240.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid ZEUS_POST_TRADE_PAYOUT_DEADLINE_SECONDS=%r; using 240.0",
+            raw,
+        )
+        return 240.0
+    if value <= 0:
+        logger.warning(
+            "Invalid ZEUS_POST_TRADE_PAYOUT_DEADLINE_SECONDS=%r; using 240.0",
+            raw,
+        )
+        return 240.0
+    return value
 
 
 def _git_head_at_boot() -> str:
@@ -210,6 +264,51 @@ def _collateral_snapshot_refresh_isolated() -> None:
         )
 
 
+def _chain_sync_read_isolated() -> None:
+    """Run read-only venue reconciliation behind a killable deadline.
+
+    Chain sync performs all venue reads before its local reconciliation write.
+    A killed child therefore submits no external action; SQLite rolls back an
+    incomplete local transaction if the deadline lands during projection.
+    """
+    deadline = _chain_sync_child_deadline_seconds()
+    timeout = deadline + _CHAIN_SYNC_CHILD_EXIT_GRACE_SECONDS
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _CHAIN_SYNC_CHILD_CODE],
+            cwd=Path(__file__).resolve().parents[2],
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"chain sync child exceeded {timeout:.1f}s and was killed"
+        ) from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"chain sync child failed with exit_code={result.returncode}")
+
+
+def _payout_observer_isolated() -> None:
+    """Run finalized payout reads behind a deadline below their ten-minute cadence."""
+    deadline = _payout_observer_child_deadline_seconds()
+    timeout = deadline + _PAYOUT_OBSERVER_CHILD_EXIT_GRACE_SECONDS
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _PAYOUT_OBSERVER_CHILD_CODE],
+            cwd=Path(__file__).resolve().parents[2],
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"payout observer child exceeded {timeout:.1f}s and was killed"
+        ) from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"payout observer child failed with exit_code={result.returncode}"
+        )
+
+
 def _assert_cascade_liveness_contract(scheduler) -> None:
     """Boot-time fail-closed mirror of src/main.py:_assert_cascade_liveness_contract.
 
@@ -303,7 +402,6 @@ def main() -> None:
 
     # The lifted post-trade cycle bodies.
     from src.execution.post_trade_capital import (
-        chain_sync_read_cycle,
         collateral_snapshot_refresh_cycle,
         _harvester_cycle,
         _redeem_reconciler_cycle,
@@ -311,12 +409,6 @@ def main() -> None:
         _wrap_submitter_cycle,
         _wrap_reconciler_cycle,
     )
-    # LX-T1 (docs/rebuild/local_ledger_excision_2026-07-12.md, GATED verdict):
-    # read-only ConditionalTokens payout observer. Not a cascade-liveness
-    # required poller (read-only, not on the settlement-grading critical path
-    # per the adjudication) — absence does not fail boot.
-    from src.ingest.payout_observer import payout_observer_cycle
-
     # Pre-flight (system_decomposition_plan §8 Step 2 mitigation): assert this process can open
     # the trades-DB and world-DB writer connections under the sanctioned path before entering
     # the loop. A misconfigured producer = stuck capital, so fail LOUD at boot rather than
@@ -356,7 +448,7 @@ def main() -> None:
     #   over (the chain-sync READ job uses a NEW id 'chain_sync_read' since the order daemon's
     #   'chain_sync_and_exit_monitor' id now belongs to the exit-SUBMIT phase that STAYS in P1).
     _scheduler.add_job(
-        _scheduler_job("chain_sync_read")(chain_sync_read_cycle),
+        _scheduler_job("chain_sync_read")(_chain_sync_read_isolated),
         "interval", minutes=2, id="chain_sync_read",
         max_instances=1, coalesce=True,
     )
@@ -400,7 +492,7 @@ def main() -> None:
     # sub-minute freshness). Not in _OWNED_CASCADE_POLLER_IDS — read-only,
     # not required for boot liveness.
     _scheduler.add_job(
-        _scheduler_job("payout_observer")(payout_observer_cycle),
+        _scheduler_job("payout_observer")(_payout_observer_isolated),
         "interval", minutes=10, id="payout_observer",
         max_instances=1, coalesce=True,
     )

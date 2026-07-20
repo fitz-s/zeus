@@ -22,6 +22,8 @@ from pathlib import Path
 import pytest
 
 from src.ingest.payout_observer import (
+    FINALIZED_SOURCE,
+    LEGACY_FINALITY_UPGRADE_BATCH_SIZE,
     PAYOUT_DENOMINATOR_SELECTOR,
     PAYOUT_NUMERATORS_SELECTOR,
     STATE_RESOLVED_NONZERO,
@@ -75,6 +77,7 @@ def _build_stub_rpc(
             calls.append((method, ""))
             if fail_block:
                 raise TimeoutError("rpc timeout on eth_getBlockByNumber")
+            assert params == ["finalized", False]
             return {"number": hex(block_number), "hash": block_hash}
         assert method == "eth_call"
         data = params[0]["data"]
@@ -604,6 +607,239 @@ class TestConditionsToObserve:
         result = conditions_to_observe(conn)
         assert sorted(result) == sorted({_CONDITION_A, _CONDITION_B})
 
+    def test_skips_terminal_history_but_keeps_current_money_risk(self, conn):
+        conn.execute(
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY, condition_id TEXT, phase TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, condition_id TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES ('p1', ?, 'settled')", (_CONDITION_A,)
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES ('p2', ?, 'active')", (_CONDITION_B,)
+        )
+        for condition_id in (_CONDITION_A, _CONDITION_B):
+            append_observation(
+                conn,
+                condition_id=condition_id,
+                outcome_index=0,
+                payout_numerator=100,
+                payout_denominator=100,
+                state=STATE_RESOLVED_NONZERO,
+                block_number=1,
+                block_hash="0xaa",
+                observed_at="t0",
+            )
+            append_observation(
+                conn,
+                condition_id=condition_id,
+                outcome_index=1,
+                payout_numerator=0,
+                payout_denominator=100,
+                state=STATE_RESOLVED_ZERO,
+                block_number=1,
+                block_hash="0xaa",
+                observed_at="t0",
+            )
+
+        assert conditions_to_observe(conn) == [_CONDITION_B]
+
+    def test_terminal_pruning_uses_latest_row_not_supersession_pointer(self, conn):
+        conn.execute(
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY, condition_id TEXT, phase TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, condition_id TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES ('p1', ?, 'settled')", (_CONDITION_A,)
+        )
+        for outcome_index, state, numerator in (
+            (0, STATE_RESOLVED_NONZERO, 100),
+            (1, STATE_RESOLVED_ZERO, 0),
+        ):
+            append_observation(
+                conn,
+                condition_id=_CONDITION_A,
+                outcome_index=outcome_index,
+                payout_numerator=numerator,
+                payout_denominator=100,
+                state=state,
+                block_number=1,
+                block_hash="0xaa",
+                observed_at="t0",
+                source="chain_rpc",
+            )
+        # Simulate legacy pointer drift: the newest outcome-1 row is unresolved
+        # but an older resolved row still has superseded_by=NULL. Selection must
+        # follow the schema owner's ORDER BY id DESC contract.
+        conn.execute(
+            "INSERT INTO payout_observations ("
+            "condition_id, outcome_index, payout_numerator, payout_denominator, state, "
+            "block_number, block_hash, observed_at, source) "
+            "VALUES (?, 1, NULL, 0, ?, 2, '0xbb', 't1', ?)",
+            (_CONDITION_A, STATE_UNRESOLVED, FINALIZED_SOURCE),
+        )
+
+        assert conditions_to_observe(conn) == [_CONDITION_A]
+
+    def test_legacy_terminal_rows_are_upgraded_before_pruning(self, conn):
+        conn.execute(
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY, condition_id TEXT, phase TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, condition_id TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES ('p1', ?, 'settled')", (_CONDITION_A,)
+        )
+        for outcome_index, state, numerator in (
+            (0, STATE_RESOLVED_NONZERO, 100),
+            (1, STATE_RESOLVED_ZERO, 0),
+        ):
+            append_observation(
+                conn,
+                condition_id=_CONDITION_A,
+                outcome_index=outcome_index,
+                payout_numerator=numerator,
+                payout_denominator=100,
+                state=state,
+                block_number=1,
+                block_hash="0xaa",
+                observed_at="t0",
+                source="chain_rpc",
+            )
+
+        assert conditions_to_observe(conn) == [_CONDITION_A]
+        rpc, _ = _build_stub_rpc(denominator=100, numerators={0: 100, 1: 0})
+        result = sweep_and_record(
+            conn, rpc_url="https://rpc.example", rpc_call=rpc, now="t1"
+        )
+        assert result == {"conditions": 1, "appended": 2, "unchanged": 0}
+        assert conditions_to_observe(conn) == []
+        sources = {
+            row[0]
+            for row in conn.execute(
+                "SELECT source FROM payout_observations WHERE superseded_by IS NULL"
+            )
+        }
+        assert sources == {FINALIZED_SOURCE}
+
+    def test_legacy_finality_upgrade_batch_is_bounded(self, conn):
+        conn.execute(
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY, condition_id TEXT, phase TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, condition_id TEXT)"
+        )
+        total = LEGACY_FINALITY_UPGRADE_BATCH_SIZE + 3
+        for index in range(total):
+            condition = f"0x{index + 1:064x}"
+            conn.execute(
+                "INSERT INTO position_current VALUES (?, ?, 'settled')",
+                (f"p{index}", condition),
+            )
+            for outcome_index, state, numerator in (
+                (0, STATE_RESOLVED_NONZERO, 100),
+                (1, STATE_RESOLVED_ZERO, 0),
+            ):
+                append_observation(
+                    conn,
+                    condition_id=condition,
+                    outcome_index=outcome_index,
+                    payout_numerator=numerator,
+                    payout_denominator=100,
+                    state=state,
+                    block_number=1,
+                    block_hash="0xaa",
+                    observed_at="t0",
+                    source="chain_rpc",
+                )
+
+        first_batch = set(conditions_to_observe(conn))
+        assert len(first_batch) == LEGACY_FINALITY_UPGRADE_BATCH_SIZE
+
+        rpc, _ = _build_stub_rpc(denominator=100, fail_denominator=True)
+        result = sweep_and_record(
+            conn, rpc_url="https://rpc.example", rpc_call=rpc, now="t1"
+        )
+        assert result == {
+            "conditions": LEGACY_FINALITY_UPGRADE_BATCH_SIZE,
+            "appended": LEGACY_FINALITY_UPGRADE_BATCH_SIZE * 2,
+            "unchanged": 0,
+        }
+        second_batch = set(conditions_to_observe(conn))
+        assert len(second_batch) == LEGACY_FINALITY_UPGRADE_BATCH_SIZE
+        assert len(second_batch - first_batch) == 3
+
+    def test_unknown_does_not_hide_prior_finalized_unresolved_fact(self, conn):
+        conn.execute(
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY, condition_id TEXT, phase TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, condition_id TEXT)"
+        )
+
+        conditions = [_CONDITION_A] + [
+            f"0x{index + 1:064x}" for index in range(LEGACY_FINALITY_UPGRADE_BATCH_SIZE)
+        ]
+        for index, condition in enumerate(conditions):
+            conn.execute(
+                "INSERT INTO position_current VALUES (?, ?, 'settled')",
+                (f"p{index}", condition),
+            )
+            for outcome_index, state, numerator in (
+                (0, STATE_RESOLVED_NONZERO, 100),
+                (1, STATE_RESOLVED_ZERO, 0),
+            ):
+                append_observation(
+                    conn,
+                    condition_id=condition,
+                    outcome_index=outcome_index,
+                    payout_numerator=numerator,
+                    payout_denominator=100,
+                    state=state,
+                    block_number=1,
+                    block_hash="0xaa",
+                    observed_at="t0",
+                    source="chain_rpc",
+                )
+
+        for outcome_index in (0, 1):
+            append_observation(
+                conn,
+                condition_id=_CONDITION_A,
+                outcome_index=outcome_index,
+                payout_numerator=None,
+                payout_denominator=0,
+                state=STATE_UNRESOLVED,
+                block_number=2,
+                block_hash="0xbb",
+                observed_at="t1",
+            )
+            append_observation(
+                conn,
+                condition_id=_CONDITION_A,
+                outcome_index=outcome_index,
+                payout_numerator=None,
+                payout_denominator=None,
+                state=STATE_UNKNOWN,
+                block_number=3,
+                block_hash="0xcc",
+                observed_at="t2",
+            )
+
+        selected = conditions_to_observe(conn)
+        assert _CONDITION_A in selected
+        assert len(selected) == LEGACY_FINALITY_UPGRADE_BATCH_SIZE + 1
+
 
 # ---------------------------------------------------------------------------
 # sweep_and_record — orchestration
@@ -613,12 +849,15 @@ class TestConditionsToObserve:
 class TestSweepAndRecord:
     def test_sweeps_all_conditions_and_reports_counts(self, conn):
         conn.execute(
-            "CREATE TABLE position_current (position_id TEXT PRIMARY KEY, condition_id TEXT)"
+            "CREATE TABLE position_current ("
+            "position_id TEXT PRIMARY KEY, condition_id TEXT, phase TEXT)"
         )
         conn.execute(
             "CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, condition_id TEXT)"
         )
-        conn.execute("INSERT INTO position_current VALUES ('p1', ?)", (_CONDITION_A,))
+        conn.execute(
+            "INSERT INTO position_current VALUES ('p1', ?, 'settled')", (_CONDITION_A,)
+        )
         conn.execute("INSERT INTO settlement_commands VALUES ('c1', ?)", (_CONDITION_B,))
 
         rpc, _ = _build_stub_rpc(denominator=100, numerators={0: 100, 1: 0})
@@ -628,11 +867,11 @@ class TestSweepAndRecord:
         total_rows = conn.execute("SELECT COUNT(*) FROM payout_observations").fetchone()[0]
         assert total_rows == 4
 
-        # Re-sweeping with an identical chain state appends nothing new.
+        # Terminal binary payout history is immutable and leaves the recurring sweep.
         rpc2, _ = _build_stub_rpc(denominator=100, numerators={0: 100, 1: 0})
         result2 = sweep_and_record(conn, rpc_url="https://rpc.example", rpc_call=rpc2, now="t1")
         assert result2["appended"] == 0
-        assert result2["unchanged"] == 4
+        assert result2 == {"conditions": 0, "appended": 0, "unchanged": 0}
 
     def test_finishes_all_rpc_reads_before_opening_append_transaction(self, conn):
         conn.execute(
@@ -663,7 +902,9 @@ class TestSweepAndRecord:
             now="t0",
         )
 
-        assert rpc_calls == 8
+        # One finalized block marker + (denominator + two numerators) per
+        # resolved binary condition.
+        assert rpc_calls == 7
         assert result == {"conditions": 2, "appended": 4, "unchanged": 0}
 
 

@@ -1804,6 +1804,7 @@ def test_init_schema_trade_only_commits_position_events_read_indexes(tmp_path):
 
     assert "idx_position_events_position_type_sequence" in indexes
     assert "idx_position_events_position_phase_after_sequence" in indexes
+    assert "idx_position_events_settled_env_position_sequence" in indexes
 
 
 def test_init_schema_trade_only_commits_position_current_quote_priority_index(tmp_path):
@@ -4695,6 +4696,31 @@ def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_dupl
     assert sorted(row["runtime_trade_id"] for row in rows) == ["dup-stage", "other-stage"]
     latest_dup = next(row for row in rows if row["runtime_trade_id"] == "dup-stage")
     assert latest_dup["details"]["pnl"] == pytest.approx(-2.5)
+
+
+def test_query_settlement_events_uses_settled_env_partial_index(tmp_path):
+    from src.state.db import query_settlement_events
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_position_events_settled_env_position_sequence "
+        "ON position_events(env, position_id, sequence_no DESC) "
+        "WHERE event_type = 'SETTLED'"
+    )
+
+    traced = []
+    conn.set_trace_callback(traced.append)
+    query_settlement_events(conn, limit=10)
+    conn.set_trace_callback(None)
+    statement = next(sql for sql in traced if "ROW_NUMBER() OVER" in sql)
+    plan = "\n".join(
+        str(row[3]) for row in conn.execute("EXPLAIN QUERY PLAN " + statement).fetchall()
+    )
+    conn.close()
+
+    assert "idx_position_events_settled_env_position_sequence" in plan
+    assert "SCAN position_events" not in plan
 
 
 def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_id(tmp_path):

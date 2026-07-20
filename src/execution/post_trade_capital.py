@@ -280,7 +280,8 @@ def chain_sync_read_cycle() -> None:
     never be held across a network call here: the lock-across-HTTP starvation that flapped
     riskguard to DATA_DEGRADED (§4.3, I3) is structurally impossible in this process.
 
-    Degrades gracefully if Keychain funder_address is absent (the REST call fails -> caught).
+    A read or commit failure is logged after cleanup and re-raised so the
+    killable child reports FAILED; the parent daemon stays alive for retry.
     The pre-split interim-commit invariant (commit chain-sync writes before Phase-2 HTTP,
     src/main.py:7233 / the riskguard-flaps fix) is preserved here as a same-process invariant:
     commit immediately after the reconcile writes, then return.
@@ -304,10 +305,10 @@ def chain_sync_read_cycle() -> None:
 
     conn = get_connection()
     if conn is None:
-        logger.warning("chain_sync_read: DB write-lock degrade — skipping cycle")
-        return
+        raise RuntimeError("chain_sync_read: DB write-lock degraded before cycle")
 
     summary: dict = {}
+    failure: Exception | None = None
     try:
         portfolio = load_portfolio()
         with PolymarketClient() as clob:
@@ -319,9 +320,10 @@ def chain_sync_read_cycle() -> None:
                     summary["chain_sync"] = chain_stats
             except Exception as exc:  # noqa: BLE001
                 logger.error(
-                    "chain_sync_read: chain sync failed (non-fatal): %s", exc, exc_info=True
+                    "chain_sync_read: chain sync failed: %s", exc, exc_info=True
                 )
                 summary["chain_sync_error"] = str(exc)
+                failure = exc
 
             # WAL WRITE-LOCK RELEASE (2026-06-08 riskguard-flaps structural fix, now §8 Step 2):
             # the chain-sync reconcile opened an implicit DEFERRED txn on the first DML
@@ -334,15 +336,20 @@ def chain_sync_read_cycle() -> None:
                 conn.commit()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "chain_sync_read: chain-sync commit failed (non-fatal): %s", exc
+                    "chain_sync_read: chain-sync commit failed: %s", exc
                 )
+                failure = exc
     except Exception as exc:  # noqa: BLE001
         logger.error("chain_sync_read: unexpected error: %s", exc, exc_info=True)
+        failure = exc
     finally:
         try:
             conn.close()
         except Exception:  # noqa: BLE001
             pass
+
+    if failure is not None:
+        raise RuntimeError("chain_sync_read cycle failed") from failure
 
     # status_summary.json is owned by the live trading daemon. This sidecar lacks the
     # process-local heartbeat/risk/collateral singletons required to compute execution

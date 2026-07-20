@@ -97,6 +97,9 @@ CREATE TABLE IF NOT EXISTS position_events (
     payload_json TEXT NOT NULL,
     UNIQUE(position_id, sequence_no)
 );
+CREATE INDEX IF NOT EXISTS idx_position_events_settled_env_position_sequence
+    ON position_events(env, position_id, sequence_no DESC)
+    WHERE event_type = 'SETTLED';
 
 CREATE TRIGGER IF NOT EXISTS trg_position_events_require_env
 BEFORE INSERT ON position_events

@@ -708,6 +708,146 @@ def test_collateral_child_timeout_kills_and_reaps_real_process(monkeypatch):
     assert time.monotonic() - started < 1.0
 
 
+def test_chain_sync_runs_in_killable_child(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    calls = []
+
+    def _run(cmd, *, cwd, check, timeout):
+        calls.append((cmd, cwd, check, timeout))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(daemon.subprocess, "run", _run)
+    monkeypatch.setattr(daemon, "_chain_sync_child_deadline_seconds", lambda: 75.0)
+
+    daemon._chain_sync_read_isolated()
+
+    assert calls == [
+        (
+            [daemon.sys.executable, "-c", daemon._CHAIN_SYNC_CHILD_CODE],
+            daemon.Path(daemon.__file__).resolve().parents[2],
+            False,
+            77.0,
+        )
+    ]
+
+
+def test_chain_sync_child_timeout_is_scheduler_failure(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    trace = []
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(daemon.subprocess, "run", _timeout)
+    monkeypatch.setattr(daemon, "_chain_sync_child_deadline_seconds", lambda: 75.0)
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda job_name, *, failed, reason: trace.append((job_name, failed, reason)),
+    )
+
+    daemon._scheduler_job("chain_sync_read")(daemon._chain_sync_read_isolated)()
+
+    assert trace == [
+        ("chain_sync_read", True, "chain sync child exceeded 77.0s and was killed")
+    ]
+
+
+def test_chain_sync_read_failure_reaches_child_exit_status(monkeypatch):
+    from src.data import polymarket_client
+    from src.engine import cycle_runner
+    from src.execution import post_trade_capital
+
+    class _Connection:
+        def __init__(self):
+            self.commits = 0
+            self.closed = False
+
+        def commit(self):
+            self.commits += 1
+
+        def close(self):
+            self.closed = True
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    conn = _Connection()
+
+    def _fail_chain_sync(*args, **kwargs):
+        raise RuntimeError("venue unavailable")
+
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: object())
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", _fail_chain_sync)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _Client)
+
+    with pytest.raises(RuntimeError, match="chain_sync_read cycle failed"):
+        post_trade_capital.chain_sync_read_cycle()
+
+    assert conn.commits == 1
+    assert conn.closed is True
+
+
+def test_payout_observer_runs_in_killable_child(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    calls = []
+
+    def _run(cmd, *, cwd, check, timeout):
+        calls.append((cmd, cwd, check, timeout))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(daemon.subprocess, "run", _run)
+    monkeypatch.setattr(
+        daemon, "_payout_observer_child_deadline_seconds", lambda: 240.0
+    )
+
+    daemon._payout_observer_isolated()
+
+    assert calls == [
+        (
+            [daemon.sys.executable, "-c", daemon._PAYOUT_OBSERVER_CHILD_CODE],
+            daemon.Path(daemon.__file__).resolve().parents[2],
+            False,
+            242.0,
+        )
+    ]
+
+
+def test_payout_observer_timeout_is_scheduler_failure(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    trace = []
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(daemon.subprocess, "run", _timeout)
+    monkeypatch.setattr(
+        daemon, "_payout_observer_child_deadline_seconds", lambda: 240.0
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda job_name, *, failed, reason: trace.append((job_name, failed, reason)),
+    )
+
+    daemon._scheduler_job("payout_observer")(daemon._payout_observer_isolated)()
+
+    assert trace == [
+        (
+            "payout_observer",
+            True,
+            "payout observer child exceeded 242.0s and was killed",
+        )
+    ]
+
+
 def test_collateral_cold_tls_budget_exceeds_observed_handshake(monkeypatch):
     """The default connect budget must not be shorter than normal cold CLOB TLS."""
     from src.execution import post_trade_capital
