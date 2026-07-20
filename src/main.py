@@ -5851,27 +5851,23 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     refresh cluster extraction, 2026-07-08) as ``run_edli_day0_hourly_refresh_cycle``.
     See that function's docstring for the vector-refresh lane it runs.
 
-    The reactor lock, redecision lock, and held-monitor Event are dispatcher-owned
-    scheduling primitives. This hook atomically admits the background refresh on
-    the shared reactor lane and injects only the resulting active/inactive state.
+    The reactor and redecision locks are dispatcher-owned scheduling primitives.
+    Held-position monitoring does not exclude this producer: fresh hourly vectors
+    are its probability input, and their DB persist lock is already non-blocking.
+    This hook atomically admits the background refresh on the shared reactor lane
+    and injects only the resulting active/inactive state.
     """
     from src.events.reactor import run_edli_day0_hourly_refresh_cycle
 
-    trading_lane_active = (
-        _held_position_monitor_active.is_set()
-        or _edli_redecision_screen_lock.locked()
-    )
+    trading_lane_active = _edli_redecision_screen_lock.locked()
     if trading_lane_active or not _edli_reactor_active_lock.acquire(blocking=False):
         run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
         return
     try:
-        # Recheck after admission so an exit-monitor priority claim cannot race
-        # the first check while this background job acquires the shared lane.
+        # Recheck after admission so a redecision claim cannot race the first
+        # check while this background job acquires the shared lane.
         run_edli_day0_hourly_refresh_cycle(
-            trading_lane_active=(
-                _held_position_monitor_active.is_set()
-                or _edli_redecision_screen_lock.locked()
-            ),
+            trading_lane_active=_edli_redecision_screen_lock.locked(),
         )
     finally:
         _edli_reactor_active_lock.release()

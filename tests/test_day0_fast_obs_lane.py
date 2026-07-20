@@ -2207,18 +2207,42 @@ class TestMutexNoHttpSplit:
             trading_lane_active=True,
         )
 
-    def test_hourly_refresh_admission_excludes_monitor_and_reactor(self):
+    def test_hourly_refresh_admission_excludes_redecision_and_reactor(self):
         source = open("src/main.py", encoding="utf-8").read()
         hook_start = source.index('@_scheduler_job("edli_day0_hourly_refresh")')
         hook_end = source.index("def _edli_is_sqlite_lock_error", hook_start)
         hook = source[hook_start:hook_end]
-        assert "_held_position_monitor_active.is_set()" in hook
+        assert "_held_position_monitor_active.is_set()" not in hook
+        assert "_edli_redecision_screen_lock.locked()" in hook
         assert "_edli_reactor_active_lock.acquire(blocking=False)" in hook
         assert "_edli_reactor_active_lock.release()" in hook
 
         schedule_at = source.index('id="edli_day0_hourly_refresh"')
         schedule = source[schedule_at - 500 : schedule_at + 500]
         assert "OPENING_HUNT_FIRST_DELAY_SECONDS + 36.0" in schedule
+
+    def test_hourly_refresh_runs_while_held_monitor_is_active(self, monkeypatch):
+        import threading
+
+        import src.main as main
+        from src.events import reactor as reactor_module
+
+        calls = []
+        monitor = threading.Event()
+        monitor.set()
+        monkeypatch.setattr(main, "_held_position_monitor_active", monitor)
+        monkeypatch.setattr(main, "_edli_redecision_screen_lock", threading.Lock())
+        monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+        monkeypatch.setattr(
+            reactor_module,
+            "run_edli_day0_hourly_refresh_cycle",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        main._edli_day0_hourly_refresh_cycle()
+
+        assert calls == [{"trading_lane_active": False}]
+        assert main._edli_reactor_active_lock.locked() is False
 
     def test_live_family_admission_scopes_market_seek_to_runtime_cities(self, monkeypatch):
         from src.events import reactor as reactor_module
