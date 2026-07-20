@@ -1999,20 +1999,36 @@ def test_day0_belief_preflight_accepts_hko_canonical_observation_without_monitor
     world.execute(
         """
         CREATE TABLE observation_instants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT, target_date TEXT, local_timestamp TEXT, utc_timestamp TEXT,
             running_max REAL, running_min REAL, authority TEXT, causality_status TEXT,
-            source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT
+            source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
     world.execute(
         """
-        INSERT INTO observation_instants VALUES (
+        INSERT INTO observation_instants (
+            city, target_date, local_timestamp, utc_timestamp,
+            running_max, running_min, authority, causality_status,
+            source, temperature_metric, training_allowed, source_role, provenance_json
+        ) VALUES (
             'Hong Kong', '2026-06-26', '2026-06-26T07:00:00+08:00',
             '2026-06-25T23:00Z', 27.0, 27.0, 'ICAO_STATION_NATIVE',
-            'OK', 'hko_hourly_accumulator', 'low', 0, 'runtime_monitoring'
+            'OK', 'hko_hourly_accumulator', 'low', 0, 'runtime_monitoring',
+            ?
         )
-        """
+        """,
+        (
+            json.dumps(
+                {
+                    "observation_basis": "hko_since_midnight_extrema_1min_mean",
+                    "official_running_high_c": 27.0,
+                    "official_running_low_c": 27.0,
+                }
+            ),
+        ),
     )
     world.commit()
     world.close()
@@ -2045,7 +2061,8 @@ def test_day0_belief_preflight_accepts_hko_canonical_observation_without_monitor
 
     assert evidence is not None
     assert evidence["observed_extreme"] == 27.0
-    assert evidence["source"] == "world.observation_instants"
+    assert evidence["source"] == "hko_hourly_accumulator"
+    assert evidence["storage_surface"] == "world.observation_instants"
 
 
 def test_live_order_presubmit_shape_blocks_restart_relevant_old_payload(monkeypatch, tmp_path):

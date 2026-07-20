@@ -63,12 +63,14 @@ allowed_files:
   - src/control/ws_gap_guard.py
   - src/observability/status_summary.py
   - scripts/healthcheck.py
+  - scripts/check_live_restart_preflight.py
   - tests/test_position_current_trade_schema_migration.py
   - tests/test_exit_safety.py
   - tests/test_exchange_reconcile.py
   - tests/execution/test_collateral_lock_retry.py
   - tests/test_collateral_ledger.py
   - tests/test_healthcheck.py
+  - tests/test_check_live_restart_preflight.py
   - tests/test_heartbeat_supervisor.py
   - tests/engine/test_position_belief_authority.py
   - tests/events/test_continuous_redecision_resurrection.py

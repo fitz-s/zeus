@@ -2957,7 +2957,7 @@ def _day0_canonical_observation_evidence(
             pass
     if observed is None:
         return None
-    extreme, observation_time, sample_count = observed
+    extreme, observation_time, observation_source, sample_count = observed
     return {
         "city": city,
         "target_date": target_date,
@@ -2965,7 +2965,8 @@ def _day0_canonical_observation_evidence(
         "observed_extreme": extreme,
         "observation_time": observation_time,
         "sample_count": sample_count,
-        "source": "world.observation_instants",
+        "source": observation_source,
+        "storage_surface": "world.observation_instants",
     }
 
 
