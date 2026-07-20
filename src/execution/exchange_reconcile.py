@@ -1677,7 +1677,7 @@ def _book_external_operator_close_exit_fact(
         return False
     # Insert the synthetic EXIT/SELL command via a DIRECT write, NOT insert_command():
     # insert_command is the U1 pre-side-effect SUBMISSION gate (snapshot freshness, tick
-    # alignment, price-in-(0,1)) — entirely inappropriate for a reconciliation correction
+    # alignment and the live [0.05,0.95] band) — entirely inappropriate for a reconciliation correction
     # and would CRASH the sweep on a long-stale snapshot. This row is journal-only truth
     # (a SELL side for _journal_positions_by_token to net the buy claim), never submitted.
     # It reuses the entry command's valid snapshot/envelope FKs.
