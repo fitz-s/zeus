@@ -42,6 +42,10 @@ def _make_db(rows: list[dict]) -> sqlite3.Connection:
         "CREATE TABLE settlement_outcomes (city TEXT, target_date TEXT, temperature_metric TEXT, "
         "settlement_value REAL, settlement_unit TEXT, authority TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE observations (city TEXT, target_date TEXT, high_temp REAL, "
+        "low_temp REAL, unit TEXT, authority TEXT)"
+    )
     seen_settlements: set[tuple[str, str, str]] = set()
     for r in rows:
         conn.execute(
@@ -358,7 +362,10 @@ def test_artifact_refuses_two_models_from_one_provider_family(tmp_path: Path) ->
         [{"name": "Munich", "timezone": "Europe/Berlin", "country_code": "DE", "lat": 48.1351, "lon": 11.5820}],
     )
 
-    with pytest.raises(ValueError, match=r"sources=\('icon_d2',\).*families=\('dwd_icon',\)"):
+    # The single-family city basket degrades to the global-core fallback; with no
+    # global-core model servable either, the cell still REFUSES publication (empty
+    # sources) — a one-provider universe can never silently publish an entry cell.
+    with pytest.raises(ValueError, match=r"sources=\(\).*families=\(\)"):
         fscw.build_artifact(
             conn,
             as_of="2026-12-31",
@@ -506,3 +513,75 @@ def test_thin_model_cannot_bypass_finite_evidence_floor(
     )
 
     assert "N" not in artifact["cities"]["ThinEvidenceCity"]["high"]["models"]
+
+
+def test_observation_truth_fills_metric_without_venue_settlement(tmp_path: Path) -> None:
+    """A metric with NO venue settlement_outcomes rows but VERIFIED settlement-source
+    observations must still train a CITY_SPECIFIC basket — venue-settled low markets
+    exist for only ~9 cities while the settlement-source low observation exists for
+    every city; observation truth is the sanctioned settlement-source backtest basis."""
+    conn = _make_db([])
+    # Forecast rows for low, but NO settlement_outcomes rows at all.
+    for i in range(70):
+        month = 1 + (i // 28)
+        day = 1 + (i % 28)
+        date = f"2026-{month:02d}-{day:02d}"
+        truth = 10.0 + (i % 7) * 0.4
+        for model, offset in (("A", 0.3), ("B", 1.2)):
+            for metric, base in (("low", truth), ("high", truth + 8.0)):
+                conn.execute(
+                    "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?)",
+                    (model, "ObsCity", date, metric, 1, base + offset, "previous_runs"),
+                )
+        conn.execute(
+            "INSERT INTO observations VALUES (?,?,?,?,?,?)",
+            ("ObsCity", date, truth + 8.0, truth, "C", "VERIFIED"),
+        )
+    conn.commit()
+    cities_path = _cities_json(
+        tmp_path,
+        [{"name": "ObsCity", "timezone": "Pacific/Fiji", "country_code": "FJ",
+          "lat": -18.0, "lon": 178.0}],
+    )
+    artifact = fscw.build_artifact(
+        conn, as_of="2026-12-31", generated_at="FIXED", cities_path=cities_path,
+        frozen_csv_path=tmp_path / "missing.csv", git_sha="FIXED",
+        servable=frozenset({"A", "B"}),
+    )
+    low = artifact["cities"]["ObsCity"]["low"]
+    assert low["basket_provenance"]["tier"] == "CITY_SPECIFIC"
+    assert low["basket_provenance"]["n_paired_dates"] == 70
+    assert set(low["models"]) == {"A", "B"}
+
+
+def test_venue_settlement_preferred_over_observation_when_both_exist(tmp_path: Path) -> None:
+    """Where venue settlement and observation disagree, venue settlement (authority of
+    record) must be the residual basis."""
+    conn = _make_db([])
+    for i in range(70):
+        month = 1 + (i // 28)
+        day = 1 + (i % 28)
+        date = f"2026-{month:02d}-{day:02d}"
+        venue = 20.0
+        obs = 25.0  # deliberately different
+        conn.execute(
+            "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?)",
+            ("A", "BothCity", date, "high", 1, venue + 0.5, "previous_runs"),
+        )
+        conn.execute(
+            "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?)",
+            ("B", "BothCity", date, "high", 1, venue + 1.5, "previous_runs"),
+        )
+        conn.execute(
+            "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?)",
+            ("BothCity", date, "high", venue, "C", "VERIFIED"),
+        )
+        conn.execute(
+            "INSERT INTO observations VALUES (?,?,?,?,?,?)",
+            ("BothCity", date, obs, obs - 8.0, "C", "VERIFIED"),
+        )
+    conn.commit()
+    loaded = fscw.load_walk_forward_rows(conn, as_of="2026-12-31")
+    settle = loaded["settle"][("BothCity", "high")]
+    # Every truth value must be the VENUE 20.0, never the observation 25.0.
+    assert all(abs(v - 20.0) < 1e-9 for v in settle.values())
