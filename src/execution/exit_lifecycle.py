@@ -40,7 +40,6 @@ from src.execution.executor import (
     _exit_execution_authority_deadline_error,
     _refresh_exit_collateral_snapshot_for_submit,
 )
-from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     enter_pending_exit_runtime_state,
@@ -2082,13 +2081,11 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
         raise ValueError("exit_intent best_bid mismatch")
     if exit_context.best_ask is not None and exit_intent.best_ask is not None and abs(exit_intent.best_ask - float(exit_context.best_ask)) > 1e-9:
         raise ValueError("exit_intent best_ask mismatch")
-    if exit_intent.exact_limit_price is not None:
-        try:
-            assert_live_order_unit_price(exit_intent.exact_limit_price)
-        except ValueError as exc:
-            raise ValueError(
-                "exit_intent exact_limit_price must be inside inclusive [0.05, 0.95]"
-            ) from exc
+    if exit_intent.exact_limit_price is not None and (
+        not math.isfinite(float(exit_intent.exact_limit_price))
+        or not 0.0 < float(exit_intent.exact_limit_price) < 1.0
+    ):
+        raise ValueError("exit_intent exact_limit_price must be finite and inside (0, 1)")
     if exit_intent.submit_order_type is not None and (
         str(exit_intent.submit_order_type).strip().upper() not in {"FOK", "FAK", "GTC", "GTD"}
     ):

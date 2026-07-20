@@ -335,7 +335,7 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     assert verdict["details"]["live_min_entry_price"] == 0.10
 
 
-def test_entry_economics_micro_tail_is_blocked_by_absolute_band():
+def test_entry_economics_micro_tail_still_requires_strategy_economics():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.024,
@@ -363,10 +363,11 @@ def test_entry_economics_micro_tail_is_blocked_by_absolute_band():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["submit_edge"] == pytest.approx(0.05)
 
 
-def test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor():
+def test_entry_economics_buenos_aires_shape_still_requires_strategy_economics():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.041,
@@ -397,7 +398,8 @@ def test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor()
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["submit_edge"] > 0.0
 
 
 def test_entry_economics_allows_high_confidence_center_buy_yes():
@@ -468,7 +470,7 @@ def test_entry_economics_allows_center_buy_yes_when_symmetric_quality_floor_clea
     assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.52)
 
 
-def test_entry_economics_legacy_low_price_is_blocked_by_absolute_band():
+def test_entry_economics_legacy_low_price_still_requires_strategy_economics():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.031,
@@ -498,7 +500,8 @@ def test_entry_economics_legacy_low_price_is_blocked_by_absolute_band():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["submit_edge"] > 0.0
 
 
 def test_entry_economics_blocks_unarmed_selection_guard_even_with_large_raw_edge():
@@ -969,7 +972,7 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     ("price", "q_lcb", "shares"),
     ((0.001, 0.80, 1000.0), (0.999, 1.0, 10.0)),
 )
-def test_entry_economics_current_state_cannot_waive_absolute_band(
+def test_entry_economics_current_state_tail_price_requires_economics_not_nominal_band(
     direction,
     side,
     price,
@@ -1020,11 +1023,12 @@ def test_entry_economics_current_state_cannot_waive_absolute_band(
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["allowed"] is True
+    assert verdict["details"]["global_limit_bound_authorized"] is True
+    assert verdict["details"]["submit_edge"] == pytest.approx(edge)
 
 
-def test_entry_economics_rejects_tail_before_positive_robust_utility():
+def test_entry_economics_current_state_tail_still_requires_positive_robust_utility():
     price = 0.999
     q_lcb = 1.0
     edge = 0.001
@@ -1078,16 +1082,13 @@ def test_entry_economics_rejects_tail_before_positive_robust_utility():
         == "global_utility_envelope"
     )
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "expected_profit_below_floor"
 
 
 @pytest.mark.parametrize(
     ("price", "expected_reason"),
     (
         (0.0, "invalid_price_or_size"),
-        (0.0499, "live_order_unit_price_out_of_bounds"),
-        (0.9501, "live_order_unit_price_out_of_bounds"),
-        (0.998, "live_order_unit_price_out_of_bounds"),
         (1.0, "invalid_price_or_size"),
         (float("nan"), "missing_entry_economics"),
         (float("inf"), "missing_entry_economics"),
