@@ -3552,7 +3552,7 @@ def _edli_refresh_global_allocator_for_live_bridge(conn, *, portfolio_snapshot=N
             heartbeat=_heartbeat_summary(),
             ws_status=_ws_gap_summary(),
         )
-        logger.info(
+        logger.debug(
             "EDLI live-bridge allocator refresh: CONFIGURED drawdown_pct=%.3f baseline=%.2f "
             "bankroll=%.2f",
             _drawdown_pct, _baseline, _current_bankroll,
@@ -3787,6 +3787,70 @@ def _day0_wake_requires_exit_monitor(
             exc_info=True,
         )
         return True
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _pending_held_day0_wake_families(
+) -> frozenset[tuple[str, str, str]] | None:
+    """Find queued Day0 families that still own canonical open exposure."""
+
+    conn = None
+    try:
+        from src.runtime.reactor_wake import reactor_wakes_since
+        from src.state.db import (
+            OPEN_EXPOSURE_PHASES,
+            get_trade_connection_read_only,
+        )
+
+        conn = get_trade_connection_read_only()
+        placeholders = ",".join("?" for _ in OPEN_EXPOSURE_PHASES)
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT city, target_date, temperature_metric
+              FROM position_current
+             WHERE phase IN ({placeholders})
+               AND city IS NOT NULL
+               AND target_date IS NOT NULL
+               AND temperature_metric IS NOT NULL
+            """,
+            OPEN_EXPOSURE_PHASES,
+        ).fetchall()
+        held_by_key: dict[tuple[str, str, str], tuple[str, str, str]] = {}
+        for raw_city, raw_target_date, raw_metric in rows:
+            family = (
+                str(raw_city or "").strip(),
+                str(raw_target_date or "").strip()[:10],
+                str(raw_metric or "").strip().lower(),
+            )
+            key = (family[0].casefold(), family[1], family[2])
+            if all(family) and family[2] in {"high", "low"}:
+                held_by_key[key] = family
+        if not held_by_key:
+            return frozenset()
+
+        matched: dict[tuple[str, str, str], tuple[str, str, str]] = {}
+        for queued in reversed(reactor_wakes_since(None)):
+            if queued.reason != "day0_extreme_event_committed":
+                continue
+            for raw_city, raw_target_date, raw_metric in queued.forecast_families:
+                key = (
+                    str(raw_city or "").strip().casefold(),
+                    str(raw_target_date or "").strip()[:10],
+                    str(raw_metric or "").strip().lower(),
+                )
+                if key in held_by_key:
+                    matched[key] = held_by_key[key]
+            if len(matched) == len(held_by_key):
+                break
+        return frozenset(matched.values())
+    except Exception:
+        logger.warning(
+            "Pending held Day0 wake scope unavailable; using full exit monitor",
+            exc_info=True,
+        )
+        return None
     finally:
         if conn is not None:
             conn.close()
@@ -4329,6 +4393,21 @@ def _edli_reactor_wake_poll_once() -> bool:
         day0_requires_exit_monitor = _day0_wake_requires_exit_monitor(
             day0_target_families
         )
+        if not day0_requires_exit_monitor:
+            pending_held_families = _pending_held_day0_wake_families()
+            if pending_held_families is None:
+                day0_target_families = None
+                day0_requires_exit_monitor = True
+            elif pending_held_families:
+                day0_target_families = frozenset(
+                    (*day0_target_families, *pending_held_families)
+                )
+                day0_requires_exit_monitor = True
+                logger.info(
+                    "Day0 wake rescued %d queued held families behind an "
+                    "entry-only selected wake",
+                    len(pending_held_families),
+                )
         if day0_requires_exit_monitor:
             started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
             if not started:
@@ -4370,7 +4449,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
     if day0_wake and not substrate_refresh_wake:
         if not day0_requires_exit_monitor:
-            logger.info(
+            logger.debug(
                 "Day0 reactor wake bypassed exit monitor: "
                 "target families have no runtime exposure or resting entry"
             )
@@ -4415,7 +4494,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         forecast_monitor_wake=bool(forecast_monitor_families),
     ):
         return False
-    logger.info(
+    logger.debug(
         "EDLI reactor consumed wake id=%s source=%s reason=%s batch=%d events=%d families=%d",
         wake.wake_id,
         wake.source,
@@ -5938,8 +6017,11 @@ def _edli_pre_submit_jit_keepalive_tick() -> None:
     lives in the same module, so the singleton has no more cross-module reader.
     """
     from src.events.reactor import run_edli_presubmit_jit_keepalive_cycle
+    from src.execution.exit_lifecycle import warm_held_monitor_clob_client
 
     run_edli_presubmit_jit_keepalive_cycle()
+    if not warm_held_monitor_clob_client():
+        logger.debug("held-monitor CLOB keepalive failed; live monitor will retry")
 
 
 
@@ -6414,6 +6496,13 @@ def main():
     _root.setLevel(logging.INFO)
     _root.addHandler(_stdout_h)
     _root.addHandler(_stderr_h)
+    for noisy_logger in (
+        "apscheduler.executors.default",
+        "apscheduler.executors.heartbeat",
+        "httpcore",
+        "httpx",
+    ):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
     # F86: forensic SIGTERM trail — logs elapsed seconds to .err before exit.
     signal.signal(
         signal.SIGTERM,

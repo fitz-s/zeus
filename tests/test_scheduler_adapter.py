@@ -904,6 +904,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
         assert j["executor"] in (
             "source_clock_db",
+            "hko_source_clock_db",
             "forecast_clock_db",
             "oracle_guard_db",
             "observation_db",
@@ -949,6 +950,7 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
     by_id = {j["id"]: j for j in sched.jobs}
     assert by_id["ingest_day0_metar_source_clock"]["executor"] == "source_clock_db"
+    assert by_id["ingest_k2_hko_tick"]["executor"] == "hko_source_clock_db"
     assert by_id["ingest_replacement_availability_poll"]["executor"] == "forecast_clock_db"
     assert by_id["ingest_replacement_maintenance"]["executor"] == "derived_db"
     assert "ingest_day0_metar_commit_retry" not in by_id

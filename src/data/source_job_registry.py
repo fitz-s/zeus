@@ -123,8 +123,11 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   notes="multi-source: WU ICAO + Ogimet METAR via tier router"),
     SourceJobSpec("ingest_k2_hko_tick", "ingest_main", "live", "default", True,
                   source_id="hko_daily_api", callable_ref="_k2_hko_tick", family="observation",
-                  notes="job id ingest_k2_hko_tick (aligned to callable by upstream #324 HKO "
-                        "job-id boot-crash fix); callable _k2_hko_tick"),
+                  misfire_grace_time=10,
+                  notes="2s default conditional HKO since-midnight-extrema source clock; "
+                        "304 responses perform no DB work, validators advance only after the "
+                        "canonical observation and Day0 event commit, and its executor is "
+                        "isolated from METAR"),
     SourceJobSpec("ingest_k2_obs_fast_tick", "ingest_main", "live", "default", True,
                   source_ids=("wu_icao_history", "ogimet_metar"),
                   callable_ref="_k2_obs_fast_tick", family="observation",

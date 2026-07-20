@@ -5699,11 +5699,14 @@ def _reactor_wake_cancellation_probe(
             observed_revision = current_revision
             return False
         for wake in pending_wakes:
-            if wake.reason == "money_path_substrate_refreshed":
-                # A substrate wake only says that cached executable books moved
-                # forward. The global auction independently rebinds current books
-                # at its JIT fence, so restarting the whole decision cannot make
-                # that evidence fresher and can starve a hot price stream.
+            if wake.reason in {
+                "market_price_advanced",
+                "money_path_substrate_refreshed",
+            }:
+                # Book producers do not invalidate probability work. The global
+                # auction independently rebinds current books at its JIT fence,
+                # so restarting the whole decision cannot make that evidence
+                # fresher and can starve a hot price stream.
                 continue
             if not targeted_forecast:
                 superseded = True
@@ -6027,7 +6030,7 @@ def run_edli_event_reactor_cycle(
                 _prune_lock_timeout_s,
             )
         else:
-            _log.info(
+            _log.debug(
                 "EDLI reactor producer wake: skipping maintenance prune "
                 "before processing fresh fact"
             )
@@ -6202,7 +6205,7 @@ def run_edli_event_reactor_cycle(
             )
             _log_stage("emit_lock_skipped")
         else:
-            _log.info(
+            _log.debug(
                 "EDLI reactor committed producer wake: reason=%s skipping "
                 "forecast/day0 discovery and draining %d durable events immediately",
                 producer_wake_reason,
@@ -6600,7 +6603,14 @@ def run_edli_event_reactor_cycle(
                 exc,
                 exc_info=True,
             )
-        _log.info(
+        _cycle_log = (
+            _log.info
+            if _rr.proof_accepted
+            or _rr.dead_lettered
+            or getattr(_rr, "claim_lock_bounces", 0)
+            else _log.debug
+        )
+        _cycle_log(
             "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d "
             "claim_lock_bounces=%d reasons=%r",
             _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered,

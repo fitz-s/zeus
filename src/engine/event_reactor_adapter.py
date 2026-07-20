@@ -2316,7 +2316,7 @@ def _bounded_projected_global_book_hint(
             error,
         )
         return None
-    logging.getLogger(__name__).info(
+    logging.getLogger(__name__).debug(
         "global book projection hint completed: elapsed_s=%.3f budget_s=%.3f",
         elapsed,
         budget_seconds,
@@ -6904,6 +6904,7 @@ def event_bound_live_adapter_from_trade_conn(
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 cache_metadata_out=cache_metadata_out,
+                allow_partial_deterministic=True,
                 allow_provisional_day0_replacement=True,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
@@ -7701,7 +7702,7 @@ def event_bound_live_adapter_from_trade_conn(
         else:
             delta_scope_family_keys = None
         if entry_submit_suppression_reason is not None:
-            logging.getLogger(__name__).info(
+            logging.getLogger(__name__).debug(
                 "global batch suppressing BUY candidates before selection: reason=%s",
                 entry_submit_suppression_reason,
             )
@@ -9357,7 +9358,7 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_cancelled=_day0_selection_cancelled,
                 restrict_to_family_keys=delta_scope_family_keys,
             )
-            logging.getLogger(__name__).info(
+            logging.getLogger(__name__).debug(
                 "global probability family cache: hits=%d ineligible_hits=%d "
                 "misses=%d refreshed=%d",
                 probability_cache_stats["hit"],
@@ -29496,9 +29497,10 @@ def _prepare_current_global_probability_family(
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
-    Whole-family preparation keeps every unresolved sibling in one joint Day0
-    simplex.  An exact partial witness is valid only for an explicitly required
-    condition, and JIT revalidation preserves the selected witness kind.
+    Whole-family preparation prefers one joint Day0 simplex. If the remaining-
+    day forecast is unavailable, exact observation-proved bins may still form a
+    partial witness; unknown siblings remain ineligible. JIT revalidation
+    preserves the selected witness kind.
     """
 
     from src.data.replacement_forecast_bundle_reader import (
@@ -29979,6 +29981,26 @@ def _prepare_current_global_probability_family(
             if (
                 exact_yes_payoffs
                 and allow_partial_deterministic
+                and required_bin_id is None
+            ):
+                try:
+                    components = _day0_remaining_global_probability_components(
+                        event,
+                        forecast_conn=forecast_conn,
+                        calibration_conn=day0_observation_conn,
+                        family=family,
+                        payload=payload,
+                        decision_time=decision_time,
+                        snapshot=day0_snapshot,
+                    )
+                except ValueError as exc:
+                    if str(exc) != "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE":
+                        raise
+                    required_bin_id = min(exact_bin_ids)
+                    payload["_edli_day0_deterministic_scope_reason"] = str(exc)
+            if (
+                exact_yes_payoffs
+                and allow_partial_deterministic
                 and required_bin_id is not None
                 and required_bin_id in exact_bin_ids
             ):
@@ -30096,6 +30118,10 @@ def _prepare_current_global_probability_family(
                         witness.captured_at_utc.isoformat()
                     ),
                 }
+                if "_edli_day0_deterministic_scope_reason" in payload:
+                    deterministic_payload[
+                        "_edli_day0_deterministic_scope_reason"
+                    ] = payload["_edli_day0_deterministic_scope_reason"]
                 payload.update(deterministic_payload)
                 if day0_payload_out is not None:
                     day0_payload_out.update(deterministic_payload)
@@ -30109,15 +30135,16 @@ def _prepare_current_global_probability_family(
                     probability_witness=witness,
                     candidate_seeds=(),
                 )
-            components = _day0_remaining_global_probability_components(
-                event,
-                forecast_conn=forecast_conn,
-                calibration_conn=day0_observation_conn,
-                family=family,
-                payload=payload,
-                decision_time=decision_time,
-                snapshot=day0_snapshot,
-            )
+            if components is None:
+                components = _day0_remaining_global_probability_components(
+                    event,
+                    forecast_conn=forecast_conn,
+                    calibration_conn=day0_observation_conn,
+                    family=family,
+                    payload=payload,
+                    decision_time=decision_time,
+                    snapshot=day0_snapshot,
+                )
             probability_authority = "day0_remaining_day_global_probability_v1"
             payload.update(
                 {

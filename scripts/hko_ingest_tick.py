@@ -99,6 +99,58 @@ class HkoExtremaSnapshot:
     fetched_at_utc: str
 
 
+@dataclass(frozen=True)
+class HkoExtremaPrefetch:
+    """One changed HKO publication, unacknowledged until its DB commit."""
+
+    snapshot: HkoExtremaSnapshot
+    etag: str | None
+    last_modified: str | None
+
+
+class HkoExtremaPoller:
+    """Conditional source-clock client with commit-coupled validators."""
+
+    def __init__(
+        self,
+        *,
+        client: httpx.Client | None = None,
+        timeout_s: float = 5.0,
+    ) -> None:
+        self._client = client or httpx.Client(timeout=max(0.1, float(timeout_s)))
+        self._owns_client = client is None
+        self._etag: str | None = None
+        self._last_modified: str | None = None
+
+    def prefetch(self) -> HkoExtremaPrefetch | None:
+        headers: dict[str, str] = {}
+        if self._etag:
+            headers["If-None-Match"] = self._etag
+        if self._last_modified:
+            headers["If-Modified-Since"] = self._last_modified
+        response = self._client.get(HKO_EXTREMA_URL, headers=headers)
+        if response.status_code == 304:
+            return None
+        response.raise_for_status()
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        return HkoExtremaPrefetch(
+            snapshot=_parse_hko_extrema_csv(
+                response.text,
+                fetched_at_utc=fetched_at,
+            ),
+            etag=response.headers.get("etag"),
+            last_modified=response.headers.get("last-modified"),
+        )
+
+    def acknowledge(self, prefetch: HkoExtremaPrefetch) -> None:
+        self._etag = prefetch.etag
+        self._last_modified = prefetch.last_modified
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+
 def _append_log(log_path: Path, entry: dict) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
@@ -222,8 +274,8 @@ def _same_extrema_already_materialized(
 def _build_hko_extrema_row(
     snapshot: HkoExtremaSnapshot,
     *,
-    temperature_c: float,
-    accumulator_fetched_at: str,
+    temperature_c: float | None,
+    accumulator_fetched_at: str | None,
     data_version: str,
     imported_at: str,
 ) -> ObsV2Row:
@@ -233,7 +285,8 @@ def _build_hko_extrema_row(
     - source='hko_hourly_accumulator' (A6 pinned for HK)
     - authority='ICAO_STATION_NATIVE' per plan v3 L95
     - data_version='v1.wu-native' to match the corpus family
-    - temp_current comes from rhrread — the diagnostic current reading
+    - temp_current uses the latest rhrread diagnostic when available; it may be
+      absent because official extrema must not wait for an unrelated spot feed
     - running_max/running_min are HKO's official since-midnight 1-minute-mean
       extrema only
     - observation_count=1, station_id='HKO' (Observatory HQ)
@@ -311,18 +364,20 @@ def project_accumulator_to_v2(
     data_version: str,
     log_path: Path,
     dry_run: bool = False,
+    *,
+    snapshot: HkoExtremaSnapshot | None = None,
 ) -> dict:
     """Write one current HKO extrema fact and retire legacy pseudo-extrema."""
     ts_now = datetime.now(timezone.utc).isoformat()
     try:
-        snapshot = _fetch_hko_extrema()
+        snapshot = snapshot or _fetch_hko_extrema()
         current = _latest_accumulator_temperature(
             conn,
             target_date=snapshot.target_date,
         )
-        if current is None:
-            raise ValueError("HKO current-temperature accumulator row missing")
-        temp_c, accumulator_fetched_at = current
+        temp_c, accumulator_fetched_at = (
+            current if current is not None else (None, None)
+        )
         row = _build_hko_extrema_row(
             snapshot,
             temperature_c=temp_c,

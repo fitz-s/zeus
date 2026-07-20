@@ -10,6 +10,7 @@ assigning each job an EXECUTOR CLASS by intent so the single-writer SQLite lock 
 DB-heavy jobs starve heartbeats:
 
     source_clock_db     — latency-critical source publication -> short live write
+    hko_source_clock_db — HKO conditional HTTP + short live write, isolated from METAR
     forecast_clock_db   — replacement forecast publication clock + scoped capture
     oracle_guard_db     — Day0 source disagreement guard
     observation_db      — supplemental observation ingest
@@ -42,6 +43,7 @@ from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 
 ExecutorClass = Literal[
     "source_clock_db",
+    "hko_source_clock_db",
     "forecast_clock_db",
     "oracle_guard_db",
     "observation_db",
@@ -72,9 +74,10 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
             "ingest_day0_metar_commit_retry",
         }:
             return "source_clock_db"
+        if spec.job_id == "ingest_k2_hko_tick":
+            return "hko_source_clock_db"
         if spec.job_id in {
             "ingest_k2_daily_obs",
-            "ingest_k2_hko_tick",
             "ingest_k2_obs",
             "ingest_k2_obs_fast_tick",
         }:
@@ -269,6 +272,7 @@ def registry_executor_pools() -> dict[str, object]:
 
     return {
         "source_clock_db": ThreadPoolExecutor(max_workers=1),
+        "hko_source_clock_db": ThreadPoolExecutor(max_workers=1),
         "forecast_clock_db": ThreadPoolExecutor(max_workers=1),
         "oracle_guard_db": ThreadPoolExecutor(max_workers=1),
         "observation_db": ThreadPoolExecutor(max_workers=1),
@@ -343,6 +347,7 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
             continue
         if s.executor_class in {
             "source_clock_db",
+            "hko_source_clock_db",
             "forecast_clock_db",
             "oracle_guard_db",
             "observation_db",

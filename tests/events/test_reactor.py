@@ -574,10 +574,15 @@ def test_targeted_forecast_wake_ignores_only_older_remaining_backlog(monkeypatch
         ),
     ],
 )
-def test_reactor_wake_probe_ignores_book_substrate_refresh(
+@pytest.mark.parametrize(
+    "pending_reason",
+    ["market_price_advanced", "money_path_substrate_refreshed"],
+)
+def test_reactor_wake_probe_ignores_book_only_revision(
     monkeypatch,
     producer_reason,
     producer_families,
+    pending_reason,
 ):
     from src.events.reactor import _reactor_wake_cancellation_probe
     from src.runtime import reactor_wake
@@ -586,7 +591,7 @@ def test_reactor_wake_probe_ignores_book_substrate_refresh(
         "wake-substrate",
         "2026-07-19T12:00:01+00:00",
         "substrate_observer",
-        "money_path_substrate_refreshed",
+        pending_reason,
         forecast_families=(("Paris", "2026-07-20", "high"),),
     )
     revisions = iter(("base", "new", "new"))
@@ -621,7 +626,6 @@ def test_reactor_wake_probe_ignores_book_substrate_refresh(
             (("Paris", "2026-07-20", "high"),),
         ),
         ("day0_extreme_event_committed", ()),
-        ("market_price_advanced", ()),
     ],
 )
 def test_targeted_forecast_wake_stops_for_dependent_or_faster_revision(

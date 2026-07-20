@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-20
 # Authority basis: day0_obs_fastlane_plan.md §4.2 (Option B) and §4.3 (Option C);
 #   operator task brief /tmp/day0_obs_fastlane_plan.md.
 """Antibody tests for Day0 observation fast-lane Options B and C.
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timezone, timedelta
 from types import SimpleNamespace
 from typing import Optional
@@ -39,6 +40,7 @@ from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
+import httpx
 
 UTC = timezone.utc
 
@@ -727,6 +729,258 @@ class TestObsFastTickSchedulerRegistration:
 
         assert isinstance(im._day0_metar_emitter(), _Emitter)
         assert constructed == [0.0]
+
+    def test_hko_source_clock_is_conditional_and_isolated_from_metar(
+        self,
+        monkeypatch,
+    ):
+        import src.ingest_main as im
+        from src.data.scheduler_adapter import (
+            executor_class_for,
+            registry_executor_pools,
+        )
+        from src.data.source_job_registry import JOB_REGISTRY
+
+        monkeypatch.delenv(im.DAY0_HKO_POLL_SECONDS_ENV, raising=False)
+        _fn, trigger, kwargs = next(
+            spec
+            for spec in im._ingest_main_job_specs()
+            if spec[2].get("id") == "ingest_k2_hko_tick"
+        )
+
+        assert trigger == "interval"
+        assert kwargs["seconds"] == 2.0
+        assert kwargs["next_run_time"] is not None
+        assert (
+            executor_class_for(JOB_REGISTRY["ingest_k2_hko_tick"])
+            == "hko_source_clock_db"
+        )
+        pools = registry_executor_pools()
+        assert pools["hko_source_clock_db"] is not pools["source_clock_db"]
+
+    def test_hko_conditional_validator_advances_only_after_acknowledge(self):
+        from scripts.hko_ingest_tick import HkoExtremaPoller
+
+        payload = (
+            "Date time,Automatic Weather Station,"
+            "Maximum Air Temperature Since Midnight(degree Celsius),"
+            "Minimum Air Temperature Since Midnight(degree Celsius)\n"
+            "202607202330,HK Observatory,29.7,25.7\n"
+        )
+
+        class _Client:
+            def __init__(self):
+                self.headers = []
+
+            def get(self, url, *, headers):
+                self.headers.append(dict(headers))
+                request = httpx.Request("GET", url, headers=headers)
+                if headers.get("If-None-Match") == '"hko-v1"':
+                    return httpx.Response(304, request=request)
+                return httpx.Response(
+                    200,
+                    text=payload,
+                    headers={
+                        "etag": '"hko-v1"',
+                        "last-modified": "Mon, 20 Jul 2026 15:38:18 GMT",
+                    },
+                    request=request,
+                )
+
+        client = _Client()
+        poller = HkoExtremaPoller(client=client)
+
+        first = poller.prefetch()
+        assert first is not None
+        retry_before_commit = poller.prefetch()
+        assert retry_before_commit is not None
+        assert client.headers[:2] == [{}, {}]
+
+        poller.acknowledge(retry_before_commit)
+        assert poller.prefetch() is None
+        assert client.headers[-1] == {
+            "If-None-Match": '"hko-v1"',
+            "If-Modified-Since": "Mon, 20 Jul 2026 15:38:18 GMT",
+        }
+
+    def test_hko_official_extrema_does_not_require_diagnostic_current_temp(self):
+        from scripts.hko_ingest_tick import (
+            HkoExtremaSnapshot,
+            _build_hko_extrema_row,
+        )
+
+        row = _build_hko_extrema_row(
+            HkoExtremaSnapshot(
+                target_date="2026-07-21",
+                observed_at_utc="2026-07-20T16:00:00+00:00",
+                high_c=28.2,
+                low_c=28.2,
+                fetched_at_utc="2026-07-20T16:00:02+00:00",
+            ),
+            temperature_c=None,
+            accumulator_fetched_at=None,
+            data_version="v1.wu-native",
+            imported_at="2026-07-20T16:00:02+00:00",
+        )
+
+        assert row.temp_current is None
+        assert row.running_max == 28.2
+        assert row.running_min == 28.2
+
+    def test_hko_changed_publication_commits_before_ack_and_wake(
+        self,
+        monkeypatch,
+    ):
+        import scripts.hko_ingest_tick as hko_tick
+        import src.config as config
+        import src.data.dual_run_lock as dual_run_lock
+        import src.events.event_priority as event_priority
+        import src.events.event_writer as event_writer
+        import src.events.triggers.day0_extreme_updated as day0_trigger
+        import src.ingest_main as im
+        import src.state.db as db
+        import src.state.write_coordinator as coordinator
+        from src.events.event_writer import EventWriteResult
+
+        timeline: list[str] = []
+        prefetch = hko_tick.HkoExtremaPrefetch(
+            snapshot=hko_tick.HkoExtremaSnapshot(
+                target_date="2026-07-20",
+                observed_at_utc="2026-07-20T15:30:00+00:00",
+                high_c=29.7,
+                low_c=25.7,
+                fetched_at_utc="2026-07-20T15:38:20+00:00",
+            ),
+            etag='"hko-v2"',
+            last_modified="Mon, 20 Jul 2026 15:38:18 GMT",
+        )
+
+        class _Poller:
+            def prefetch(self):
+                return prefetch
+
+            def acknowledge(self, value):
+                assert value is prefetch
+                timeline.append("validator_ack")
+
+        class _Cursor:
+            def fetchall(self):
+                return [("Hong Kong", "2026-07-20", "low")]
+
+        class _Conn:
+            total_changes = 0
+            in_transaction = False
+
+            def execute(self, sql, _params=()):
+                if "FROM opportunity_events" in sql:
+                    return _Cursor()
+                return self
+
+            def commit(self):
+                timeline.append("event_commit")
+
+            def rollback(self):
+                timeline.append("rollback")
+
+            def close(self):
+                timeline.append("connection_close")
+
+        class _Mutex:
+            def acquire(self, *, timeout):
+                assert timeout > 0
+                return True
+
+            def release(self):
+                timeline.append("mutex_release")
+
+        class _Lease:
+            def record_commit(self, **_kwargs):
+                timeline.append("lease_record")
+
+        @contextmanager
+        def _source_lock(_name):
+            yield True
+
+        @contextmanager
+        def _lease(*_args, **_kwargs):
+            yield _Lease()
+
+        def _project(conn, *_args, snapshot, **_kwargs):
+            assert snapshot is prefetch.snapshot
+            conn.total_changes += 1
+            timeline.append("observation_commit")
+            return {
+                "candidates": 1,
+                "written": 1,
+                "build_errors": 0,
+                "retired": 0,
+            }
+
+        class _Trigger:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def scan_observation_instants_rows(self, **_kwargs):
+                timeline.append("event_write")
+                return [EventWriteResult("event-hko", True, False)]
+
+        hko_city = SimpleNamespace(
+            settlement_source_type="hko",
+            settlement_unit="C",
+            wu_station="HKO",
+        )
+        monkeypatch.setattr(im, "_day0_hko_poller", lambda: _Poller())
+        monkeypatch.setattr(
+            im,
+            "_day0_family_admission_for_scopes",
+            lambda _scopes: lambda _observation: True,
+        )
+        monkeypatch.setattr(
+            im,
+            "_bridge_committed_day0_events",
+            lambda **_kwargs: timeline.append("bridge_and_wake"),
+        )
+        monkeypatch.setattr(hko_tick, "project_accumulator_to_v2", _project)
+        monkeypatch.setattr(dual_run_lock, "acquire_lock", _source_lock)
+        monkeypatch.setattr(
+            config,
+            "runtime_cities_by_name",
+            lambda: {"Hong Kong": hko_city},
+        )
+        monkeypatch.setattr(
+            config,
+            "settings",
+            {
+                "edli": {
+                    "enabled": True,
+                    "event_writer_enabled": True,
+                    "day0_extreme_trigger_enabled": True,
+                    "edli_live_scope": "forecast_plus_day0",
+                }
+            },
+        )
+        monkeypatch.setattr(
+            event_priority,
+            "day0_is_tradeable_for_scope",
+            lambda _scope: True,
+        )
+        monkeypatch.setattr(event_writer, "EventWriter", lambda _conn: object())
+        monkeypatch.setattr(day0_trigger, "Day0ExtremeUpdatedTrigger", _Trigger)
+        monkeypatch.setattr(db, "get_world_connection", lambda **_kwargs: _Conn())
+        monkeypatch.setattr(db, "world_write_mutex", lambda: _Mutex())
+        monkeypatch.setattr(
+            coordinator,
+            "default_runtime_write_coordinator",
+            lambda: SimpleNamespace(lease=_lease),
+        )
+
+        result = im._k2_hko_tick.__wrapped__()
+
+        assert result["status"] == "COMMITTED"
+        assert result["events_emitted"] == 1
+        assert timeline.index("observation_commit") < timeline.index("event_commit")
+        assert timeline.index("event_commit") < timeline.index("validator_ack")
+        assert timeline.index("validator_ack") < timeline.index("bridge_and_wake")
 
     def test_day0_oracle_guard_is_separate_from_source_clock_lane(self):
         import src.ingest_main as im

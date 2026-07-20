@@ -61,6 +61,8 @@ class _CurrentHoldingWitness:
 
 UTC = timezone.utc
 _LOG = logging.getLogger(__name__)
+_SLOW_BATCH_STAGE_SECONDS = 2.0
+_SLOW_BATCH_TOTAL_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -2776,12 +2778,20 @@ def process_current_global_batch(
     def log_stage(stage: str, *, families: int | None = None) -> None:
         nonlocal stage_started
         now = time.monotonic()
-        _LOG.info(
+        elapsed = now - stage_started
+        total = now - batch_started
+        stage_log = (
+            _LOG.info
+            if elapsed >= _SLOW_BATCH_STAGE_SECONDS
+            or total >= _SLOW_BATCH_TOTAL_SECONDS
+            else _LOG.debug
+        )
+        stage_log(
             "global batch stage completed: %s elapsed_s=%.3f total_s=%.3f "
             "events=%d families=%s",
             stage,
-            now - stage_started,
-            now - batch_started,
+            elapsed,
+            total,
             len(event_tuple),
             families if families is not None else "unknown",
         )
@@ -2791,7 +2801,7 @@ def process_current_global_batch(
         counts, distinct_reasons, omitted_codes = _no_trade_rejection_log_summary(
             decision
         )
-        _LOG.info(
+        _LOG.debug(
             "global batch no-trade detail: stage=%s reason=%s "
             "rejection_codes=%s distinct_reasons=%d omitted_codes=%d",
             stage,
@@ -3197,7 +3207,7 @@ def process_current_global_batch(
                 ),
                 captured_at_utc=scope_at,
             )
-            _LOG.info(
+            _LOG.debug(
                 "global batch restricted scope plus held obligations: "
                 "families=%d held_families=%d global_families=%d",
                 len(decision_scope.events_by_family),

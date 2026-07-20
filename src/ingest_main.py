@@ -52,12 +52,14 @@ REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV = "ZEUS_REPLACEMENT_SOURCE_
 REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS"
 DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
 DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
+DAY0_HKO_POLL_SECONDS_ENV = "ZEUS_DAY0_HKO_POLL_SECONDS"
 DAY0_METAR_COMMIT_RETRY_SECONDS = 0.25
 DAY0_METAR_COMMIT_RETRY_MAX_SECONDS = 5.0
 DAY0_METAR_COMMIT_RETRY_MAX_FAILURES = 6
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 _DAY0_METAR_EMITTER: Any | None = None
+_DAY0_HKO_POLLER: Any | None = None
 _DAY0_METAR_COMMIT_LOCK = threading.Lock()
 _DAY0_METAR_PENDING_COMMITS: list[tuple[Any, str, bool, Any | None]] = []
 _DAY0_METAR_RETRY_LOCK = threading.Lock()
@@ -99,6 +101,21 @@ def _day0_metar_poll_seconds() -> float:
             raw,
         )
         return 5.0
+
+
+def _day0_hko_poll_seconds() -> float:
+    raw = os.environ.get(DAY0_HKO_POLL_SECONDS_ENV, "").strip()
+    if not raw:
+        return 2.0
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using 2s HKO extrema source-clock cadence",
+            DAY0_HKO_POLL_SECONDS_ENV,
+            raw,
+        )
+        return 2.0
 
 
 def _day0_metar_write_budget_seconds() -> float:
@@ -148,6 +165,31 @@ def _close_day0_metar_emitter() -> None:
         )
 
 
+def _day0_hko_poller():
+    global _DAY0_HKO_POLLER
+    if _DAY0_HKO_POLLER is None:
+        from scripts.hko_ingest_tick import HkoExtremaPoller
+
+        _DAY0_HKO_POLLER = HkoExtremaPoller()
+    return _DAY0_HKO_POLLER
+
+
+def _close_day0_hko_poller() -> None:
+    global _DAY0_HKO_POLLER
+    poller = _DAY0_HKO_POLLER
+    _DAY0_HKO_POLLER = None
+    if poller is None:
+        return
+    try:
+        poller.close()
+    except Exception as exc:  # noqa: BLE001 - teardown must retain clean exit
+        logger.warning(
+            "DAY0_HKO_POLLER_CLOSE_FAILED exc=%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _day0_priority_scopes() -> frozenset[tuple[str, str]]:
     """Current exposure scopes whose station files deserve the fastest lane."""
 
@@ -171,24 +213,17 @@ def _day0_priority_scopes() -> frozenset[tuple[str, str]]:
     )
 
 
-def _day0_source_family_admission(eligible: Any):
-    """Bind source-clock event emission to a market or current exposure.
-
-    METAR reports remain durable observation facts regardless of this result. The
-    returned predicate only decides whether one fact can create executable reactor
-    work. Read failure returns ``None`` and preserves the former fail-open behavior.
-    """
+def _day0_family_admission_for_scopes(
+    scopes: tuple[tuple[str, str], ...],
+):
+    """Bind source-clock events to a listed market or current exposure."""
 
     scopes = tuple(
         sorted(
             {
-                (
-                    str(getattr(city, "name", "") or "").strip(),
-                    str(target_date or "").strip(),
-                )
-                for city, _source, target_date in tuple(eligible or ())
-                if str(getattr(city, "name", "") or "").strip()
-                and str(target_date or "").strip()
+                (str(city or "").strip(), str(target_date or "").strip())
+                for city, target_date in scopes
+                if str(city or "").strip() and str(target_date or "").strip()
             }
         )
     )
@@ -262,6 +297,20 @@ def _day0_source_family_admission(eligible: Any):
     return _admit
 
 
+def _day0_source_family_admission(eligible: Any):
+    """Derive executable family admission from a METAR prefetch."""
+
+    return _day0_family_admission_for_scopes(
+        tuple(
+            (
+                str(getattr(city, "name", "") or "").strip(),
+                str(target_date or "").strip(),
+            )
+            for city, _source, target_date in tuple(eligible or ())
+        )
+    )
+
+
 def _stage_day0_metar_commit(
     prefetch: Any,
     *,
@@ -280,6 +329,64 @@ def _stage_day0_metar_commit(
             _DAY0_METAR_PENDING_COMMITS.append(staged)
         else:
             _DAY0_METAR_PENDING_COMMITS[-1] = staged
+
+
+def _bridge_committed_day0_events(
+    *,
+    source: str,
+    event_ids: tuple[str, ...],
+    families: tuple[tuple[str, str, str], ...],
+) -> None:
+    """After commit, enqueue probability refresh and wake the trading reactor."""
+
+    if not event_ids:
+        return
+    unique_families = tuple(dict.fromkeys(families))
+    try:
+        from src.data.replacement_cycle_advance_trigger import (
+            enqueue_day0_extreme_updated_materialization_seed,
+        )
+
+        for city, target_date, metric in unique_families:
+            report = enqueue_day0_extreme_updated_materialization_seed(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+            logger.info(
+                "DAY0_SOURCE_MATERIALIZATION_BRIDGE source=%s city=%s "
+                "target_date=%s metric=%s status=%s",
+                source,
+                city,
+                target_date,
+                metric,
+                report.get("status"),
+            )
+    except Exception:
+        logger.warning(
+            "DAY0_SOURCE_MATERIALIZATION_BRIDGE_FAILED source=%s families=%d; "
+            "scheduled recompute remains the fallback",
+            source,
+            len(unique_families),
+            exc_info=True,
+        )
+    try:
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        publish_reactor_wake(
+            source=source,
+            reason="day0_extreme_event_committed",
+            event_ids=event_ids,
+            forecast_families=unique_families,
+        )
+    except Exception:
+        logger.warning(
+            "DAY0_SOURCE_REACTOR_WAKE_FAILED source=%s events=%d; "
+            "periodic reactor scan remains authoritative",
+            source,
+            len(event_ids),
+            exc_info=True,
+        )
 
 
 def _persist_day0_metar_ledger_after_wake(prefetch: Any) -> bool:
@@ -359,7 +466,6 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
 
         import sqlite3
 
-        from src.runtime.reactor_wake import publish_reactor_wake
         from src.state.db import get_world_connection, world_write_mutex
         from src.state.write_coordinator import (
             DBIdentity,
@@ -473,53 +579,11 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
         _DAY0_METAR_COMMIT_LOCK.release()
 
     if emitted:
-        # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): a freshly-committed
-        # DAY0_EXTREME_UPDATED family must not wait on the ~40-min scheduled
-        # posterior recompute cadence — the measured latency bottleneck (see
-        # docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md).
-        # Runs AFTER the world-write mutex is released and conn closed (no
-        # network/DB I/O in the just-closed txn), mirroring the LOCK LAW every
-        # other substrate-refresh drain in this codebase already follows.
-        try:
-            from src.data.replacement_cycle_advance_trigger import (
-                enqueue_day0_extreme_updated_materialization_seed,
-            )
-
-            for family_city, family_target_date, family_metric in dict.fromkeys(
-                inserted_families
-            ):
-                bridge_report = enqueue_day0_extreme_updated_materialization_seed(
-                    city=family_city,
-                    target_date=family_target_date,
-                    metric=family_metric,
-                )
-                logger.info(
-                    "DAY0_METAR_MATERIALIZATION_BRIDGE city=%s target_date=%s metric=%s "
-                    "status=%s",
-                    family_city, family_target_date, family_metric,
-                    bridge_report.get("status"),
-                )
-        except Exception:
-            logger.warning(
-                "DAY0_METAR_MATERIALIZATION_BRIDGE_FAILED families=%d; scheduled recompute "
-                "cadence remains the fallback",
-                len(inserted_families),
-                exc_info=True,
-            )
-        try:
-            publish_reactor_wake(
-                source="day0_metar_source_clock",
-                reason="day0_extreme_event_committed",
-                event_ids=tuple(inserted_event_ids),
-                forecast_families=tuple(dict.fromkeys(inserted_families)),
-            )
-        except Exception:
-            logger.warning(
-                "DAY0_METAR_REACTOR_WAKE_FAILED events_emitted=%d; "
-                "periodic reactor scan remains authoritative",
-                emitted,
-                exc_info=True,
-            )
+        _bridge_committed_day0_events(
+            source="day0_metar_source_clock",
+            event_ids=tuple(inserted_event_ids),
+            families=tuple(inserted_families),
+        )
     # Never reacquire the world writer after waking the reactor for a new
     # trade fact. The emitter retains unledgered publication identities, and a
     # later non-emitting source pass persists them outside the alpha window.
@@ -771,6 +835,7 @@ def _graceful_shutdown(signum, frame) -> None:
         logger.warning("Scheduler shutdown error: %s", exc)
     finally:
         _close_day0_metar_emitter()
+        _close_day0_hko_poller()
     sys.exit(0)
 
 
@@ -1553,65 +1618,159 @@ def _raise_if_all_obs_tick_attempts_failed(job_id: str, results: list[object]) -
 
 @_scheduler_job("ingest_k2_hko_tick")
 def _k2_hko_tick():
-    """HKO hourly accumulator fetch + v2 projection for Hong Kong.
+    """Poll HKO extrema conditionally and publish changed facts after commit."""
 
-    Runs hourly at minute=30, offset from obs (:15) and harvester (:45).
-    Decoupled from the trading daemon per operator directive 2026-04-23
-    ("daemon-live和polymarket数据/天气数据采集本不应该混为一谈").
+    import sqlite3
 
-    scripts/hko_ingest_tick.py acquires db_writer_lock(BULK) only in its
-    CLI main() path. When called via module-level functions (as done here),
-    the lock is NOT acquired inside those functions — ingest_main is
-    responsible for any lock coordination at this call site (currently
-    guarded by acquire_lock("hko_tick") above). Called as functions to
-    avoid subprocess overhead and inherit the daemon's DB path resolution.
-    """
     from src.data.dual_run_lock import acquire_lock
-    from pathlib import Path
+    from scripts.hko_ingest_tick import DEFAULT_LOG_PATH, project_accumulator_to_v2
+    from src.config import runtime_cities_by_name, settings
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.events.event_priority import day0_is_tradeable_for_scope
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
+    from src.state.db import get_world_connection, world_write_mutex
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteLeaseTimeout,
+        default_runtime_write_coordinator,
+    )
 
-    with acquire_lock("hko_tick") as acquired:
-        if not acquired:
-            logger.info("ingest k2_hko_tick skipped_lock_held")
-            return
-        _REPO_ROOT = Path(__file__).resolve().parent.parent
-        from src.config import STATE_DIR
-        db_path = STATE_DIR / "zeus-world.db"
-        # Import the standalone script's two entry-point functions directly.
-        # hko_ingest_tick.py is already in SQLITE_CONNECT_ALLOWLIST.
-        import sys as _sys
-        if str(_REPO_ROOT) not in _sys.path:
-            _sys.path.insert(0, str(_REPO_ROOT))
-        from scripts.hko_ingest_tick import (
-            tick_accumulator,
-            project_accumulator_to_v2,
-            DEFAULT_LOG_PATH,
-        )
-        from src.state.db_writer_lock import WriteClass, db_writer_lock
-        import os as _os
-        import sqlite3 as _sqlite3
-        data_version = "v1.wu-native"
-        # CATEGORY ANTIBODY (Fitz #5): bare no-timeout connect was a lock-loser on
-        # this BULK ingest write path. Apply the configured busy_timeout (ms→s) so
-        # WAL contention WAITS instead of raising "database is locked".
-        _busy_ms = int(_os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
-        with db_writer_lock(db_path, WriteClass.BULK):
-            conn = _sqlite3.connect(str(db_path), timeout=_busy_ms / 1000.0)
-            conn.execute("PRAGMA busy_timeout = %d" % _busy_ms)
-            try:
-                tick_result = tick_accumulator(conn, DEFAULT_LOG_PATH)
+    poller = _day0_hko_poller()
+    prefetch = poller.prefetch()
+    if prefetch is None:
+        return {"status": "SOURCE_CURRENT"}
+
+    snapshot = prefetch.snapshot
+    hko_city = runtime_cities_by_name()["Hong Kong"]
+    family_admission = _day0_family_admission_for_scopes(
+        (("Hong Kong", snapshot.target_date),)
+    )
+    edli_cfg = settings["edli"]
+    event_enabled = bool(
+        edli_cfg.get("enabled")
+        and edli_cfg.get("event_writer_enabled")
+        and edli_cfg.get("day0_extreme_trigger_enabled")
+    )
+    write_budget_s = _day0_metar_write_budget_seconds()
+    write_deadline = time.monotonic() + write_budget_s
+    conn = None
+    mutex = None
+    acquired = False
+    inserted_event_ids: tuple[str, ...] = ()
+    inserted_families: tuple[tuple[str, str, str], ...] = ()
+    try:
+        with acquire_lock("hko_tick") as source_acquired:
+            if not source_acquired:
+                return {"status": "SOURCE_CONTENDED"}
+            mutex = world_write_mutex()
+            acquired = mutex.acquire(timeout=write_budget_s)
+            if not acquired:
+                return {"status": "WRITE_CONTENDED"}
+            remaining_ms = max(
+                1,
+                int((write_deadline - time.monotonic()) * 1000.0),
+            )
+            with default_runtime_write_coordinator().lease(
+                (DBIdentity.WORLD,),
+                owner="day0_hko_source_clock",
+                write_class="live",
+                deadline_ms=remaining_ms,
+                max_hold_ms=max(1, int(write_budget_s * 1000.0)),
+            ) as write_lease:
+                conn = get_world_connection(write_class="live")
+                conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+                before_changes = int(conn.total_changes)
+                commit_started = time.monotonic()
                 project_result = project_accumulator_to_v2(
-                    conn, data_version, DEFAULT_LOG_PATH
+                    conn,
+                    "v1.wu-native",
+                    DEFAULT_LOG_PATH,
+                    snapshot=snapshot,
                 )
-            finally:
-                conn.close()
-        logger.info(
-            "K2 hko_tick: tick_ok=%s candidates=%s written=%s build_errors=%s",
-            tick_result.get("tick_ok"),
-            project_result.get("candidates"),
-            project_result.get("written"),
-            project_result.get("build_errors"),
-        )
-        return {**tick_result, **project_result}
+                if event_enabled:
+                    decision_time = datetime.now(timezone.utc)
+                    trigger = Day0ExtremeUpdatedTrigger(
+                        EventWriter(conn),
+                        day0_is_tradeable=day0_is_tradeable_for_scope(
+                            str(
+                                edli_cfg.get("edli_live_scope")
+                                or "forecast_plus_day0"
+                            )
+                        ),
+                        family_admission=family_admission,
+                        scan_cities=("Hong Kong",),
+                    )
+                    results = trigger.scan_observation_instants_rows(
+                        observation_conn=conn,
+                        settlement_semantics=SettlementSemantics.for_city(hko_city),
+                        decision_time=decision_time,
+                        received_at=decision_time.isoformat(),
+                        limit=4,
+                    )
+                    inserted_event_ids = tuple(
+                        result.event_id for result in results if result.inserted
+                    )
+                    if inserted_event_ids:
+                        placeholders = ",".join("?" for _ in inserted_event_ids)
+                        inserted_families = tuple(
+                            (
+                                str(city),
+                                str(target_date),
+                                str(metric).lower(),
+                            )
+                            for city, target_date, metric in conn.execute(
+                                f"""
+                                SELECT json_extract(payload_json, '$.city'),
+                                       json_extract(payload_json, '$.target_date'),
+                                       json_extract(payload_json, '$.metric')
+                                  FROM opportunity_events
+                                 WHERE event_id IN ({placeholders})
+                                """,
+                                inserted_event_ids,
+                            ).fetchall()
+                        )
+                    conn.commit()
+                write_lease.record_commit(
+                    commit_ms=(time.monotonic() - commit_started) * 1000.0,
+                    rows_changed=max(
+                        0,
+                        int(conn.total_changes) - before_changes,
+                    ),
+                )
+                poller.acknowledge(prefetch)
+    except WriteLeaseTimeout:
+        return {"status": "WRITE_CONTENDED"}
+    except sqlite3.OperationalError as exc:
+        if conn is not None and conn.in_transaction:
+            conn.rollback()
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            return {"status": "WRITE_CONTENDED"}
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+        if acquired and mutex is not None:
+            mutex.release()
+
+    _bridge_committed_day0_events(
+        source="day0_hko_source_clock",
+        event_ids=inserted_event_ids,
+        families=inserted_families,
+    )
+    logger.info(
+        "K2 hko_source_clock: observed_at=%s target_date=%s written=%s "
+        "events_emitted=%d",
+        snapshot.observed_at_utc,
+        snapshot.target_date,
+        project_result.get("written"),
+        len(inserted_event_ids),
+    )
+    return {
+        **project_result,
+        "status": "COMMITTED",
+        "events_emitted": len(inserted_event_ids),
+    }
 
 
 # Staleness threshold for boot-time force-fetch.  A once-per-day cron
@@ -3234,6 +3393,7 @@ def _ingest_main_job_specs() -> list[tuple]:
     now = _dt_now.now()
     replacement_availability_poll_seconds = _replacement_availability_poll_seconds()
     day0_metar_poll_seconds = _day0_metar_poll_seconds()
+    day0_hko_poll_seconds = _day0_hko_poll_seconds()
     specs: list[tuple] = [
         (_k2_daily_obs_tick, "cron", dict(minute=0, id="ingest_k2_daily_obs",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
@@ -3259,8 +3419,10 @@ def _ingest_main_job_specs() -> list[tuple]:
         (_day0_oracle_anomaly_tick, "interval", dict(seconds=10,
             id="ingest_day0_oracle_anomaly", max_instances=1, coalesce=True,
             misfire_grace_time=30, next_run_time=now + timedelta(seconds=2.5))),
-        (_k2_hko_tick, "cron", dict(minute=30, id="ingest_k2_hko_tick",
-            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_k2_hko_tick, "interval", dict(seconds=day0_hko_poll_seconds,
+            id="ingest_k2_hko_tick", max_instances=1, coalesce=True,
+            misfire_grace_time=max(5, int(day0_hko_poll_seconds * 2)),
+            next_run_time=now)),
         (_etl_recalibrate, "cron", dict(hour=6, minute=0, id="ingest_etl_recalibrate")),
         (_harvester_truth_writer_tick, "cron", dict(minute=45, id="ingest_harvester_truth_writer",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
@@ -3493,6 +3655,7 @@ def main() -> None:
             _shutdown_scheduler_if_running(_scheduler, wait=True)
         finally:
             _close_day0_metar_emitter()
+            _close_day0_hko_poller()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-20
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -2876,7 +2876,11 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
         "condition-23-plus": 2,
     }
     assert payload["_edli_day0_finite_evidence_absorbing_no_conditions"] == []
-    hard_fact_payload = {"metric": "high", "rounded_value": 23.0}
+    hard_fact_payload = {
+        "metric": "high",
+        "rounded_value": 23.0,
+        "settlement_source": "wu_icao_history",
+    }
     hard_fact_floors = era._day0_current_evidence_yes_ucb_floors(
         analysis=analysis,
         family=family,
@@ -2896,6 +2900,7 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
             payload={
                 "metric": "high",
                 "rounded_value": 23.0,
+                "settlement_source": "wu_icao_history",
                 "_edli_day0_lcb_transform": {
                     "absorbing_no_conditions": [],
                 },
@@ -3717,7 +3722,14 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as current_target_plan
     import src.engine.replacement_forecast_hook_factory as hook_factory
+
+    monkeypatch.setattr(
+        current_target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *args, **kwargs: None,
+    )
 
     forecast = sqlite3.connect(":memory:")
     forecast.row_factory = sqlite3.Row
@@ -3984,18 +3996,81 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         joint.probability_witness.witness_identity
     )
 
-    selected_dead_payload: dict[str, object] = {}
-    selected_dead = era._prepare_current_global_probability_family(
+    preferred_joint_payload: dict[str, object] = {}
+    preferred_joint = era._prepare_current_global_probability_family(
         deterministic_event,
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
         decision_time=deterministic_cut + _dt.timedelta(milliseconds=3),
         max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=preferred_joint_payload,
+        allow_partial_deterministic=True,
+    )
+    assert remaining_day_calls == 4
+    assert isinstance(
+        preferred_joint.probability_witness,
+        JointOutcomeProbabilityWitness,
+    )
+    assert preferred_joint_payload["q_source"] == "day0_remaining_day"
+
+    def missing_remaining_day_components(*_args, **_kwargs):
+        nonlocal remaining_day_calls
+        remaining_day_calls += 1
+        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        missing_remaining_day_components,
+    )
+    fallback_payload: dict[str, object] = {}
+    fallback = era._prepare_current_global_probability_family(
+        deterministic_event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=4),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=fallback_payload,
+        allow_partial_deterministic=True,
+    )
+    assert remaining_day_calls == 5
+    assert isinstance(
+        fallback.probability_witness,
+        DeterministicBinPayoffWitness,
+    )
+    fallback_payoffs = dict(fallback.probability_witness.exact_yes_payoffs)
+    assert tuple(fallback_payoffs.values()) == (0,)
+    assert tuple(
+        binding.condition_id
+        for binding in actionable_family_payoff_bindings(
+            fallback.probability_witness
+        )
+    ) == ("c0",)
+    assert fallback_payload["q_source"] == "day0_deterministic_bin_payoff"
+    assert (
+        fallback_payload["_edli_day0_deterministic_scope_reason"]
+        == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        remaining_day_components,
+    )
+
+    selected_dead_payload: dict[str, object] = {}
+    selected_dead = era._prepare_current_global_probability_family(
+        deterministic_event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=5),
+        max_age=_dt.timedelta(seconds=30),
         day0_payload_out=selected_dead_payload,
         required_condition_id="c0",
     )
-    assert remaining_day_calls == 3
+    assert remaining_day_calls == 5
     assert isinstance(
         selected_dead.probability_witness,
         DeterministicBinPayoffWitness,
@@ -4021,9 +4096,9 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=4),
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=6),
     )
-    assert remaining_day_calls == 3
+    assert remaining_day_calls == 5
     assert isinstance(
         revalidated.probability_witness,
         DeterministicBinPayoffWitness,
@@ -4037,13 +4112,13 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         forecast_conn=forecast,
         topology_conn=forecast,
         observation_conn=observations,
-        decision_time=deterministic_cut + _dt.timedelta(milliseconds=5),
+        decision_time=deterministic_cut + _dt.timedelta(milliseconds=7),
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=held_unknown_payload,
         cache_metadata_out=held_unknown_cache_metadata,
         required_condition_id="c1",
     )
-    assert remaining_day_calls == 4
+    assert remaining_day_calls == 6
     assert isinstance(
         held_unknown.probability_witness,
         JointOutcomeProbabilityWitness,
@@ -4077,7 +4152,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
             forecast_conn=forecast,
             topology_conn=forecast,
             observation_conn=observations,
-            decision_time=deterministic_cut + _dt.timedelta(milliseconds=6),
+            decision_time=deterministic_cut + _dt.timedelta(milliseconds=8),
             max_age=_dt.timedelta(seconds=30),
             allow_partial_deterministic=False,
         )
@@ -4099,7 +4174,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         day0_payload_out=exact_payload,
     )
 
-    assert remaining_day_calls == 4
+    assert remaining_day_calls == 6
     assert exact.probability_witness.band_basis == (
         "day0_absorbing_observation_exact_settlement_simplex_v1"
     )
@@ -4328,6 +4403,17 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "reactor_urgent_wake_reason",
         lambda: urgent_reason["value"],
     )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda *args, **kwargs: (
+            SimpleNamespace(
+                wake_id="new-day0-wake",
+                reason=urgent_reason["value"],
+                forecast_families=(),
+            ),
+        ),
+    )
 
     class CapacityAuthority:
         def capacity_usd(self, **kwargs):
@@ -4407,6 +4493,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
     assert captured["epoch_superseded"]() is True
+    urgent_reason["value"] = "market_price_advanced"
     assert captured["restrict_to_family_keys"] == frozenset(
         {
             era.weather_family_id(
@@ -4455,6 +4542,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert all(kwargs["forecast_conn"] is forecast for kwargs in prepared_with)
     assert all(kwargs["topology_conn"] is topology for kwargs in prepared_with)
     assert all(kwargs["observation_conn"] is world for kwargs in prepared_with)
+    assert all(
+        kwargs["allow_partial_deterministic"] is True
+        for kwargs in prepared_with
+    )
 
     def locked_prepare(*_args, **_kwargs):
         raise sqlite3.OperationalError("database is locked")

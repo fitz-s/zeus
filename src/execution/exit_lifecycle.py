@@ -23,6 +23,7 @@ import sqlite3
 import threading
 import time as _time_module
 from collections.abc import Collection, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
@@ -55,6 +56,87 @@ from src.state.portfolio import (
 )
 
 logger = logging.getLogger(__name__)
+
+_HELD_MONITOR_CLOB_CLIENT = None
+_HELD_MONITOR_CLOB_CLIENT_FACTORY = None
+_HELD_MONITOR_CLOB_CLIENT_LOCK = threading.Lock()
+
+
+def _held_monitor_clob_timeout():
+    """Bound reduce-only book reads while relying on the warm connection."""
+
+    import httpx
+
+    return httpx.Timeout(connect=1.8, read=2.0, write=0.25, pool=0.10)
+
+
+def _held_monitor_clob_warmup_timeout():
+    import httpx
+
+    return httpx.Timeout(connect=4.5, read=0.75, write=0.25, pool=0.10)
+
+
+def _reset_held_monitor_clob_client() -> None:
+    global _HELD_MONITOR_CLOB_CLIENT, _HELD_MONITOR_CLOB_CLIENT_FACTORY
+
+    with _HELD_MONITOR_CLOB_CLIENT_LOCK:
+        client = _HELD_MONITOR_CLOB_CLIENT
+        _HELD_MONITOR_CLOB_CLIENT = None
+        _HELD_MONITOR_CLOB_CLIENT_FACTORY = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - shutdown/test cleanup is best effort.
+            pass
+
+
+def _held_monitor_clob_client():
+    """Return the process-owned reduce-only CLOB transport."""
+
+    import httpx
+    from src.data.polymarket_client import PolymarketClient
+    from src.data.polymarket_request_governor import RequestPriority
+
+    global _HELD_MONITOR_CLOB_CLIENT, _HELD_MONITOR_CLOB_CLIENT_FACTORY
+    with _HELD_MONITOR_CLOB_CLIENT_LOCK:
+        client = _HELD_MONITOR_CLOB_CLIENT
+        public_client = getattr(client, "_public_http_client", None)
+        unusable = bool(getattr(public_client, "is_closed", False))
+        if (
+            client is None
+            or _HELD_MONITOR_CLOB_CLIENT_FACTORY is not PolymarketClient
+            or unusable
+        ):
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001 - replace unusable transport.
+                    pass
+            client = PolymarketClient(
+                public_http_timeout=_held_monitor_clob_timeout(),
+                public_http_limits=httpx.Limits(
+                    max_keepalive_connections=4,
+                    max_connections=8,
+                    keepalive_expiry=180.0,
+                ),
+                public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
+            )
+            _HELD_MONITOR_CLOB_CLIENT = client
+            _HELD_MONITOR_CLOB_CLIENT_FACTORY = PolymarketClient
+        return client
+
+
+def warm_held_monitor_clob_client() -> bool:
+    """Warm the reduce-only transport outside an observation-triggered exit."""
+
+    try:
+        return bool(
+            _held_monitor_clob_client().warm_public_connection(
+                timeout=_held_monitor_clob_warmup_timeout()
+            )
+        )
+    except Exception:  # noqa: BLE001 - keepalive is advisory; monitor fails closed.
+        return False
 
 _PENDING_EXIT_SCAN_INACTIVE_STATES = frozenset(
     {
@@ -7141,8 +7223,6 @@ def run_exit_monitor_cycle(
     cadence). Behavior-preserving relocation — was inline in src/main.py.
     """
     from src.config import settings
-    from src.data.polymarket_client import PolymarketClient
-    from src.data.polymarket_request_governor import RequestPriority
     from src.engine.cycle_runner import (
         _execute_monitoring_phase,
         get_connection,
@@ -7208,9 +7288,7 @@ def run_exit_monitor_cycle(
                 {_exit_family_key(*family) for family in target_families}
             )
             summary["target_position_count"] = len(monitor_portfolio.positions)
-        with PolymarketClient(
-            public_request_priority=RequestPriority.HELD_REDUCE_ONLY
-        ) as clob:
+        with nullcontext(_held_monitor_clob_client()) as clob:
             tracker = get_tracker()
             artifact = CycleArtifact(
                 mode="exit_monitor",

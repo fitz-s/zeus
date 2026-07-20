@@ -6331,10 +6331,21 @@ def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
             self.closed = True
 
     class Client:
-        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+        def __init__(
+            self,
+            *,
+            public_http_timeout=None,  # noqa: ANN001
+            public_http_limits=None,  # noqa: ANN001
+            public_request_priority=None,  # noqa: ANN001
+        ):
             from src.data.polymarket_request_governor import RequestPriority
 
+            assert public_http_timeout is not None
+            assert public_http_limits.keepalive_expiry == 180.0
             assert public_request_priority is RequestPriority.HELD_REDUCE_ONLY
+
+        def close(self) -> None:
+            pass
 
         def __enter__(self):
             return self
@@ -6401,6 +6412,47 @@ def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
     assert conn.closed is True
     assert completed == [True]
     assert health == [(True, "monitor failed")]
+    exit_module._reset_held_monitor_clob_client()
+
+
+def test_held_monitor_reuses_warm_bounded_clob_transport(monkeypatch) -> None:
+    import src.data.polymarket_client as polymarket_module
+    import src.execution.exit_lifecycle as exit_module
+    from src.data.polymarket_request_governor import RequestPriority
+
+    created = []
+    warm_timeouts = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.closed = False
+            created.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+        def warm_public_connection(self, *, timeout=None):  # noqa: ANN001
+            warm_timeouts.append(timeout)
+            return True
+
+    exit_module._reset_held_monitor_clob_client()
+    monkeypatch.setattr(polymarket_module, "PolymarketClient", Client)
+    try:
+        first = exit_module._held_monitor_clob_client()
+        second = exit_module._held_monitor_clob_client()
+
+        assert first is second
+        assert created == [first]
+        assert first.kwargs["public_request_priority"] is RequestPriority.HELD_REDUCE_ONLY
+        assert first.kwargs["public_http_timeout"].read == 2.0
+        assert first.kwargs["public_http_limits"].keepalive_expiry == 180.0
+        assert exit_module.warm_held_monitor_clob_client() is True
+        assert warm_timeouts[-1].connect == 4.5
+    finally:
+        exit_module._reset_held_monitor_clob_client()
+
+    assert first.closed is True
 
 
 def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:

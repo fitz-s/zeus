@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-07-19
-# Lifecycle: created=2026-05-14; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Last reused/audited: 2026-07-20
+# Lifecycle: created=2026-05-14; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction); a0d51d480b507f324 root-cause (ECMWF 00z ingest schedule fix — add 12z triggers, update FORECAST_LIVE_JOB_IDS).
 # Purpose: Relationship tests for the forecast-live daemon boundary — job registry, lock semantics, journaling, and source-health probe.
 # Reuse: Run when forecast_live_daemon.py job specs, run_opendata_track, or job journaling logic changes.
@@ -2260,7 +2260,25 @@ def test_slow_day0_monitor_does_not_block_unrelated_wake(monkeypatch) -> None:
     assert reactor_calls == ["market_price_advanced", "day0_extreme_event_committed"]
 
 
-def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("pending_held_families", "expected_calls"),
+    (
+        (frozenset(), ["reactor"]),
+        (
+            frozenset({("Tokyo", "2026-07-20", "high")}),
+            [
+                "monitor:Paris|2026-07-16|high,Tokyo|2026-07-20|high",
+                "reactor",
+            ],
+        ),
+    ),
+    ids=("no-held-backlog", "older-held-family"),
+)
+def test_day0_entry_only_wake_rescues_queued_held_family_before_reactor(
+    monkeypatch,
+    pending_held_families,
+    expected_calls,
+) -> None:
     import threading
 
     import src.main as main
@@ -2284,6 +2302,7 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
 
     calls: list[str] = []
     pending = threading.Event()
+    main._day0_exit_monitor_attempts.clear()
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
     monkeypatch.setattr(
         reactor_wake,
@@ -2307,8 +2326,22 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         main,
-        "_exit_monitor_cycle",
-        lambda **_kwargs: pytest.fail("no-risk wake must not run exit monitor"),
+        "_pending_held_day0_wake_families",
+        lambda: pending_held_families,
+    )
+
+    def _dispatch_monitor(wake_id, target_families):
+        calls.append(
+            "monitor:"
+            + ",".join("|".join(family) for family in sorted(target_families))
+        )
+        main._day0_exit_monitor_attempts[wake_id] = True
+        return True
+
+    monkeypatch.setattr(
+        main,
+        "_dispatch_day0_exit_monitor",
+        _dispatch_monitor,
     )
     monkeypatch.setattr(
         main,
@@ -2318,8 +2351,56 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 
     assert main._edli_reactor_wake_poll_once() is True
-    assert calls == ["reactor"]
+    assert calls == expected_calls
     assert pending.is_set() is False
+
+
+def test_pending_day0_wake_scope_intersects_only_open_exposure(monkeypatch) -> None:
+    import src.main as main
+    import src.state.db as db
+    from src.runtime import reactor_wake
+
+    class _Conn:
+        closed = False
+
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchall(self):
+            return (
+                ("Tokyo", "2026-07-20", "high"),
+                ("London", "2026-07-20", "low"),
+            )
+
+        def close(self):
+            self.closed = True
+
+    conn = _Conn()
+    wakes = (
+        reactor_wake.ReactorWake(
+            "wake-tokyo",
+            "2026-07-20T04:05:34+00:00",
+            "ingest_main",
+            "day0_extreme_event_committed",
+            ("event-tokyo",),
+            (("Tokyo", "2026-07-20", "high"),),
+        ),
+        reactor_wake.ReactorWake(
+            "wake-paris",
+            "2026-07-20T04:05:35+00:00",
+            "ingest_main",
+            "day0_extreme_event_committed",
+            ("event-paris",),
+            (("Paris", "2026-07-20", "high"),),
+        ),
+    )
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: conn)
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", lambda _cutoff: wakes)
+
+    assert main._pending_held_day0_wake_families() == frozenset(
+        {("Tokyo", "2026-07-20", "high")}
+    )
+    assert conn.closed is True
 
 
 def test_forecast_wake_refreshes_held_family_before_entry_reactor(
