@@ -11213,6 +11213,12 @@ def test_global_actuation_rebinds_only_selected_day0_buy_no_admission():
             "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:test"
         ),
     )
+    sibling = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_yes"
+    )
     selected_candidate = SimpleNamespace(
         candidate_id="selected-no",
         family_key=witness.family_key,
@@ -11240,7 +11246,7 @@ def test_global_actuation_rebinds_only_selected_day0_buy_no_admission():
     )
 
     rebound = era._global_actuation_current_admission_proofs(
-        proofs=(proof,),
+        proofs=(proof, sibling),
         global_actuation=SimpleNamespace(
             decision=SimpleNamespace(candidate=selected_candidate)
         ),
@@ -11248,7 +11254,7 @@ def test_global_actuation_rebinds_only_selected_day0_buy_no_admission():
         family=family,
     )
 
-    assert len(rebound) == 1
+    assert len(rebound) == 2
     assert rebound[0].missing_reason is None
     assert rebound[0].q_posterior == pytest.approx(float(no_samples.mean()))
     assert rebound[0].q_lcb_5pct == pytest.approx(cap)
@@ -11258,6 +11264,122 @@ def test_global_actuation_rebinds_only_selected_day0_buy_no_admission():
     assert rebound[0].probability_authority == (
         "global_current_probability_witness"
     )
+    assert rebound[1] is sibling
+
+
+@pytest.mark.parametrize("invalid_cap", (float("nan"), -0.01, 1.01))
+def test_global_current_admission_rejects_invalid_probability_cap(invalid_cap):
+    witness = _current_global_book_probability()
+    family, proofs, _ = _corpus()[0]
+    binding = witness.bindings[0]
+    proof = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_no"
+    )
+    proof = replace(
+        proof,
+        missing_reason="ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:test",
+    )
+    candidate = SimpleNamespace(
+        candidate_id="selected-no",
+        family_key=witness.family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="NO",
+        token_id=binding.no_token_id,
+        probability_witness_identity=witness.witness_identity,
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="current-day0",
+        probability_witness=witness,
+        candidate_seeds=(),
+        candidate_payoff_q_lcb_caps=((
+            witness.family_key,
+            binding.condition_id,
+            binding.bin_id,
+            "NO",
+            invalid_cap,
+        ),),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_CANDIDATE_CAP_INVALID",
+    ):
+        era._global_actuation_current_admission_proofs(
+            proofs=(proof,),
+            global_actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate)
+            ),
+            prepared_global_family=prepared,
+            family=family,
+        )
+
+
+@pytest.mark.parametrize("delta", (5e-13, 2e-12))
+def test_global_current_admission_probability_cap_tolerance(delta):
+    witness = _current_global_book_probability()
+    family, proofs, _ = _corpus()[0]
+    binding = witness.bindings[0]
+    proof = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_no"
+    )
+    proof = replace(
+        proof,
+        missing_reason="ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:test",
+    )
+    candidate = SimpleNamespace(
+        candidate_id="selected-no",
+        family_key=witness.family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="NO",
+        token_id=binding.no_token_id,
+        probability_witness_identity=witness.witness_identity,
+    )
+    q_point = float((1.0 - witness.yes_q_samples[:, 0]).mean())
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="current-day0",
+        probability_witness=witness,
+        candidate_seeds=(),
+        candidate_payoff_q_lcb_caps=((
+            witness.family_key,
+            binding.condition_id,
+            binding.bin_id,
+            "NO",
+            q_point + delta,
+        ),),
+    )
+
+    if delta > 1e-12:
+        with pytest.raises(
+            ValueError,
+            match="GLOBAL_ACTUATION_CURRENT_ADMISSION_PROBABILITY_INVALID",
+        ):
+            era._global_actuation_current_admission_proofs(
+                proofs=(proof,),
+                global_actuation=SimpleNamespace(
+                    decision=SimpleNamespace(candidate=candidate)
+                ),
+                prepared_global_family=prepared,
+                family=family,
+            )
+        return
+
+    rebound = era._global_actuation_current_admission_proofs(
+        proofs=(proof,),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate)
+        ),
+        prepared_global_family=prepared,
+        family=family,
+    )
+    assert rebound[0].q_lcb_5pct == pytest.approx(q_point)
 
 
 def test_current_global_book_epoch_refreshes_one_newer_projected_token():

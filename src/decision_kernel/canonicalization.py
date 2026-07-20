@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Mapping
 
 CANONICALIZATION_VERSION = "decision-kernel-json-v1"
+_EXPECTED_IDENTITY_UNSET = object()
 
 
 def normalize(value: Any) -> Any:
@@ -88,6 +89,12 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_actuation_identity",
     "global_optimum_semantics",
     "global_candidate_id",
+    "global_condition_id",
+    "global_token_id",
+    "global_family_key",
+    "global_probability_witness_identity",
+    "global_probability_authority",
+    "global_posterior_id",
     "global_bin_id",
     "global_economic_identity",
     "global_universe_witness_identity",
@@ -213,6 +220,21 @@ def qkernel_global_current_state_rejection_reason(
     economics: Any,
     *,
     direction: str | None = None,
+    expected_candidate_id: str | None = None,
+    expected_condition_id: str | None = None,
+    expected_token_id: str | None = None,
+    expected_family_key: str | None = None,
+    expected_probability_authority: str | None = None,
+    expected_posterior_id: object = _EXPECTED_IDENTITY_UNSET,
+    expected_actuation_identity: str | None = None,
+    expected_economic_identity: str | None = None,
+    expected_probability_witness_identity: str | None = None,
+    expected_universe_witness_identity: str | None = None,
+    expected_wealth_witness_identity: str | None = None,
+    expected_wealth_economic_identity: str | None = None,
+    expected_selection_epoch_identity: str | None = None,
+    expected_selection_cut_at: str | None = None,
+    expected_selection_decision_at: str | None = None,
 ) -> str | None:
     """Validate one sealed global winner independent of legacy route fields."""
 
@@ -235,11 +257,74 @@ def qkernel_global_current_state_rejection_reason(
         return "side"
     if native_side is not None and side != native_side:
         return "side_direction_mismatch"
+    exact_binding_requested = any(
+        expected is not None
+        for expected in (
+            expected_candidate_id,
+            expected_condition_id,
+            expected_token_id,
+            expected_family_key,
+            expected_probability_authority,
+            expected_actuation_identity,
+            expected_economic_identity,
+            expected_probability_witness_identity,
+            expected_universe_witness_identity,
+            expected_wealth_witness_identity,
+            expected_wealth_economic_identity,
+            expected_selection_epoch_identity,
+            expected_selection_cut_at,
+            expected_selection_decision_at,
+        )
+    ) or expected_posterior_id is not _EXPECTED_IDENTITY_UNSET
+    if exact_binding_requested:
+        for field in (
+            "global_candidate_id",
+            "global_condition_id",
+            "global_token_id",
+            "global_family_key",
+            "global_probability_witness_identity",
+            "global_probability_authority",
+        ):
+            if not str(economics.get(field) or "").strip():
+                return field
+        if "global_posterior_id" not in economics:
+            return "global_posterior_id"
+    expected_identity = (
+        ("global_candidate_id", expected_candidate_id),
+        ("global_condition_id", expected_condition_id),
+        ("global_token_id", expected_token_id),
+        ("global_family_key", expected_family_key),
+        ("global_probability_authority", expected_probability_authority),
+        ("global_actuation_identity", expected_actuation_identity),
+        ("global_economic_identity", expected_economic_identity),
+        (
+            "global_probability_witness_identity",
+            expected_probability_witness_identity,
+        ),
+        ("global_universe_witness_identity", expected_universe_witness_identity),
+        ("global_wealth_witness_identity", expected_wealth_witness_identity),
+        ("global_wealth_economic_identity", expected_wealth_economic_identity),
+        ("global_selection_epoch_identity", expected_selection_epoch_identity),
+        ("global_selection_cut_at", expected_selection_cut_at),
+        ("global_selection_decision_at", expected_selection_decision_at),
+    )
+    for field, expected in expected_identity:
+        if expected is None:
+            continue
+        if str(economics.get(field) or "").strip() != str(expected).strip():
+            return f"{field}_mismatch"
+    if expected_posterior_id is not _EXPECTED_IDENTITY_UNSET:
+        if str(economics.get("global_posterior_id") or "").strip() != str(
+            expected_posterior_id or ""
+        ).strip():
+            return "global_posterior_id_mismatch"
     for field in (
         "global_candidate_id",
         "global_bin_id",
+        "global_economic_identity",
         "global_universe_witness_identity",
         "global_wealth_witness_identity",
+        "global_wealth_economic_identity",
         "global_selection_epoch_identity",
         "global_selection_cut_at",
         "global_selection_decision_at",

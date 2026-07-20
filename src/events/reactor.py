@@ -4122,49 +4122,70 @@ def _receipt_money_path_blocker(
         # The buy_no stanza below STAYS — its same_bin_yes_posterior /
         # settlement_coverage_status come from a distinct receipt-provenance path.
         proof_bundle = receipt.decision_proof_bundle
-        # The adapter constructs this typed bundle only after the replacement
-        # NO certificate has matched its forecast/candidate parents and qkernel
-        # pre/post probability mapping. Reconstructing the proof again here
-        # created a second authority plane and rejected a valid W3 monotone
-        # tightening after the authoritative bundle had already passed.
-        # Legacy/synthetic receipts without the typed bundle retain the
-        # fail-closed receipt gate.
-        if not (
-            receipt.direction == "buy_no"
-            and receipt.probability_authority == "replacement_0_1"
-            and (
-                isinstance(proof_bundle, NoSubmitProofBundle)
-                or bool(_execution_receipt_certificate_bundle(receipt))
-            )
-        ):
-            replacement_expected = replacement_no_bound_expected_from_parents(
-                getattr(getattr(proof_bundle, "forecast_authority", None), "payload", None),
-                getattr(getattr(proof_bundle, "candidate_evidence", None), "payload", None),
-            )
-            buy_no_conservative_reason = live_buy_no_conservative_evidence_rejection_reason(
-                direction=receipt.direction,
-                q_direction=receipt.q_live,
-                q_lcb=receipt.q_lcb_5pct,
-                execution_price=receipt.c_fee_adjusted,
-                q_lcb_calibration_source=receipt.q_lcb_calibration_source,
-                # The same independently-materialized YES-bin posterior the ADAPTER gate
-                # evaluated against (proof.same_bin_yes_posterior). Carrying it on the
-                # receipt closes the proof->receipt input-loss that rejected every buy_no
-                # with ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING. NEVER a
-                # 1-price / 1-q_no complement — the field is the q-vector YES mass.
-                same_bin_yes_posterior=receipt.same_bin_yes_posterior,
-                # Twin-authority reconciliation #7: the SAME family coverage verdict the
-                # adapter gate evaluated (carried on the receipt; single computation).
-                settlement_coverage_status=receipt.settlement_coverage_status,
-                replacement_no_bound_certificate=receipt.replacement_no_bound_certificate,
-                replacement_no_bound_expected=replacement_expected,
-                qkernel_execution_economics=receipt.qkernel_execution_economics,
-                probability_authority=receipt.probability_authority,
-                posterior_id=receipt.posterior_id,
-                condition_id=receipt.condition_id,
-            )
-            if buy_no_conservative_reason is not None:
-                return "TRADE_SCORE", buy_no_conservative_reason
+        replacement_expected = replacement_no_bound_expected_from_parents(
+            getattr(getattr(proof_bundle, "forecast_authority", None), "payload", None),
+            getattr(getattr(proof_bundle, "candidate_evidence", None), "payload", None),
+        )
+        global_actuation = receipt.global_actuation
+        global_candidate = getattr(
+            getattr(global_actuation, "decision", None),
+            "candidate",
+            None,
+        )
+        buy_no_conservative_reason = live_buy_no_conservative_evidence_rejection_reason(
+            direction=receipt.direction,
+            q_direction=receipt.q_live,
+            q_lcb=receipt.q_lcb_5pct,
+            execution_price=receipt.c_fee_adjusted,
+            q_lcb_calibration_source=receipt.q_lcb_calibration_source,
+            # The same independently-materialized YES-bin posterior the ADAPTER gate
+            # evaluated against (proof.same_bin_yes_posterior). Carrying it on the
+            # receipt closes the proof->receipt input-loss that rejected every buy_no
+            # with ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING. NEVER a
+            # 1-price / 1-q_no complement — the field is the q-vector YES mass.
+            same_bin_yes_posterior=receipt.same_bin_yes_posterior,
+            # Twin-authority reconciliation #7: the SAME family coverage verdict the
+            # adapter gate evaluated (carried on the receipt; single computation).
+            settlement_coverage_status=receipt.settlement_coverage_status,
+            replacement_no_bound_certificate=receipt.replacement_no_bound_certificate,
+            replacement_no_bound_expected=replacement_expected,
+            qkernel_execution_economics=receipt.qkernel_execution_economics,
+            probability_authority=receipt.probability_authority,
+            posterior_id=receipt.posterior_id,
+            condition_id=receipt.condition_id,
+            token_id=receipt.token_id,
+            family_id=receipt.family_id,
+            candidate_id=receipt.candidate_id,
+            global_actuation_identity=getattr(
+                global_actuation, "actuation_identity", None
+            ),
+            global_economic_identity=getattr(
+                global_actuation, "economic_identity", None
+            ),
+            global_probability_witness_identity=getattr(
+                global_candidate, "probability_witness_identity", None
+            ),
+            global_universe_witness_identity=getattr(
+                global_actuation, "universe_witness_identity", None
+            ),
+            global_wealth_witness_identity=getattr(
+                global_actuation, "wealth_witness_identity", None
+            ),
+            global_wealth_economic_identity=getattr(
+                global_actuation, "wealth_economic_identity", None
+            ),
+            global_selection_epoch_identity=getattr(
+                global_actuation, "selection_epoch_identity", None
+            ),
+            global_selection_cut_at=getattr(
+                global_actuation, "selection_cut_at_utc", None
+            ),
+            global_selection_decision_at=getattr(
+                global_actuation, "decision_at_utc", None
+            ),
+        )
+        if buy_no_conservative_reason is not None:
+            return "TRADE_SCORE", buy_no_conservative_reason
     if receipt.proof_accepted is False:
         return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "NO_SUBMIT_PROOF_FALSE"
     # Task #102 — optional book-wide edge-zone admission. The always-on live
@@ -8075,6 +8096,11 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             summary = refresh_money_path_substrate_now(
                 families=[family],
                 condition_ids=clean_condition_ids,
+                selected_token_ids=(
+                    (str(selected_token_id).strip(),)
+                    if str(selected_token_id or "").strip()
+                    else ()
+                ),
                 reason="decision_triggered_targeted_refresh",
                 refresh_budget_seconds=refresh_budget_s,
                 snapshot_reserve_seconds=snapshot_reserve_s,
@@ -8093,22 +8119,36 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         proved_fresh = False
         if clean_condition_ids:
             try:
+                clean_selected_token_id = str(selected_token_id or "").strip()
                 refresh_completed = (
                     (
                         str((summary or {}).get("status") or "") == "refreshed"
                         and int((summary or {}).get("forced_condition_count") or 0)
                         == len(clean_condition_ids)
-                        and int((summary or {}).get("attempted") or 0) >= 2
-                        and int((summary or {}).get("inserted") or 0) >= 2
-                        and int((summary or {}).get("prefetched_orderbook_count") or 0) >= 2
+                        and int((summary or {}).get("forced_token_count") or 0)
+                        == (1 if clean_selected_token_id else 0)
+                        and int((summary or {}).get("attempted") or 0)
+                        >= (1 if clean_selected_token_id else 2)
+                        and int((summary or {}).get("inserted") or 0)
+                        >= (1 if clean_selected_token_id else 2)
+                        and int((summary or {}).get("prefetched_orderbook_count") or 0)
+                        >= (1 if clean_selected_token_id else 2)
                     )
                     if force_refresh
                     else True
                 )
-                proved_fresh = refresh_completed and family in (
-                    _edli_families_with_fresh_scoped_executable_substrate(
+                checked_at = datetime.now(timezone.utc)
+                proved_fresh = refresh_completed and (
+                    _edli_selected_token_snapshot_is_fresh(
+                        condition_ids=clean_condition_ids,
+                        selected_token_id=clean_selected_token_id,
+                        now_utc=checked_at,
+                    )
+                    if clean_selected_token_id
+                    else family
+                    in _edli_families_with_fresh_scoped_executable_substrate(
                         {family: set(clean_condition_ids)},
-                        now_utc=datetime.now(timezone.utc),
+                        now_utc=checked_at,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
@@ -9542,6 +9582,61 @@ def _edli_families_with_fresh_scoped_executable_substrate(
                 out.add(family)
         return out
     finally:
+        try:
+            trade_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _edli_selected_token_snapshot_is_fresh(
+    *,
+    condition_ids: Iterable[str],
+    selected_token_id: str,
+    now_utc: datetime,
+) -> bool:
+    """Prove one exact selected token has a fresh, non-invalidated snapshot."""
+
+    clean_conditions = tuple(
+        dict.fromkeys(
+            str(condition_id or "").strip()
+            for condition_id in condition_ids or ()
+            if str(condition_id or "").strip()
+        )
+    )
+    token_id = str(selected_token_id or "").strip()
+    if len(clean_conditions) != 1 or not token_id:
+        return False
+    from src.state.db import get_trade_connection_read_only
+    from src.state.snapshot_repo import snapshot_row_is_invalidated
+
+    trade_ro = get_trade_connection_read_only()
+    saved_factory = trade_ro.row_factory
+    trade_ro.row_factory = sqlite3.Row
+    try:
+        row = trade_ro.execute(
+            """
+            SELECT *
+              FROM executable_market_snapshot_latest
+             WHERE condition_id = ?
+               AND selected_outcome_token_id = ?
+               AND freshness_deadline >= ?
+             ORDER BY captured_at DESC
+             LIMIT 1
+            """,
+            (clean_conditions[0], token_id, now_utc.isoformat()),
+        ).fetchone()
+        return bool(
+            row is not None
+            and not snapshot_row_is_invalidated(
+                trade_ro,
+                row,
+                checked_at=now_utc,
+            )
+        )
+    except sqlite3.Error:
+        return False
+    finally:
+        trade_ro.row_factory = saved_factory
         try:
             trade_ro.close()
         except Exception:  # noqa: BLE001

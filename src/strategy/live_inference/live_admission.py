@@ -368,6 +368,18 @@ def live_buy_no_conservative_evidence_rejection_reason(
     probability_authority: str | None = None,
     posterior_id: int | str | None = None,
     condition_id: str | None = None,
+    token_id: str | None = None,
+    family_id: str | None = None,
+    candidate_id: str | None = None,
+    global_actuation_identity: str | None = None,
+    global_economic_identity: str | None = None,
+    global_probability_witness_identity: str | None = None,
+    global_universe_witness_identity: str | None = None,
+    global_wealth_witness_identity: str | None = None,
+    global_wealth_economic_identity: str | None = None,
+    global_selection_epoch_identity: str | None = None,
+    global_selection_cut_at: str | None = None,
+    global_selection_decision_at: str | None = None,
     material_yes_posterior: float = LIVE_BUY_NO_MATERIAL_YES_POSTERIOR,
     allowed_lcb_sources: frozenset[str] = LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES,
 ) -> str | None:
@@ -417,6 +429,75 @@ def live_buy_no_conservative_evidence_rejection_reason(
         raise ValueError("buy-NO material-bin posterior floor must be in (0, 1)")
 
     replacement_authority = str(probability_authority or "").strip() == "replacement_0_1"
+    declares_global_current = bool(
+        isinstance(qkernel_execution_economics, Mapping)
+        and any(
+            str(field).startswith("global_")
+            for field in qkernel_execution_economics
+        )
+    )
+    global_current_reason = qkernel_global_current_state_rejection_reason(
+        qkernel_execution_economics,
+        direction=direction,
+        expected_candidate_id=candidate_id,
+        expected_condition_id=condition_id,
+        expected_token_id=token_id,
+        expected_family_key=family_id,
+        expected_probability_authority=probability_authority,
+        expected_posterior_id=posterior_id,
+        expected_actuation_identity=global_actuation_identity,
+        expected_economic_identity=global_economic_identity,
+        expected_probability_witness_identity=(
+            global_probability_witness_identity
+        ),
+        expected_universe_witness_identity=global_universe_witness_identity,
+        expected_wealth_witness_identity=global_wealth_witness_identity,
+        expected_wealth_economic_identity=global_wealth_economic_identity,
+        expected_selection_epoch_identity=global_selection_epoch_identity,
+        expected_selection_cut_at=global_selection_cut_at,
+        expected_selection_decision_at=global_selection_decision_at,
+    )
+    if declares_global_current:
+        if global_current_reason is not None:
+            return f"ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:{global_current_reason}"
+        if not all(
+            str(value or "").strip()
+            for value in (
+                candidate_id,
+                condition_id,
+                token_id,
+                family_id,
+                probability_authority,
+                global_actuation_identity,
+                global_economic_identity,
+                global_probability_witness_identity,
+                global_universe_witness_identity,
+                global_wealth_witness_identity,
+                global_wealth_economic_identity,
+                global_selection_epoch_identity,
+                global_selection_cut_at,
+                global_selection_decision_at,
+            )
+        ):
+            return "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_identity"
+        assert isinstance(qkernel_execution_economics, Mapping)
+        try:
+            certified_q = float(qkernel_execution_economics["payoff_q_point"])
+            certified_lcb = float(qkernel_execution_economics["payoff_q_lcb"])
+            certified_cost = float(qkernel_execution_economics["cost"])
+        except (KeyError, TypeError, ValueError):
+            certified_q = certified_lcb = certified_cost = float("nan")
+        if not all(
+            math.isclose(actual, certified, rel_tol=0.0, abs_tol=1e-12)
+            for actual, certified in (
+                (q_value, certified_q),
+                (q_lcb_value, certified_lcb),
+                (price, certified_cost),
+                (yes_posterior, 1.0 - certified_q),
+            )
+        ):
+            return "ADMISSION_BUY_NO_GLOBAL_CURRENT_STATE_INVALID:receipt_scalar_mismatch"
+        return None
     if replacement_no_bound_certificate_matches(
         replacement_no_bound_certificate,
         expected=replacement_no_bound_expected,
@@ -429,28 +510,6 @@ def live_buy_no_conservative_evidence_rejection_reason(
         condition_id=condition_id,
     ):
         return None
-    global_current_reason = qkernel_global_current_state_rejection_reason(
-        qkernel_execution_economics,
-        direction=direction,
-    )
-    if global_current_reason is None:
-        assert isinstance(qkernel_execution_economics, Mapping)
-        try:
-            certified_q = float(qkernel_execution_economics["payoff_q_point"])
-            certified_lcb = float(qkernel_execution_economics["payoff_q_lcb"])
-            certified_cost = float(qkernel_execution_economics["cost"])
-        except (KeyError, TypeError, ValueError):
-            certified_q = certified_lcb = certified_cost = float("nan")
-        if all(
-            math.isclose(actual, certified, rel_tol=0.0, abs_tol=1e-12)
-            for actual, certified in (
-                (q_value, certified_q),
-                (q_lcb_value, certified_lcb),
-                (price, certified_cost),
-                (yes_posterior, 1.0 - certified_q),
-            )
-        ):
-            return None
     if replacement_authority:
         return (
             "ADMISSION_BUY_NO_REPLACEMENT_BOUND_CERTIFICATE_MISSING:"

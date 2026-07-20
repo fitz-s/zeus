@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: Prove one native YES/NO candidate shape and its callback contracts.
 # Reuse: Re-audit identity, full-depth, and call-shape seams before auction changes.
 # Authority basis: "bin selection.md" §14.2 (NativeSideCandidate per bin per side) +
@@ -606,6 +606,180 @@ def test_missing_global_winner_refresh_fails_closed_on_identity(winner):
         match="GLOBAL_ACTUATION_SNAPSHOT_REFRESH_IDENTITY_MISSING",
     ):
         era._global_candidate_snapshot_refresh_target(winner)
+
+
+def test_global_winner_refresh_commits_and_rereads_exact_native_token(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = []
+    conn = SimpleNamespace(commit=lambda: calls.append(("commit",)))
+    winner = SimpleNamespace(
+        condition_id="winner-condition",
+        token_id="winner-no",
+        side="NO",
+    )
+    expected_rows = [{"snapshot_id": "winner-current"}]
+
+    def refresh(**kwargs):
+        calls.append(("refresh", kwargs))
+        return True
+
+    def latest(*args, **kwargs):
+        calls.append(("latest", args, kwargs))
+        return expected_rows
+
+    monkeypatch.setattr(era, "_latest_snapshot_rows_for_event_family", latest)
+
+    rows = era._refresh_global_candidate_snapshot_rows(
+        trade_conn=conn,
+        event=SimpleNamespace(event_id="event-current"),
+        payload={"city": "Paris", "target_date": "2026-07-20", "metric": "HIGH"},
+        family_condition_ids=("winner-condition", "sibling-condition"),
+        candidate=winner,
+        family_snapshot_refresher=refresh,
+    )
+
+    assert rows == expected_rows
+    assert calls[0] == ("commit",)
+    assert calls[1][0] == "refresh"
+    assert calls[1][1]["condition_ids"] == ("winner-condition",)
+    assert calls[1][1]["selected_token_id"] == "winner-no"
+    assert calls[1][1]["force_refresh"] is True
+    assert calls[2][0] == "latest"
+    assert calls[2][2]["condition_ids"] == (
+        "winner-condition",
+        "sibling-condition",
+    )
+    assert calls[2][2]["fresh_at"] is None
+
+
+def test_global_winner_refresh_noop_stays_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    reread = False
+
+    def latest(*_args, **_kwargs):
+        nonlocal reread
+        reread = True
+        return [{"snapshot_id": "must-not-be-read"}]
+
+    monkeypatch.setattr(era, "_latest_snapshot_rows_for_event_family", latest)
+
+    rows = era._refresh_global_candidate_snapshot_rows(
+        trade_conn=SimpleNamespace(commit=lambda: None),
+        event=SimpleNamespace(event_id="event-current"),
+        payload={"city": "Paris", "target_date": "2026-07-20", "metric": "HIGH"},
+        family_condition_ids=("winner-condition",),
+        candidate=SimpleNamespace(
+            condition_id="winner-condition",
+            token_id="winner-no",
+            side="NO",
+        ),
+        family_snapshot_refresher=lambda **_kwargs: False,
+    )
+
+    assert rows == []
+    assert reread is False
+
+
+def test_non_global_empty_family_snapshot_returns_typed_missing_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        era,
+        "_event_family_market_topology_rows",
+        lambda *_args, **_kwargs: [{"condition_id": "condition-current"}],
+    )
+    monkeypatch.setattr(
+        era,
+        "_latest_snapshot_rows_for_event_family",
+        lambda *_args, **_kwargs: [],
+    )
+    event = SimpleNamespace(
+        event_id="event-current",
+        causal_snapshot_id="causal-current",
+        event_type="FORECAST_SNAPSHOT_READY",
+        payload_json=json.dumps(
+            {"city": "Paris", "target_date": "2026-07-20", "metric": "HIGH"}
+        ),
+    )
+
+    receipt = era._build_event_bound_no_submit_receipt_core(
+        event,
+        trade_conn=sqlite3.connect(":memory:"),
+        decision_time=datetime(2026, 7, 20, tzinfo=timezone.utc),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+    )
+
+    assert receipt.reason == "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING"
+
+
+@pytest.mark.parametrize("refresh_result", (False, True))
+def test_global_empty_family_snapshot_refresh_failure_stays_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    refresh_result: bool,
+):
+    candidate = SimpleNamespace(
+        condition_id="condition-current",
+        token_id="token-no-current",
+        side="NO",
+    )
+    actuation = SimpleNamespace(
+        winner_event_id="event-current",
+        decision=SimpleNamespace(candidate=candidate),
+    )
+    refresh_calls = []
+    read_calls = []
+    monkeypatch.setattr(
+        era,
+        "_current_global_actuation_prepared_family",
+        lambda *_args, **_kwargs: (object(), {}),
+    )
+    monkeypatch.setattr(
+        era,
+        "_event_family_market_topology_rows",
+        lambda *_args, **_kwargs: [{"condition_id": "condition-current"}],
+    )
+
+    def latest(*_args, **_kwargs):
+        read_calls.append(1)
+        return []
+
+    def refresh(**kwargs):
+        refresh_calls.append(kwargs)
+        return refresh_result
+
+    monkeypatch.setattr(era, "_latest_snapshot_rows_for_event_family", latest)
+    event = SimpleNamespace(
+        event_id="event-current",
+        causal_snapshot_id="causal-current",
+        event_type="DAY0_EXTREME_UPDATED",
+        payload_json=json.dumps(
+            {"city": "Paris", "target_date": "2026-07-20", "metric": "HIGH"}
+        ),
+    )
+
+    receipt = era._build_event_bound_no_submit_receipt_core(
+        event,
+        trade_conn=sqlite3.connect(":memory:"),
+        decision_time=datetime(2026, 7, 20, tzinfo=timezone.utc),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        global_actuation=actuation,
+        family_snapshot_refresher=refresh,
+    )
+
+    assert receipt.reason == "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING"
+    assert len(refresh_calls) == 1
+    assert refresh_calls[0]["condition_ids"] == ("condition-current",)
+    assert refresh_calls[0]["selected_token_id"] == "token-no-current"
+    assert refresh_calls[0]["force_refresh"] is True
+    assert len(read_calls) == (2 if refresh_result else 1)
 
 
 def test_global_submit_requires_complete_candidate_bound_jit_identity():

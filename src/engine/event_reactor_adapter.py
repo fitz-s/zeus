@@ -10196,6 +10196,49 @@ def _global_candidate_snapshot_refresh_target(
     return (condition_id,), token_id
 
 
+def _refresh_global_candidate_snapshot_rows(
+    *,
+    trade_conn: sqlite3.Connection,
+    event: OpportunityEvent,
+    payload: Mapping[str, Any],
+    family_condition_ids: Sequence[str],
+    candidate: object,
+    family_snapshot_refresher: Callable[..., object],
+) -> list[dict[str, Any]]:
+    """Refresh and re-read only the exact global winner's native token."""
+
+    refresh_condition_ids, refresh_token_id = (
+        _global_candidate_snapshot_refresh_target(candidate)
+    )
+    try:
+        trade_conn.commit()
+    except Exception:  # noqa: BLE001 - release the read snapshot boundary
+        pass
+    refreshed = bool(
+        family_snapshot_refresher(
+            city=str(payload.get("city") or ""),
+            target_date=str(payload.get("target_date") or ""),
+            metric=str(
+                payload.get("metric")
+                or payload.get("temperature_metric")
+                or ""
+            ),
+            condition_ids=refresh_condition_ids,
+            selected_token_id=refresh_token_id,
+            force_refresh=True,
+        )
+    )
+    if not refreshed:
+        return []
+    return _latest_snapshot_rows_for_event_family(
+        trade_conn,
+        event,
+        condition_ids=family_condition_ids,
+        fresh_at=None,
+        require_fresh=False,
+    )
+
+
 def _global_selected_order_economics_drift(
     *,
     decision: object,
@@ -12188,6 +12231,16 @@ def _global_actuation_selected_proof(
                 getattr(global_actuation, "decision_at_utc", "") or ""
             ),
             "global_candidate_id": candidate.candidate_id,
+            "global_condition_id": candidate.condition_id,
+            "global_token_id": candidate.token_id,
+            "global_family_key": candidate.family_key,
+            "global_probability_witness_identity": (
+                candidate.probability_witness_identity
+            ),
+            "global_probability_authority": str(
+                getattr(proof, "probability_authority", "") or ""
+            ),
+            "global_posterior_id": getattr(proof, "posterior_id", None),
             "global_bin_id": candidate.bin_id,
             "global_book_hash": candidate.executable_cost_curve.book_hash,
             "global_jit_book_hash": rebound.executable_cost_curve.book_hash,
@@ -12559,6 +12612,7 @@ def _build_event_bound_no_submit_receipt_core(
     payload = _payload(event)
     current_actuation_family = None
     current_actuation_day0_payload: dict[str, object] = {}
+    global_candidate = None
     if global_actuation is not None:
         if str(getattr(global_actuation, "winner_event_id", "") or "") != event.event_id:
             return EventSubmissionReceipt(
@@ -12637,6 +12691,30 @@ def _build_event_bound_no_submit_receipt_core(
         fresh_at=decision_time,
         require_fresh=False,  # FDR proves family identity/completeness; price-freshness is enforced at submission
     )
+    global_snapshot_refresh_attempted = False
+    if (
+        not family_rows
+        and global_candidate is not None
+        and family_snapshot_refresher is not None
+    ):
+        global_snapshot_refresh_attempted = True
+        try:
+            family_rows = _refresh_global_candidate_snapshot_rows(
+                trade_conn=trade_conn,
+                event=event,
+                payload=payload,
+                family_condition_ids=family_condition_ids,
+                candidate=global_candidate,
+                family_snapshot_refresher=family_snapshot_refresher,
+            )
+        except Exception as exc:  # noqa: BLE001 - refresh failure stays fail-closed
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "global winner snapshot refresh failed; family substrate remains "
+                "unavailable: %s",
+                exc,
+            )
     if not family_rows:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING")
     snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
@@ -12685,28 +12763,16 @@ def _build_event_bound_no_submit_receipt_core(
         row is None
         and global_candidate is not None
         and family_snapshot_refresher is not None
+        and not global_snapshot_refresh_attempted
     ):
         try:
-            refresh_condition_ids, refresh_token_id = (
-                _global_candidate_snapshot_refresh_target(global_candidate)
-            )
-            try:
-                trade_conn.commit()
-            except Exception:  # noqa: BLE001 - release the read snapshot boundary
-                pass
-            refreshed = bool(
-                family_snapshot_refresher(
-                    city=str(payload.get("city") or ""),
-                    target_date=str(payload.get("target_date") or ""),
-                    metric=str(
-                        payload.get("metric")
-                        or payload.get("temperature_metric")
-                        or ""
-                    ),
-                    condition_ids=refresh_condition_ids,
-                    selected_token_id=refresh_token_id,
-                    force_refresh=True,
-                )
+            refreshed_family_rows = _refresh_global_candidate_snapshot_rows(
+                trade_conn=trade_conn,
+                event=event,
+                payload=payload,
+                family_condition_ids=family_condition_ids,
+                candidate=global_candidate,
+                family_snapshot_refresher=family_snapshot_refresher,
             )
         except Exception as exc:  # noqa: BLE001 - refresh failure stays fail-closed
             import logging as _logging
@@ -12716,42 +12782,34 @@ def _build_event_bound_no_submit_receipt_core(
                 "unavailable: %s",
                 exc,
             )
-            refreshed = False
-        if refreshed:
-            refreshed_family_rows = _latest_snapshot_rows_for_event_family(
-                trade_conn,
-                event,
-                condition_ids=family_condition_ids,
-                fresh_at=None,
-                require_fresh=False,
-            )
-            if refreshed_family_rows:
-                family_rows = refreshed_family_rows
-                snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
-                try:
-                    topology = tuple(
-                        _topology_candidate_from_market_event(
-                            topology_row,
-                            snapshot_token_maps.get(
-                                str(topology_row.get("condition_id") or "")
-                            ),
-                            payload,
-                        )
-                        for topology_row in family_topology_rows
+            refreshed_family_rows = []
+        if refreshed_family_rows:
+            family_rows = refreshed_family_rows
+            snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
+            try:
+                topology = tuple(
+                    _topology_candidate_from_market_event(
+                        topology_row,
+                        snapshot_token_maps.get(
+                            str(topology_row.get("condition_id") or "")
+                        ),
+                        payload,
                     )
-                except ValueError as exc:
-                    return EventSubmissionReceipt(
-                        False,
-                        event.event_id,
-                        event.causal_snapshot_id,
-                        reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
-                    )
-                row = _global_candidate_snapshot_row(
-                    family_rows,
-                    global_candidate,
+                    for topology_row in family_topology_rows
                 )
-                if provenance_capture is not None and row is not None:
-                    provenance_capture["snapshot_row"] = row
+            except ValueError as exc:
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
+                )
+            row = _global_candidate_snapshot_row(
+                family_rows,
+                global_candidate,
+            )
+            if provenance_capture is not None and row is not None:
+                provenance_capture["snapshot_row"] = row
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
@@ -14964,7 +15022,11 @@ def _build_event_bound_no_submit_receipt_core(
         final_intent_id=f"edli_intent:{event.event_id}:{selected_token_id}",
         event_id=event.event_id,
         family_id=family.family_id,
-        candidate_id=f"{family.family_id}:{candidate.condition_id}",
+        candidate_id=(
+            str(getattr(global_candidate, "candidate_id", "") or "")
+            if global_candidate is not None
+            else f"{family.family_id}:{candidate.condition_id}"
+        ),
         condition_id=str(candidate.condition_id or ""),
         token_id=selected_token_id,
         direction=direction,
@@ -25115,6 +25177,8 @@ def _generate_candidate_proofs(
                 probability_authority=probability_evidence.get("probability_authority"),
                 posterior_id=probability_evidence.get("posterior_id"),
                 condition_id=condition_id,
+                token_id=token_id,
+                family_id=family.family_id,
             )
             if buy_no_conservative_evidence_reason is not None:
                 score = 0.0

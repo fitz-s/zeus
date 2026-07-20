@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-11; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-06-11; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Authority basis: production defect — Shanghai|2026-06-12|high 32°C buy_no
 #   (trade_score +0.0448) rejected ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING;
 #   docs/evidence/settlement_guard/2026-06-11_yesq_wiring_plan.md.
@@ -25,10 +25,7 @@ complement of the NO direction posterior.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
-from src.decision_kernel import claims
-from src.decision_kernel.compiler import NoSubmitProofBundle
 from src.events.reactor import (
     EventSubmissionReceipt,
     ReactorConfig,
@@ -109,36 +106,34 @@ def test_receipt_gate_still_rejects_when_posterior_genuinely_absent() -> None:
     assert reason == "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING"
 
 
-def test_typed_adapter_bundle_does_not_repeat_replacement_no_bound_gate() -> None:
-    """Adapter proof construction already validated parents and W3 tightening."""
+def test_unbound_bundle_marker_cannot_bypass_global_no_admission() -> None:
+    """A marker is not an exact receipt-bound probability certificate."""
     receipt = _money_path_clean_buy_no_receipt(
         same_bin_yes_posterior=0.35,
-        probability_authority="replacement_0_1",
-        decision_proof_bundle=object.__new__(NoSubmitProofBundle),
+        probability_authority="day0_deterministic_bin_payoff_v1",
+        decision_proof_bundle=object(),
         replacement_no_bound_certificate={"schema": "validated_by_adapter"},
     )
 
     stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
 
-    assert stage is None
-    assert reason == ""
+    assert stage == "TRADE_SCORE"
+    assert reason.startswith("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:")
 
 
-def test_compiled_execution_bundle_does_not_repeat_replacement_no_bound_gate() -> None:
-    """A terminal execution certificate proves the adapter chain already compiled."""
+def test_unbound_execution_marker_cannot_bypass_global_no_admission() -> None:
+    """An internally typed marker from another receipt is not current proof."""
     receipt = _money_path_clean_buy_no_receipt(
         same_bin_yes_posterior=0.35,
-        probability_authority="replacement_0_1",
-        decision_proof_bundle=(
-            SimpleNamespace(certificate_type=claims.EXECUTION_RECEIPT),
-        ),
+        probability_authority="day0_deterministic_bin_payoff_v1",
+        decision_proof_bundle=(object(),),
         replacement_no_bound_certificate={"schema": "validated_by_adapter"},
     )
 
     stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
 
-    assert stage is None
-    assert reason == ""
+    assert stage == "TRADE_SCORE"
+    assert reason.startswith("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:")
 
 
 def test_receipt_gate_material_yes_unlicensed_source_still_rejected() -> None:
