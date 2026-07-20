@@ -9766,20 +9766,26 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
         "observation_time": "2026-06-08T00:10:00+09:00",
         "source": "wu_api",
     })
-    monkeypatch.setattr(monitor_refresh, "_read_day0_hourly_vectors", lambda **kw: {
-        "members_hourly": np.zeros((3, 3)),
-        "times": [
-            "2026-06-07T15:00:00+00:00",
-            "2026-06-07T16:00:00+00:00",
-            "2026-06-07T17:00:00+00:00",
-        ],
-        "source_id": "day0_hourly_vectors",
-        "forecast_source_role": "day0_remaining_window_live",
-        "source_models": ["icon_d2", "ecmwf_ifs"],
-        "expected_models": ["icon_d2", "ecmwf_ifs"],
-        "source_model_count": 2,
-        "fetch_time": datetime(2026, 6, 7, 15, 5, tzinfo=timezone.utc),
-    })
+    monitor_clock = {}
+
+    def _hourly_vectors(**kwargs):
+        monitor_clock["read"] = kwargs
+        return {
+            "members_hourly": np.zeros((3, 3)),
+            "times": [
+                "2026-06-07T15:00:00+00:00",
+                "2026-06-07T16:00:00+00:00",
+                "2026-06-07T17:00:00+00:00",
+            ],
+            "source_id": "day0_hourly_vectors",
+            "forecast_source_role": "day0_remaining_window_live",
+            "source_models": ["icon_d2", "ecmwf_ifs"],
+            "expected_models": ["icon_d2", "ecmwf_ifs"],
+            "source_model_count": 2,
+            "fetch_time": datetime(2026, 6, 7, 15, 5, tzinfo=timezone.utc),
+        }
+
+    monkeypatch.setattr(monitor_refresh, "_read_day0_hourly_vectors", _hourly_vectors)
     monkeypatch.setattr(diurnal, "build_day0_temporal_context", lambda *a, **k: SimpleNamespace(
         daypart="morning",
         post_peak_confidence=0.0,
@@ -9803,13 +9809,20 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
             **kwargs,
         ),
     )
+    def _remaining_extrema(*args, **kwargs):
+        monitor_clock["extrema"] = kwargs
+        return (
+            RemainingMemberExtrema.for_metric(
+                np.array([24.0, 25.0, 26.0]),
+                kwargs["temperature_metric"],
+            ),
+            23.0,
+        )
+
     monkeypatch.setattr(
         monitor_refresh,
         "remaining_member_extrema_for_day0",
-        lambda *a, **k: (
-            RemainingMemberExtrema.for_metric(np.array([24.0, 25.0, 26.0]), k["temperature_metric"]),
-            23.0,
-        ),
+        _remaining_extrema,
     )
     monkeypatch.setattr(
         monitor_refresh,
@@ -9834,6 +9847,9 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
 
     assert np.isfinite(p)
     assert getattr(pos, "_monitor_probability_is_fresh") is True
+    observation_boundary = datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc)
+    assert monitor_clock["read"]["remaining_window_start"] == observation_boundary
+    assert monitor_clock["extrema"]["now"] == observation_boundary
     assert "day0_observation_remaining_window" in validations
     assert "day0_extreme_not_absorbing" in validations
     assert any(v.startswith("day0_high_extreme_not_mature:") for v in validations)

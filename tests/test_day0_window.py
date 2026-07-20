@@ -67,3 +67,70 @@ def test_day0_window_returns_empty_when_target_day_has_no_remaining_hours():
 
     assert hours == 0.0
     assert remaining.size == 0
+
+
+def test_day0_window_keeps_terminal_subhour_anchor_for_high_and_low():
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
+
+    start = datetime(2025, 3, 10, 0, 0, tzinfo=timezone.utc)
+    times = [(start + timedelta(hours=i)).isoformat() for i in range(24)]
+    members = np.array(
+        [
+            np.arange(0.0, 24.0),
+            np.arange(100.0, 124.0),
+        ]
+    )
+    boundary = datetime(2025, 3, 10, 23, 30, tzinfo=timezone.utc)
+
+    high, high_hours = remaining_member_extrema_for_day0(
+        members,
+        times,
+        "UTC",
+        date(2025, 3, 10),
+        now=boundary,
+        temperature_metric=HIGH_LOCALDAY_MAX,
+    )
+    low, low_hours = remaining_member_extrema_for_day0(
+        members,
+        times,
+        "UTC",
+        date(2025, 3, 10),
+        now=boundary,
+        temperature_metric=LOW_LOCALDAY_MIN,
+    )
+
+    assert high is not None and high.maxes.tolist() == [23.0, 123.0]
+    assert low is not None and low.mins.tolist() == [23.0, 123.0]
+    assert high_hours == low_hours == 1.0
+
+
+def test_day0_window_compares_fall_back_folds_by_utc_instant():
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
+
+    start = datetime(2026, 10, 24, 22, 0, tzinfo=timezone.utc)
+    times = [(start + timedelta(hours=i)).isoformat() for i in range(25)]
+    members = np.full((2, 25), 10.0)
+    members[0, 3] = 99.0
+    members[1, 3] = -99.0
+    boundary = datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+
+    high, high_hours = remaining_member_extrema_for_day0(
+        members,
+        times,
+        "Europe/Paris",
+        date(2026, 10, 25),
+        now=boundary,
+        temperature_metric=HIGH_LOCALDAY_MAX,
+    )
+    low, low_hours = remaining_member_extrema_for_day0(
+        members,
+        times,
+        "Europe/Paris",
+        date(2026, 10, 25),
+        now=boundary,
+        temperature_metric=LOW_LOCALDAY_MIN,
+    )
+
+    assert high is not None and high.maxes.tolist() == [99.0, 10.0]
+    assert low is not None and low.mins.tolist() == [10.0, -99.0]
+    assert high_hours == low_hours == 22.0

@@ -67,6 +67,7 @@ from src.engine.evaluator import (
     _day0_observation_quality_rejection_reason,
     _day0_observation_source_rejection_reason,
     _finite_day0_observation_float,
+    _parse_day0_observation_time_utc,
 )
 from src.engine.time_context import lead_days_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
@@ -1281,19 +1282,18 @@ def _day0_hourly_bundle_authority_rejection_reason(ens_result: dict) -> str | No
 
 
 def _parse_utc_datetime(raw: object) -> datetime | None:
-    try:
-        text = str(raw or "").strip()
-        if not text:
-            return None
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+    if isinstance(raw, bool):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return _parse_day0_observation_time_utc(raw)
 
 
-def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = None) -> dict | None:
+def _read_day0_hourly_vectors(
+    *,
+    city,
+    target_d: date,
+    now: datetime | None = None,
+    remaining_window_start: datetime | None = None,
+) -> dict | None:
     """Read the live Day0 remaining-window hourly vectors for monitor belief.
 
     Day0 held-position redecision needs hourly trajectories. The daily
@@ -1305,6 +1305,7 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
     from src.state.db import get_forecasts_connection_read_only
     from src.data.day0_hourly_vectors import (
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        day0_hourly_vector_target_values_utc,
         day0_hourly_models_for_city,
         read_freshest_day0_hourly_vectors,
     )
@@ -1314,6 +1315,11 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
         return None
     target_date = target_d.isoformat()
     decision_time = now or datetime.now(timezone.utc)
+    causal_boundary = remaining_window_start or decision_time
+    if decision_time.tzinfo is None or causal_boundary.tzinfo is None:
+        return None
+    if causal_boundary.astimezone(timezone.utc) > decision_time.astimezone(timezone.utc):
+        return None
     try:
         conn = get_forecasts_connection_read_only()
     except sqlite3.Error:
@@ -1328,7 +1334,7 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
             expected_models=expected_models,
             require_expected=bool(expected_models),
             max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-            remaining_window_start=decision_time,
+            remaining_window_start=causal_boundary,
             require_complete_remaining_window=True,
         )
     except sqlite3.Error:
@@ -1342,17 +1348,22 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
     member_rows: list[list[float]] = []
     captured_times: list[datetime] = []
     for vector in vectors:
-        row_times = [str(item) for item in vector.times]
-        temps_c = list(vector.temps_c)
-        if len(row_times) != len(temps_c) or not row_times:
+        try:
+            vector_tz = ZoneInfo(str(vector.timezone_name))
+        except Exception:
             return None
+        target_values = day0_hourly_vector_target_values_utc(
+            vector,
+            target=target_d,
+            tz=vector_tz,
+        )
+        if not target_values:
+            return None
+        row_times = [instant.isoformat() for instant, _value in target_values]
+        values_c = [value for _instant, value in target_values]
         if times is None:
             times = row_times
         elif row_times != times:
-            return None
-        try:
-            values_c = [float(item) for item in temps_c]
-        except (TypeError, ValueError):
             return None
         if not np.isfinite(np.asarray(values_c, dtype=float)).all():
             return None
@@ -2881,9 +2892,25 @@ def _refresh_day0_observation(
     if obs is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation"]
+    decision_time = datetime.now(timezone.utc)
     if not _day0_observation_field(obs, "observation_time"):
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "missing_observation_timestamp"]
+    observation_boundary = _parse_utc_datetime(
+        _day0_observation_field(obs, "observation_time")
+    )
+    if observation_boundary is None:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "day0_observation",
+            "unparseable_observation_timestamp",
+        ]
+    if observation_boundary > decision_time:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "day0_observation",
+            "observation_timestamp_after_decision",
+        ]
 
     # R4: wrap the str from Position (portfolio boundary) into MetricIdentity
     # so Day0Signal receives the typed object, not a bare str.
@@ -2930,7 +2957,6 @@ def _refresh_day0_observation(
         coverage_validations.append("day0_observation_bound_only:coverage_gap_suspect")
 
     temporal_context = None
-    decision_time = datetime.now(timezone.utc)
     decision_local_hour = _decision_local_hour_for_target(city, target_d, decision_time)
     quality_rejection = _day0_observation_quality_rejection_reason(
         city,
@@ -3000,7 +3026,12 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "day0_live_forecast"]
 
-    ens_result = _read_day0_hourly_vectors(city=city, target_d=target_d)
+    ens_result = _read_day0_hourly_vectors(
+        city=city,
+        target_d=target_d,
+        now=decision_time,
+        remaining_window_start=observation_boundary,
+    )
     live_forecast_source = "day0_hourly_vectors"
     day0_selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
     daily_extrema_conditioned = False
@@ -3023,7 +3054,7 @@ def _refresh_day0_observation(
             ens_result["times"],
             city.timezone,
             target_d,
-            now=temporal_context.current_utc_timestamp,
+            now=observation_boundary,
             temperature_metric=temperature_metric,
         )
         if extrema is None:

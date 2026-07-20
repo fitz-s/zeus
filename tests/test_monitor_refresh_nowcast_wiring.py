@@ -34,6 +34,14 @@ from src.observability.counters import read as read_counter, reset_all as reset_
 from src.state.portfolio import Position
 
 
+def test_monitor_utc_parser_shares_observation_timestamp_contract() -> None:
+    parsed = monitor_refresh_module._parse_utc_datetime("1784476800")
+
+    assert parsed == datetime(2026, 7, 19, 16, 0, tzinfo=timezone.utc)
+    assert monitor_refresh_module._parse_utc_datetime(True) is None
+    assert monitor_refresh_module._parse_utc_datetime("nan") is None
+
+
 def test_belief_reseed_dispatch_is_family_isolated_and_coalesced(monkeypatch) -> None:
     paris_started = threading.Event()
     paris_release = threading.Event()
@@ -1609,6 +1617,51 @@ def test_day0_metric_fact_write_helper_uses_monitor_observation_contract() -> No
     assert kwargs["local_timestamp"] == "2026-07-09T06:00:00+02:00"
     assert kwargs["temp_current"] == 21.2
     assert kwargs["running_extreme"] == 20.0
+
+
+def test_day0_monitor_rejects_future_observation_before_forecast_fallback(
+    monkeypatch,
+) -> None:
+    from datetime import date
+
+    pos = _make_position(market_slug="paris-2026-07-20-high")
+    pos.target_date = "2026-07-20"
+    pos.temperature_metric = "high"
+    pos.p_posterior = 0.41
+    city = MagicMock()
+    city.name = "Paris"
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_fetch_day0_observation",
+        lambda *_: {
+            "source": "wu_api",
+            "observation_time": "9999-07-20T12:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_read_day0_hourly_vectors",
+        lambda **kwargs: pytest.fail("future observation must not read hourly forecast"),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_read_day0_raw_model_extrema",
+        lambda **kwargs: pytest.fail("future observation must not reach daily fallback"),
+    )
+
+    posterior, validations = monitor_refresh_module._refresh_day0_observation(
+        position=pos,
+        current_p_market=0.5,
+        conn=None,
+        city=city,
+        target_d=date(2026, 7, 20),
+    )
+
+    assert posterior == pytest.approx(0.41)
+    assert validations == [
+        "day0_observation",
+        "observation_timestamp_after_decision",
+    ]
 
 
 def test_day0_metric_fact_write_helper_is_fail_soft(caplog) -> None:

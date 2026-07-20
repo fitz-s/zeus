@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -45,7 +45,8 @@ def remaining_member_extrema_for_day0(
         )
 
     tz = ZoneInfo(timezone_name)
-    now_local = (now or datetime.now(tz)).astimezone(tz)
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now_local = now_utc.astimezone(tz)
     try:
         target_day_idxs = select_hours_for_target_date(
             target_d,
@@ -58,8 +59,31 @@ def remaining_member_extrema_for_day0(
     remaining_idxs = [
         int(idx)
         for idx in target_day_idxs
-        if _parse_forecast_timestamp(times[int(idx)]).astimezone(tz) >= now_local
+        if _parse_forecast_timestamp(times[int(idx)]) >= now_utc
     ]
+    if not remaining_idxs and now_local.date() == target_d:
+        day_end = datetime.combine(
+            target_d + timedelta(days=1),
+            datetime_time.min,
+            tzinfo=tz,
+        )
+        elapsed = [
+            int(idx)
+            for idx in target_day_idxs
+            if _parse_forecast_timestamp(times[int(idx)]) < now_utc
+        ]
+        if elapsed:
+            anchor_idx = max(
+                elapsed,
+                key=lambda idx: _parse_forecast_timestamp(times[idx]),
+            )
+            anchor_time = _parse_forecast_timestamp(times[anchor_idx])
+            day_end_utc = day_end.astimezone(timezone.utc)
+            if (
+                timedelta(0) < day_end_utc - now_utc <= timedelta(hours=1)
+                and timedelta(0) <= now_utc - anchor_time <= timedelta(hours=1)
+            ):
+                remaining_idxs = [anchor_idx]
     if not remaining_idxs:
         return None, 0.0
 

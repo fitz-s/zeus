@@ -25,7 +25,7 @@ Contracts:
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import numpy as np
@@ -891,6 +891,7 @@ class TestRemainingDayMembers:
             city=_paris(),
             target_d=datetime(2026, 6, 10, tzinfo=UTC).date(),
             now=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            remaining_window_start=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
         )
 
         assert out is None
@@ -898,9 +899,131 @@ class TestRemainingDayMembers:
         assert captured["require_expected"] is True
         assert captured["max_bundle_skew_minutes"] == hv.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES
         assert captured["remaining_window_start"] == datetime(
-            2026, 6, 10, 9, 0, tzinfo=UTC
+            2026, 6, 10, 8, 0, tzinfo=UTC
         )
         assert captured["require_complete_remaining_window"] is True
+
+    def test_monitor_normalizes_local_hours_before_remaining_window_cut(
+        self,
+        monkeypatch,
+    ):
+        import src.data.day0_hourly_vectors as hv
+        import src.engine.monitor_refresh as monitor_refresh
+        import src.state.db as db
+        from src.signal.day0_window import remaining_member_extrema_for_day0
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        temps = [10.0] * 24
+        temps[13] = 99.0
+        vector = _vector(model="ecmwf_ifs", temps=temps)
+        monkeypatch.setattr(
+            db,
+            "get_forecasts_connection_read_only",
+            lambda: sqlite3.connect(":memory:"),
+        )
+        monkeypatch.setattr(
+            hv,
+            "day0_hourly_models_for_city",
+            lambda city: ["ecmwf_ifs"],
+        )
+        monkeypatch.setattr(
+            hv,
+            "read_freshest_day0_hourly_vectors",
+            lambda **kwargs: [vector],
+        )
+
+        boundary = datetime(2026, 6, 10, 12, 30, tzinfo=UTC)  # 14:30 Paris
+        out = monitor_refresh._read_day0_hourly_vectors(
+            city=_paris(),
+            target_d=date(2026, 6, 10),
+            now=boundary,
+            remaining_window_start=boundary,
+        )
+
+        assert out is not None
+        assert out["times"][13] == "2026-06-10T11:00:00+00:00"
+        extrema, hours = remaining_member_extrema_for_day0(
+            out["members_hourly"],
+            out["times"],
+            "Europe/Paris",
+            date(2026, 6, 10),
+            now=boundary,
+            temperature_metric=HIGH_LOCALDAY_MAX,
+        )
+        assert extrema is not None
+        assert extrema.maxes.tolist() == [10.0]
+        assert hours == 9.0
+
+        stale_observation = datetime(2026, 6, 10, 10, 30, tzinfo=UTC)
+        stale_out = monitor_refresh._read_day0_hourly_vectors(
+            city=_paris(),
+            target_d=date(2026, 6, 10),
+            now=boundary,
+            remaining_window_start=stale_observation,
+        )
+        assert stale_out is not None
+        stale_extrema, stale_hours = remaining_member_extrema_for_day0(
+            stale_out["members_hourly"],
+            stale_out["times"],
+            "Europe/Paris",
+            date(2026, 6, 10),
+            now=stale_observation,
+            temperature_metric=HIGH_LOCALDAY_MAX,
+        )
+        assert stale_extrema is not None
+        assert stale_extrema.maxes.tolist() == [99.0]
+        assert stale_hours == 11.0
+
+    def test_monitor_normalizes_both_fall_back_folds_to_distinct_utc_instants(
+        self,
+        monkeypatch,
+    ):
+        import src.data.day0_hourly_vectors as hv
+        import src.engine.monitor_refresh as monitor_refresh
+        import src.state.db as db
+
+        times = tuple(
+            ["2026-10-25T00:00", "2026-10-25T01:00"]
+            + ["2026-10-25T02:00", "2026-10-25T02:00"]
+            + [f"2026-10-25T{hour:02d}:00" for hour in range(3, 24)]
+        )
+        vector = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-10-25",
+            timezone_name="Europe/Paris",
+            captured_at="2026-10-25T00:00:00+00:00",
+            times=times,
+            temps_c=tuple(float(i) for i in range(25)),
+        )
+        monkeypatch.setattr(
+            db,
+            "get_forecasts_connection_read_only",
+            lambda: sqlite3.connect(":memory:"),
+        )
+        monkeypatch.setattr(
+            hv,
+            "day0_hourly_models_for_city",
+            lambda city: ["ecmwf_ifs"],
+        )
+        monkeypatch.setattr(
+            hv,
+            "read_freshest_day0_hourly_vectors",
+            lambda **kwargs: [vector],
+        )
+
+        out = monitor_refresh._read_day0_hourly_vectors(
+            city=_paris(),
+            target_d=date(2026, 10, 25),
+            now=datetime(2026, 10, 25, 12, 0, tzinfo=UTC),
+            remaining_window_start=datetime(2026, 10, 24, 22, 0, tzinfo=UTC),
+        )
+
+        assert out is not None
+        assert out["times"][2:4] == [
+            "2026-10-25T00:00:00+00:00",
+            "2026-10-25T01:00:00+00:00",
+        ]
 
     def test_live_remaining_day_unavailable_blocks_before_legacy_fallback(self, monkeypatch):
         """When live Day0 remaining-day mode is enabled, missing vectors are an

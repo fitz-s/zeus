@@ -559,13 +559,13 @@ def _target_day_hour_grid_utc(*, target: date, tz: ZoneInfo) -> tuple[datetime, 
     return tuple(out)
 
 
-def _vector_target_hour_values(
+def day0_hourly_vector_target_values_utc(
     vector: Day0HourlyVector,
     *,
     target: date,
     tz: ZoneInfo,
 ) -> tuple[tuple[datetime, float], ...] | None:
-    """Map provider local hours to exact UTC instants, including DST folds."""
+    """Map one provider-local target-day vector to exact UTC instants."""
 
     grid = _target_day_hour_grid_utc(target=target, tz=tz)
     by_label: dict[str, list[datetime]] = {}
@@ -646,7 +646,11 @@ def day0_hourly_vectors_cover_remaining_window(
         if boundary_local.date() != target:
             return False
         grid = _target_day_hour_grid_utc(target=target, tz=tz)
-        values = _vector_target_hour_values(vector, target=target, tz=tz)
+        values = day0_hourly_vector_target_values_utc(
+            vector,
+            target=target,
+            tz=tz,
+        )
         if not grid or values is None:
             return False
         counts = Counter(instant for instant, _value in values)
@@ -707,7 +711,11 @@ def remaining_day_extremes_c(
         start_local = start.astimezone(tz)
         if start_local.date() != target:
             continue
-        target_values = _vector_target_hour_values(vector, target=target, tz=tz)
+        target_values = day0_hourly_vector_target_values_utc(
+            vector,
+            target=target,
+            tz=tz,
+        )
         if target_values is None:
             return []
         values: list[float] = []
