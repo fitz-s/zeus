@@ -678,7 +678,7 @@ def select_prepared_global_auction(
             probability = probability_witnesses.get(asset.family_key)
             if probability is None:
                 return _no_trade("GLOBAL_BOOK_FAMILY_PROBABILITY_MISSING")
-            if asset.family_key in excluded or asset.family_key in buy_disabled:
+            if asset.family_key in excluded:
                 continue
             native = SimpleNamespace(
                 no_trade_reason=None,
@@ -855,6 +855,18 @@ def select_prepared_global_auction(
             )
         )
 
+    def _candidate_policy_rejection(
+        candidate: GlobalSingleOrderAnyCandidate,
+    ) -> str | None:
+        if (
+            str(getattr(candidate, "action", "BUY") or "BUY").upper() == "BUY"
+            and candidate.family_key in buy_disabled
+        ):
+            return "GLOBAL_BUY_DISABLED_FAMILY"
+        if candidate_policy_rejection_resolver is None:
+            return None
+        return candidate_policy_rejection_resolver(candidate)
+
     def _candidate_endowment(
         candidate: GlobalSingleOrderAnyCandidate,
     ) -> CandidatePortfolioEndowment:
@@ -886,7 +898,7 @@ def select_prepared_global_auction(
             _candidate_endowment if book_epoch is not None else None
         ),
         candidate_payoff_q_lcb_resolver=_candidate_payoff_q_lcb,
-        candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
+        candidate_policy_rejection_resolver=_candidate_policy_rejection,
         cancelled=cancelled,
     )
     evaluated = {

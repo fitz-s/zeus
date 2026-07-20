@@ -13030,11 +13030,38 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         and evaluation.family_key == held_probability.family_key
         for evaluation in held_only_selected.decision.candidate_evaluations
     )
-    assert not any(
-        evaluation.action == "BUY"
-        and evaluation.family_key == held_probability.family_key
+    held_only_buy_evaluations = tuple(
+        evaluation
         for evaluation in held_only_selected.decision.candidate_evaluations
+        if evaluation.action == "BUY"
+        and evaluation.family_key == held_probability.family_key
     )
+    assert held_only_buy_evaluations
+    assert all(
+        evaluation.status == "REJECTED"
+        and evaluation.rejection_reason == "GLOBAL_BUY_DISABLED_FAMILY"
+        for evaluation in held_only_buy_evaluations
+    )
+    held_only_book_receipt = global_batch_runtime._book_native_side_receipt(
+        asset_states=held_book_epoch.asset_states,
+        probability_keys=tuple(probabilities),
+        buy_candidate_index=tuple(
+            (
+                evaluation.candidate_id,
+                evaluation.family_key,
+                evaluation.bin_id,
+                evaluation.condition_id,
+                evaluation.side,
+                evaluation.token_id,
+            )
+            for evaluation in held_only_selected.decision.candidate_evaluations
+            if evaluation.action == "BUY"
+        ),
+        excluded_by_family={},
+    )
+    assert held_only_book_receipt[
+        "book_native_side_candidate_coverage_status"
+    ] == "COMPLETE"
     assert capital_scopes
     assert all(
         gamma_market_id == f"gamma-{condition_id}"
