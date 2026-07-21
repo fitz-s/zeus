@@ -21,12 +21,12 @@ truly post-load-bearing from one that is merely past its activity window.
 Every packet directory under `docs/operations/task_*/` receives one verdict
 on each maintenance run:
 
-- `ACTIVE`: modified within last 30 days OR contains `Status: ACTIVE_LAW` /
-  `Status: AUTHORITY` / `Status: IN_PROGRESS`
-- `WINDING_DOWN`: not modified 30–60 days, no AUTHORITY status, but at least
-  one current-authority file references a path inside it
-- `ARCHIVE_CANDIDATE`: not modified 60+ days, no AUTHORITY status, and
-  passes ALL exemption checks below
+- `ACTIVE`: contains `Status: ACTIVE_LAW` / `Status: AUTHORITY` /
+  `Status: IN_PROGRESS` (archival eligibility is not gated on age)
+- `WINDING_DOWN`: no AUTHORITY status, but at least one current-authority
+  file references a path inside it (a load-bearing link to cut before archival)
+- `ARCHIVE_CANDIDATE`: no AUTHORITY status, and passes ALL exemption checks
+  below. Archival is gated on load-bearing safety, never on age
 - `LOAD_BEARING_DESPITE_AGE`: would otherwise be ARCHIVE_CANDIDATE, but at
   least one exemption check failed; this packet stays in place AND a row is
   written to `LOAD_BEARING_REGISTRY.md` so the human knows it cannot be

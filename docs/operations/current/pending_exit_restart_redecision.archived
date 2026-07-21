@@ -1,0 +1,11 @@
+---
+archived_to: docs/archive/2026-Q3/pending_exit_restart_redecision/
+archived_at: 2026-07-20
+archived_by: docs-reconciliation (directed, operator-authorized)
+last_modified_before_archive: 2026-07-20
+exemption_checks_passed: 9/9  # check #0 registry + checks 1-8, all PASS
+reference_grep_count: 0
+restore_command: git mv docs/archive/2026-Q3/pending_exit_restart_redecision/ docs/operations/current/pending_exit_restart_redecision/
+---
+Packet closed (receipt.json) and archived after all load-bearing exemption
+checks passed (age gate removed 2026-07-20). Body at docs/archive/2026-Q3/pending_exit_restart_redecision/.

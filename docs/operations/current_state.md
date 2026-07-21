@@ -34,8 +34,5 @@ Closed packet bodies: `docs/archive_registry.md` (bodies untracked under `docs/a
 - `docs/operations/AGENTS.md` — packet/package routing and closeout rules
 - `architecture/history_lore.yaml` — durable lessons
 - `docs/operations/current/plans/live_branch_workflow_2026-07-20.md` — the `live`-branch workflow (worktree → cherry-pick/PR → live); AGENTS §5 is the summary
-- 2026-07-10 packet `current/runtime_open_exposure_snapshot` landed (head 6aa976985). <!-- zpkt landed: current/runtime_open_exposure_snapshot -->
-- 2026-07-10 packet `current/runtime_claim_contention` landed (head 666642225). <!-- zpkt landed: current/runtime_claim_contention -->
-- 2026-07-10 packet `current/chain_absence_livelock` landed (head 16cec04f6). <!-- zpkt landed: current/chain_absence_livelock -->
-- 2026-07-11 packet `current/quarantine_chain_freshness` landed (head 51b7d9ec0). <!-- zpkt landed: current/quarantine_chain_freshness -->
-- 2026-07-11 packet `current/pending_exit_restart_redecision` landed (head a49c07254). <!-- zpkt landed: current/pending_exit_restart_redecision -->
+
+(2026-07-20: the five 2026-07-10/11 landed packets — runtime_open_exposure_snapshot, runtime_claim_contention, chain_absence_livelock, quarantine_chain_freshness, pending_exit_restart_redecision — archived to `docs/archive/2026-Q3/`; `.archived` stubs carry the restore path.)

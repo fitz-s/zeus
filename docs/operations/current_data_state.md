@@ -1,35 +1,26 @@
 # Current Data State
 
-Status: CURRENT_FOR_LIVE - replacement forecast shadow/veto simple-switch fact refresh
-Last audited: 2026-06-07T00:50:34.580045+00:00
-Max staleness: 14 days for replacement forecast simple-switch planning
-Authority status: not authority law; audit-bound current fact only
+Status: CURRENT — live belief center is the fusion posterior `openmeteo_ecmwf_ifs9_bayes_fusion_v1`. Supersedes the 2026-06-07 AIFS shadow/veto refresh (that product is dead — see below).
+Last audited: 2026-07-21
+Max staleness: 14 days — re-query `state/zeus-forecasts.db` before trusting past that.
+Authority status: not authority law; audit-bound current fact only. Full source detail: `docs/operations/current/plans/coarse_feed_retirement_2026-07-20.md` and `architecture/data_sources_registry_2026_05_08.yaml`.
 
-## Replacement Forecast Simple-Switch Evidence
+## Live forecast authority
 
-- Open-Meteo ECMWF IFS 9km endpoint verified: run=2026-06-06T06:00 target_local_date=2026-06-07 samples=24 high_c=28.60 low_c=19.40 url=https://single-runs-api.open-meteo.com/v1/forecast?latitude=31.2304&longitude=121.4737&hourly=temperature_2m&models=ecmwf_ifs&run=2026-06-06T06%3A00&forecast_hours=72&temperature_unit=celsius&timezone=Asia%2FShanghai
-- AIFS GRIB metadata verified: .local/replacement_raw/aifs_ens_20260605_00z_step0_pf_member001_2t.meta.json sha256=eae7da9d1542fdc34ebf420709a9ac7ff4836cb673f11f4813279316372eb51d
-- AIFS sampled-2t identity verified from .local/replacement_raw/aifs_ens_20260605_00z_step0_pf_member001_2t.meta.json and .local/replacement_raw/aifs_sample_points_from_implemented_materializer.json
-- Settlement source routing document inspected; replacement path does not propose source-route changes
-- Live root pre-existing read files exist under /Users/leofitz/zeus; refit handoff is supplied by simple-switch install plan
-- Replacement schema dry-run verified from .local/replacement_reports/replacement_schema_dry_run.json: committed=false created=['raw_forecast_artifacts', 'deterministic_forecast_anchors', 'forecast_posteriors']
-- Materialization seed builder verified: market bins and baseline source-run coverage are converted into validated seed JSON
-- Materialization seed discovery verified: live shadow can generate seed JSON from forecast DB targets plus raw manifests
-- Materialization request builder verified: seed JSON is validated before entering the shadow queue
-- EMOS product identity verified: replacement product-keyed cell ready and legacy city|season|metric cell blocked
-- Refit gate verified: baseline EMOS reuse blocks promotion and product-specific refit stays non-live without promotion request
-- Fine-tune artifact builder verified: nested Brier/log loss folds and selected soft-anchor parameter are written as durable JSON
-- Refit handoff builder verified: fine-tune output is converted into product-keyed non-live EMOS/data-refit handoff JSON
-- Refit handoff install planner verified: ready handoff artifacts are dry-run validated before optional live-root write
-- Promotion evidence composer verified: runtime promotion evidence is composed from before/after, same-CLOB, q_lcb, fine-tune, and refit reports
-- Full replacement test suite verified from .local/replacement_reports/replacement_full_suite_pytest.json: 309 passed in 23.48s
-- Event reactor no-bypass suite verified from .local/replacement_reports/event_reactor_no_bypass_pytest.json: 95 passed, 1 xfailed in 7.59s
+- **Live trade-authority product: `openmeteo_ecmwf_ifs9_bayes_fusion_v1`** — flag `openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled=true` (`config/settings.json:264`); 44,925 `forecast_posteriors` rows, latest `computed_at` 2026-07-21T01:27Z. This is the belief center, not a shadow/veto lane.
+- Fed by the multi-model fusion basket in `raw_model_forecasts` (ecmwf_ifs, icon_*, ukmo, arome, ncep_nbm, jma_msm, plus `cwa_township` / `hko_fnd` official station forecasts re-homed onto `ingest_main`). Re-audit members/freshness from `SELECT model, MAX(captured_at) FROM raw_model_forecasts GROUP BY model`.
+
+## Retired / dead — do NOT cite as live
+
+- **AIFS (`ecmwf_aifs_ens`) — RETIRED.** GRIB-ingest cluster deleted in commit `2764616bf` (2026-07-19); `src/data/forecast_source_registry.py` tier=disabled, product "A1" trade_authority=BLOCKED; zero `aifs` tables in `state/zeus-forecasts.db`.
+- **`openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1` — DEAD** (frozen 2026-06-18T11:52Z, 3,610 rows, none since). This is the product the pre-2026-07-21 version of this file wrongly labelled `CURRENT_FOR_LIVE`.
+- Coarse `ecmwf_open_data` (0.25°) — cold-lane fallback only (Day0 fail-closed fallback + legacy causal-cycle pin), NOT the belief center.
+
+## Observation / settlement (ACTIVE as of 2026-07-21 audit)
+
+- Observation: `wu_icao_history` (48-city primary), `hko_daily_api`/`hko_realtime_api`, `ogimet_metar_*` (Tel Aviv / Moscow / Istanbul). Settlement: `polymarket_gamma` → `settlements`.
+- Source-freshness facts here come from a read-only audit of `state/zeus-forecasts.db` on 2026-07-21; re-query before trusting past the staleness ceiling.
 
 ## Notes
 
-- Generated read-only; missing evidence remains false.
-
-## Guardrails
-
-- This current-fact refresh authorizes shadow/veto readiness only.
-- It does not authorize live trade authority, Kelly increase, direction flip, settlement rewrites, calibration refit promotion, or source-route changes.
+- Generated read-only; missing evidence remains false. Known coverage gap (LOW-track fusion): `docs/operations/known_gaps.md`.

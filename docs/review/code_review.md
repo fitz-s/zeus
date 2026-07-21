@@ -524,7 +524,7 @@ git diff --name-only | sort
 git diff --numstat | sort -nr | head -50
 git diff -- src/execution/ src/venue/ src/contracts/      # Tier 0
 git diff -- src/calibration/ src/signal/ src/strategy/    # Tier 1
-git log --oneline main..HEAD
+git log --oneline live..HEAD
 ```
 
 Zeus-specific (operator-side, optional):

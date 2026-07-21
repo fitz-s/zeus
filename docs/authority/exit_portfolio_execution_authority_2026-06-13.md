@@ -191,6 +191,6 @@ cadences, riskguard alert thresholds, min-fills licenses.
 4. **MEDIUM-HIGH — Q3 dynamic re-quoting** (after 1-2, replay-gated).
 5. **MEDIUM — laddering** (flag, replay-licensed).
 
-All new capability lands flag-gated, default = current behavior, shadow-computed;
-flag flips are operator-only (standing law). Every fitted constant keeps the K4
+Delivery is live-direct via the time-boxed promotion harness (see the ERRATUM above:
+no standing shadow lane, no flag survives promotion). Every fitted constant keeps the K4
 licensing functional, never a bare count or habitual percentile.

@@ -8,7 +8,7 @@ Status: ACTIVE — established 2026-07-20. Promote the binding clauses into `AGE
 
 ## The law
 
-1. **Never commit to `live` directly, and never mutate the live checkout's git state.** The live daemons run from `/Users/leofitz/zeus` on the live branch; switching or force-moving that checkout out from under them is the 2026-06-12 hijack incident. The `maintree_git_state_guard` enforces this — deliberate operator moves prefix `MAINTREE_GIT_BYPASS=1`.
+1. **`live` accepts commits by exactly two lanes — hot-fix `git cherry-pick` or merged PR — and no third lane. A direct commit, amend, or in-place edit to the live checkout is forbidden.** The live daemons run from `/Users/leofitz/zeus` on the live branch; directly committing to it or force-moving that checkout out from under them is the 2026-06-12 hijack incident. `maintree_git_state_guard` enforces the no-git-state-mutation half — deliberate operator moves prefix `MAINTREE_GIT_BYPASS=1`.
 2. **All work happens in a worktree.** Branch a linked worktree (`.claude/worktrees/agent-*` or `git worktree add`) off live, make the change there, and prove it there.
 3. **Landing on live is cherry-pick or PR only.**
    - Small, isolated, reviewed change → `git cherry-pick` onto live (or `scripts/agent_worktree_merge.py`).
