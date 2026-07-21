@@ -2942,12 +2942,11 @@ def _score_global_single_order(
     minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
         candidate.executable_cost_curve.levels[0].price
     )
-    maximum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
-        candidate.executable_cost_curve.levels[-1].price
-    )
+    minimum_limit_price = candidate.executable_cost_curve.levels[0].price
+    maximum_limit_price = candidate.executable_cost_curve.levels[-1].price
     if (
-        minimum_unit_cost > LIVE_ORDER_MAX_UNIT_PRICE
-        or maximum_unit_cost < LIVE_ORDER_MIN_UNIT_PRICE
+        minimum_limit_price > LIVE_ORDER_MAX_UNIT_PRICE
+        or maximum_limit_price < LIVE_ORDER_MIN_UNIT_PRICE
     ):
         reason = "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
         return GlobalSingleOrderDecision(
@@ -3032,7 +3031,7 @@ def _score_global_single_order(
             )
         except ValueError:
             continue
-        if not _live_unit_price_in_band(cost / shares):
+        if not _live_unit_price_in_band(limit_price):
             full_price_band_rejected = True
             continue
         if max_spend > optimization_limit:
@@ -3199,7 +3198,7 @@ def _score_global_single_order(
             )
         except ValueError:
             continue
-        if not _live_unit_price_in_band(cost / shares):
+        if not _live_unit_price_in_band(limit_price):
             projected_price_band_rejected = True
             continue
         if max_spend > spend_limit:

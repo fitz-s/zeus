@@ -3235,6 +3235,47 @@ def test_global_single_order_buy_price_band_is_inclusive(side, price, q):
     assert decision.cost_usd / decision.shares == Decimal(price)
 
 
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_buy_price_band_applies_to_raw_limit_not_fee_vwap(side):
+    candidate = _global_candidate(
+        candidate_id=f"fee-boundary-{side}",
+        family=f"fee-boundary-{side}-family",
+        side=side,
+        q=1.0,
+        levels=(("0.95", "100"),),
+        fee="0.02",
+    )
+
+    decision = _global_select((candidate,))
+
+    assert decision.candidate is candidate
+    assert decision.limit_price == Decimal("0.95")
+    assert decision.cost_usd / decision.shares > Decimal("0.95")
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_buy_never_crosses_illegal_deep_limit(side):
+    candidate = _global_candidate(
+        candidate_id=f"mixed-limit-{side}",
+        family=f"mixed-limit-{side}-family",
+        side=side,
+        q=0.99,
+        levels=(("0.94", "100"), ("0.96", "10")),
+    )
+
+    decision = _global_select(
+        (candidate,),
+        floor="1000",
+        ceiling="1000",
+        cash="1000",
+        cap="200",
+    )
+
+    assert decision.candidate is candidate
+    assert decision.shares == Decimal("100")
+    assert decision.limit_price == Decimal("0.94")
+
+
 def test_global_single_order_rejects_expired_quote_before_economics():
     expired = replace(
         _global_candidate(candidate_id="expired", family="a", side="YES", q=0.99),
