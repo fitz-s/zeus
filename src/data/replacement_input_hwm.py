@@ -445,18 +445,12 @@ def _batch_product_cycle_artifact_cycles(
           FROM {table_ref}
          WHERE source_id = ?
            AND product_id = ?
-           AND datetime(captured_at) <= datetime(?)
-           AND datetime(source_available_at) <= datetime(?)
-           AND datetime(source_cycle_time) <= datetime(?)
          GROUP BY source_cycle_time
-         ORDER BY datetime(source_cycle_time) DESC
+         ORDER BY source_cycle_time DESC
         """,
         (
             OPENMETEO_ANCHOR_SOURCE_ID,
             OPENMETEO_ANCHOR_PRODUCT_ID,
-            decision_iso,
-            decision_iso,
-            decision_iso,
         ),
     ).fetchall()
     select_path = "artifact_path" if "artifact_path" in columns else "NULL"
@@ -502,6 +496,7 @@ def _batch_product_cycle_artifact_cycles(
              WHERE source_id = ?
                AND product_id = ?
                AND source_cycle_time = ?
+               AND datetime(source_cycle_time) <= datetime(?)
                AND datetime(captured_at) <= datetime(?)
                AND datetime(source_available_at) <= datetime(?)
              ORDER BY datetime(captured_at) DESC,
@@ -511,6 +506,7 @@ def _batch_product_cycle_artifact_cycles(
                 OPENMETEO_ANCHOR_SOURCE_ID,
                 OPENMETEO_ANCHOR_PRODUCT_ID,
                 source_cycle,
+                decision_iso,
                 decision_iso,
                 decision_iso,
             ),

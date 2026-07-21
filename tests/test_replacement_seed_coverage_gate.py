@@ -801,5 +801,17 @@ def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> No
         if "FROM RAW_FORECAST_ARTIFACTS" in statement.upper()
         and "ARTIFACT_METADATA_JSON" in statement.upper()
     ]
+    cycle_queries = [
+        statement.upper()
+        for statement in traced
+        if "SELECT SOURCE_CYCLE_TIME" in statement.upper()
+        and "GROUP BY SOURCE_CYCLE_TIME" in statement.upper()
+    ]
+    assert cycle_queries
+    assert all("DATETIME(CAPTURED_AT)" not in statement for statement in cycle_queries)
+    assert all(
+        "DATETIME(SOURCE_AVAILABLE_AT)" not in statement
+        for statement in cycle_queries
+    )
     assert payload_queries
     assert all("SOURCE_CYCLE_TIME =" in statement for statement in payload_queries)
