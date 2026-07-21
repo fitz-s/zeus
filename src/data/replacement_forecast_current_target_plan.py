@@ -860,10 +860,24 @@ def _latest_authorized_day0_fact(
             )
 
     if "opportunity_events" in _table_names(conn):
+        day0_family_index = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'index' "
+                "AND name = 'idx_opportunity_events_day0_family_extreme'"
+            ).fetchone()
+            is not None
+        )
+        event_table = (
+            "opportunity_events INDEXED BY "
+            "idx_opportunity_events_day0_family_extreme"
+            if day0_family_index
+            else "opportunity_events"
+        )
         event_rows = conn.execute(
-            """
+            f"""
             SELECT payload_json, available_at, received_at
-              FROM opportunity_events
+              FROM {event_table}
              WHERE event_type = 'DAY0_EXTREME_UPDATED'
                AND available_at <= ?
                AND received_at <= ?

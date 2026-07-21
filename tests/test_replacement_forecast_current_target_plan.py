@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-07-21
 # Lifecycle: created=2026-06-06; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
@@ -463,6 +463,49 @@ def _insert_paris_day0_event(
         "INSERT INTO opportunity_events VALUES (?, ?, ?, ?, ?, ?)",
         (event_id, "DAY0_EXTREME_UPDATED", available_at, available_at, available_at, json.dumps(payload)),
     )
+
+
+def test_day0_event_fact_lookup_uses_family_index_when_available() -> None:
+    conn = _day0_source_switch_conn()
+    conn.execute(
+        """
+        CREATE INDEX idx_opportunity_events_day0_family_extreme
+            ON opportunity_events (
+                event_type,
+                json_extract(payload_json, '$.city'),
+                json_extract(payload_json, '$.target_date'),
+                json_extract(payload_json, '$.metric'),
+                available_at
+            )
+        """
+    )
+    _insert_paris_day0_event(
+        conn,
+        event_id="wu-api-34-indexed",
+        settlement_source="wu_api",
+        metric="high",
+        observation_time="2026-07-14T14:00:00+00:00",
+        available_at="2026-07-14T14:15:00+00:00",
+        raw_value=34.0,
+    )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Paris",
+        target_date="2026-07-14",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 14, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert fact is not None
+    assert any(
+        "FROM opportunity_events INDEXED BY "
+        "idx_opportunity_events_day0_family_extreme" in statement
+        for statement in statements
+    )
+    conn.close()
 
 
 def test_hko_day0_fact_uses_latest_official_snapshot_not_cross_time_max() -> None:
