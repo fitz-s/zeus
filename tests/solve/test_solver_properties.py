@@ -1179,6 +1179,8 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
         current_token_shares=(),
         wealth_floor_usd=Decimal("1449.166"),
         spendable_cash_usd=Decimal("1449.166"),
+        portfolio_capital_usd=Decimal("1449.166"),
+        committed_capital_usd=Decimal("0"),
         ledger_snapshot_id="ledger-current",
     )
     plan = S.plan_family_joint_buy_targets(
@@ -1194,10 +1196,12 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
 
     assert plan.no_trade_reason is None
     assert plan.primary_candidate_id == "candidate-33-YES"
-    assert plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
+    assert Decimal("45") < plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
+    assert plan.robust_delta_log_wealth > 0.06
     target_by_id = {target.candidate_id: target.shares for target in plan.targets}
-    assert Decimal("0") < target_by_id["candidate-33-YES"] <= Decimal("17.19")
-    assert target_by_id["candidate-35-NO"] < Decimal("40.5")
+    assert Decimal("500") <= target_by_id["candidate-33-YES"] <= Decimal("505")
+    assert "candidate-35-NO" not in target_by_id
+    assert "candidate-36-NO" not in target_by_id
 
     payout = {bin_id: Decimal("0") for bin_id in witness.bin_ids}
     holdings = []
@@ -1219,6 +1223,8 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
         current_token_shares=tuple(holdings),
         wealth_floor_usd=Decimal("1449.166") - plan.fractional_target_cost_usd,
         spendable_cash_usd=Decimal("1449.166") - plan.fractional_target_cost_usd,
+        portfolio_capital_usd=Decimal("1449.166"),
+        committed_capital_usd=plan.fractional_target_cost_usd,
         ledger_snapshot_id="ledger-current",
     )
     repeated = S.plan_family_joint_buy_targets(
@@ -1232,8 +1238,9 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert repeated.fractional_target_cost_usd <= Decimal("1")
-    assert repeated.fractional_target_cost_usd < plan.fractional_target_cost_usd / 20
+    assert repeated.primary_candidate_id is None
+    assert repeated.no_trade_reason == "FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED"
+    assert repeated.fractional_target_cost_usd == 0
 
     bound_candidates = tuple(
         replace(

@@ -502,7 +502,7 @@ def _family_portfolio_endowment(
     holdings_snapshot: Any,
     wealth_witness: PortfolioWealthWitness,
 ) -> FamilyPortfolioEndowment:
-    """Project every current native claim onto the complete MECE family axis."""
+    """Project claims and cumulative capital ownership onto one MECE family."""
 
     family_key = str(getattr(probability_witness, "family_key", "") or "")
     outcomes = tuple(str(bin_id) for bin_id in probability_witness.bin_ids)
@@ -539,12 +539,32 @@ def _family_portfolio_endowment(
                 if outcome != bin_id:
                     payout[outcome] += shares
         shares_by_token[token_id] = shares_by_token.get(token_id, Decimal("0")) + shares
+    commitments = {
+        str(token): Decimal(int(amount)) / Decimal("1000000")
+        for token, amount in wealth_witness.native_commitments_micro
+    }
+    family_tokens = {
+        str(token)
+        for binding in probability_witness.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+        if str(token)
+    }
+    family_committed = sum(
+        (commitments.get(token, Decimal("0")) for token in family_tokens),
+        Decimal("0"),
+    )
+    portfolio_capital = wealth_witness.spendable_cash_usd + sum(
+        commitments.values(),
+        Decimal("0"),
+    )
     return FamilyPortfolioEndowment(
         family_key=family_key,
         payout_by_bin_usd=tuple((outcome, payout[outcome]) for outcome in outcomes),
         current_token_shares=tuple(sorted(shares_by_token.items())),
         wealth_floor_usd=wealth_witness.wealth_floor_usd,
         spendable_cash_usd=wealth_witness.spendable_cash_usd,
+        portfolio_capital_usd=portfolio_capital,
+        committed_capital_usd=family_committed,
         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
     )
 

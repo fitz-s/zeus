@@ -1037,6 +1037,7 @@ class PortfolioWealthWitness:
     witness_identity: str
     native_holdings_micro: tuple[tuple[str, int], ...] = ()
     pending_entry_endowments_micro: tuple[tuple[str, str, int], ...] = ()
+    native_commitments_micro: tuple[tuple[str, int], ...] = ()
 
     @property
     def economic_identity(self) -> str:
@@ -1083,6 +1084,17 @@ class PortfolioWealthWitness:
             )
         ):
             raise ValueError("portfolio pending entry endowments must be unique and positive")
+        commitments = tuple(
+            sorted(
+                (str(token), int(amount))
+                for token, amount in self.native_commitments_micro
+            )
+        )
+        if (
+            len({token for token, _ in commitments}) != len(commitments)
+            or any(not token or amount <= 0 for token, amount in commitments)
+        ):
+            raise ValueError("portfolio native commitments must be unique and positive")
         expected = portfolio_wealth_identity(
             ledger_snapshot_id=self.ledger_snapshot_id,
             position_set_hash=self.position_set_hash,
@@ -1097,6 +1109,7 @@ class PortfolioWealthWitness:
             raise ValueError("PortfolioWealthWitness identity does not bind its values")
         object.__setattr__(self, "native_holdings_micro", native_holdings)
         object.__setattr__(self, "pending_entry_endowments_micro", pending)
+        object.__setattr__(self, "native_commitments_micro", commitments)
 
 
 @dataclass(frozen=True)
@@ -1130,13 +1143,15 @@ class CandidatePortfolioEndowment:
 
 @dataclass(frozen=True)
 class FamilyPortfolioEndowment:
-    """Exact current same-family payoff vector for joint Fractional Kelly."""
+    """Exact family payoff plus cumulative portfolio/family capital ownership."""
 
     family_key: str
     payout_by_bin_usd: tuple[tuple[str, Decimal], ...]
     current_token_shares: tuple[tuple[str, Decimal], ...]
     wealth_floor_usd: Decimal
     spendable_cash_usd: Decimal
+    portfolio_capital_usd: Decimal
+    committed_capital_usd: Decimal
     ledger_snapshot_id: str
 
     def __post_init__(self) -> None:
@@ -1166,6 +1181,13 @@ class FamilyPortfolioEndowment:
             or Decimal(self.wealth_floor_usd) <= 0
             or not Decimal(self.spendable_cash_usd).is_finite()
             or Decimal(self.spendable_cash_usd) < 0
+            or not Decimal(self.portfolio_capital_usd).is_finite()
+            or Decimal(self.portfolio_capital_usd) <= 0
+            or not Decimal(self.committed_capital_usd).is_finite()
+            or Decimal(self.committed_capital_usd) < 0
+            or Decimal(self.committed_capital_usd)
+            > Decimal(self.portfolio_capital_usd)
+            or (holdings and Decimal(self.committed_capital_usd) <= 0)
         ):
             raise ValueError("family portfolio endowment is invalid")
         object.__setattr__(self, "payout_by_bin_usd", payouts)
@@ -2759,13 +2781,13 @@ def plan_family_joint_buy_targets(
     capital_limit_by_candidate: Mapping[str, Decimal],
     fractional_kelly_multiplier: Decimal,
 ) -> FamilyJointBuyPlan:
-    """Solve one MECE family jointly, then apply Fractional Kelly to the final vector.
+    """Maximize one MECE family directly inside its cumulative Fractional-Kelly budget.
 
-    The prior global selector solved each native token independently and applied κ to
-    every coordinate.  Repeated sibling BUYs therefore each received a fresh risk
-    budget.  Here the full-Kelly vector shares one cash constraint and one exact
-    same-family payoff axis.  κ is applied to the desired FINAL holding, so a later
-    epoch cannot re-apply the fraction to an already-owned target.
+    Scaling a full-bankroll optimum preserves low-efficiency sibling legs that are not
+    optimal when capital is scarce.  The executable solve therefore owns one family-wide
+    budget ``κ * portfolio capital - already committed family capital`` and optimizes
+    inside that bound.  Existing holdings and unresolved entry commitments consume the
+    same budget, so a later auction epoch cannot mint another κ allocation.
     """
 
     family = str(probability_witness.family_key)
@@ -2799,16 +2821,28 @@ def plan_family_joint_buy_targets(
     if not np.isfinite(w0).all() or np.any(w0 <= 0.0):
         return empty
 
+    fractional_budget = (
+        multiplier * Decimal(endowment.portfolio_capital_usd)
+        - Decimal(endowment.committed_capital_usd)
+    )
+    if fractional_budget <= 0:
+        return replace(
+            empty,
+            no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
+        )
+
     tranche_owner: list[int] = []
     tranche_caps: list[float] = []
     tranche_costs: list[float] = []
     tranche_payoffs: list[np.ndarray] = []
     candidate_caps: list[Decimal] = []
+    valid_capital_limits: list[Decimal] = []
     for owner, candidate in enumerate(candidates):
         limit = Decimal(capital_limit_by_candidate.get(candidate.candidate_id, 0))
         if not limit.is_finite() or limit <= 0:
             candidate_caps.append(Decimal("0"))
             continue
+        valid_capital_limits.append(limit)
         curve = candidate.executable_cost_curve
         try:
             max_shares = _single_order_max_shares_by_cost(
@@ -2851,7 +2885,14 @@ def plan_family_joint_buy_targets(
     payoff = np.stack(tranche_payoffs)
     caps = np.asarray(tranche_caps, dtype=np.float64)
     costs = np.asarray(tranche_costs, dtype=np.float64)
-    cash = float(endowment.spendable_cash_usd)
+    allocator_budget = max(valid_capital_limits, default=Decimal("0"))
+    full_cash = min(endowment.spendable_cash_usd, allocator_budget)
+    direct_cash = min(full_cash, fractional_budget)
+    if direct_cash <= 0:
+        return replace(
+            empty,
+            no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
+        )
     weights = np.ones(probability_witness.yes_q_samples.shape[0], dtype=np.float64)
     try:
         full, _u, _top1, _top1_u, _sweeps = _optimize_continuous(
@@ -2859,7 +2900,17 @@ def plan_family_joint_buy_targets(
             payoff,
             caps,
             costs,
-            cash,
+            float(full_cash),
+            probability_witness.yes_q_samples,
+            weights,
+            probability_witness.band_alpha,
+        )
+        direct, _u, _top1, _top1_u, _sweeps = _optimize_continuous(
+            w0,
+            payoff,
+            caps,
+            costs,
+            float(direct_cash),
             probability_witness.yes_q_samples,
             weights,
             probability_witness.band_alpha,
@@ -2870,12 +2921,13 @@ def plan_family_joint_buy_targets(
     full_by_candidate = [Decimal("0") for _ in candidates]
     for index, units in enumerate(full):
         full_by_candidate[tranche_owner[index]] += Decimal(str(float(units)))
+    direct_by_candidate = [Decimal("0") for _ in candidates]
+    for index, units in enumerate(direct):
+        direct_by_candidate[tranche_owner[index]] += Decimal(str(float(units)))
     held_by_token = dict(endowment.current_token_shares)
     desired: list[tuple[int, Decimal]] = []
     for index, candidate in enumerate(candidates):
-        held = held_by_token.get(candidate.token_id, Decimal("0"))
-        final_full_target = held + full_by_candidate[index]
-        additional = multiplier * final_full_target - held
+        additional = direct_by_candidate[index]
         if additional <= 0:
             continue
         additional = min(additional, candidate_caps[index])
@@ -2905,6 +2957,24 @@ def plan_family_joint_buy_targets(
             continue
         desired.append((index, legal))
     if not desired:
+        minimum_costs: list[Decimal] = []
+        for candidate in candidates:
+            minimum = _single_order_min_marketable_shares(
+                candidate.executable_cost_curve
+            )
+            if minimum is None:
+                continue
+            try:
+                minimum_costs.append(
+                    _single_order_cost(candidate.executable_cost_curve, minimum)
+                )
+            except ValueError:
+                continue
+        if minimum_costs and direct_cash < min(minimum_costs):
+            return replace(
+                empty,
+                no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
+            )
         return empty
 
     def exact_delta(pairs: Sequence[tuple[int, Decimal]]) -> float:
@@ -2954,17 +3024,14 @@ def plan_family_joint_buy_targets(
             ),
             full_kelly_target_shares=(
                 held_by_token.get(candidates[index].token_id, Decimal("0"))
-                + full_by_candidate[index]
+                + max(full_by_candidate[index], shares)
             ),
             fractional_kelly_target_shares=(
-                multiplier
-                * (
-                    held_by_token.get(
-                        candidates[index].token_id,
-                        Decimal("0"),
-                    )
-                    + full_by_candidate[index]
+                held_by_token.get(
+                    candidates[index].token_id,
+                    Decimal("0"),
                 )
+                + shares
             ),
             standalone_robust_delta_log_wealth=standalone[index],
         )

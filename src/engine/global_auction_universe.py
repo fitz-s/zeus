@@ -14,7 +14,7 @@ import sqlite3
 import time as _time
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from functools import cached_property
 from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -2721,6 +2721,7 @@ def current_portfolio_wealth_witness(
         position_max_age = timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS)
         represented_micro: dict[str, int] = {}
         uncertain_micro: dict[str, int] = {}
+        native_commitments_micro: dict[str, int] = {}
         position_rows = []
         for position in positions:
             token = _position_token(position)
@@ -2767,6 +2768,55 @@ def current_portfolio_wealth_witness(
                         evidence = "position_chain_seen"
             target = represented_micro if evidence != "uncertain_local_claim" else uncertain_micro
             target[token] = target.get(token, 0) + micro
+            try:
+                cost = max(
+                    Decimal(
+                        str(
+                            getattr(position, name, 0)
+                            or 0
+                        )
+                    )
+                    for name in (
+                        "effective_cost_basis_usd",
+                        "chain_cost_basis_usd",
+                        "cost_basis_usd",
+                        "size_usd",
+                    )
+                )
+                basis_shares = max(
+                    Decimal(str(getattr(position, name, 0) or 0))
+                    for name in ("effective_shares", "chain_shares", "shares")
+                )
+                if cost <= 0:
+                    price = max(
+                        Decimal(str(getattr(position, name, 0) or 0))
+                        for name in (
+                            "entry_price_avg_fill",
+                            "chain_avg_price",
+                            "entry_price",
+                        )
+                    )
+                    cost = basis_shares * price
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise ValueError("CURRENT_WEALTH_POSITION_COST_INVALID") from exc
+            if (
+                not cost.is_finite()
+                or not basis_shares.is_finite()
+                or cost <= 0
+                or basis_shares <= 0
+            ):
+                raise ValueError("CURRENT_WEALTH_POSITION_COST_INVALID")
+            represented_cost = cost * min(shares / basis_shares, Decimal("1"))
+            cost_micro = int(
+                (represented_cost * Decimal("1000000")).to_integral_value(
+                    rounding=ROUND_CEILING
+                )
+            )
+            if cost_micro <= 0:
+                raise ValueError("CURRENT_WEALTH_POSITION_COST_INVALID")
+            native_commitments_micro[token] = (
+                native_commitments_micro.get(token, 0) + cost_micro
+            )
             position_rows.append(
                 (
                     str(getattr(position, "trade_id", "") or ""),
@@ -2775,6 +2825,7 @@ def current_portfolio_wealth_witness(
                     chain_state,
                     str(getattr(position, "state", "") or ""),
                     evidence,
+                    cost_micro,
                 )
             )
         if token_balances:
@@ -2807,6 +2858,18 @@ def current_portfolio_wealth_witness(
             for command_id, amount in pending_cost_micro.items()
             if command_id not in inflight_command_ids
         )
+        pending_token_by_id = {
+            command_id: token
+            for command_id, token, _ in pending_endowments
+            if command_id in pending_cost_micro
+        }
+        for command_id, amount in pending_cost_micro.items():
+            token = pending_token_by_id.get(command_id)
+            if token is None or amount <= 0:
+                raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_COST_INVALID")
+            native_commitments_micro[token] = (
+                native_commitments_micro.get(token, 0) + amount
+            )
 
         pusd_micro = int(row.get("pusd_balance_micro") or 0)
         allowance_micro = int(row.get("pusd_allowance_micro") or 0)
@@ -2854,6 +2917,7 @@ def current_portfolio_wealth_witness(
                     tuple(sorted(token_balances.items())),
                     inflight_identities,
                     tuple(sorted(pending_endowments)),
+                    tuple(sorted(native_commitments_micro.items())),
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -2890,6 +2954,9 @@ def current_portfolio_wealth_witness(
             witness_identity=identity,
             native_holdings_micro=tuple(sorted(native_holdings.items())),
             pending_entry_endowments_micro=pending_endowments,
+            native_commitments_micro=tuple(
+                sorted(native_commitments_micro.items())
+            ),
         )
     finally:
         if owns_txn and trade_conn.in_transaction:

@@ -12812,6 +12812,7 @@ def test_global_selection_endowment_uses_same_chain_balance_as_wealth_witness():
         token_id="yes-a",
         no_token_id="no-a",
         chain_shares=Decimal("40.5"),
+        chain_cost_basis_usd=Decimal("25.92"),
         chain_state="synced",
         chain_verified_at="2026-07-17T05:43:00+00:00",
         state="entered",
@@ -12882,6 +12883,9 @@ def test_global_selection_counts_open_entry_without_granting_sell_inventory():
         no_token_id="no-a",
         shares=Decimal("31.6"),
         chain_shares=Decimal("31.6"),
+        cost_basis_usd=Decimal("17.696"),
+        chain_cost_basis_usd=Decimal("17.696"),
+        entry_price=Decimal("0.56"),
         chain_state="synced",
         chain_verified_at="2026-07-17T05:43:00+00:00",
         state="entered",
@@ -12946,6 +12950,7 @@ def test_global_selection_counts_open_entry_without_granting_sell_inventory():
     assert wealth.pending_entry_endowments_micro == (
         ("command-a", "no-a", 7_500_000),
     )
+    assert wealth.native_commitments_micro == (("no-a", 21_896_000),)
     assert snapshot.holdings[0].shares == Decimal("31.6")
     assert snapshot.pending_endowments[0].shares == Decimal("7.5")
     assert endowment.current_token_shares == Decimal("39.1")
@@ -12959,6 +12964,8 @@ def test_global_selection_counts_open_entry_without_granting_sell_inventory():
     )
     position.shares = Decimal("39.1")
     position.chain_shares = Decimal("39.1")
+    position.cost_basis_usd = Decimal("21.896")
+    position.chain_cost_basis_usd = Decimal("21.896")
     position.chain_verified_at = "2026-07-17T05:44:42+00:00"
     unresolved = current_portfolio_wealth_witness(
         conn,
@@ -13680,6 +13687,7 @@ def test_current_portfolio_wealth_economic_identity_ignores_heartbeat_time_only(
                 no_token_id="no-token",
                 chain_state="synced",
                 chain_shares=3.25,
+                chain_cost_basis_usd=1.625,
                 chain_verified_at=first_at.isoformat(),
                 state="entered",
             )
@@ -13762,6 +13770,7 @@ def test_current_portfolio_wealth_uses_fresh_synced_positions_when_ctf_mirror_em
                 no_token_id="no-token",
                 chain_state="synced",
                 chain_shares=3.25,
+                chain_cost_basis_usd=1.625,
                 chain_verified_at=decision_at.isoformat(),
                 state="entered",
             )
@@ -13796,6 +13805,7 @@ def test_current_portfolio_wealth_uses_fresh_ctf_mirror_over_stale_projection_ti
                 no_token_id="no-token",
                 chain_state="synced",
                 chain_shares=3.25,
+                chain_cost_basis_usd=1.625,
                 chain_verified_at="2026-07-10T07:00:00+00:00",
                 state="entered",
             )
@@ -13830,6 +13840,7 @@ def test_current_portfolio_wealth_uses_ctf_mirror_during_projection_lag():
                 chain_state="unknown",
                 chain_shares=0.0,
                 shares=14.589284,
+                cost_basis_usd=10.0,
                 fill_authority="venue_confirmed_full",
                 chain_verified_at="",
                 state="entered",
@@ -13862,6 +13873,7 @@ def test_current_portfolio_wealth_bounds_verified_fill_during_chain_lag():
                 chain_state="unknown",
                 chain_shares=0.0,
                 shares=14.589284,
+                cost_basis_usd=10.0,
                 fill_authority="venue_confirmed_full",
                 chain_verified_at="",
                 state="entered",
@@ -13927,6 +13939,7 @@ def test_current_portfolio_wealth_accepts_targeted_ctf_subset():
                 no_token_id="no-token-1",
                 chain_state="synced",
                 chain_shares=3.25,
+                chain_cost_basis_usd=1.625,
                 chain_verified_at=decision_at.isoformat(),
                 state="entered",
             ),
@@ -13937,6 +13950,7 @@ def test_current_portfolio_wealth_accepts_targeted_ctf_subset():
                 no_token_id="no-token-2",
                 chain_state="synced",
                 chain_shares=2.0,
+                chain_cost_basis_usd=1.0,
                 chain_verified_at=decision_at.isoformat(),
                 state="entered",
             ),
@@ -13977,6 +13991,7 @@ def test_current_portfolio_wealth_bounds_unverified_claim_without_spendable_cred
                 no_token_id="no-token",
                 chain_state=chain_state,
                 chain_shares=1.0,
+                chain_cost_basis_usd=0.5,
                 chain_verified_at=chain_verified_at,
                 state="entered",
             )
