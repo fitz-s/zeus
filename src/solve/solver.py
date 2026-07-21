@@ -4632,16 +4632,16 @@ def select_global_single_order(
             scored.append(score)
 
     if family_portfolio_endowment_resolver is not None:
-        joint_actionable_families = {
-            score.candidate.family_key
+        joint_positive_candidate_ids = {
+            score.candidate.candidate_id
             for score in scored
             if isinstance(score.candidate, GlobalSingleOrderCandidate)
             and score.robust_delta_log_wealth > 0.0
             and score.robust_ev_usd > _ROBUST_EV_EPS_USD
             and score.candidate.candidate_id not in rejections
         }
-        joint_actionable_families.update(
-            candidate.family_key
+        joint_positive_candidate_ids.update(
+            candidate.candidate_id
             for family_candidates in joint_buy_candidates_by_family.values()
             for candidate in family_candidates
             for economics in (
@@ -4662,7 +4662,12 @@ def select_global_single_order(
             # A positive executable probe is therefore sufficient to reach the joint
             # solve; requiring a pre-sized standalone order here would erase the very
             # family optimum this stage owns.
-            if family_key not in joint_actionable_families:
+            positive_family_candidates = tuple(
+                candidate
+                for candidate in family_candidates
+                if candidate.candidate_id in joint_positive_candidate_ids
+            )
+            if not positive_family_candidates:
                 continue
             witness = probability_witnesses.get(family_key)
             if not isinstance(witness, JointOutcomeProbabilityWitness):
@@ -4670,7 +4675,7 @@ def select_global_single_order(
             try:
                 family_endowment = family_portfolio_endowment_resolver(family_key)
                 joint_plan = plan_family_joint_buy_targets(
-                    tuple(family_candidates),
+                    positive_family_candidates,
                     probability_witness=witness,
                     endowment=family_endowment,
                     capital_limit_by_candidate=buy_capital_limits,

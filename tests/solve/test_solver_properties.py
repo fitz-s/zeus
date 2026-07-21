@@ -1098,7 +1098,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         ("33", "YES", "0.087", "550"),
         ("35", "NO", "0.64", "1300.75"),
         ("36", "NO", "0.76", "1121"),
-        ("other", "YES", "0.90", "1"),
+        ("other", "YES", "0.90", "100"),
     )
     bindings = tuple(
         S.OutcomeTokenBinding(
@@ -1131,7 +1131,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         witness_identity=S.joint_probability_witness_identity(**witness_fields),
     )
     candidates = []
-    for bin_id, side, price, depth in specs[:3]:
+    for bin_id, side, price, depth in specs:
         token = f"{side.lower()}-{bin_id}"
         binding = next(binding for binding in bindings if binding.bin_id == bin_id)
         if side == "YES":
@@ -1184,6 +1184,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         ledger_snapshot_id="ledger-current",
     )
     optimize_calls = 0
+    optimizer_shapes = []
     optimize_family = S._ru_cvar_optimum
 
     def counted_optimize(**kwargs):
@@ -1192,10 +1193,16 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         caps = kwargs["caps"]
         costs = kwargs["costs"]
         cash = kwargs["cash"]
+        optimizer_shapes.append(len(caps))
+        owners = (
+            (0, 0, 1, 2, 3)
+            if len(caps) == 5
+            else (0, 0, 1, 2)
+        )
         for owner in range(len(candidates)):
             owned = [
                 i
-                for i, tranche_owner in enumerate((0, 0, 1, 2))
+                for i, tranche_owner in enumerate(owners)
                 if tranche_owner == owner
             ]
             assert sum(costs[i] * caps[i] for i in owned) <= cash + 1e-9
@@ -1296,6 +1303,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         for row in decision.candidate_evaluations
     )
     assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
+    assert optimizer_shapes == [5, 4]
 
 
 def _global_witness(
