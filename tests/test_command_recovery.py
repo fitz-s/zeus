@@ -1560,7 +1560,9 @@ def test_terminal_entry_obligation_releases_proven_no_fill_but_not_conflict(conn
         venue_order_id="order-obligation-terminal-order",
         command_id=terminal_order,
         state="CANCEL_CONFIRMED",
-        remaining_size="0",
+        # Polymarket preserves the cancelled, unfilled residual here.  It is not
+        # live exposure once the order fact is terminal and matched_size is zero.
+        remaining_size="10",
         matched_size="0",
         source="REST",
         observed_at="2026-07-14T08:00:04+00:00",

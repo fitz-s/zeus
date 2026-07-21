@@ -7227,11 +7227,16 @@ def reconcile_terminal_entry_exposure_obligations(
             )
         )
         canonical_orders = canonical_orders_by_command.get(command_id, [])
-        terminal_zero_orders = all(
+        # CANCEL_CONFIRMED preserves the unfilled residual on Polymarket.  That
+        # remaining_size describes what was cancelled, not live exposure.  The
+        # terminal state plus zero matched size is the no-fill proof; an unknown
+        # or negative residual remains ambiguous and keeps the obligation open.
+        terminal_no_fill_orders = all(
             str(order.get("state") or "").upper()
             in _TERMINAL_NO_FILL_ORDER_FACT_STATES
             and _decimal_or_none(order.get("matched_size")) == 0
-            and _decimal_or_none(order.get("remaining_size")) == 0
+            and _decimal_or_none(order.get("remaining_size")) is not None
+            and _decimal_or_none(order.get("remaining_size")) >= 0
             for order in canonical_orders
         )
         terminal_no_fill = (
@@ -7239,7 +7244,7 @@ def reconcile_terminal_entry_exposure_obligations(
             and bool(row.get("no_fill_confirmed"))
             and not bool(row.get("trade_exposure_or_unknown"))
             and not bool(row.get("execution_fill_or_unknown"))
-            and terminal_zero_orders
+            and terminal_no_fill_orders
         )
         terminal_partial = _terminal_partial_entry_obligation_proven(
             conn,
