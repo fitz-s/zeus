@@ -6214,12 +6214,11 @@ def test_urgent_exit_monitor_takes_handoff_after_reactor_preemption(
     assert result == [True]
 
 
-def test_urgent_exit_monitor_yields_to_newer_day0_wake(monkeypatch) -> None:
+def test_urgent_exit_monitor_finishes_before_newer_day0_wake(monkeypatch) -> None:
     import src.execution.exit_lifecycle as exit_module
     import src.main as main_module
     from src.runtime import reactor_wake
 
-    revisions = iter(((1, 1, 1), (2, 2, 2)))
     captured = {}
 
     class ReactorGate:
@@ -6231,7 +6230,7 @@ def test_urgent_exit_monitor_yields_to_newer_day0_wake(monkeypatch) -> None:
 
     def _run(**kwargs) -> bool:
         captured.update(kwargs)
-        assert kwargs["should_preempt_for_urgent_day0"]() is True
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
         kwargs["mark_held_position_monitor_complete"]()
         return True
 
@@ -6241,12 +6240,12 @@ def test_urgent_exit_monitor_yields_to_newer_day0_wake(monkeypatch) -> None:
     monkeypatch.setattr(
         reactor_wake,
         "reactor_urgent_wake_revision",
-        lambda: next(revisions),
+        lambda: pytest.fail("same-priority wake revision must not preempt"),
     )
     monkeypatch.setattr(
         reactor_wake,
         "reactor_urgent_wake_reason",
-        lambda: "day0_extreme_event_committed",
+        lambda: pytest.fail("same-priority wake reason must not preempt"),
     )
 
     assert (

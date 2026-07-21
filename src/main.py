@@ -6400,23 +6400,11 @@ def _exit_monitor_cycle(
 
             should_preempt_for_urgent_day0 = _day0_wake_pending
         elif urgent_day0:
-            from src.runtime.reactor_wake import (
-                reactor_urgent_wake_reason,
-                reactor_urgent_wake_revision,
-            )
-
-            urgent_revision = reactor_urgent_wake_revision()
-
-            def _newer_day0_wake_pending() -> bool:
-                current = reactor_urgent_wake_revision()
-                return (
-                    current is not None
-                    and current != urgent_revision
-                    and reactor_urgent_wake_reason()
-                    == "day0_extreme_event_committed"
-                )
-
-            should_preempt_for_urgent_day0 = _newer_day0_wake_pending
+            # Same-priority Day0 wakes are durable and run next.  Preempting an
+            # in-flight urgent batch on every newer observation creates a
+            # livelock when observations arrive faster than the batch can scan:
+            # the tail positions never receive a MONITOR_REFRESHED decision.
+            should_preempt_for_urgent_day0 = lambda: False
         else:
             # A Day0 producer wake is not itself held-position work. Entry-only
             # facts intentionally bypass the targeted monitor, so letting their
