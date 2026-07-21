@@ -584,10 +584,10 @@ def wu_metar_anomaly_action(
         if now_monotonic - last_failure < _WU_CHECK_FAILURE_RETRY_S:
             return None
 
-    from src.data.observation_client import get_current_observation
+    from src.data.observation_client import get_live_wu_observation
 
     try:
-        wu_obs = get_current_observation(city, target_date=target_date)
+        wu_obs = get_live_wu_observation(city, target_date=target_date)
     except Exception as exc:  # noqa: BLE001 — WU side fail-soft, loud
         with _WU_CHECK_MEMO_LOCK:
             _WU_CHECK_FAILURE_MEMO[city_name] = now_monotonic

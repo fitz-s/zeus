@@ -1077,3 +1077,28 @@ antibodies, resting-order rejection, immediate-order permission, bounded POST
 rate with fresh status writes, standard deployment, and a natural receipt that
 selects CASH or a positive executable order without heartbeat priority
 inversion.
+
+## 2026-07-21 live WU source truth versus durable continuity
+
+The 48-hour loss audit separated a market/forecast miss from a source-routing
+defect. Same-station METAR prints reached the append-only publication ledger
+within seconds, but WU-settled positions intentionally applied a one-unit
+divergence margin until the settlement source confirmed the crossing. The
+direct WU client could supply that confirmation; however,
+`get_current_observation` returned any existing canonical
+`observation_instants` context before contacting WU. Consequently the
+WU-vs-METAR anomaly guard compared no live WU side at all, and the hard-fact
+lane's nominal `wu_api` refresh could actually be an older durable row.
+
+The source contract is now explicit. `get_live_wu_observation` can return only
+a current `wu_api` context and fails closed instead of substituting durable or
+METAR evidence. The WU anomaly guard and WU hard-fact confirmation use that
+narrow contract; HKO and general continuity consumers keep the existing
+canonical-capable path. Successful live WU observations remain memoized for
+ten minutes per city/date, while failures retry after two minutes, preventing
+per-position HTTP amplification without freezing recovery for a full success
+interval. Acceptance requires provider-isolation antibodies, failure-backoff
+proof, the complete Day0 fast-observation/hard-fact suites, one read-only live
+WU probe with station/source identity, standard deployment, and natural monitor
+evidence that a WU-confirmed crossing dominates the prior probabilistic belief
+before the settlement-channel hourly row arrives.

@@ -67,6 +67,7 @@ UTC = timezone.utc
 #: part of the memo key: WU and HKO facts have different semantics and must not
 #: share cached authority merely because city/date match.
 _CURRENT_SOURCE_FETCH_INTERVAL_S = 600.0
+_CURRENT_SOURCE_FAILURE_RETRY_S = 120.0
 SAME_STATION_FAST_TAIL_SOURCE = "same_station_fast_tail"
 COMBINED_WU_FAST_TAIL_SOURCE = f"wu_api+{SAME_STATION_FAST_TAIL_SOURCE}"
 _CURRENT_SOURCE_MEMO: dict[
@@ -623,6 +624,7 @@ def _current_source_rounded_extremes(
     now: datetime,
     source_family: str,
     accepted_sources: Collection[str],
+    observation_getter: Any,
 ) -> tuple[Optional[float], Optional[float]]:
     """Read and round extrema only when the observation matches its source family."""
     city_name = str(getattr(city, "name", ""))
@@ -630,14 +632,19 @@ def _current_source_rounded_extremes(
     monotonic_now = time.monotonic()
     with _CURRENT_SOURCE_MEMO_LOCK:
         cached = _CURRENT_SOURCE_MEMO.get(key)
-        if cached is not None and monotonic_now - cached[0] < _CURRENT_SOURCE_FETCH_INTERVAL_S:
-            return cached[1], cached[2]
+        if cached is not None:
+            retry_after = (
+                _CURRENT_SOURCE_FETCH_INTERVAL_S
+                if cached[1] is not None or cached[2] is not None
+                else _CURRENT_SOURCE_FAILURE_RETRY_S
+            )
+            if monotonic_now - cached[0] < retry_after:
+                return cached[1], cached[2]
     high = low = None
     try:
         from src.contracts.settlement_semantics import SettlementSemantics
-        from src.data.observation_client import get_current_observation
 
-        obs = get_current_observation(city, target_date=target_date, reference_time=now)
+        obs = observation_getter(city, target_date=target_date, reference_time=now)
         observed_source = str(getattr(obs, "source", "") or "").strip().lower()
         allowed = {str(source).strip().lower() for source in accepted_sources}
         if observed_source not in allowed:
@@ -668,12 +675,15 @@ def _wu_rounded_extremes(
     city: Any, target_date: str, *, now: datetime
 ) -> tuple[Optional[float], Optional[float]]:
     """Rounded WU bucket extrema for a WU-settled contract."""
+    from src.data.observation_client import get_live_wu_observation
+
     return _current_source_rounded_extremes(
         city,
         target_date,
         now=now,
         source_family="wu",
-        accepted_sources=("wu_api", "wu_icao_history"),
+        accepted_sources=("wu_api",),
+        observation_getter=get_live_wu_observation,
     )
 
 
@@ -681,12 +691,15 @@ def _hko_rounded_extremes(
     city: Any, target_date: str, *, now: datetime
 ) -> tuple[Optional[float], Optional[float]]:
     """Rounded latest official HKO cumulative extrema for an HKO contract."""
+    from src.data.observation_client import get_current_observation
+
     return _current_source_rounded_extremes(
         city,
         target_date,
         now=now,
         source_family="hko",
         accepted_sources=("hko_hourly_accumulator",),
+        observation_getter=get_current_observation,
     )
 
 

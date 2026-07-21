@@ -2119,7 +2119,7 @@ class TestMutexNoHttpSplit:
             )
 
         monkeypatch.setattr(db_writer_lock, "db_writer_lock", forbidden_lock)
-        monkeypatch.setattr("src.data.observation_client.get_current_observation", wu_obs)
+        monkeypatch.setattr("src.data.observation_client.get_live_wu_observation", wu_obs)
 
         t0 = datetime(2026, 6, 9, 15, 0, tzinfo=UTC)  # Jun 10 00:00 JST
         reports = [
@@ -2485,7 +2485,7 @@ class TestAnomalyPausePersistence:
             raise RuntimeError("WU outage")
 
         monkeypatch.setattr(
-            "src.data.observation_client.get_current_observation", failing_wu
+            "src.data.observation_client.get_live_wu_observation", failing_wu
         )
         city = _tokyo()
         extremes = SimpleNamespace(target_date="2026-06-10")
@@ -2520,7 +2520,7 @@ class TestAnomalyPausePersistence:
             )
 
         monkeypatch.setattr(
-            "src.data.observation_client.get_current_observation", wu_obs
+            "src.data.observation_client.get_live_wu_observation", wu_obs
         )
         city = _tokyo()
         extremes = SimpleNamespace(target_date="2026-06-10")

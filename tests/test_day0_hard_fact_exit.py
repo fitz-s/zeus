@@ -42,6 +42,7 @@ from src.execution.day0_hard_fact_exit import (
     _final_daily_observation_extreme,
     _hko_rounded_extremes,
     _reset_wu_memo_for_tests,
+    _wu_rounded_extremes,
     cancel_day0_dead_bin_resting_entries,
     day0_entry_bin_still_alive,
     evaluate_hard_fact_exit,
@@ -782,6 +783,55 @@ class TestSourceDiscipline:
 
         assert high == pytest.approx(29.0)
         assert low == pytest.approx(25.0)
+
+    def test_wu_current_extrema_require_live_wu_provider(self, monkeypatch):
+        calls = []
+
+        def live_wu(city, target_date, reference_time):
+            calls.append((city.name, target_date, reference_time))
+            return SimpleNamespace(
+                source="wu_api", high_so_far=36.0, low_so_far=19.0
+            )
+
+        monkeypatch.setattr(
+            "src.data.observation_client.get_live_wu_observation",
+            live_wu,
+        )
+        monkeypatch.setattr(
+            "src.data.observation_client.get_current_observation",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stale canonical-capable getter must not serve live WU")
+            ),
+        )
+        _reset_wu_memo_for_tests()
+
+        high, low = _wu_rounded_extremes(_paris(), "2026-07-20", now=NOW)
+
+        assert high == pytest.approx(36.0)
+        assert low == pytest.approx(19.0)
+        assert calls == [("Paris", "2026-07-20", NOW)]
+
+    def test_wu_live_failure_uses_short_retry_memo(self, monkeypatch):
+        import src.execution.day0_hard_fact_exit as hard_fact
+
+        calls = []
+
+        def failing_live_wu(*_args, **_kwargs):
+            calls.append(True)
+            raise RuntimeError("WU unavailable")
+
+        clock = iter((0.0, 60.0, 121.0))
+        monkeypatch.setattr(hard_fact.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(
+            "src.data.observation_client.get_live_wu_observation",
+            failing_live_wu,
+        )
+        _reset_wu_memo_for_tests()
+
+        assert _wu_rounded_extremes(_paris(), "2026-07-20", now=NOW) == (None, None)
+        assert _wu_rounded_extremes(_paris(), "2026-07-20", now=NOW) == (None, None)
+        assert _wu_rounded_extremes(_paris(), "2026-07-20", now=NOW) == (None, None)
+        assert len(calls) == 2
 
     def _observation_instants_conn(self):
         conn = sqlite3.connect(":memory:")

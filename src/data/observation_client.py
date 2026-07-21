@@ -681,6 +681,43 @@ def _fetch_same_station_fast_tail_observation(
     )
 
 
+def get_live_wu_observation(
+    city: City,
+    target_date: date | str | None = None,
+    reference_time: datetime | str | None = None,
+) -> Day0ObservationContext:
+    """Fetch current WU settlement-source truth without a durable-cache substitute.
+
+    ``get_current_observation`` prefers canonical ``observation_instants`` when
+    present.  That is correct for continuity, but it is not proof that WU's live
+    provider has not advanced since the latest durable row.  Callers comparing
+    WU against the same-station fast channel, or asking whether WU itself has
+    crossed an absorbing bin edge, require this narrower source contract.
+    """
+
+    if str(getattr(city, "settlement_source_type", "") or "").strip() != "wu_icao":
+        raise ObservationUnavailableError(
+            f"Live WU observation unsupported for "
+            f"{city.name}/{city.settlement_source_type}"
+        )
+    target_day, _reference_utc, reference_local, tz = _resolve_observation_context(
+        city,
+        target_date=target_date,
+        reference_time=reference_time,
+    )
+    result = _fetch_wu_observation(
+        city,
+        target_day=target_day,
+        reference_local=reference_local,
+        tz=tz,
+    )
+    if result is None or str(getattr(result, "source", "") or "") != "wu_api":
+        raise ObservationUnavailableError(
+            f"Live WU observation unavailable for {city.name}/{target_day.isoformat()}"
+        )
+    return result
+
+
 def get_current_observation(
     city: City,
     target_date: date | str | None = None,

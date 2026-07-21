@@ -422,6 +422,59 @@ class TestGetCurrentObservationFastTail:
         assert result.source == "wu_api"
         mock_emitter.latest_extremes.assert_not_called()
 
+
+class TestLiveWuObservation:
+    def test_bypasses_canonical_and_fast_tail_substitutes(self, monkeypatch):
+        import src.data.observation_client as oc
+        from src.data.observation_client import Day0ObservationContext
+
+        city = _wu_icao_city()
+        ref = datetime(2026, 6, 12, 18, 0, tzinfo=UTC)
+        live = Day0ObservationContext(
+            current_temp=84.0,
+            high_so_far=84.0,
+            low_so_far=65.0,
+            source="wu_api",
+            observation_time=ref.isoformat(),
+            unit="F",
+            coverage_status="OK",
+        )
+        monkeypatch.setattr(
+            oc,
+            "_fetch_canonical_observation_from_instants",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("live WU source must not read canonical cache")
+            ),
+        )
+        monkeypatch.setattr(
+            oc,
+            "_fetch_same_station_fast_tail_observation",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("live WU source must not substitute METAR")
+            ),
+        )
+        monkeypatch.setattr(oc, "_fetch_wu_observation", lambda *_args, **_kwargs: live)
+
+        assert oc.get_live_wu_observation(
+            city,
+            target_date=date(2026, 6, 12),
+            reference_time=ref,
+        ) is live
+
+    def test_missing_live_wu_fails_closed(self, monkeypatch):
+        import src.data.observation_client as oc
+        from src.contracts.exceptions import ObservationUnavailableError
+
+        city = _wu_icao_city()
+        monkeypatch.setattr(oc, "_fetch_wu_observation", lambda *_args, **_kwargs: None)
+
+        with pytest.raises(ObservationUnavailableError, match="Live WU observation unavailable"):
+            oc.get_live_wu_observation(
+                city,
+                target_date=date(2026, 6, 12),
+                reference_time=datetime(2026, 6, 12, 18, 0, tzinfo=UTC),
+            )
+
     def test_non_wu_icao_city_fast_lane_never_fires(self):
         """B3: non-wu_icao city → ObservationUnavailableError, fast lane never consulted."""
         from src.contracts.exceptions import ObservationUnavailableError
