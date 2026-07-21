@@ -12493,7 +12493,10 @@ def _global_actuation_current_admission_proofs(
     selected = matches[0]
     missing_reason = str(getattr(selected, "missing_reason", "") or "")
     if not missing_reason.startswith(
-        "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:"
+        (
+            "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:",
+            "ADMISSION_BUY_NO_REPLACEMENT_BOUND_CERTIFICATE_MISSING:",
+        )
     ):
         return proofs
     if side != "NO":

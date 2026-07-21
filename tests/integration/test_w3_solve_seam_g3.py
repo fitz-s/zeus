@@ -11456,7 +11456,14 @@ def _current_global_book_probability():
     return result.global_family.probability_witness
 
 
-def test_global_actuation_rebinds_only_selected_day0_buy_no_admission():
+@pytest.mark.parametrize(
+    "missing_reason",
+    (
+        "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:test",
+        "ADMISSION_BUY_NO_REPLACEMENT_BOUND_CERTIFICATE_MISSING:test",
+    ),
+)
+def test_global_actuation_rebinds_only_selected_buy_no_admission(missing_reason):
     witness = _current_global_book_probability()
     family, proofs, _ = _corpus()[0]
     binding = witness.bindings[0]
@@ -11470,9 +11477,7 @@ def test_global_actuation_rebinds_only_selected_day0_buy_no_admission():
         proof,
         q_posterior=0.1,
         q_lcb_5pct=0.0,
-        missing_reason=(
-            "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:test"
-        ),
+        missing_reason=missing_reason,
     )
     sibling = next(
         row
