@@ -1091,7 +1091,7 @@ def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
     )
 
 
-def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
+def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch):
     family = "guangzhou-joint-kelly"
     captured_at = _DECISION_AT - timedelta(milliseconds=100)
     specs = (
@@ -1183,6 +1183,25 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
         committed_capital_usd=Decimal("0"),
         ledger_snapshot_id="ledger-current",
     )
+    optimize_calls = 0
+    optimize_continuous = S._optimize_continuous
+
+    def counted_optimize(*args, **kwargs):
+        nonlocal optimize_calls
+        optimize_calls += 1
+        caps = args[2]
+        costs = args[3]
+        cash = args[4]
+        for owner in range(len(candidates)):
+            owned = [
+                i
+                for i, tranche_owner in enumerate((0, 0, 1, 2))
+                if tranche_owner == owner
+            ]
+            assert sum(costs[i] * caps[i] for i in owned) <= cash + 1e-9
+        return optimize_continuous(*args, **kwargs)
+
+    monkeypatch.setattr(S, "_optimize_continuous", counted_optimize)
     plan = S.plan_family_joint_buy_targets(
         tuple(candidates),
         probability_witness=witness,
@@ -1202,6 +1221,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
     assert Decimal("500") <= target_by_id["candidate-33-YES"] <= Decimal("505")
     assert "candidate-35-NO" not in target_by_id
     assert "candidate-36-NO" not in target_by_id
+    assert optimize_calls == 1
 
     payout = {bin_id: Decimal("0") for bin_id in witness.bin_ids}
     holdings = []
@@ -1241,6 +1261,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
     assert repeated.primary_candidate_id is None
     assert repeated.no_trade_reason == "FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED"
     assert repeated.fractional_target_cost_usd == 0
+    assert optimize_calls == 1
 
     bound_candidates = tuple(
         replace(
