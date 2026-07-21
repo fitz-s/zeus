@@ -12981,6 +12981,61 @@ class TestRecoveryResolutionTable:
         }
         assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
 
+    def test_confirmed_rest_fill_and_dust_order_fact_clear_review_without_active_projection(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.06, price=0.60)
+        _advance_to_acked(conn, venue_order_id="ord-confirmed-dust")
+        _append_trade_fact(
+            conn,
+            order_id="ord-confirmed-dust",
+            trade_id="trade-confirmed-dust",
+            state="CONFIRMED",
+            filled_size="5.05",
+            fill_price="0.60",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-confirmed-dust",
+            state="PARTIALLY_MATCHED",
+            matched_size="5.05",
+            remaining_size="0.01",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-confirmed-dust"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "venue_order_id": "ord-confirmed-dust",
+            },
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        event = _get_events(conn, "cmd-001")[-1]
+        assert event["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == (
+            "review_required_matched_order_fact_with_positive_trade_fact"
+        )
+
     def test_filled_entry_execution_fact_repair_preserves_position_increments(
         self,
         conn,

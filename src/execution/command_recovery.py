@@ -9576,6 +9576,121 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                 venue_order_id=venue_order_id,
             )
             filled_size = str(trade_summary.get("filled_size") or "0")
+            confirmed_rows = conn.execute(
+                "WITH " + _canonical_trade_fact_cte() + """
+                SELECT trade_fact_id,
+                       trade_id,
+                       venue_order_id,
+                       state,
+                       filled_size,
+                       fill_price,
+                       source,
+                       observed_at,
+                       venue_timestamp,
+                       tx_hash
+                  FROM canonical_trade_fact
+                 WHERE command_id = ?
+                   AND venue_order_id = ?
+                   AND state = 'CONFIRMED'
+                   AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+                   AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
+                 ORDER BY proof_rank DESC, local_sequence DESC
+                """,
+                (command_id, venue_order_id),
+            ).fetchall()
+            order_fact = _latest_order_fact_for_command_order(
+                conn,
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+            )
+            if (
+                len(confirmed_rows) == 1
+                and order_fact
+                and _matched_cancel_residual_is_dust(
+                    command, order_fact, filled_size
+                )
+            ):
+                confirmed_fact = _dict_row(confirmed_rows[0])
+                fact_size = str(confirmed_fact.get("filled_size") or "")
+                fact_price = str(confirmed_fact.get("fill_price") or "")
+                if (
+                    _decimal_or_none(fact_size) == _decimal_or_none(filled_size)
+                    and _decimal_or_none(order_fact.get("matched_size"))
+                    == _decimal_or_none(filled_size)
+                ):
+                    observed_at = str(
+                        confirmed_fact.get("venue_timestamp")
+                        or confirmed_fact.get("observed_at")
+                        or _now_iso()
+                    )
+                    payload = {
+                        "reason": "review_cleared_confirmed_fill",
+                        "proof_class": (
+                            "review_required_matched_order_fact_with_positive_trade_fact"
+                        ),
+                        "command_id": command_id,
+                        "venue_order_id": venue_order_id,
+                        "trade_id": str(confirmed_fact.get("trade_id") or ""),
+                        "filled_size": fact_size,
+                        "fill_price": fact_price,
+                        "latest_order_fact_id": order_fact.get("fact_id"),
+                        "latest_order_fact_state": order_fact.get("state"),
+                        "latest_order_fact_remaining_size": order_fact.get(
+                            "remaining_size"
+                        ),
+                        "latest_order_fact_matched_size": order_fact.get(
+                            "matched_size"
+                        ),
+                        "required_predicates": {
+                            "command_state_review_required": True,
+                            "latest_event_is_review_boundary": True,
+                            "positive_trade_fact": True,
+                            "matched_order_fact_positive": True,
+                            "trade_facts_cover_command_or_leave_only_dust": True,
+                        },
+                        "trade_fact_proof": {
+                            "trade_fact_id": confirmed_fact.get("trade_fact_id"),
+                            "state": confirmed_fact.get("state"),
+                            "source": confirmed_fact.get("source"),
+                            "observed_at": confirmed_fact.get("observed_at"),
+                            "venue_timestamp": confirmed_fact.get(
+                                "venue_timestamp"
+                            ),
+                            "tx_hash": confirmed_fact.get("tx_hash"),
+                        },
+                        "source_proof": {
+                            "source_commit": "runtime",
+                            "source_function": (
+                                "command_recovery."
+                                "reconcile_matched_cancel_review_required_entries"
+                            ),
+                            "source_reason": (
+                                "matched_order_fact_confirmed_trade_dust_clearance"
+                            ),
+                        },
+                        "reviewed_by": "command_recovery",
+                        "cleared_at": observed_at,
+                    }
+                    safe_command_id = "".join(
+                        ch if ch.isalnum() else "_" for ch in command_id
+                    )
+                    sp_name = f"sp_confirmed_dust_review_{safe_command_id}"
+                    conn.execute(f"SAVEPOINT {sp_name}")
+                    try:
+                        append_event(
+                            conn,
+                            command_id=command_id,
+                            event_type=CommandEventType.FILL_CONFIRMED.value,
+                            occurred_at=observed_at,
+                            payload=payload,
+                        )
+                        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    except Exception:
+                        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                        raise
+                    summary["advanced"] += 1
+                    continue
             if (
                 bool(trade_summary.get("authenticated_confirmed"))
                 and _matched_cancel_residual_is_dust(command, {}, filled_size)
