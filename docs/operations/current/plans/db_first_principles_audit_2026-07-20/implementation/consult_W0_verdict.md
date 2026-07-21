@@ -1,3 +1,5 @@
+> **编辑注(Zeus 法)**:本文是外部 GPT-5.6 consult 的 verbatim 记录。其中 "shadow-read / shadow mode / B shadow"(§ "Implement W0-b … in shadow/report-only mode"、"Activation order: B shadow → …")是外部术语。**Zeus 已根除 shadow modes**(operator 指令 2026-06-12,root AGENTS §2:不得作为 staging tier 重引入)。落地时一律读作 **report-only 一次性 log-only 校验**(不插 lot、非变更、验完即切),不得实现为常驻并行分层。权威落法见 `W0_RUNBOOK.md` 激活顺序 step 1。
+
 Verdict — NO-GO as specified; high confidence. The generalized table rebuild is the right operation and is crash-atomic in one single-file WAL transaction, but the live procedure has five blockers: the app writer-lock is not fleet-complete, SELECT * is unsafe under known schema drift, the old AUTOINCREMENT high-water may be lost, both post-check PRAGMAs are accidentally fleet-wide, and W0-c lacks a proven per-fill idempotency key. Correct those and W0-a is GO without changing journal mode.
 
 Revisions and confirmations

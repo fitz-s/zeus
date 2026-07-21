@@ -1,3 +1,5 @@
+> **编辑注(Zeus 法)**:本文是外部 GPT-5.6 consult 的 verbatim 记录。其无下线切换段落用 "Shadow-read and compare" 是外部术语。**Zeus 已根除 shadow modes**(operator 指令 2026-06-12,root AGENTS §2)。落地一律读作 report-only 一次性 log-only 校验(非变更、验完即切),不得实现为常驻并行分层。
+
 Verdict
 
 Do not run a fleet-wide dbstat census, full ANALYZE, VACUUM, page-size change, or blocking checkpoint against these live files. The immediate problem is not that SQLite has crossed a nominal size limit. It is that three separate risks have accumulated in one failure domain:

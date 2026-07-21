@@ -36,7 +36,7 @@ AND position_lots 中该精确不可变 fill 身份的经济量 < canonical fill
 **必须先测的运行事实**:venue_trade_facts 是 **fill-grain(一 fill 一不可变行)还是 cumulative-snapshot-grain**?这一条决定最终 SQL(fill-grain→按 stable fill id 建 lot;cumulative→取 canonical 最新累计事实,只插正 shortfall)。→ W0-b 前置探针。
 
 ## 激活顺序(consult 定;答我原问题 f)
-1. 实现 W0-b,**shadow/report-only** 跑新旧谓词对比(不插 lot)。
+1. 实现 W0-b,以 **report-only 一次性校验**(仅计算并记录新旧谓词的 diff,**不插 lot、非变更**)跑对比。**禁 shadow**:这不是 shadow 模式、不是常驻并行分层——Zeus 已根除 shadow tier(operator 指令 2026-06-12,root AGENTS §2);这是激活前的一次性 log-only 验证,验完即切,不留常驻旁路。consult 原文用 "shadow-read/shadow mode",系外部术语,此处按 Zeus 法改为 report-only。
 2. 落地目标 db.py DDL + 迁移脚本 + antibody + schema 指纹。
 3. 取**全 trades 写者 fence** + 暂停显式 checkpoint owner。
 4. 采集并校验 rollback capsule。
