@@ -541,3 +541,41 @@ class TestSingleModeAuthorityFreshSide:
             decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
         )
         assert mode == "MAKER"
+
+    def test_global_current_escalation_crosses_ask_only_book(self, monkeypatch):
+        """The terminal global objective outranks an absent resale bid."""
+
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        from src.engine import event_reactor_adapter as era
+        from src.strategy.live_inference.mode_consistent_ev import (
+            POLICY_TAKER_ESCALATED_AFTER_REST,
+        )
+
+        monkeypatch.setattr(
+            era,
+            "_qkernel_current_state_solve_economics",
+            lambda _cert: True,
+        )
+        mode = era._fresh_rest_then_cross_mode(
+            actionable_payload={
+                "direction": "buy_no",
+                "q_lcb_5pct": 0.787521,
+                "c_fee_adjusted": 0.61,
+                "rest_then_cross_policy": POLICY_TAKER_ESCALATED_AFTER_REST,
+                "qkernel_execution_economics": {
+                    "global_robust_delta_log_wealth": 0.000037166,
+                    "global_robust_ev_usd": 1.325012,
+                },
+            },
+            executable_snapshot=SimpleNamespace(
+                payload={"market_end_at": "2026-07-22T04:00:00+00:00"}
+            ),
+            fresh_best_bid=None,
+            fresh_best_ask=0.61,
+            tick_size=0.01,
+            decision_time=datetime(2026, 7, 21, 20, 30, tzinfo=timezone.utc),
+        )
+
+        assert mode == "TAKER"

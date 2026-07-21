@@ -2183,6 +2183,75 @@ def test_global_current_state_proof_preserves_rest_then_cross_policy():
     assert current.maker_limit_price == pytest.approx(0.31)
 
 
+def test_global_current_winner_crosses_ask_only_after_real_maker_window(monkeypatch):
+    """A missing resale bid cannot erase a positive terminal global objective."""
+
+    from dataclasses import replace
+
+    proof = replace(
+        _overlay_proof(
+            q_posterior=0.96584,
+            q_lcb_5pct=0.787521,
+            economics=_selected_economics(
+                edge_lcb=0.165626,
+                cost=0.621895,
+                q_dot_payoff=0.96584,
+                point_ev=0.343945,
+            ),
+        ),
+        execution_mode_intent="MAKER",
+        rest_then_cross_policy="MAKER_TAKER_FORBIDDEN",
+        maker_limit_price=0.60,
+        ev_taker=0.165626,
+        taker_forbidden_reason=(
+            "TAKER_FORBIDDEN_RELATIVE_SPREAD:spread=unmeasurable:max=0.30"
+        ),
+        p_fill_lcb=0.25,
+    )
+    cert = {
+        **proof.qkernel_execution_economics,
+        "payoff_q_point": 0.96584,
+        "payoff_q_lcb": 0.787521,
+        "edge_lcb": 0.165626,
+        "false_edge_rate": 0.01,
+        "global_robust_delta_log_wealth": 0.000037166,
+        "global_robust_ev_usd": 1.325012,
+    }
+    monkeypatch.setattr(
+        era,
+        "_qkernel_current_state_solve_economics",
+        lambda _cert: True,
+    )
+
+    current = era._bind_global_current_state_economics_to_proof(proof, cert)
+
+    assert current.execution_mode_intent == "TAKER"
+    assert current.rest_then_cross_policy == "TAKER_ESCALATED_AFTER_REST"
+    assert current.taker_forbidden_reason is None
+    assert current.p_fill_lcb == pytest.approx(1.0)
+    assert current.maker_limit_price == pytest.approx(0.60)
+
+    non_positive = era._bind_global_current_state_economics_to_proof(
+        proof,
+        {**cert, "global_robust_delta_log_wealth": 0.0},
+    )
+    assert non_positive.execution_mode_intent == "MAKER"
+    assert non_positive.rest_then_cross_policy == "MAKER_TAKER_FORBIDDEN"
+
+    wide_two_sided = era._bind_global_current_state_economics_to_proof(
+        replace(
+            proof,
+            taker_forbidden_reason=(
+                "TAKER_FORBIDDEN_RELATIVE_SPREAD:spread=1.2000:max=0.30"
+            ),
+            relative_spread_at_eval=1.2,
+        ),
+        cert,
+    )
+    assert wide_two_sided.execution_mode_intent == "MAKER"
+    assert wide_two_sided.rest_then_cross_policy == "MAKER_TAKER_FORBIDDEN"
+
+
 def test_global_maker_preflight_does_not_require_taker_fragmentation_proof(
     monkeypatch,
 ):

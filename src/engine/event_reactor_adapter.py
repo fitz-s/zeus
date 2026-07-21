@@ -11974,6 +11974,48 @@ def _global_current_state_economics_seed(proof: "_CandidateProof") -> dict[str, 
     return cert
 
 
+def _positive_global_current_objective(cert: Mapping[str, Any]) -> bool:
+    """Whether one sealed current-state winner improves robust terminal wealth."""
+
+    if not _qkernel_current_state_solve_economics(cert):
+        return False
+    delta_log_wealth = _optional_float(cert.get("global_robust_delta_log_wealth"))
+    robust_ev = _optional_float(cert.get("global_robust_ev_usd"))
+    return bool(
+        delta_log_wealth is not None
+        and robust_ev is not None
+        and delta_log_wealth > 0.0
+        and robust_ev > 0.0
+    )
+
+
+def _global_current_one_sided_escalation(
+    proof: "_CandidateProof",
+    cert: Mapping[str, Any],
+) -> bool:
+    """Admit an ask-only cross only after a real maker window and global solve.
+
+    ``MAKER_TAKER_FORBIDDEN`` plus a measurable maker limit means the shared
+    rest-then-cross policy reached its post-rest escalation lane but rejected the
+    executable ask solely because no bid existed to define a spread.  For a sealed
+    global winner, terminal payoff, ask depth, fee, correlated family endowment and
+    robust utility are already priced together.  A missing resale bid is therefore
+    not a second economic objective.  Wide *two-sided* books remain forbidden.
+    """
+
+    reason = str(getattr(proof, "taker_forbidden_reason", "") or "")
+    ev_taker = _optional_float(getattr(proof, "ev_taker", None))
+    return bool(
+        str(getattr(proof, "rest_then_cross_policy", "") or "").strip().upper()
+        == "MAKER_TAKER_FORBIDDEN"
+        and getattr(proof, "maker_limit_price", None) is not None
+        and "spread=unmeasurable" in reason
+        and ev_taker is not None
+        and ev_taker > 0.0
+        and _positive_global_current_objective(cert)
+    )
+
+
 def _bind_global_current_state_economics_to_proof(
     proof: "_CandidateProof",
     cert: Mapping[str, Any],
@@ -12014,15 +12056,25 @@ def _bind_global_current_state_economics_to_proof(
         or not (0.0 <= false_edge_rate <= 1.0)
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_NON_POSITIVE")
+    replacement: dict[str, Any] = {
+        "q_lcb_5pct": q_lcb,
+        "trade_score": edge_lcb,
+        "p_value": false_edge_rate,
+        "passed_prefilter": True,
+        "missing_reason": None,
+        "qkernel_execution_economics": dict(cert),
+        "selection_authority_applied": "qkernel_spine",
+    }
+    if _global_current_one_sided_escalation(proof, cert):
+        replacement.update(
+            execution_mode_intent="TAKER",
+            rest_then_cross_policy="TAKER_ESCALATED_AFTER_REST",
+            taker_forbidden_reason=None,
+            p_fill_lcb=1.0,
+        )
     return dataclass_replace(
         proof,
-        q_lcb_5pct=q_lcb,
-        trade_score=edge_lcb,
-        p_value=false_edge_rate,
-        passed_prefilter=True,
-        missing_reason=None,
-        qkernel_execution_economics=dict(cert),
-        selection_authority_applied="qkernel_spine",
+        **replacement,
     )
 
 
@@ -16328,6 +16380,22 @@ def _fresh_rest_then_cross_mode(
         price=fresh_best_ask,
         q_decision_lcb=float(q_lcb),
     )
+    economics = actionable_payload.get("qkernel_execution_economics")
+    if (
+        escalated_after_rest
+        and fresh_best_bid is None
+        and fresh_best_ask is not None
+        and taker_all_in is not None
+        and taker_all_in <= float(q_exec_lcb_value) + 1e-9
+        and isinstance(economics, Mapping)
+        and _positive_global_current_objective(economics)
+    ):
+        # A selected global winner already priced the executable ask depth, fee,
+        # full same-family terminal payoff vector and robust wealth delta.  After
+        # its real maker window, absence of a resale bid cannot invalidate that
+        # settlement-held objective.  A present-but-wide two-sided book still
+        # flows through the ordinary spread guard below.
+        return "TAKER"
     mode_ev = select_rest_then_cross_mode(
         q_lcb=float(q_lcb),
         q_exec_lcb=q_exec_lcb_value,
