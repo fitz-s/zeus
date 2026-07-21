@@ -99,8 +99,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     rot = _rot_audit(Path(a.manifest), state)
     if rot:
         failed = True
-        print(f"GATE FAIL — {len(rot)} droppable-labeled table(s) are actually LIVE "
-              "(a registry drop would delete live data). Run audit_manifest_rot.py for the list.")
+        print(f"GATE FAIL — {len(rot)} droppable-labeled table(s) still hold data/a writer with no "
+              "canonical sibling; confirm each is fully drained/retired (and not a live-authority "
+              "mislabel) before any label-keyed drop. Run audit_manifest_rot.py for the list.")
     else:
         print("GATE OK — no manifest rot.")
 

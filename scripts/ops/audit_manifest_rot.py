@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[2]
-_DB_FILE = {"trade": "zeus_trades.db", "world": "zeus-world.db", "forecast": "zeus-forecasts.db"}
+_DB_FILE = {"trade": "zeus_trades.db", "world": "zeus-world.db", "forecasts": "zeus-forecasts.db"}
 _GHOST_NOTE = re.compile(r"ghost|drop after|residual drift|deprecated", re.IGNORECASE)
 
 
@@ -146,10 +146,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             a.state_dir = str(ROOT / "state")
     rot = audit(Path(a.manifest), Path(a.state_dir))
     if not rot:
-        print("MANIFEST-ROT: none — no droppable-labeled table has rows or a live writer.")
+        print("PRE-DROP OK: no droppable-labeled table (with no canonical sibling) still holds "
+              "data or a writer.")
         return 0
-    print(f"MANIFEST-ROT: {len(rot)} droppable-labeled table(s) are actually LIVE "
-          "(a drop keyed on the label would delete live data):")
+    # These are droppable-labeled tables that still hold rows or have a same-named writer and
+    # have NO canonical (owning-class) sibling. In a correct manifest these are legitimately-
+    # labeled legacy tables (superseded / retired / migration artifacts) that are simply not yet
+    # physically dropped — NOT live-authority mislabels. The gate blocks a BLIND label-keyed drop
+    # so the operator confirms each is fully drained/retired first (and rules out a genuine
+    # mislabel by checking the writer's target DB — the writer signal here is name-only).
+    print(f"PRE-DROP REVIEW: {len(rot)} droppable-labeled table(s) still hold data or a writer "
+          "and have no canonical sibling — confirm each is fully drained/retired before any "
+          "label-keyed drop (rule out a genuine live-authority mislabel):")
     for r in sorted(rot, key=lambda x: (x["db"], x["name"])):
         print(f"  [{r['db']}] {r['name']}  label={r['label']}  has_rows={r['has_rows']}  live_writer={r['live_writer']}")
     return 1
