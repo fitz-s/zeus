@@ -2,7 +2,7 @@
 
 > Created: 2026-05-26
 > Authority basis: external CI topology refactor spec supplied by operator on 2026-05-26 (out-of-repo authoring artifact) + live-run reconciliation against `scripts/topology_doctor.py` (active authority).
-> Status: PROPOSED, awaiting operator sign-off.
+> Status: IMPLEMENTED (2026-07-21 re-verified) — the CI/topology infra this refines is built and cited as "Authority basis" by `architecture/{ci_overrides,failure_chains,topology_surfaces}.yaml` and `scripts/ci/context_pack_gate_router.py`. The "PROPOSED, awaiting sign-off" line was stale.
 
 ## 1. Why this is a refinement, not a rewrite
 

@@ -19,8 +19,8 @@ results stand, X1 (event-driven re-decision) is affirmed as core law, and K4's
 replay as a design-time analysis tool is not a runtime shadow lane and was never
 banned.
 
-Status: AUTHORITY (clean-room consult-3, GPT Pro, no Zeus context). Raw archived at
-`consult3_exit_portfolio_execution_2026-06-13_raw.txt`. Confidence: HIGH for Q1
+Status: AUTHORITY (clean-room consult-3, GPT Pro, no Zeus context). Raw archived under
+`docs/archive/` (moved 2b158c02a). Confidence: HIGH for Q1
 fixed-position exit formulas, Q2 horse-race Kelly, the stop-loss-not-distinct proof;
 MEDIUM-HIGH for Q2 mean-variance/robust; MEDIUM for Q3 (microstructure, replay-gated).
 
@@ -178,7 +178,7 @@ cadences, riskguard alert thresholds, min-fills licenses.
 ═══════════════════════════════════════════════════════════════════════════════
 ## IMPLEMENTATION PRIORITY (consult-3 ranking, mapped to Zeus tasks)
 ═══════════════════════════════════════════════════════════════════════════════
-1. **BLOCKER — Q1 exit capability** (Zeus has none). Build `exit_fraction_binary`
+1. **Q1 exit — binary only; E6 fraction unbuilt.** `Position.evaluate_exit` (src/state/portfolio.py:992) is live but returns a strict bool `should_exit` (ExitDecision, portfolio.py:123-131 — no fraction field). Build the `exit_fraction_binary` E6 partial-exit fraction
    with depth-aware proceeds + position/wealth awareness + blended q_exit (E5a) +
    CI-licensed sell/hold margin + the e-process suspension (E5b). Maps to task #52
    (take-profit lane) + the exit-threshold hardcodes (sweep rank 31). The Denver

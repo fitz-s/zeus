@@ -1,4 +1,4 @@
-Status: ACTIVE
+Status: DIAGNOSTICS-ONLY raw consult input (2026-07-21) — unverified clean-room dump (see this file's own tail disclaimer), NOT live law. Under the single-q regime the residual/floor/mixture calibration machinery here is diagnostics-only; the "Step 1" joint (b_loc,k) migration prescribed below never shipped (scripts/fit_sigma_scale.py still fits only (k,w)). Index: statistical_calibration_authority_2026-06-12_README.md.
 
 Verdict
 

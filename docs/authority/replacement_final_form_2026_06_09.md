@@ -150,7 +150,7 @@ q[bin] = bin_probability_settlement(mu=μ*, sigma=σ_pred, bin_bounds, half_step
 q_shape provenance = "fused_normal_direct"
 ```
 
-`src/calibration/emos.bin_probability_settlement` (lines 427–485) is the single settlement integrator — preimage math, Celsius bounds, half_step=0.5 for precision=1. `src/data/replacement_forecast_materializer.py:1040–1062`.
+`src/calibration/emos.bin_probability_settlement` (emos.py:580) is the single settlement integrator — preimage math, Celsius bounds, half_step=0.5 for precision=1, and a `rounding_rule` param (wmo_half_up vs oracle_truncate for HK). `src/data/replacement_forecast_materializer.py:1040–1062`.
 
 The Normal is the maximum-entropy distribution determined by the observable
 current center and variance; it does not add a fitted tail or a market anchor.

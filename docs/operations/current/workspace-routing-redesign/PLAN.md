@@ -4,7 +4,7 @@
 <!-- Last reused or audited: 2026-06-14 -->
 <!-- Authority basis: operator brief 2026-06-14 (workspace sprawl + context-management revolution); architecture/file_arrangement.yaml; .claude/hooks/{dispatch.py,registry.yaml}; scripts/{topology_doctor_docs_checks.py,zpkt.py,worktree_doctor.py}; Claude Code hooks doc (code.claude.com/docs/en/hooks). -->
 
-**Status:** DESIGN APPROVED — implementation GATED (no code until operator authorizes a build step).
+**Status:** IMPLEMENTED (2026-07-21 re-verified) — `route_write.py` is live and registered BLOCKING in `.claude/hooks/registry.yaml` (sunset 2026-12-14); the router this design specifies is built and wired (`dispatch.py`, `architecture/file_arrangement.yaml`, `scripts/zpkt.py`). Design of record retained; the earlier "GATED, no code" line was stale.
 **This file dogfoods its own design:** it is a work-artifact, so it lives in its own by-work folder `docs/operations/current/workspace-routing-redesign/` with its `scope.yaml` sibling — exactly where the router (R20) would route it.
 
 ---

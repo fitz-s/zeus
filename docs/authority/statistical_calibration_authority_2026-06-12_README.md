@@ -1,6 +1,6 @@
 # Statistical calibration authority (2026-06-12)
 
-Status: ACTIVE
+Status: DIAGNOSTICS-ONLY (2026-07-21). Under the single-q regime (root AGENTS.md; `replacement_final_form_2026_06_09.md`; `regime_unification_2026-06-12.md`) this residual/floor/mixture calibration chain is diagnostics-only, not live law. It is also unverified consult input (advisory until each step's walk-forward gate passes locally).
 
 Source: clean-room math consult REQ-20260612-174119 (zero Zeus context by operator
 directive — derivations from first principles + literature only). Full text:
@@ -11,7 +11,7 @@ walk-forward gate passes locally; the gates themselves are specified in the text
 
 1. k_wrong² = k_true² + (δ/σ)² — variance-only spread fit ABSORBS unmodeled center
    bias. Our k=1.5833 ⇒ RMS unmodeled bias ≈ 1.22σ if true scale ≈1. The current
-   state/sigma_scale_fit.json artifact is certified-contaminated; superseded by Step 1.
+   state/sigma_scale_fit.json artifact is certified-contaminated. NB: the Step 1 joint (b_loc,k) replacement never shipped (as of 2026-07-21 `scripts/fit_sigma_scale.py` still fits only (k,w)); the artifact remains the live diagnostic input cited by replacement_final_form.
 2. (b_loc, k_cluster) jointly identifiable from interval-censored categorical
    likelihood given ≥2 finite bin boundaries (proof in text). Estimator: MLE/MAP with
    empirical-Bayes shrinkage S_ℓ = τ²/(τ²+s_ℓ²), (b0, τ) by marginal likelihood.

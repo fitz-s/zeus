@@ -3,8 +3,8 @@
 Status: ACTIVE — authority extension of `statistical_calibration_authority_2026-06-12.txt`.
 Sources (three independent derivations, cross-validated by convergence):
 1. **Consult-2** (GPT Pro, no-Zeus-context): era-mixture fitting, two-stage
-   contamination, correlated-bin multiplicity, maker/taker. Raw answer archived at
-   `consult2_era_contamination_fdr_maker_2026-06-13_raw.txt`.
+   contamination, correlated-bin multiplicity, maker/taker. Raw answer archived under
+   `docs/archive/` (moved 2b158c02a).
 2. **GPT addendum** ("superior frameworks" follow-up, operator-forwarded 2026-06-13).
 3. **Fable addendum** (independent same-prompt run, operator-forwarded 2026-06-13).
 

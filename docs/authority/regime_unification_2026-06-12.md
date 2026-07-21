@@ -72,6 +72,8 @@ budgets) migrate to fitted artifacts on touch.
 
 ## U5 — Execution order
 
+_Status re-verified 2026-07-21: item 1 DONE; items 2–5 NOT shipped. Item 3 (retire edli_live_scope as a live gate) unexecuted — `src/engine/event_reactor_adapter.py:6745,6953` still hard-gate admission on `edli_live_scope != "forecast_plus_day0"`; item 5 (edli_per_city_v1 retirement) likewise open — `src/forecast/debias_authority.py` still documents live read+subtract. This checklist has drifted; migrate it to an operations packet on next touch._
+
 1. ✅ DONE 2026-06-12 (commit 479cb34446): Wave-2 batch — baseline-cap exit (single q
    authority), mode-string two-state (edli_live), σ-floor per-cell (no flags),
    refuted-branch deletion (code + keys), taker fold. Deployed all daemons 18:09Z.

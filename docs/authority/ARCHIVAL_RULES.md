@@ -1,7 +1,7 @@
 # Operations Packet Archival Rules
 
-Status: SPEC
-Companion: `PURGE_CATEGORIES.md` (Category 4 names the rule;
+Status: ACTIVE
+Companion: `PURGE_CATEGORIES.md` (archived under docs/archive/, 2026-05-23 fdfa9bdb1 — Category 4 names the rule;
 this file specifies the criteria, evidence, and exemption logic in detail)
 
 ## Why Archival Is Hard

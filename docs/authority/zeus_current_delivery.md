@@ -1,6 +1,6 @@
 # Zeus Current Delivery Law
 
-Status: active delivery authority
+Status: ACTIVE
 Scope: authority order, boot order, planning lock, packet doctrine, autonomy limits, demotion/promotion hygiene, completion evidence
 
 ---
@@ -26,8 +26,9 @@ It is the single default entrypoint for workspace governance and delivery law.
 
 ## 2. Authority Order
 
-Use this order when deciding what may land:
+Canonical authority order is root `AGENTS.md` §1 (Direct instructions > Routers/AGENTS > Executable law > Authority docs > current facts > references > derived context > archives). This is the delivery-landing view of it:
 
+0. direct operator instructions (supersede everything below)
 1. executable source, tests, DB/event/projection truth
 2. machine manifests under `architecture/**`
 3. `docs/authority/zeus_current_architecture.md`
