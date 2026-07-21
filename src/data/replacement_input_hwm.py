@@ -187,6 +187,21 @@ def latest_raw_artifact_input_cycle(
     }
     if not required.issubset(columns):
         return None
+    if {"source_id", "product_id"}.issubset(columns):
+        try:
+            data_version_row = conn.execute("PRAGMA data_version").fetchone()
+            data_version = int(data_version_row[0]) if data_version_row is not None else -1
+            return _raw_artifact_cycle_for_frozen_request(
+                conn,
+                table_ref,
+                frozenset(columns),
+                key,
+                decision_iso,
+                data_version,
+                conn.total_changes,
+            )
+        except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
+            return None
     predicates = [
         "json_extract(artifact_metadata_json, '$.city') = ?",
         "json_extract(artifact_metadata_json, '$.target_date') = ?",
@@ -213,16 +228,6 @@ def latest_raw_artifact_input_cycle(
         try:
             data_version_row = conn.execute("PRAGMA data_version").fetchone()
             data_version = int(data_version_row[0]) if data_version_row is not None else -1
-            if {"source_id", "product_id"}.issubset(columns):
-                return _raw_artifact_cycle_for_frozen_request(
-                    conn,
-                    table_ref,
-                    frozenset(columns),
-                    key,
-                    decision_iso,
-                    data_version,
-                    conn.total_changes,
-                )
             cached = dict(
                 _raw_artifact_cycles_for_frozen_target(
                     conn,

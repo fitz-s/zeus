@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-07-21
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -733,3 +733,73 @@ def test_scalar_frozen_artifact_hwm_uses_product_cycle_partition() -> None:
         for statement in traced
     )
     assert not any("JOIN REQUESTED" in statement.upper() for statement in traced)
+
+
+def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            product_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_raw_forecast_artifacts_product_cycle
+            ON raw_forecast_artifacts(source_id, product_id, source_cycle_time)
+        """
+    )
+    conn.executemany(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+                "2026-06-07T00:00:00+00:00",
+                "2026-06-07T06:00:00+00:00",
+                "2026-06-07T06:00:00+00:00",
+                json.dumps(
+                    {"city": "Tokyo", "target_date": _TARGET_DATE, "metric": _METRIC}
+                ),
+            ),
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+                "2026-06-07T06:00:00+00:00",
+                "2026-06-07T12:00:00+00:00",
+                "2026-06-07T12:00:00+00:00",
+                json.dumps(
+                    {"city": _CITY, "target_date": _TARGET_DATE, "metric": _METRIC}
+                ),
+            ),
+        ),
+    )
+    conn.commit()
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    cycle = latest_raw_artifact_input_cycle(
+        conn,
+        city=_CITY,
+        target_date=_TARGET_DATE,
+        metric=_METRIC,
+        decision_time=datetime(2026, 6, 7, 13, tzinfo=UTC),
+    )
+    conn.set_trace_callback(None)
+
+    assert cycle == datetime(2026, 6, 7, 6, tzinfo=UTC)
+    payload_queries = [
+        statement.upper()
+        for statement in traced
+        if "FROM RAW_FORECAST_ARTIFACTS" in statement.upper()
+        and "ARTIFACT_METADATA_JSON" in statement.upper()
+    ]
+    assert payload_queries
+    assert all("SOURCE_CYCLE_TIME =" in statement for statement in payload_queries)
