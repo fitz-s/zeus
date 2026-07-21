@@ -558,6 +558,11 @@ class TestSingleModeAuthorityFreshSide:
             "_qkernel_current_state_solve_economics",
             lambda _cert: True,
         )
+        monkeypatch.setattr(
+            era,
+            "_event_bound_q_exec_lcb",
+            lambda **kwargs: (float(kwargs["q_decision_lcb"]), None),
+        )
         mode = era._fresh_rest_then_cross_mode(
             actionable_payload={
                 "direction": "buy_no",
