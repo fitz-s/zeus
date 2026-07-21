@@ -109,6 +109,7 @@ _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = (
     | frozenset(
         {
             "edli_command_recovery",
+            "edli_day0_hourly_refresh",
             "c3_staleness_cancel",
             "live_health_composite",
         }
@@ -5957,11 +5958,13 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     See that function's docstring for the vector-refresh lane it runs.
 
     The reactor and redecision locks are dispatcher-owned scheduling primitives.
-    Held-position monitoring does not exclude this producer: fresh hourly vectors
-    are its probability input, and their DB persist lock is already non-blocking.
-    This hook atomically admits the background refresh on the shared reactor lane
-    and injects only the resulting active/inactive state.
+    The first full held-position pass reads the already-persisted current evidence
+    without competing with this background scan. After bootstrap, fresh vectors
+    resume and their durable wake triggers targeted re-monitoring.
     """
+    if _defer_for_held_position_monitor("edli_day0_hourly_refresh"):
+        return
+
     from src.events.reactor import run_edli_day0_hourly_refresh_cycle
 
     trading_lane_active = _edli_redecision_screen_lock.locked()

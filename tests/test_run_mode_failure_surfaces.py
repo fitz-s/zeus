@@ -6650,6 +6650,7 @@ def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) 
     for job_name in (
         "edli_event_reactor",
         "edli_command_recovery",
+        "edli_day0_hourly_refresh",
         "c3_staleness_cancel",
         "live_health_composite",
     ):
@@ -6665,6 +6666,7 @@ def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) 
     bootstrap_complete.set()
     for job_name in (
         "edli_command_recovery",
+        "edli_day0_hourly_refresh",
         "c3_staleness_cancel",
         "live_health_composite",
     ):
