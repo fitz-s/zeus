@@ -40,6 +40,23 @@ def _dangling_fks(state_dir: Path) -> list[tuple[str, str, str, str]]:
     return out
 
 
+def _stray_db_files(state_dir: Path) -> list[tuple[str, int]]:
+    """Decoy DB files that shadow a canonical one under the opposite dash/underscore spelling.
+    zeus_trades.db (canonical) vs zeus-trades.db (decoy), etc. A wrong-separator open under
+    fail-open connect creates/uses one of these EMPTY files instead of erroring."""
+    canonical = set(_DB_FILES)
+    decoys = []
+    for f in canonical:
+        # the opposite-separator spelling of each canonical name
+        alt = f.replace("_", "-") if "_" in f else f.replace("-", "_")
+        if alt == f:
+            continue
+        p = state_dir / alt
+        if p.exists():
+            decoys.append((alt, p.stat().st_size))
+    return decoys
+
+
 def _state_dir(arg: Optional[str]) -> Path:
     if arg:
         return Path(arg)
@@ -67,6 +84,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"  [{f}] {child}.{col} -> MISSING {parent}")
     else:
         print("GATE OK — no dangling foreign keys.")
+
+    strays = _stray_db_files(state)
+    if strays:
+        failed = True
+        print(f"GATE FAIL — {len(strays)} stray/decoy DB file(s) (wrong dash/underscore separator; "
+              "opening one silently yields an EMPTY DB, the fail-open-connect hazard):")
+        for name, size in strays:
+            print(f"  {name}  ({size} bytes)")
+    else:
+        print("GATE OK — no stray/decoy DB files.")
 
     from scripts.ops.audit_manifest_rot import audit as _rot_audit
     rot = _rot_audit(Path(a.manifest), state)

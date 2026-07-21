@@ -54,3 +54,13 @@ def test_manifest_rot_fails_the_gate(tmp_path):
     r = _run(state, m)
     assert r.returncode == 1
     assert "droppable-labeled" in r.stdout
+
+
+def test_stray_decoy_db_fails_the_gate(tmp_path):
+    state = tmp_path / "state"; state.mkdir()
+    c = sqlite3.connect(str(state / "zeus_trades.db"))  # canonical
+    c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)"); c.commit(); c.close()
+    (state / "zeus-trades.db").write_bytes(b"")  # decoy (dash instead of underscore), 0 bytes
+    r = _run(state, _clean_manifest(tmp_path))
+    assert r.returncode == 1
+    assert "stray/decoy" in r.stdout
