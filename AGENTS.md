@@ -24,7 +24,7 @@ SessionStart injects only a prefix of this file; this digest keeps the whole law
 
 **Docs & registries [§4 — registry-route table].** Unregistered files are invisible; every added/renamed/deleted file updates its owning registry. Current-fact docs are summary-only, evidence-backed, expiry-bound. No root coordination/scratch files unless asked.
 
-**Change control [§5].** `main` = live (traded 24/7; never commit direct, never mutate its checkout — `maintree_git_state_guard`); all work in a worktree, land via hot-fix cherry-pick (urgent money-path defect) or milestone PR (paid review once — batch); `type(scope): subject`; no destructive git; preserve unrelated dirty work; gates never weakened to land faster.
+**Change control [§5].** `live` is the live branch (traded 24/7; never commit direct, never mutate its checkout — `maintree_git_state_guard`); all work in a worktree, land via hot-fix cherry-pick (urgent money-path defect) or milestone PR (paid review once — batch); `type(scope): subject`; no destructive git; preserve unrelated dirty work; gates never weakened to land faster.
 
 **Review [§6 + REVIEW.md first].** Runtime-risk order (Tier 0 live-money before all); empty findings + partial coverage ≠ clean pass.
 
@@ -287,14 +287,14 @@ Unregistered files are invisible to future agents. Treat a missing registry row 
 
 ## 5. Change Control
 
-### Live branch (main = live)
+### Live branch (`live`)
 
-`main` is the **live** branch: the exact tree the running engine trades from continuously — a 24/7 mesh of scheduled jobs and event-woken agents, not a staging or integration branch. A commit on `main` is a commit the live daemons will act on within one reload.
+`live` is the **live** branch: the exact tree the running engine trades from continuously — a 24/7 mesh of scheduled jobs and event-woken agents, not a staging or integration branch. A commit on `live` is a commit the live daemons will act on within one reload.
 
-- **Never commit to `main` directly; never mutate the live checkout's git state.** The daemons run from that checkout; switching or force-moving it out from under them is a live incident. Enforced by `maintree_git_state_guard` — deliberate operator moves prefix `MAINTREE_GIT_BYPASS=1`.
+- **Never commit to `live` directly; never mutate the live checkout's git state.** The daemons run from that checkout; switching or force-moving it out from under them is a live incident. Enforced by `maintree_git_state_guard` — deliberate operator moves prefix `MAINTREE_GIT_BYPASS=1`.
 - **All work happens in a linked worktree/branch, is proven there, then lands on live promptly** so the running code reloads and stays coherent. Two landing lanes, chosen by urgency × blast-radius:
   - **Hot-fix** — a live defect degrading the money path (wrong settlement, dropped exit, fail-open admission, an unbounded hang). The smallest correct change plus a minimal antibody, `git cherry-pick`ed onto live as soon as it proves out. The bar is "restores correct live operation without new risk"; speed is the point.
-  - **PR** — functional / milestone work (a feature, a new invariant + antibody tests, a schema migration with coverage, a gate). Open a PR into `main`, pass the required gates and review, then merge. Paid review fires once — batch related work (≥300 self-authored LOC).
+  - **PR** — functional / milestone work (a feature, a new invariant + antibody tests, a schema migration with coverage, a gate). Open a PR into `live`, pass the required gates and review, then merge. Paid review fires once — batch related work (≥300 self-authored LOC).
 - **Freshness and fail-closed gates are never weakened to land faster.** The §0 alpha-clock and failure-isolation invariants bind every money-path change, both lanes.
 - **Multi-agent live-repair:** many agents are woken concurrently (improvement loop, failing gate, review, monitor, operator) to inspect and repair live. The **main thread is integrator + landing authority**; agents own bounded slices. Discipline: **one owner per file/slice**; parallel editors isolated in separate worktrees; each agent **verifies the defect is real, ships a behavioral antibody, and proves zero new regressions** before its commit counts; remaining findings are **adversarially dispositioned** (fix/refute/defer-with-rationale) before landing; integrate by **disjoint cherry-pick onto the current live tip** with a base-vs-integrated diff; land small and often. Never clobber concurrent live-ops — rebase onto the current tip, and a dirty live checkout is a coordination point, not a force. Lowest model tier that fits the slice; the top tier only for outcome-deciding money-path logic. Full protocol: `docs/operations/current/plans/live_branch_workflow_2026-07-20.md`.
 
@@ -308,7 +308,7 @@ Commits use `type(scope): subject`. Add body only when why/tested scope/residual
 
 Open PRs only for milestone-level changes: complete feature, new invariant plus antibody tests, security gate, schema migration with coverage, or equivalent. Single-function fixes, partial implementations, incremental docs, and local packet iterations stay in the worktree branch. Every PR consumes paid automated review once; batch related work before opening. Template: `.github/pull_request_template.md`.
 
-Never run destructive git commands (`reset --hard`, `checkout .`, `clean -f`, force-push to main) or overwrite unrelated dirty work. Preserve runtime artifacts, untracked inputs, other packets, and user edits unless the active packet explicitly governs them.
+Never run destructive git commands (`reset --hard`, `checkout .`, `clean -f`, force-push to live) or overwrite unrelated dirty work. Preserve runtime artifacts, untracked inputs, other packets, and user edits unless the active packet explicitly governs them.
 
 ## 6. Review Tasks
 

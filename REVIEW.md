@@ -285,8 +285,8 @@ author or human reviewer can use to pre-prune the review surface.
 To machine-classify the PR diff into Tiers and get an advisory check:
 
 ```
-python3 scripts/review_scope_collect.py --base origin/main
-python3 scripts/review_scope_collect.py --base origin/main --json
+python3 scripts/review_scope_collect.py --base origin/live
+python3 scripts/review_scope_collect.py --base origin/live --json
 ```
 
 The collector groups changed paths into Tier 0/1/2/3 using the definitions in

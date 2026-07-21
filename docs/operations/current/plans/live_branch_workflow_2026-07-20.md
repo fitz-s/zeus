@@ -1,18 +1,18 @@
-# Live-branch workflow (main = live)
+# Live-branch workflow (`live`)
 
 Status: ACTIVE — established 2026-07-20. Promote the binding clauses into `AGENTS.md` §5 (Change control) at the operator's discretion; until then this doc is the workflow of record.
 
-## What `main` is now
+## What `live` is now
 
-`main` is the **live** branch: the exact tree the running Zeus engine trades from continuously. It is not a staging or integration branch. A commit reaching `main` is a commit the live daemons will act on.
+`live` is the **live** branch: the exact tree the running Zeus engine trades from continuously. It is not a staging or integration branch. A commit reaching `live` is a commit the live daemons will act on.
 
 ## The law
 
-1. **Never commit to `main` directly, and never mutate the main checkout's git state.** The live daemons run from `/Users/leofitz/zeus` on the live branch; switching or force-moving that checkout out from under them is the 2026-06-12 hijack incident. The `maintree_git_state_guard` enforces this — deliberate operator moves prefix `MAINTREE_GIT_BYPASS=1`.
+1. **Never commit to `live` directly, and never mutate the live checkout's git state.** The live daemons run from `/Users/leofitz/zeus` on the live branch; switching or force-moving that checkout out from under them is the 2026-06-12 hijack incident. The `maintree_git_state_guard` enforces this — deliberate operator moves prefix `MAINTREE_GIT_BYPASS=1`.
 2. **All work happens in a worktree.** Branch a linked worktree (`.claude/worktrees/agent-*` or `git worktree add`) off live, make the change there, and prove it there.
 3. **Landing on live is cherry-pick or PR only.**
    - Small, isolated, reviewed change → `git cherry-pick` onto live (or `scripts/agent_worktree_merge.py`).
-   - Anything larger, or anything that wants review → open a **PR into `main`** and merge after review.
+   - Anything larger, or anything that wants review → open a **PR into `live`** and merge after review.
    - Nothing reaches live without passing review. Opening a PR fires paid auto-reviewers; bundle related work into one PR (≥300 self-authored LOC) per `architecture/agent_pr_discipline_2026_05_09.md`.
 4. **Freshness and fail-closed gates are never weakened to land faster.** The alpha-clock and failure-isolation invariants in `docs/operations/current/GOAL.md` bind every change that touches the money path.
 
@@ -26,7 +26,7 @@ git push origin --delete <absorbed-branch>   # only if merged into live and no o
 
 ## Multi-agent live-repair protocol
 
-`main` runs 24/7 as a mesh of scheduled jobs; a mechanism (the improvement loop, a failing gate, a code review, a monitor alert, or an operator ask) wakes work. Many agents may repair concurrently. The **main thread is the integrator and landing authority** — it holds full context and owns alignment, integration, final verification, and the landing decision; agents own bounded slices and prove them in isolation.
+`live` runs 24/7 as a mesh of scheduled jobs; a mechanism (the improvement loop, a failing gate, a code review, a monitor alert, or an operator ask) wakes work. Many agents may repair concurrently. The **main thread is the integrator and landing authority** — it holds full context and owns alignment, integration, final verification, and the landing decision; agents own bounded slices and prove them in isolation.
 
 1. **Wake → align.** Reconcile the trigger into a precise work-list: per item, the exact `file:line` and the disposition to prove — *fix* / *refute* / *defer-with-rationale*. Alignment precedes fan-out; a vague brief buys well-argued irrelevance.
 

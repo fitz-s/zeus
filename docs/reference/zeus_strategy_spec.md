@@ -53,7 +53,7 @@ The strongest actionable strategy family is **deterministic/vector payoff arbitr
 
 When this document is used by future agents, resolve conflicts in the following order:
 
-1. **Executable code and tests at current `origin/main`.** Code wins over prose when implementation state disagrees.
+1. **Executable code and tests at current `origin/live`.** Code wins over prose when implementation state disagrees.
 2. **Architecture and invariant files** under `architecture/**`, especially strategy registry and DB ownership.
 3. **`docs/reference/zeus_math_spec.md`** for unit handling, bins, calibration, FDR, Kelly, and training-pair mathematics.
 4. **This document** for strategy-level mathematical theses, proof forms, and implementation direction.

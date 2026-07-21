@@ -103,7 +103,7 @@ For an `ARCHIVE_CANDIDATE` packet:
    `<original-name>\t<archived-to>\t<exemption-checks-passed>`
 6. The `git mv` and stub-write happen in a single commit on a dedicated
    branch named `maintenance/archive-<YYYY-MM-DD>`. The commit message lists
-   every archived packet. PR opened against main with `[maintenance]` tag.
+   every archived packet. PR opened against live with `[maintenance]` tag.
 
 The agent does NOT merge the PR. Human merges after spot-check.
 
