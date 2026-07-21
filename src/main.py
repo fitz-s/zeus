@@ -109,9 +109,14 @@ _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = (
     | frozenset(
         {
             "edli_command_recovery",
+            "edli_continuous_redecision_screen",
             "edli_day0_hourly_refresh",
             "c3_staleness_cancel",
             "live_health_composite",
+            "settlement_guard_report",
+            "settlement_skill_attribution",
+            "trades_wal_checkpoint",
+            "world_wal_checkpoint",
         }
     )
 )
@@ -1115,6 +1120,9 @@ def _settlement_guard_report_tick() -> None:
     Idempotent + cheap (one read-only pass over graded tables); n=0 produces an
     honest report, never a crash. Import is local to keep src.main import-light.
     """
+    if _defer_for_held_position_monitor("settlement_guard_report"):
+        return
+
     from src.analysis.settlement_guard_report import run_settlement_guard_report
 
     run_settlement_guard_report()
@@ -1140,6 +1148,8 @@ def _settlement_skill_attribution_tick() -> None:
     historically-settled position on first run. Sole writer of
     settlement_attribution. Import local to keep src.main import-light.
     """
+    if _defer_for_held_position_monitor("settlement_skill_attribution"):
+        return
     if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
         logger.info(
             "settlement_skill_attribution skipped: live money-path cycle active"
@@ -5345,6 +5355,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     function itself: it is a plain mutable dict (no lock lifecycle), still
     mutated directly by the command-recovery cluster here in main.py.
     """
+    if _defer_for_held_position_monitor("edli_continuous_redecision_screen"):
+        return
     if _defer_for_active_entry_reactor("edli_redecision_screen"):
         return
 
@@ -5449,6 +5461,9 @@ def _world_wal_checkpoint_cycle() -> None:
     must not wait behind live writers, so it cannot block held-position monitor
     redecision. Fail-soft via the decorator.
     """
+    if _defer_for_held_position_monitor("world_wal_checkpoint"):
+        return
+
     from src.state.db import checkpoint_world_wal
 
     busy, log_frames, ckpt_frames = checkpoint_world_wal()
@@ -5482,6 +5497,9 @@ def _trades_wal_checkpoint_cycle() -> None:
     not releasing the trade-DB floor. PASSIVE mode must not wait behind the live
     monitor writer. Fail-soft via the decorator.
     """
+    if _defer_for_held_position_monitor("trades_wal_checkpoint"):
+        return
+
     from src.state.db import checkpoint_trades_wal
 
     busy, log_frames, ckpt_frames = checkpoint_trades_wal()

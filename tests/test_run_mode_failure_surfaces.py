@@ -6631,6 +6631,8 @@ def test_entry_reactor_monitor_defer_contract_is_effective(monkeypatch) -> None:
 
 
 def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) -> None:
+    import inspect
+
     import src.main as main_module
     import src.runtime.reactor_wake as wake_module
 
@@ -6650,11 +6652,33 @@ def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) 
     for job_name in (
         "edli_event_reactor",
         "edli_command_recovery",
+        "edli_continuous_redecision_screen",
         "edli_day0_hourly_refresh",
         "c3_staleness_cancel",
         "live_health_composite",
+        "settlement_guard_report",
+        "settlement_skill_attribution",
+        "trades_wal_checkpoint",
+        "world_wal_checkpoint",
     ):
         assert main_module._defer_for_held_position_monitor(job_name) is True
+
+    routed_jobs = {
+        main_module._edli_continuous_redecision_screen_cycle: (
+            "edli_continuous_redecision_screen"
+        ),
+        main_module._edli_day0_hourly_refresh_cycle: "edli_day0_hourly_refresh",
+        main_module._live_health_composite_cycle: "live_health_composite",
+        main_module._settlement_guard_report_tick: "settlement_guard_report",
+        main_module._settlement_skill_attribution_tick: "settlement_skill_attribution",
+        main_module._trades_wal_checkpoint_cycle: "trades_wal_checkpoint",
+        main_module._world_wal_checkpoint_cycle: "world_wal_checkpoint",
+    }
+    for job, job_name in routed_jobs.items():
+        assert (
+            f'_defer_for_held_position_monitor("{job_name}")'
+            in inspect.getsource(job)
+        )
 
     monkeypatch.setattr(
         wake_module,
@@ -6666,9 +6690,14 @@ def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) 
     bootstrap_complete.set()
     for job_name in (
         "edli_command_recovery",
+        "edli_continuous_redecision_screen",
         "edli_day0_hourly_refresh",
         "c3_staleness_cancel",
         "live_health_composite",
+        "settlement_guard_report",
+        "settlement_skill_attribution",
+        "trades_wal_checkpoint",
+        "world_wal_checkpoint",
     ):
         assert main_module._defer_for_held_position_monitor(job_name) is False
 
