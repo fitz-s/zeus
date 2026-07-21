@@ -72,6 +72,33 @@ def test_live_writer_alone_flags(tmp_path, monkeypatch):
     assert next(r for r in rot if r["name"] == "empty_archived")["live_writer"] is True
 
 
+def test_legacy_archived_with_canonical_sibling_is_not_rot(tmp_path, monkeypatch):
+    """A legacy_archived copy is a legitimate ghost when a canonical (owning-class) sibling
+    for the same name exists in another DB — must NOT be flagged (that was the 80->17 fix)."""
+    state = tmp_path / "state"; state.mkdir()
+    c = sqlite3.connect(str(state / "zeus_trades.db"))
+    c.execute("CREATE TABLE dc (id INTEGER)"); c.execute("INSERT INTO dc VALUES (1)")  # ghost copy has stale rows
+    c.commit(); c.close()
+    man = tmp_path / "m.yaml"
+    man.write_text("tables:\n"
+                   "  - name: dc\n    db: trade\n    schema_class: legacy_archived\n    notes: ghost\n"
+                   "  - name: dc\n    db: world\n    schema_class: world_class\n    notes: the authority\n")
+    monkeypatch.setattr(mod, "_has_writer", lambda name: True)
+    assert mod.audit(man, state) == []  # canonical world sibling -> trade copy is a legit ghost
+
+
+def test_droppable_without_canonical_sibling_and_live_is_rot(tmp_path, monkeypatch):
+    state = tmp_path / "state"; state.mkdir()
+    c = sqlite3.connect(str(state / "zeus_trades.db"))
+    c.execute("CREATE TABLE orphan (id INTEGER)"); c.execute("INSERT INTO orphan VALUES (1)")
+    c.commit(); c.close()
+    man = tmp_path / "m.yaml"
+    man.write_text("tables:\n  - name: orphan\n    db: trade\n    schema_class: legacy_archived\n    notes: ghost\n")
+    monkeypatch.setattr(mod, "_has_writer", lambda name: False)
+    rot = mod.audit(man, state)
+    assert {r["name"] for r in rot} == {"orphan"}  # no canonical home + live -> genuine rot
+
+
 def test_healthy_manifest_has_no_rot(tmp_path, monkeypatch):
     state = tmp_path / "state"; state.mkdir()
     (state / "zeus_trades.db")  # no db needed

@@ -99,17 +99,30 @@ def _has_writer(table: str) -> bool:
         return bool(r.stdout.strip())
 
 
+_OWNING_CLASSES = {"trade_class", "world_class", "forecast_class", "backtest_class"}
+
+
 def audit(manifest: Path, state_dir: Path) -> list[dict]:
+    """Genuine manifest rot: a table labeled droppable (legacy_archived / ghost-noted) that
+    is actually LIVE **and has no canonical (owning-class) sibling registration for the same
+    name in any DB**. A legacy_archived copy WITH a canonical sibling is a legitimate ghost
+    (correct dual-registration, pending drop) — NOT rot; flagging those over-reports. The
+    money-data-loss case is a droppable label on a table whose only/authoritative home it is."""
+    entries = [e for e in _load_entries(manifest) if e.get("name") and e.get("db") in _DB_FILE]
+    # names that have a canonical (owning-class) registration somewhere
+    canonical_names = {
+        e["name"] for e in entries if (e.get("schema_class") or "").strip() in _OWNING_CLASSES
+    }
     rot = []
-    for e in _load_entries(manifest):
-        name, db = e.get("name"), e.get("db")
-        if not name or db not in _DB_FILE:
-            continue
+    for e in entries:
+        name, db = e["name"], e["db"]
         sc = (e.get("schema_class") or "").strip()
         notes = e.get("notes") or ""
         droppable_label = (sc == "legacy_archived") or bool(_GHOST_NOTE.search(notes))
         if not droppable_label:
             continue
+        if name in canonical_names:
+            continue  # legitimate ghost — a canonical sibling owns it; this copy is droppable
         has_rows = _has_rows(state_dir, _DB_FILE[db], name)
         has_writer = _has_writer(name)
         if has_rows or has_writer:
