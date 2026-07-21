@@ -29588,6 +29588,17 @@ def _prepare_current_global_probability_family(
             now=decision_time,
             conn=forecast_conn,
         )
+        if (
+            final_daily_observation is None
+            and day0_observation_conn is not forecast_conn
+        ):
+            final_daily_observation = _final_daily_observation_extreme(
+                city=city,
+                target_date=str(family.target_date),
+                metric=str(family.metric),
+                now=decision_time,
+                conn=day0_observation_conn,
+            )
         if final_daily_observation is None:
             from src.data.replacement_forecast_current_target_plan import (
                 _latest_authorized_day0_fact,

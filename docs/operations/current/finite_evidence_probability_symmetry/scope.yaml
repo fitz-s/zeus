@@ -45,6 +45,7 @@ in_scope:
 - src/execution/exchange_reconcile.py
 - src/execution/executor.py
 - src/execution/exit_lifecycle.py
+- src/execution/day0_hard_fact_exit.py
 - src/architecture/gate_runtime.py
 - src/state/portfolio.py
 - src/state/db.py
@@ -102,6 +103,7 @@ in_scope:
 - tests/test_gate_runtime.py
 - tests/test_lifecycle.py
 - tests/test_day0_exit_gate.py
+- tests/test_day0_hard_fact_exit.py
 - tests/test_day0_observation_reader.py
 - tests/test_day0_obs_fastlane_optionbc.py
 - tests/test_day0_fast_obs_lane.py

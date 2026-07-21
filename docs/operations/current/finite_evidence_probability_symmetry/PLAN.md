@@ -987,3 +987,30 @@ pre-fix failing `0.004`/`0.999` YES/NO BUY and SELL antibodies, the malformed-ol
 cycle scalar antibody, focused and integration regressions, a read-only canonical
 scalar benchmark, standard deployment, and natural receipts showing no late
 price-band preflight loop or out-of-band venue command.
+
+## 2026-07-20 WU post-day final observation continuity
+
+Live held-position evidence exposed a permanent authority gap after the local
+target day ended. HKO markets could promote an explicit verified daily product
+to an exact settlement simplex, while WU markets always returned
+`POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE` even after canonical same-station
+hourly history had completed. The global auction therefore retained stale held
+probability for WU positions and could not compare HOLD/SELL from current
+physical evidence.
+
+WU finality now requires two independent causal facts: exact coverage of every
+UTC hour belonging to the contract-local target day (23/24/25 across DST), and
+the exact first same-station `wu_icao_history` observation of the following
+local day. Every contributing row must be `VERIFIED`, `OK`,
+`historical_hourly`, `utc_hour_bucket_extremum`, unit/station correct, and both
+observed and imported no later than the decision time. The target extreme is
+then settlement-rounded and mapped to the complete exact family simplex.
+Missing an hour, the following-day
+publication, or current causality remains fail-closed. The reactor checks the
+forecast daily-product plane first and the canonical observation connection
+second; neither source role is guessed or substituted.
+
+Acceptance requires the pre-fix failing complete-WU antibody, incomplete/future
+counterexamples, a cross-connection global-simplex integration test, current
+canonical read-only proof, standard deployment, and a natural held-position
+receipt showing the stale WU probability is replaced without a forced order.

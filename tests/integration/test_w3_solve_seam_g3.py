@@ -4323,6 +4323,106 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     forecast.close()
 
 
+def test_post_day_wu_hourly_observation_conn_builds_exact_global_simplex(
+    monkeypatch,
+):
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT NOT NULL, target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL, condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL, market_slug TEXT, range_label TEXT,
+            range_low REAL, range_high REAL
+        )
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            ("Dallas", "2026-07-11", "high", "c0", "yes0", "a", "69F or below", None, 69.0),
+            ("Dallas", "2026-07-11", "high", "c1", "yes1", "b", "70-71F", 70.0, 71.0),
+            ("Dallas", "2026-07-11", "high", "c2", "yes2", "c", "72F or above", 72.0, None),
+        ),
+    )
+    observations = sqlite3.connect(":memory:")
+    observations.row_factory = sqlite3.Row
+    observations.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            utc_timestamp TEXT, time_basis TEXT, running_max REAL, running_min REAL,
+            temp_unit TEXT, imported_at TEXT, authority TEXT,
+            causality_status TEXT, source_role TEXT
+        )
+        """
+    )
+    target_start = _dt.datetime(2026, 7, 11, 5, tzinfo=_dt.timezone.utc)
+    rows = []
+    for offset in range(24):
+        observed_at = target_start + _dt.timedelta(hours=offset)
+        value = 72.4 if offset == 16 else 68.0
+        rows.append(
+            (
+                "Dallas", "2026-07-11", "wu_icao_history", "KDAL",
+                observed_at.isoformat(), "utc_hour_bucket_extremum", value, value, "F",
+                (observed_at + _dt.timedelta(minutes=15)).isoformat(),
+                "VERIFIED", "OK", "historical_hourly",
+            )
+        )
+    following_at = target_start + _dt.timedelta(hours=24)
+    rows.append(
+        (
+            "Dallas", "2026-07-12", "wu_icao_history", "KDAL",
+            following_at.isoformat(), "utc_hour_bucket_extremum", 68.0, 68.0, "F",
+            (following_at + _dt.timedelta(minutes=15)).isoformat(),
+            "VERIFIED", "OK", "historical_hourly",
+        )
+    )
+    observations.executemany(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    monkeypatch.setattr(
+        era,
+        "_forecast_snapshot_row_for_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("final WU observation must not require a forecast snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("final WU observation must not request remaining hours")
+        ),
+    )
+
+    day0_payload: dict[str, object] = {}
+    prepared = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(2026, 7, 12, 12, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=day0_payload,
+    )
+
+    witness = prepared.probability_witness
+    assert witness.band_basis == (
+        "final_daily_observation_exact_settlement_simplex_v1"
+    )
+    assert np.all(witness.yes_q_samples == np.asarray([0.0, 0.0, 1.0]))
+    assert day0_payload["probability_authority"] == (
+        "final_daily_observation_exact_global_probability_v1"
+    )
+    assert day0_payload["_edli_global_day0_binding"]["final_daily"] is True
+    observations.close()
+    forecast.close()
+
+
 def test_current_forecast_global_probability_still_requires_replacement_readiness(
     monkeypatch,
 ):

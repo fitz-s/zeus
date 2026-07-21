@@ -33,6 +33,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -189,6 +190,94 @@ def _final_daily_observation_conn(
     return conn
 
 
+def _final_wu_hourly_observation_conn(
+    *,
+    missing_hour: int | None = None,
+    include_following_day: bool = True,
+    following_utc_offset: timedelta = timedelta(0),
+    time_basis: str = "utc_hour_bucket_extremum",
+) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            station_id TEXT,
+            local_timestamp TEXT NOT NULL,
+            utc_timestamp TEXT NOT NULL,
+            time_basis TEXT NOT NULL,
+            running_max REAL,
+            running_min REAL,
+            temp_unit TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            causality_status TEXT,
+            source_role TEXT
+        )
+        """
+    )
+    zone = ZoneInfo("Europe/Paris")
+    target = datetime(2026, 7, 15, tzinfo=zone)
+    rows = []
+    for hour in range(24):
+        if hour == missing_hour:
+            continue
+        local = target.replace(hour=hour)
+        value = 35.4 if hour == 16 else 20.0 - abs(12 - hour) / 2
+        rows.append(
+            (
+                "Paris",
+                "2026-07-15",
+                "wu_icao_history",
+                "LFPB",
+                local.isoformat(),
+                local.astimezone(UTC).isoformat(),
+                time_basis,
+                value,
+                value,
+                "C",
+                (local.astimezone(UTC) + timedelta(minutes=15)).isoformat(),
+                "VERIFIED",
+                "OK",
+                "historical_hourly",
+            )
+        )
+    if include_following_day:
+        following_local = datetime(2026, 7, 16, tzinfo=zone)
+        rows.append(
+            (
+                "Paris",
+                "2026-07-16",
+                "wu_icao_history",
+                "LFPB",
+                following_local.isoformat(),
+                (
+                    following_local.astimezone(UTC) + following_utc_offset
+                ).isoformat(),
+                time_basis,
+                18.0,
+                18.0,
+                "C",
+                (
+                    following_local.astimezone(UTC)
+                    + following_utc_offset
+                    + timedelta(minutes=15)
+                ).isoformat(),
+                "VERIFIED",
+                "OK",
+                "historical_hourly",
+            )
+        )
+    conn.executemany(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    return conn
+
+
 def test_post_local_day_hko_daily_extract_authorizes_exact_no_win(monkeypatch):
     conn = _final_daily_observation_conn(high_temp=28.8)
     final = _final_daily_observation_extreme(
@@ -275,6 +364,65 @@ def test_post_local_day_future_final_row_is_not_decision_time_authority():
         target_date="2026-07-15",
         metric="high",
         now=datetime(2026, 7, 15, 22, 0, tzinfo=UTC),
+        conn=conn,
+    )
+
+    assert final is None
+
+
+def test_post_local_day_complete_wu_hours_and_following_day_are_final():
+    conn = _final_wu_hourly_observation_conn()
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(
+        "CREATE TABLE world.observation_instants AS "
+        "SELECT * FROM observation_instants"
+    )
+    conn.execute("DROP TABLE observation_instants")
+
+    final = _final_daily_observation_extreme(
+        city=_paris(),
+        target_date="2026-07-15",
+        metric="high",
+        now=datetime(2026, 7, 16, 1, 0, tzinfo=UTC),
+        conn=conn,
+    )
+
+    assert final is not None
+    assert final.raw_extreme == pytest.approx(35.4)
+    assert final.settled_extreme == 35.0
+    assert final.source == "wu_icao_history:following_day_observed"
+    assert final.station_id == "LFPB"
+
+
+@pytest.mark.parametrize(
+    "conn",
+    (
+        pytest.param(
+            _final_wu_hourly_observation_conn(include_following_day=False),
+            id="following-day-missing",
+        ),
+        pytest.param(
+            _final_wu_hourly_observation_conn(missing_hour=7),
+            id="target-hour-missing",
+        ),
+        pytest.param(
+            _final_wu_hourly_observation_conn(
+                following_utc_offset=timedelta(hours=4)
+            ),
+            id="following-day-future",
+        ),
+        pytest.param(
+            _final_wu_hourly_observation_conn(time_basis="snap_to_hour"),
+            id="non-extremum-time-basis",
+        ),
+    ),
+)
+def test_post_local_day_incomplete_wu_hourly_evidence_is_not_final(conn):
+    final = _final_daily_observation_extreme(
+        city=_paris(),
+        target_date="2026-07-15",
+        metric="high",
+        now=datetime(2026, 7, 16, 1, 0, tzinfo=UTC),
         conn=conn,
     )
 

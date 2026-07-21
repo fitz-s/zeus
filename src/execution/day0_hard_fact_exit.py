@@ -55,7 +55,7 @@ import threading
 import time
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -142,6 +142,200 @@ def _final_daily_source_matches(city: Any, source: str) -> bool:
     # has published; NOAA/Ogimet rows require their own resolver-finality
     # credential. A daily value alone is not sufficient to call either final.
     return False
+
+
+def _as_causal_utc(value: Any, *, now: datetime) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    parsed = parsed.astimezone(UTC)
+    return parsed if parsed <= now.astimezone(UTC) else None
+
+
+def _final_wu_hourly_observation_extreme(
+    *,
+    city: Any,
+    target_date: str,
+    metric: str,
+    now: datetime,
+    conn: Any,
+) -> FinalDailyObservation | None:
+    """Promote a complete WU local-day timeline after its next-day publication.
+
+    WU has no separate daily-final row in the canonical observation plane. The
+    first causal observation of the following local day proves that the source
+    has advanced past the target day; exact hourly coverage proves that no
+    target-day interval was silently omitted. Both facts are required.
+    """
+
+    if (
+        str(getattr(city, "settlement_source_type", "") or "").lower()
+        != "wu_icao"
+    ):
+        return None
+    try:
+        target = date.fromisoformat(str(target_date))
+        zone = ZoneInfo(str(getattr(city, "timezone", "") or ""))
+        start = datetime.combine(target, datetime.min.time(), tzinfo=zone).astimezone(UTC)
+        end = datetime.combine(
+            target + timedelta(days=1), datetime.min.time(), tzinfo=zone
+        ).astimezone(UTC)
+    except (TypeError, ValueError):
+        return None
+    expected_hours = {
+        start + timedelta(hours=offset)
+        for offset in range(int((end - start).total_seconds() // 3600))
+    }
+    field = (
+        "running_max"
+        if metric == "high"
+        else "running_min" if metric == "low" else ""
+    )
+    if not field or not expected_hours:
+        return None
+    station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+    if not station or not unit:
+        return None
+
+    required = {
+        "city",
+        "target_date",
+        "source",
+        "station_id",
+        "utc_timestamp",
+        "time_basis",
+        field,
+        "temp_unit",
+        "imported_at",
+        "authority",
+        "causality_status",
+        "source_role",
+    }
+    following_date = str(target + timedelta(days=1))
+    for table_ref in (
+        "world.observation_instants",
+        "observation_instants",
+        "forecasts.observation_instants",
+    ):
+        try:
+            schema, separator, table = table_ref.partition(".")
+            pragma = (
+                f"PRAGMA {schema}.table_info({table})"
+                if separator
+                else f"PRAGMA table_info({schema})"
+            )
+            columns = {
+                str(row[1])
+                for row in conn.execute(pragma).fetchall()
+            }
+            if not required <= columns:
+                continue
+            rows = conn.execute(
+                f"""
+                SELECT target_date, source, station_id, utc_timestamp,
+                       time_basis, {field} AS extreme, temp_unit, imported_at,
+                       authority, causality_status, source_role
+                  FROM {table_ref}
+                 WHERE city = ?
+                   AND target_date IN (?, ?)
+                   AND source = 'wu_icao_history'
+                   AND station_id = ?
+                 ORDER BY utc_timestamp
+                """,
+                (
+                    str(getattr(city, "name", "") or ""),
+                    str(target_date),
+                    following_date,
+                    station,
+                ),
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - absent attachment/schema fails closed
+            continue
+
+        target_values: dict[datetime, tuple[float, datetime]] = {}
+        following_published_at: datetime | None = None
+        for row in rows:
+            try:
+                row_date = str(row["target_date"] if hasattr(row, "keys") else row[0])
+                row_source = str(row["source"] if hasattr(row, "keys") else row[1])
+                row_station = str(
+                    row["station_id"] if hasattr(row, "keys") else row[2]
+                ).strip().upper()
+                observed_at = _as_causal_utc(
+                    row["utc_timestamp"] if hasattr(row, "keys") else row[3],
+                    now=now,
+                )
+                time_basis = str(
+                    row["time_basis"] if hasattr(row, "keys") else row[4]
+                ).strip().lower()
+                raw_extreme = row["extreme"] if hasattr(row, "keys") else row[5]
+                row_unit = str(
+                    row["temp_unit"] if hasattr(row, "keys") else row[6]
+                ).strip().upper()
+                imported_at = _as_causal_utc(
+                    row["imported_at"] if hasattr(row, "keys") else row[7],
+                    now=now,
+                )
+                authority = str(
+                    row["authority"] if hasattr(row, "keys") else row[8]
+                ).strip().upper()
+                causality = str(
+                    row["causality_status"] if hasattr(row, "keys") else row[9]
+                ).strip().upper()
+                source_role = str(
+                    row["source_role"] if hasattr(row, "keys") else row[10]
+                ).strip().lower()
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+            if (
+                row_source != "wu_icao_history"
+                or row_station != station
+                or time_basis != "utc_hour_bucket_extremum"
+                or row_unit != unit
+                or authority != "VERIFIED"
+                or causality != "OK"
+                or source_role != "historical_hourly"
+                or observed_at is None
+                or imported_at is None
+            ):
+                continue
+            if row_date == str(target_date) and observed_at in expected_hours:
+                try:
+                    target_values[observed_at] = (float(raw_extreme), imported_at)
+                except (TypeError, ValueError):
+                    continue
+            elif row_date == following_date and observed_at == end:
+                following_published_at = max(
+                    following_published_at or imported_at,
+                    imported_at,
+                )
+        if set(target_values) != expected_hours or following_published_at is None:
+            continue
+        try:
+            values = [value for value, _ in target_values.values()]
+            raw = max(values) if metric == "high" else min(values)
+            from src.contracts.settlement_semantics import SettlementSemantics
+
+            settled = SettlementSemantics.for_city(city).round_single(raw)
+        except Exception:  # noqa: BLE001 - invalid semantics/value cannot authorize q
+            continue
+        fetched_at = max(
+            following_published_at,
+            *(imported for _, imported in target_values.values()),
+        )
+        return FinalDailyObservation(
+            raw_extreme=float(raw),
+            settled_extreme=float(settled),
+            source="wu_icao_history:following_day_observed",
+            station_id=station,
+            unit=unit,
+            fetched_at=fetched_at,
+        )
+    return None
 
 
 def _final_daily_observation_extreme(
@@ -231,7 +425,13 @@ def _final_daily_observation_extreme(
                 unit=str(unit).strip().upper(),
                 fetched_at=fetched_at,
             )
-    return None
+    return _final_wu_hourly_observation_extreme(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        now=now,
+        conn=conn,
+    )
 
 
 def _normalize_direction(direction: Any) -> str:
