@@ -6905,7 +6905,6 @@ def event_bound_live_adapter_from_trade_conn(
                 max_age=FRESHNESS_WINDOW_DEFAULT,
                 cache_metadata_out=cache_metadata_out,
                 allow_partial_deterministic=True,
-                allow_provisional_day0_replacement=True,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
             failure_type = type(exc).__name__
@@ -7938,6 +7937,7 @@ def event_bound_live_adapter_from_trade_conn(
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                     allow_unobserved_day0_replacement=True,
                     allow_provisional_day0_replacement=True,
+                    entry_authority=False,
                 )
             except Exception as exc:  # noqa: BLE001 - held authority remains fail closed
                 failure_type = type(exc).__name__
@@ -12697,6 +12697,10 @@ def _current_global_actuation_prepared_family(
         ),
         allow_provisional_day0_replacement=(
             getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED"
+        ),
+        entry_authority=(
+            str(getattr(candidate, "action", "BUY") or "BUY").upper()
+            != "SELL"
         ),
     )
     current_witness = getattr(current, "probability_witness", None)
@@ -29501,6 +29505,7 @@ def _prepare_current_global_probability_family(
     allow_partial_deterministic: bool | None = None,
     allow_unobserved_day0_replacement: bool = False,
     allow_provisional_day0_replacement: bool = False,
+    entry_authority: bool = True,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -29540,6 +29545,8 @@ def _prepare_current_global_probability_family(
         raise ValueError("GLOBAL_UNOBSERVED_DAY0_REPLACEMENT_POLICY_INVALID")
     if not isinstance(allow_provisional_day0_replacement, bool):
         raise ValueError("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
+    if not isinstance(entry_authority, bool):
+        raise ValueError("GLOBAL_ENTRY_AUTHORITY_POLICY_INVALID")
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
     rows = _event_family_market_topology_rows(topology_conn, payload)
@@ -29651,6 +29658,13 @@ def _prepare_current_global_probability_family(
                 )
                 == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
             )
+            if (
+                provisional_day0_observation
+                and entry_authority
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY"
+                )
             if (
                 provisional_day0_observation
                 and not allow_provisional_day0_replacement

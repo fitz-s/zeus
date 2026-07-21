@@ -617,6 +617,26 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
 
     with pytest.raises(
         ValueError,
+        match="GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
+    ):
+        adapter._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=datetime(
+                2026,
+                6,
+                9,
+                12,
+                tzinfo=timezone.utc,
+            ),
+            max_age=timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+        )
+
+    with pytest.raises(
+        ValueError,
         match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
     ):
         adapter._prepare_current_global_probability_family(
@@ -633,6 +653,7 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
             ),
             max_age=timedelta(seconds=30),
             allow_provisional_day0_replacement=True,
+            entry_authority=False,
         )
     forecast.close()
     observations.close()
