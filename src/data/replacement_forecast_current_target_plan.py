@@ -1226,11 +1226,14 @@ def _day0_observation_lag_reason(
         provenance = json.loads(str(posterior_provenance_json or "{}"))
     except (TypeError, ValueError):
         provenance = {}
-    conditioning = (
-        provenance.get("day0_conditioning")
-        if isinstance(provenance, dict)
-        else None
-    )
+    conditioning = None
+    if isinstance(provenance, dict):
+        provisional = provenance.get("day0_provisional_observation")
+        conditioning = (
+            provisional
+            if isinstance(provisional, Mapping) and provisional.get("active") is True
+            else provenance.get("day0_conditioning")
+        )
     served_raw = (
         conditioning.get("observation_time")
         if isinstance(conditioning, Mapping)

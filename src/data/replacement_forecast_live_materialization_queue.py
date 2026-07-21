@@ -486,11 +486,15 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
                 )
             except (TypeError, ValueError):
                 posterior_provenance = {}
-            conditioning = (
-                posterior_provenance.get("day0_conditioning")
-                if isinstance(posterior_provenance, dict)
-                else None
-            )
+            conditioning = None
+            if isinstance(posterior_provenance, dict):
+                provisional = posterior_provenance.get("day0_provisional_observation")
+                conditioning = (
+                    provisional
+                    if isinstance(provisional, Mapping)
+                    and provisional.get("active") is True
+                    else posterior_provenance.get("day0_conditioning")
+                )
             posterior_observation_time = _parse_utc_iso(
                 conditioning.get("observation_time")
                 if isinstance(conditioning, dict)

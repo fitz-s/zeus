@@ -68,18 +68,25 @@ def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
             "historical_hourly",
         ),
     )
-    reason = _day0_observation_lag_reason(
-        conn,
-        city="Paris",
-        target_date="2026-07-10",
-        temperature_metric="high",
-        decision_time=datetime(2026, 7, 10, 12, tzinfo=timezone.utc),
-        posterior_provenance_json=json.dumps(
-            {"day0_conditioning": {"observation_time": "2026-07-10T10:00:00+00:00"}}
-        ),
-    )
-    assert reason is not None
-    assert reason.startswith("basis=day0_observation_hwm_lag")
+    for provenance in (
+        {"day0_conditioning": {"observation_time": "2026-07-10T10:00:00+00:00"}},
+        {
+            "day0_provisional_observation": {
+                "active": True,
+                "observation_time": "2026-07-10T10:00:00+00:00",
+            }
+        },
+    ):
+        reason = _day0_observation_lag_reason(
+            conn,
+            city="Paris",
+            target_date="2026-07-10",
+            temperature_metric="high",
+            decision_time=datetime(2026, 7, 10, 12, tzinfo=timezone.utc),
+            posterior_provenance_json=json.dumps(provenance),
+        )
+        assert reason is not None
+        assert reason.startswith("basis=day0_observation_hwm_lag")
 
 
 def test_readiness_bound_posterior_ids_are_selected_in_one_batch() -> None:
