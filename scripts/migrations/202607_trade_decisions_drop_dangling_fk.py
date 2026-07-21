@@ -277,6 +277,23 @@ def _assert_schema_pinned(conn: sqlite3.Connection) -> str:
     if extra:
         raise SystemExit(f"REFUSED: unexpected index/trigger appeared on trade_decisions: {extra}. "
                          "Generalized rebuild must recreate dependents — re-review.")
+    # Dependent GLOBAL views / cross-table triggers that REFERENCE trade_decisions are
+    # invisible to the tbl_name check above, but the DROP/RENAME would abort mid-fence
+    # under legacy_alter_table=OFF (SQLite integrity-checks the temporarily-dangling
+    # view during RENAME). The physical schema already drifted from db.py (p_calibrated),
+    # so an ad-hoc dependent object cannot be excluded from code alone — refuse EARLY
+    # (before BEGIN, before the operator's fence matters) with a clear message rather
+    # than a raw traceback after daemons are stopped. (consult precondition: "all global
+    # views/triggers/schema objects mentioning trade_decisions inventoried".)
+    deps = conn.execute(
+        "SELECT type,name FROM sqlite_master WHERE type IN ('view','trigger') "
+        "AND name != 'trade_decisions' AND sql LIKE '%trade_decisions%'"
+    ).fetchall()
+    if deps:
+        raise SystemExit(
+            f"REFUSED: dependent view/trigger(s) reference trade_decisions: {deps}. The "
+            "generalized-rebuild DROP/RENAME would abort mid-fence. Review and drop/recreate "
+            "them under the fence (or extend this migration to rebuild them) before running.")
     return sql
 
 
@@ -319,7 +336,9 @@ def _write_capsule(conn: sqlite3.Connection, live_sql: str, old_seq: int, capsul
     copy — respects the DB-backup guard; NOT a CSV — preserves storage classes)."""
     capsule_dir.mkdir(parents=True, exist_ok=True)
     stamp = _now_iso().replace(":", "").replace("-", "")[:15]
-    cap = capsule_dir / f"trade_decisions_capsule_{stamp}.sqlite"
+    # include pid so a --dry-run and the real run in the same wall-clock second do not
+    # collide on the capsule name (MINOR-5).
+    cap = capsule_dir / f"trade_decisions_capsule_{stamp}_{os.getpid()}.sqlite"
     if cap.exists():
         raise SystemExit(f"REFUSED: capsule {cap} already exists.")
     cnt, mn, mx = conn.execute("SELECT count(*), min(trade_id), max(trade_id) FROM trade_decisions").fetchone()
@@ -346,11 +365,27 @@ def _write_capsule(conn: sqlite3.Connection, live_sql: str, old_seq: int, capsul
         cxn.commit()
     finally:
         cxn.close()
-    # fsync file + parent dir, then read-only.
+    # fsync file + parent dir.
     fd = os.open(str(cap), os.O_RDONLY)
     os.fsync(fd); os.close(fd)
     dfd = os.open(str(capsule_dir), os.O_RDONLY)
     os.fsync(dfd); os.close(dfd)
+    # Self-validate: reopen the capsule INDEPENDENTLY and recompute the typed row
+    # digest + count/min/max over its stored rows; a silently-corrupt capsule (write
+    # error, storage-class coercion) must not give false rollback confidence (consult §7).
+    vconn = sqlite3.connect(f"file:{cap}?mode=ro", uri=True)
+    try:
+        v_digest = _typed_row_digest(vconn, "trade_decisions")
+        v_cnt, v_mn, v_mx = vconn.execute(
+            "SELECT count(*), min(trade_id), max(trade_id) FROM trade_decisions").fetchone()
+    finally:
+        vconn.close()
+    if v_digest != digest or (v_cnt, v_mn, v_mx) != (cnt, mn, mx):
+        raise SystemExit(
+            f"REFUSED: rollback capsule self-validation FAILED on reopen "
+            f"(digest {v_digest!r}!={digest!r} or count/min/max "
+            f"{(v_cnt, v_mn, v_mx)}!={(cnt, mn, mx)}). Do not proceed — the capsule is "
+            "not a faithful rollback artifact.")
     cap_sha = hashlib.sha256(cap.read_bytes()).hexdigest()
     (capsule_dir / (cap.name + ".sha256")).write_text(cap_sha + "\n")
     os.chmod(cap, 0o444)
@@ -420,14 +455,19 @@ def run_migration(path: Path, *, operator_confirms_fenced: bool, capsule_dir: Pa
                                  f"{(old_count,old_min,old_max)}.")
             if _typed_row_digest(conn, "trade_decisions_new") != old_digest:
                 raise SystemExit("ABORT: typed row digest mismatch after copy.")
-            # two-way typed EXCEPT over explicit columns
+            # Symmetric value diff (old\new) + (new\old), each EXCEPT parenthesized in
+            # its own subquery — SQLite compound operators are equal-precedence /
+            # left-associative, so an un-parenthesized `A EXCEPT B UNION ALL C EXCEPT D`
+            # collapses to (new\old) alone and is BLIND to rows LOST from new. EXCEPT
+            # compares by value (1 == 1.0), so a storage-class flip is caught by the
+            # typed digest above, not here; this catches value/row set divergence.
             diff = conn.execute(
-                f"SELECT count(*) FROM (SELECT {cols} FROM trade_decisions "
-                f"EXCEPT SELECT {cols} FROM trade_decisions_new "
-                f"UNION ALL SELECT {cols} FROM trade_decisions_new "
-                f"EXCEPT SELECT {cols} FROM trade_decisions)").fetchone()[0]
+                f"SELECT (SELECT count(*) FROM (SELECT {cols} FROM trade_decisions "
+                f"EXCEPT SELECT {cols} FROM trade_decisions_new)) "
+                f"+ (SELECT count(*) FROM (SELECT {cols} FROM trade_decisions_new "
+                f"EXCEPT SELECT {cols} FROM trade_decisions))").fetchone()[0]
             if diff != 0:
-                raise SystemExit(f"ABORT: two-way row diff is {diff}, expected 0.")
+                raise SystemExit(f"ABORT: symmetric row diff is {diff}, expected 0.")
 
             conn.execute("DROP TABLE trade_decisions")
             _maybe_crash("after_drop")

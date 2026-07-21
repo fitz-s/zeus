@@ -194,6 +194,53 @@ def test_sequence_high_water_preserved(tmp_path, rows, delete_top, expect_next):
         c.close()
 
 
+def test_sequence_wide_gap_high_water(tmp_path):
+    """Consult-mandated antibody: id 9000 committed then deleted (max drops back to 4),
+    sqlite_sequence.seq=9000. After migration the next AUTOINCREMENT id must be 9001 —
+    never a reused id. This is the exact case that a naive rebuild (reset seq to max)
+    would corrupt by aliasing a deleted historical decision to a new one (consult B3)."""
+    db = _build_fixture(tmp_path, rows=4, delete_top=False)  # ids 1..4, seq=4
+    c = sqlite3.connect(str(db))
+    try:
+        cols = "trade_id," + ",".join(_MIN_COLS)
+        ph = ",".join(["?"] * (1 + len(_MIN_COLS)))
+        c.execute(f"INSERT INTO trade_decisions ({cols}) VALUES ({ph})",
+                  (9000, "m", "b", "buy_yes", 1.0, 0.5, "t", 0.5, 0.5, 0.1, 0.0, 1.0, 0.1, "s", "live"))
+        c.execute("DELETE FROM trade_decisions WHERE trade_id=9000")  # max=4, seq stays 9000
+        c.commit()
+        assert c.execute("SELECT seq FROM sqlite_sequence WHERE name='trade_decisions'").fetchone()[0] == 9000
+    finally:
+        c.close()
+    assert _run(tmp_path).returncode == 0
+    c = sqlite3.connect(str(db))
+    try:
+        assert c.execute("SELECT seq FROM sqlite_sequence WHERE name='trade_decisions'").fetchone()[0] == 9000
+        cols = ",".join(_MIN_COLS)
+        ph = ",".join(["?"] * len(_MIN_COLS))
+        c.execute(f"INSERT INTO trade_decisions ({cols}) VALUES ({ph})",
+                  ("m", "b", "buy_yes", 1.0, 0.5, "t", 0.5, 0.5, 0.1, 0.0, 1.0, 0.1, "s", "live"))
+        assert c.execute("SELECT max(trade_id) FROM trade_decisions").fetchone()[0] == 9001
+    finally:
+        c.close()
+
+
+def test_dependent_view_refused_before_any_change(tmp_path):
+    """A global view referencing trade_decisions must be refused EARLY (before BEGIN,
+    before the operator's fence), not aborted mid-RENAME under legacy_alter_table=OFF."""
+    db = _build_fixture(tmp_path)
+    c = sqlite3.connect(str(db))
+    try:
+        c.execute("CREATE VIEW v_recent AS SELECT trade_id, price FROM trade_decisions")
+        c.commit()
+    finally:
+        c.close()
+    r = _run(tmp_path)
+    assert r.returncode != 0
+    assert "dependent view/trigger" in (r.stderr + r.stdout)
+    assert any(e[2] == "ensemble_snapshots" for e in _fk_edges(db))
+    assert not _has_new_residue(db)
+
+
 # --- Crash matrix -----------------------------------------------------------
 
 @pytest.mark.parametrize("kill_at",
