@@ -2149,6 +2149,57 @@ def test_global_current_state_proof_replaces_legacy_bound_with_current_witness()
     assert current.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(0.61)
 
 
+def test_global_current_state_proof_preserves_rest_then_cross_policy():
+    """A global winner must not turn a proven maker-first plan into a taker cross."""
+
+    from dataclasses import replace
+
+    economics = _selected_economics(
+        edge_lcb=0.28,
+        cost=0.32,
+        q_dot_payoff=0.652,
+        point_ev=0.332,
+    )
+    proof = replace(
+        _overlay_proof(
+            q_posterior=0.652,
+            q_lcb_5pct=0.617,
+            economics=economics,
+        ),
+        execution_mode_intent="MAKER",
+        rest_then_cross_policy="REST_DEFAULT",
+        maker_limit_price=0.31,
+    )
+    cert = {
+        **proof.qkernel_execution_economics,
+        "payoff_q_lcb": 0.61,
+        "edge_lcb": 0.29,
+    }
+
+    current = era._bind_global_current_state_economics_to_proof(proof, cert)
+
+    assert current.execution_mode_intent == "MAKER"
+    assert current.rest_then_cross_policy == "REST_DEFAULT"
+    assert current.maker_limit_price == pytest.approx(0.31)
+
+
+def test_global_live_command_builder_has_no_unconditional_taker_override():
+    """Global and local BUYs must share the fresh rest-then-cross authority."""
+
+    import inspect
+
+    source = inspect.getsource(era._build_live_execution_command_certificates)
+
+    assert 'if global_candidate is not None:\n            order_mode = "TAKER"' not in source
+    assert source.count("_fresh_rest_then_cross_mode(") == 1
+    taker_only = (
+        'global_decision is not None\n'
+        '                and str(order_mode).strip().upper() == "TAKER"'
+    )
+    assert f"exact_taker_shares=(\n                str(global_decision.shares)\n                if {taker_only}" in source
+    assert f"exact_taker_limit_price=(\n                str(global_decision.limit_price)\n                if {taker_only}" in source
+
+
 def test_global_current_state_proof_atomically_replaces_legacy_admission_reject(
     monkeypatch,
 ):

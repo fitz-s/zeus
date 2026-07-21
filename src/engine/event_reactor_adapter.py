@@ -11976,7 +11976,7 @@ def _bind_global_current_state_economics_to_proof(
     proof: "_CandidateProof",
     cert: Mapping[str, Any],
 ) -> "_CandidateProof":
-    """Atomically carry the JIT-tightened bound on the selected proof."""
+    """Carry the current global bound without changing the proven order policy."""
 
     missing_reason = str(getattr(proof, "missing_reason", "") or "").strip()
     if not _global_current_state_may_rebind_scalar_rejection(missing_reason):
@@ -12021,7 +12021,6 @@ def _bind_global_current_state_economics_to_proof(
         missing_reason=None,
         qkernel_execution_economics=dict(cert),
         selection_authority_applied="qkernel_spine",
-        execution_mode_intent="TAKER",
     )
 
 
@@ -17236,23 +17235,20 @@ def _build_live_execution_command_certificates(
         # one doctrine, not forced maker: both proof and fresh validation use the
         # same conservative q/q_exec bound, spread/fee law, maker haircut, and
         # mode-consistent EV margin.
-        if global_candidate is not None:
-            order_mode = "TAKER"
-        else:
-            _fresh_mode = _fresh_rest_then_cross_mode(
-                actionable_payload=actionable.payload,
-                executable_snapshot=executable_snapshot,
-                fresh_best_bid=fresh_best_bid,
-                fresh_best_ask=fresh_best_ask,
-                tick_size=float(provisional_final_intent.payload["tick_size"]),
-                decision_time=decision_time,
-            )
-            order_mode = _validate_final_order_mode_or_abort(
-                proof_mode=str(actionable.payload.get("proof_execution_mode_intent") or "") or None,
-                fresh_mode=_fresh_mode,
-                fresh_best_bid=fresh_best_bid,
-                fresh_best_ask=fresh_best_ask,
-            )
+        _fresh_mode = _fresh_rest_then_cross_mode(
+            actionable_payload=actionable.payload,
+            executable_snapshot=executable_snapshot,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+            tick_size=float(provisional_final_intent.payload["tick_size"]),
+            decision_time=decision_time,
+        )
+        order_mode = _validate_final_order_mode_or_abort(
+            proof_mode=str(actionable.payload.get("proof_execution_mode_intent") or "") or None,
+            fresh_mode=_fresh_mode,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+        )
         day0_admission_rejection = _day0_live_submit_admission_rejection_reason(
             event=event,
             actionable_payload=actionable.payload,
@@ -17615,11 +17611,13 @@ def _build_live_execution_command_certificates(
             exact_taker_shares=(
                 str(global_decision.shares)
                 if global_decision is not None
+                and str(order_mode).strip().upper() == "TAKER"
                 else None
             ),
             exact_taker_limit_price=(
                 str(global_decision.limit_price)
                 if global_decision is not None
+                and str(order_mode).strip().upper() == "TAKER"
                 else None
             ),
             executable_market_context=executable_market_context,

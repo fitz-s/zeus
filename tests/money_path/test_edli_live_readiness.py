@@ -2851,6 +2851,83 @@ def test_fresh_pre_submit_book_upgrades_proven_maker_to_taker_when_crossing_clea
     assert command.payload["post_only"] is False
 
 
+def test_global_live_execution_respects_proven_maker_policy(monkeypatch):
+    """A global winner may rest; global identity must not imply an immediate cross."""
+
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    receipt = _accepted_receipt(
+        event,
+        execution_mode_intent="MAKER",
+        maker_limit_price=0.39,
+        rest_then_cross_policy="REST_DEFAULT",
+    )
+    receipt = replace(
+        receipt,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(
+            event,
+            receipt,
+            decision_time=decision_time,
+        ),
+        global_actuation=SimpleNamespace(
+            winner_event_id=event.event_id,
+            decision=SimpleNamespace(
+                candidate=SimpleNamespace(candidate_id="global-candidate"),
+                shares=Decimal("10"),
+                limit_price=Decimal("0.40"),
+                cost_usd=Decimal("4"),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_global_jit_book_hash_for_submit",
+        lambda **_kwargs: "jit-book",
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_qkernel_current_state_actual_submit_rejection_reason",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_fresh_rest_then_cross_mode",
+        lambda **_kwargs: "MAKER",
+    )
+
+    certs = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=receipt,
+        decision_time=decision_time,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
+            current_best_bid=0.39,
+            current_best_ask=0.41,
+        ),
+    )
+
+    final_intent = next(
+        cert for cert in certs if cert.certificate_type == claims.FINAL_INTENT
+    )
+    command = next(
+        cert for cert in certs if cert.certificate_type == claims.EXECUTION_COMMAND
+    )
+    assert final_intent.payload["order_mode"] == "MAKER"
+    assert final_intent.payload["post_only"] is True
+    assert final_intent.payload["global_exact_order"] is False
+    assert command.payload["time_in_force"] == "GTC"
+    assert command.payload["post_only"] is True
+
+
 def test_live_order_build_releases_stale_wal_snapshot_before_aggregate_write(tmp_path):
     from src.decision_kernel import claims
     from src.engine import event_reactor_adapter as adapter
