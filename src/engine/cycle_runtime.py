@@ -4545,7 +4545,7 @@ def _held_monitor_schedule_key(
     dead_bin_position_ids: frozenset[int],
     selected_urgent_position_ids: frozenset[int],
     has_selected_urgent: bool,
-    reserved_local_position_id: int | None,
+    reserved_local_position_ids: frozenset[int],
     reserved_network_position_id: int | None,
     structural_win_position_ids: frozenset[int],
     network_book_tokens: frozenset[str],
@@ -4559,12 +4559,14 @@ def _held_monitor_schedule_key(
     if position_id in selected_urgent_position_ids:
         return (-3 if position_id in dead_bin_position_ids else -2), urgency
     if has_selected_urgent:
-        if position_id == reserved_network_position_id:
+        if position_id in reserved_local_position_ids:
             return -1, 0
+        if position_id == reserved_network_position_id:
+            return -1, 1
         if position_id in dead_bin_position_ids or urgency < 2:
             return 0, urgency
         return 1, int(network_dependent)
-    if position_id == reserved_local_position_id:
+    if position_id in reserved_local_position_ids:
         return 0, 0
     if position_id == reserved_network_position_id:
         return 0, 1
@@ -4573,6 +4575,8 @@ def _held_monitor_schedule_key(
 
 _HELD_MONITOR_CURSOR_LOCK = threading.Lock()
 _HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE: dict[str, str] = {}
+# Bound the non-Day0 tail without letting continuous urgent wakes starve it.
+_HELD_MONITOR_URGENT_ACTIVE_LOCAL_PROGRESS_LIMIT = 4
 
 
 def _held_monitor_stable_position_key(pos) -> str:
@@ -5665,24 +5669,32 @@ def execute_monitoring_phase(
     ]
     reserved_local_positions = (
         []
-        if has_selected_urgent
+        if has_selected_urgent and should_preempt_for_urgent_day0 is None
         else _reserve_held_monitor_positions(
             "active_local",
             ordinary_active_local_positions,
-            limit=1,
+            limit=(
+                _HELD_MONITOR_URGENT_ACTIVE_LOCAL_PROGRESS_LIMIT
+                if has_selected_urgent
+                else 1
+            ),
         )
     )
     reserved_local_position = (
         reserved_local_positions[0] if reserved_local_positions else None
     )
-    reserved_local_position_id = (
-        id(reserved_local_position) if reserved_local_position is not None else None
+    reserved_local_position_ids = frozenset(
+        id(position) for position in reserved_local_positions
     )
     summary["held_monitor_active_local_progress_position"] = (
         getattr(reserved_local_position, "trade_id", "")
         if reserved_local_position is not None
         else ""
     )
+    summary["held_monitor_active_local_progress_positions"] = [
+        str(getattr(position, "trade_id", "") or "")
+        for position in reserved_local_positions
+    ]
     summary["held_monitor_active_network_progress_position"] = (
         getattr(reserved_network_position, "trade_id", "")
         if reserved_network_position is not None
@@ -5705,7 +5717,7 @@ def execute_monitoring_phase(
             dead_bin_position_ids=dead_bin_position_ids,
             selected_urgent_position_ids=selected_urgent_position_ids,
             has_selected_urgent=has_selected_urgent,
-            reserved_local_position_id=reserved_local_position_id,
+            reserved_local_position_ids=reserved_local_position_ids,
             reserved_network_position_id=reserved_network_position_id,
             structural_win_position_ids=structural_win_position_ids,
             network_book_tokens=network_book_tokens,
@@ -5714,10 +5726,10 @@ def execute_monitoring_phase(
     budget_guaranteed_position_ids = frozenset(
         {
             *selected_urgent_position_ids,
+            *reserved_local_position_ids,
             *(
                 position_id
                 for position_id in (
-                    reserved_local_position_id,
                     reserved_network_position_id,
                 )
                 if position_id is not None

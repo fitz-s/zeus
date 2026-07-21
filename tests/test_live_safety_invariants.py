@@ -873,6 +873,16 @@ def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
         state="holding",
         chain_state="synced",
     )
+    ordinary_local = [
+        _make_position(
+            trade_id=f"urgent-cycle-ordinary-local-{index}",
+            token_id=f"ordinary-local-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(3)
+    ]
 
     class Clob:
         def get_orderbook_snapshots(self, token_ids):
@@ -888,7 +898,14 @@ def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
     monkeypatch.setattr(
         cycle_runtime,
         "_fresh_local_held_monitor_orderbooks",
-        lambda *_args, **_kwargs: {},
+        lambda *_args, **_kwargs: {
+            f"ordinary-local-token-{index}": {
+                "asset_id": f"ordinary-local-token-{index}",
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+            for index in range(3)
+        },
     )
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
@@ -928,7 +945,12 @@ def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
         cycle_runtime.execute_monitoring_phase(
             None,
             Clob(),
-            _make_portfolio(*dead_bins, *canonical_urgent, ordinary_network),
+            _make_portfolio(
+                *dead_bins,
+                *canonical_urgent,
+                *ordinary_local,
+                ordinary_network,
+            ),
             _monitor_test_artifact(),
             _monitor_test_tracker(),
             summary,
@@ -936,6 +958,7 @@ def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
             run_exit_preflight=False,
             exit_order_submit_enabled=False,
             held_position_monitor_budget_seconds=0.0,
+            should_preempt_for_urgent_day0=lambda: False,
             defer_partial_orderbook_gaps=True,
         )
         summaries.append(summary)
@@ -945,9 +968,18 @@ def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
         ["rotating-dead-bin-1", "rotating-canonical-urgent-1"],
         ["rotating-dead-bin-2", "rotating-canonical-urgent-2"],
     ]
-    assert all(summary["held_monitor_budget_guaranteed_positions"] == 3 for summary in summaries)
-    assert all(summary["held_monitor_budget_bypass_scanned"] == 3 for summary in summaries)
-    assert all(summary["held_monitor_budget_bypass_scanned"] <= 3 for summary in summaries)
+    assert all(summary["held_monitor_budget_guaranteed_positions"] == 6 for summary in summaries)
+    assert all(summary["held_monitor_budget_bypass_scanned"] == 6 for summary in summaries)
+    assert all(summary["held_monitor_budget_bypass_scanned"] <= 6 for summary in summaries)
+    assert all(
+        summary["held_monitor_active_local_progress_positions"]
+        == [
+            "urgent-cycle-ordinary-local-0",
+            "urgent-cycle-ordinary-local-1",
+            "urgent-cycle-ordinary-local-2",
+        ]
+        for summary in summaries
+    )
     assert all(summary["held_monitor_deadline_deferred_positions"] == 4 for summary in summaries)
     assert all(
         summary["held_monitor_deadline_defer_reason"] == "MONITOR_DEADLINE_EXPIRED"
