@@ -2920,15 +2920,16 @@ def plan_family_joint_buy_targets(
         )
     weights = np.ones(probability_witness.yes_q_samples.shape[0], dtype=np.float64)
     try:
-        direct, _u, _top1, _top1_u, _sweeps = _optimize_continuous(
-            w0,
-            payoff,
-            caps,
-            costs,
-            float(direct_cash),
-            probability_witness.yes_q_samples,
-            weights,
-            probability_witness.band_alpha,
+        direct, _u, _iterations = _ru_cvar_optimum(
+            seed=np.zeros(len(caps), dtype=np.float64),
+            w0=w0,
+            payoff=payoff,
+            caps=caps,
+            costs=costs,
+            cash=float(direct_cash),
+            q_draws=probability_witness.yes_q_samples,
+            weights=weights,
+            alpha=probability_witness.band_alpha,
         )
     except Exception:  # noqa: BLE001 - optimizer failure is a family no-trade
         return empty

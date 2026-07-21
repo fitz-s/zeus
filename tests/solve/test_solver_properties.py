@@ -1184,14 +1184,14 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         ledger_snapshot_id="ledger-current",
     )
     optimize_calls = 0
-    optimize_continuous = S._optimize_continuous
+    optimize_family = S._ru_cvar_optimum
 
-    def counted_optimize(*args, **kwargs):
+    def counted_optimize(**kwargs):
         nonlocal optimize_calls
         optimize_calls += 1
-        caps = args[2]
-        costs = args[3]
-        cash = args[4]
+        caps = kwargs["caps"]
+        costs = kwargs["costs"]
+        cash = kwargs["cash"]
         for owner in range(len(candidates)):
             owned = [
                 i
@@ -1199,9 +1199,9 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
                 if tranche_owner == owner
             ]
             assert sum(costs[i] * caps[i] for i in owned) <= cash + 1e-9
-        return optimize_continuous(*args, **kwargs)
+        return optimize_family(**kwargs)
 
-    monkeypatch.setattr(S, "_optimize_continuous", counted_optimize)
+    monkeypatch.setattr(S, "_ru_cvar_optimum", counted_optimize)
     plan = S.plan_family_joint_buy_targets(
         tuple(candidates),
         probability_witness=witness,
