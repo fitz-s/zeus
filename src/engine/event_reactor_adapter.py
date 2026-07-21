@@ -9356,7 +9356,11 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
-                restrict_to_family_keys=delta_scope_family_keys,
+                # Delta facts narrow refresh I/O, never the economic feasible set.
+                # Restricting the auction here made unchanged positive candidates
+                # disappear after another family moved, so CASH was only optimal
+                # inside the changed-family slice rather than across the venue.
+                restrict_to_family_keys=None,
             )
             logging.getLogger(__name__).debug(
                 "global probability family cache: hits=%d ineligible_hits=%d "

@@ -4594,15 +4594,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert captured["portfolio_state_provider"] is None
     assert captured["epoch_superseded"]() is True
     urgent_reason["value"] = "market_price_advanced"
-    assert captured["restrict_to_family_keys"] == frozenset(
-        {
-            era.weather_family_id(
-                city="Dallas",
-                target_date="2026-07-11",
-                metric="high",
-            )
-        }
-    )
+    assert captured["restrict_to_family_keys"] is None
     assert callable(captured["candidate_policy_rejection_resolver"])
     assert captured["buy_candidates_enabled"] is False
     candidate = SimpleNamespace(family_key="family-dallas")
@@ -7085,7 +7077,7 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     world.close()
 
 
-def test_live_adapter_restricts_price_delta_to_changed_families(monkeypatch):
+def test_live_adapter_keeps_price_delta_auction_global(monkeypatch):
     trade = sqlite3.connect(":memory:")
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
@@ -7121,16 +7113,7 @@ def test_live_adapter_restricts_price_delta_to_changed_families(monkeypatch):
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
     )
 
-    assert captured["restrict_to_family_keys"] == frozenset(
-        {
-            era.weather_family_id(
-                city=city,
-                target_date="2026-07-11",
-                metric="high",
-            )
-            for city in ("Dallas", "Miami")
-        }
-    )
+    assert captured["restrict_to_family_keys"] is None
     trade.close()
     forecast.close()
     topology.close()
