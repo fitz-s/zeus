@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-20
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-20; last_reused=2026-07-20
+# Last reused/audited: 2026-07-21
+# Lifecycle: created=2026-06-10; last_reviewed=2026-07-21; last_reused=2026-07-21
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -27,11 +27,13 @@ Contracts:
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -2188,6 +2190,55 @@ class TestMutexNoHttpSplit:
         assert "maybe_refresh_day0_hourly_vectors" in hourly_src
         assert 'id="edli_day0_hourly_refresh"' in main_source
 
+    def test_hourly_refresh_reads_latest_auction_day0_gaps(self, monkeypatch, tmp_path):
+        from src.events import reactor as reactor_module
+        from src.events.candidate_binding import weather_family_id
+
+        decision_time = datetime(2026, 7, 21, 7, 0, tzinfo=UTC)
+        london = _london()
+        target_date = decision_time.astimezone(
+            ZoneInfo(london.timezone)
+        ).date().isoformat()
+        blocked_id = weather_family_id(
+            city="London",
+            target_date=target_date,
+            metric="high",
+        )
+        db_path = tmp_path / "trades.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO decision_log (id, mode, artifact_json) VALUES (?, ?, ?)",
+            (
+                1,
+                "global_single_order_auction_delta",
+                json.dumps(
+                    {
+                        "summary": {
+                            "probability_ineligible_by_family": {
+                                blocked_id: "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                                "FamilyAuthorityUnavailable:"
+                                "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+                            }
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(
+            "src.state.db._zeus_trade_db_path",
+            lambda: db_path,
+        )
+
+        assert reactor_module._edli_latest_day0_hourly_blocked_families(
+            cities=[_tokyo(), london],
+            decision_time=decision_time,
+        ) == {("London", target_date, "high")}
+
     def test_hourly_refresh_keeps_held_day0_truth_fresh_while_trading(self, monkeypatch):
         import src.config as config_module
         import src.main  # load settings consumers before replacing the config singleton
@@ -2210,8 +2261,13 @@ class TestMutexNoHttpSplit:
         )
         monkeypatch.setattr(
             reactor_module,
+            "_edli_latest_day0_hourly_blocked_families",
+            lambda **_: set(),
+        )
+        monkeypatch.setattr(
+            reactor_module,
             "_edli_day0_hourly_priority_families",
-            lambda **_: pytest.fail("active trading lane must not scan pending families"),
+            lambda **_: [("Tokyo", target_date, "high")],
         )
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
@@ -2237,7 +2293,77 @@ class TestMutexNoHttpSplit:
         assert kwargs["quota_priority_cities"] == 1
         assert kwargs["persist_lock_blocking"] is False
 
-    def test_hourly_refresh_does_not_scan_unheld_cities_while_trading(self, monkeypatch):
+    def test_hourly_refresh_reserves_pending_slot_while_trading(self, monkeypatch):
+        import src.config as config_module
+        import src.main  # load settings consumers before replacing the config singleton
+        from src.events import reactor as reactor_module
+
+        tokyo = _tokyo()
+        seoul = _seoul()
+        london = _london()
+        now = datetime.now(UTC)
+        tokyo_date = now.astimezone(ZoneInfo(tokyo.timezone)).date().isoformat()
+        seoul_date = now.astimezone(ZoneInfo(seoul.timezone)).date().isoformat()
+        london_date = now.astimezone(ZoneInfo(london.timezone)).date().isoformat()
+        calls = []
+
+        monkeypatch.setattr(
+            config_module,
+            "settings",
+            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        )
+        monkeypatch.setattr(
+            config_module,
+            "runtime_cities",
+            lambda: [tokyo, seoul, london],
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_current_held_position_family_keys",
+            lambda: {
+                ("Tokyo", tokyo_date, "high"),
+                ("Seoul", seoul_date, "high"),
+            },
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_latest_day0_hourly_blocked_families",
+            lambda **_: {("London", london_date, "high")},
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_day0_hourly_priority_families",
+            lambda **_: [
+                ("Tokyo", tokyo_date, "high"),
+                ("Seoul", seoul_date, "high"),
+                ("London", london_date, "high"),
+            ],
+        )
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
+            lambda cities, **kwargs: calls.append((cities, kwargs))
+            or SimpleNamespace(
+                vectors_written=9,
+                cities_attempted=3,
+                cities_skipped_throttle=0,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=0,
+                budget_exhausted=False,
+            ),
+        )
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(
+            trading_lane_active=True,
+        )
+
+        assert len(calls) == 1
+        cities, kwargs = calls[0]
+        assert [city.name for city in cities] == ["Tokyo", "London", "Seoul"]
+        assert kwargs["max_cities"] == 3
+        assert kwargs["quota_priority_cities"] == 1
+        assert kwargs["persist_lock_blocking"] is False
+
+    def test_hourly_refresh_defers_unprioritized_universe_while_trading(self, monkeypatch):
         import src.config as config_module
         import src.main  # load settings consumers before replacing the config singleton
         from src.events import reactor as reactor_module
@@ -2255,12 +2381,17 @@ class TestMutexNoHttpSplit:
         )
         monkeypatch.setattr(
             reactor_module,
+            "_edli_latest_day0_hourly_blocked_families",
+            lambda **_: set(),
+        )
+        monkeypatch.setattr(
+            reactor_module,
             "_edli_day0_hourly_priority_families",
-            lambda **_: pytest.fail("active trading lane must not scan pending families"),
+            lambda **_: [],
         )
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
-            lambda *_args, **_kwargs: pytest.fail("unheld universe must remain deferred"),
+            lambda *_args, **_kwargs: pytest.fail("unprioritized universe must remain deferred"),
         )
 
         reactor_module.run_edli_day0_hourly_refresh_cycle(

@@ -4876,9 +4876,80 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     return out
 
 
+def _edli_latest_day0_hourly_blocked_families(
+    *,
+    cities: Iterable[Any],
+    decision_time: datetime,
+) -> set[tuple[str, str, str]]:
+    """Map the latest complete-auction Day0 data gaps back to city families."""
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    from src.events.candidate_binding import weather_family_id
+    from src.state.db import _zeus_trade_db_path
+
+    try:
+        path = _zeus_trade_db_path()
+        conn = _sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = _sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT artifact_json
+                  FROM decision_log
+                 WHERE mode IN (
+                     'global_single_order_auction',
+                     'global_single_order_auction_delta',
+                     'global_single_order_auction_duplicate'
+                 )
+                 ORDER BY id DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return set()
+        summary = _json.loads(str(row["artifact_json"] or ""))["summary"]
+        blocked_ids = {
+            str(family_key)
+            for family_key, reason in dict(
+                summary.get("probability_ineligible_by_family") or {}
+            ).items()
+            if "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE" in str(reason)
+        }
+        if not blocked_ids:
+            return set()
+        blocked: set[tuple[str, str, str]] = set()
+        for city in cities:
+            city_name = str(getattr(city, "name", "") or "").strip()
+            timezone_name = str(getattr(city, "timezone", "") or "").strip()
+            if not city_name or not timezone_name:
+                continue
+            target_date = decision_time.astimezone(
+                ZoneInfo(timezone_name)
+            ).date().isoformat()
+            for metric in ("high", "low"):
+                family_id = weather_family_id(
+                    city=city_name,
+                    target_date=target_date,
+                    metric=metric,
+                )
+                if family_id in blocked_ids:
+                    blocked.add((city_name, target_date, metric))
+        return blocked
+    except Exception as exc:  # noqa: BLE001 — scheduling hint, never authority
+        logging.getLogger("zeus.events.reactor").warning(
+            "edli_day0_hourly_refresh: auction-gap priority read failed: %s",
+            exc,
+        )
+        return set()
+
+
 def _edli_day0_hourly_priority_families(
     *,
     held_families: Iterable[tuple[str, str, str]] | None = None,
+    blocked_families: Iterable[tuple[str, str, str]] = (),
 ) -> list[tuple[str, str, str]]:
     """Money-path families that should drive Day0 hourly-vector refresh order."""
     import logging as _logging
@@ -4906,6 +4977,7 @@ def _edli_day0_hourly_priority_families(
         else held_families
     )
     add(sorted(held))
+    add(sorted(blocked_families))
 
     try:
         world_ro = get_world_connection_read_only()
@@ -5052,10 +5124,12 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     These vectors improve remaining-day Day0 pricing, but fetching Open-Meteo
     and writing ``zeus-forecasts.db`` must not pin the live event reactor. The
     producer therefore uses bounded HTTP work and a non-blocking persist lock.
-    While the trading reactor/redecision lane is active, it refreshes only
-    same-day cities with held capital; pending candidates and the universe sweep
-    wait. Held-position probability authority must not expire merely because
-    its consumer is busy.
+    While the trading reactor/redecision lane is active, held capital remains
+    first, but one bounded normal-quota slot is reserved for a pending same-day
+    family.  Otherwise a sustained reactor backlog can starve new-entry
+    probability authority forever.  The unprioritized universe sweep still
+    waits, and held-position probability authority retains critical-quota
+    precedence.
 
     ``trading_lane_active`` is injected from src.main after atomic admission
     against the reactor, redecision, and held-monitor scheduling primitives.
@@ -5076,15 +5150,16 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
 
         decision_time = datetime.now(timezone.utc)
-        held_families = sorted(_edli_current_held_position_family_keys())
-        priority_families = (
-            held_families
-            if trading_lane_active
-            else _edli_day0_hourly_priority_families(
-                held_families=held_families,
-            )
-        )
         cities = _rc()
+        held_families = sorted(_edli_current_held_position_family_keys())
+        blocked_families = _edli_latest_day0_hourly_blocked_families(
+            cities=cities,
+            decision_time=decision_time,
+        )
+        priority_families = _edli_day0_hourly_priority_families(
+            held_families=held_families,
+            blocked_families=blocked_families,
+        )
         ordered_cities, priority_city_count = _edli_order_day0_hourly_refresh_cities(
             cities,
             decision_time=decision_time,
@@ -5101,25 +5176,38 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             held_city_count=held_city_count,
             cursor=_DAY0_HOURLY_REFRESH_CURSOR,
         )
-        if trading_lane_active:
-            if held_city_count <= 0:
-                _log.info(
-                    "edli_day0_hourly_refresh deferred: trading lane active; "
-                    "no same-day held cities"
-                )
-                return
-            ordered_cities = ordered_cities[:held_city_count]
-            priority_city_count = held_city_count
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
+        quota_priority_cities = held_city_count
+        if trading_lane_active:
+            held = ordered_cities[:held_city_count]
+            pending = ordered_cities[held_city_count:priority_city_count]
+            if not held and not pending:
+                _log.info(
+                    "edli_day0_hourly_refresh deferred: trading lane active; "
+                    "no same-day held or pending cities"
+                )
+                return
+            if held and pending and max_cities >= 2:
+                # First protect one money-at-risk city, then make discovery
+                # progress before a slow held fetch can exhaust the whole
+                # budget.  Any remaining slots return to held capital.
+                ordered_cities = [held[0], pending[0]] + held[1:max_cities - 1]
+                quota_priority_cities = 1
+            elif held:
+                ordered_cities = held[:max_cities]
+                quota_priority_cities = len(ordered_cities)
+            else:
+                ordered_cities = pending[:max_cities]
+                quota_priority_cities = 0
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
             budget_s=_day0_hourly_refresh_budget_seconds(),
             max_cities=max_cities,
             timeout_s=_day0_hourly_fetch_timeout_seconds(),
-            quota_priority_cities=held_city_count,
+            quota_priority_cities=quota_priority_cities,
             persist_lock_blocking=False,
             return_stats=True,
         )
@@ -5132,7 +5220,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         if vectors_written or priority_city_count:
             _log.info(
                 "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
-                "held_cities=%d held_only=%s "
+                "held_cities=%d trading_lane_active=%s "
                 "max_cities=%d cities_attempted=%d skipped_throttle=%d "
                 "skipped_quota=%d incomplete_expected_bundles=%d "
                 "budget_exhausted=%s cursor=%d",

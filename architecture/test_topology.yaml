@@ -397,7 +397,7 @@ test_trust_policy:
     tests/test_day0_admission.py: {created: "2026-06-17", last_used: "2026-07-19", note: "Day0 live admission contracts, including strict quote-after-observation ordering, current source-health classification, final-localday no-entry geometry, one-bin stress, and maker-only routing."}
     tests/test_day0_extreme_updated_materialization_bridge.py: {created: "2026-07-19", last_used: "2026-07-20", note: "Non-blocking coalesced Day0 posterior rematerialization bridge: scoped manifests, same-cycle observation advance, and no family drop under burst."}
     tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
-    tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-20", note: "Fast METAR publication persistence, event identities, committed-family wake propagation, and hourly-vector producer independence from reactor/redecision consumer locks."}
+    tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-21", note: "Fast METAR publication persistence and Day0 hourly-vector fairness: held capital keeps critical-quota priority while a busy trading lane reserves one normal-quota slot for a pending same-day family, preventing new-entry authority starvation without sweeping the unprioritized universe."}
     tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-20", note: "Day0 METAR/HKO source-clock scheduling, conditional HKO validator commit coupling, isolated executor lanes, bounded commit retry, and commit-before-wake ordering."}
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
