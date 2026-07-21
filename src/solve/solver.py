@@ -73,6 +73,10 @@ from src.contracts.execution_intent import (
     quantize_submit_shares_for_venue_at_most,
     venue_submit_amount_precision_error,
 )
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
+)
 from src.solve.exits import ZeroWealthOutcomeError
 from src.solve.kappa import KappaPolicy
 from src.solve.scenario_service import ScenarioService
@@ -117,6 +121,13 @@ _SIZE_QUANTUM = Decimal("0.01")
 _MAX_ORDERS = 15
 
 _WORST_PRICE_MODEL = "avg_cost_size_aware_depth_capped_v1"
+
+
+def _live_unit_price_in_band(value: Decimal) -> bool:
+    return (
+        value.is_finite()
+        and LIVE_ORDER_MIN_UNIT_PRICE <= value <= LIVE_ORDER_MAX_UNIT_PRICE
+    )
 
 # CVaR tail stability (consult REV-2 follow-up): a robust ΔU at alpha needs enough draws in
 # the alpha-tail to be meaningful. Below this the plan is STAMPED (diagnostics) so the promotion
@@ -192,6 +203,7 @@ GlobalEligibilityReason = Literal[
     "DEPTH_INFEASIBLE",
     "ROBUST_MAJORITY_LOSS",
     "FRACTIONAL_KELLY_TARGET_REACHED",
+    "LIVE_UNIT_PRICE_OUT_OF_BOUNDS",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
 ]
 
@@ -2930,6 +2942,24 @@ def _score_global_single_order(
     minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
         candidate.executable_cost_curve.levels[0].price
     )
+    maximum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
+        candidate.executable_cost_curve.levels[-1].price
+    )
+    if (
+        minimum_unit_cost > LIVE_ORDER_MAX_UNIT_PRICE
+        or maximum_unit_cost < LIVE_ORDER_MIN_UNIT_PRICE
+    ):
+        reason = "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons={candidate.candidate_id: reason},
+        )
     if robust_q <= float(minimum_unit_cost):
         reason = "NON_POSITIVE_ROBUST_OBJECTIVE"
         full_target = held_shares
@@ -2983,6 +3013,7 @@ def _score_global_single_order(
         Decimal,
         Decimal,
     ] | None = None
+    full_price_band_rejected = False
     for shares in sorted(probes):
         if shares < raw_min_shares or shares > raw_max_shares:
             continue
@@ -3000,6 +3031,9 @@ def _score_global_single_order(
                 candidate, shares
             )
         except ValueError:
+            continue
+        if not _live_unit_price_in_band(cost / shares):
+            full_price_band_rejected = True
             continue
         if max_spend > optimization_limit:
             continue
@@ -3019,6 +3053,18 @@ def _score_global_single_order(
                 max_spend,
             )
 
+    if full_best is None and full_price_band_rejected:
+        reason = "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons={candidate.candidate_id: reason},
+        )
     if full_best is None or full_best[0] <= 0.0:
         reason = "NON_POSITIVE_ROBUST_OBJECTIVE"
         probe_shares = full_best[4] if full_best is not None else legal_min_shares
@@ -3134,6 +3180,7 @@ def _score_global_single_order(
                     projected_probes.add(legal)
 
     best = None
+    projected_price_band_rejected = False
     for shares in sorted(projected_probes):
         if shares < legal_min_shares or shares > fractional_max_shares:
             continue
@@ -3151,6 +3198,9 @@ def _score_global_single_order(
                 candidate, shares
             )
         except ValueError:
+            continue
+        if not _live_unit_price_in_band(cost / shares):
+            projected_price_band_rejected = True
             continue
         if max_spend > spend_limit:
             continue
@@ -3170,6 +3220,18 @@ def _score_global_single_order(
                 max_spend,
             )
 
+    if best is None and projected_price_band_rejected:
+        reason = "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons={candidate.candidate_id: reason},
+        )
     if best is None or not (
         best[0] > 0.0 and best[1] > _ROBUST_EV_EPS_USD
     ):
@@ -3481,8 +3543,12 @@ def _score_global_single_order_sell(
         Decimal,
         Decimal,
     ] | None = None
+    price_band_rejected = False
     for shares in sorted(venue_probes):
         proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(shares)
+        if not _live_unit_price_in_band(limit_price):
+            price_band_rejected = True
+            continue
         loss_at_risk = shares - proceeds
         if proceeds <= 0 or loss_at_risk <= 0:
             raise ValueError(
@@ -3512,7 +3578,21 @@ def _score_global_single_order_sell(
             best = scored_point
 
     if best is None:
-        raise ValueError("sell optimizer produced no venue-legal size")
+        reason = (
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+            if price_band_rejected
+            else "DEPTH_INFEASIBLE"
+        )
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons={candidate.candidate_id: reason},
+        )
     (
         robust_du,
         efficiency,

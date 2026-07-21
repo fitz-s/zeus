@@ -1803,6 +1803,53 @@ def test_global_single_order_sell_yes_no_label_mirror_is_exact():
     assert yes_decision.robust_ev_usd == no_decision.robust_ev_usd
 
 
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    ("price", "held_q"),
+    (("0.004", 0.001), ("0.999", 0.20)),
+)
+def test_global_single_order_sell_ranks_only_live_price_band_probes(
+    side, price, held_q
+):
+    sell = _global_sell_candidate(
+        candidate_id=f"sell-out-of-band-{side}-{price}",
+        family=f"sell-out-of-band-{side}-{price}-family",
+        side=side,
+        held_q=held_q,
+        bids=((price, "10"),),
+        shares="10",
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is None
+    assert (
+        decision.rejection_reasons[sell.candidate_id]
+        == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    ("price", "held_q"),
+    (("0.05", 0.001), ("0.95", 0.20)),
+)
+def test_global_single_order_sell_price_band_is_inclusive(side, price, held_q):
+    sell = _global_sell_candidate(
+        candidate_id=f"sell-boundary-{side}-{price}",
+        family=f"sell-boundary-{side}-{price}-family",
+        side=side,
+        held_q=held_q,
+        bids=((price, "10"),),
+        shares="10",
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.limit_price == Decimal(price)
+
+
 def test_global_single_order_sell_uses_best_partial_depth_when_full_depth_is_absent():
     sell = _global_sell_candidate(
         candidate_id="sell-thin-depth",
@@ -3135,6 +3182,57 @@ def test_global_single_order_rejects_curve_from_another_token_or_snapshot():
 
     assert decision.candidate.candidate_id == "valid-no"
     assert decision.rejection_reasons["cheap-low-hit-yes"] == "BOOK_CERTIFICATE_MISMATCH"
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    ("price", "q"),
+    (("0.004", 0.20), ("0.999", 1.0)),
+)
+def test_global_single_order_ranks_only_live_price_band_buy_probes(side, price, q):
+    out_of_band = _global_candidate(
+        candidate_id=f"out-of-band-{side}-{price}",
+        family="out-of-band",
+        side=side,
+        q=q,
+        levels=((price, "1000"),),
+    )
+    legal = _global_candidate(
+        candidate_id=f"legal-{side}-{price}",
+        family="legal",
+        side=side,
+        q=0.80,
+        levels=(("0.60", "100"),),
+    )
+
+    decision = _global_select((out_of_band, legal))
+
+    assert decision.candidate is not None
+    assert decision.candidate.candidate_id == legal.candidate_id
+    assert (
+        decision.rejection_reasons[out_of_band.candidate_id]
+        == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    ("price", "q"),
+    (("0.05", 0.20), ("0.95", 1.0)),
+)
+def test_global_single_order_buy_price_band_is_inclusive(side, price, q):
+    candidate = _global_candidate(
+        candidate_id=f"boundary-{side}-{price}",
+        family=f"boundary-{side}-{price}-family",
+        side=side,
+        q=q,
+        levels=((price, "1000"),),
+    )
+
+    decision = _global_select((candidate,))
+
+    assert decision.candidate is candidate
+    assert decision.cost_usd / decision.shares == Decimal(price)
 
 
 def test_global_single_order_rejects_expired_quote_before_economics():

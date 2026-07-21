@@ -213,6 +213,16 @@ def latest_raw_artifact_input_cycle(
         try:
             data_version_row = conn.execute("PRAGMA data_version").fetchone()
             data_version = int(data_version_row[0]) if data_version_row is not None else -1
+            if {"source_id", "product_id"}.issubset(columns):
+                return _raw_artifact_cycle_for_frozen_request(
+                    conn,
+                    table_ref,
+                    frozenset(columns),
+                    key,
+                    decision_iso,
+                    data_version,
+                    conn.total_changes,
+                )
             cached = dict(
                 _raw_artifact_cycles_for_frozen_target(
                     conn,
@@ -508,6 +518,28 @@ def _batch_product_cycle_artifact_cycles(
             )
         )
     return cycles
+
+
+@lru_cache(maxsize=64)
+def _raw_artifact_cycle_for_frozen_request(
+    conn: sqlite3.Connection,
+    table_ref: str,
+    columns: frozenset[str],
+    request: tuple[str, str, str],
+    decision_iso: str,
+    data_version: int,
+    total_changes: int,
+) -> datetime | None:
+    """Resolve one frozen request through indexed product-cycle partitions."""
+
+    del data_version, total_changes  # cache-key invalidators
+    return _batch_product_cycle_artifact_cycles(
+        conn,
+        table_ref=table_ref,
+        columns=columns,
+        requests=frozenset((request,)),
+        decision_iso=decision_iso,
+    ).get(request)
 
 
 def _batch_artifact_cycles(

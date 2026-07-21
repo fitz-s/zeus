@@ -966,3 +966,24 @@ structured product identity retain the generic fail-closed path. Acceptance
 requires the pre-fix malformed-old-cycle antibody, focused HWM tests, a
 read-only canonical-DB benchmark with an indexed query plan, standard live
 deployment, and natural auction evidence below the 180-second evidence horizon.
+
+## 2026-07-20 submit-feasible ranking and scalar HWM
+
+The batch HWM repair restored complete auctions, then natural production exposed
+two later-ordering defects. Winner JIT still used the legacy scalar JSON scan
+inside the frozen read transaction, blocking one preflight for about 102 seconds.
+The same epoch ranked a `0.99904995` all-in BUY first even though the durable live
+submission contract rejects every unit price outside inclusive `[0.05, 0.95]`.
+Final guards prevented a venue order, but late rejection wasted the evidence
+window and hid any legal runner-up.
+
+Structured scalar HWM reads now reuse the indexed newest-first product-cycle
+resolver; legacy schemas keep the generic path. Global BUY scoring admits only
+exact probe sizes whose all-in average unit cost is in the live band, while SELL
+uses its exact submitted limit price. This feasibility constraint is native-side
+symmetric and precedes ranking; robust log wealth, EV, correlated endowment, and
+Fractional Kelly still decide among the remaining orders. Acceptance requires
+pre-fix failing `0.004`/`0.999` YES/NO BUY and SELL antibodies, the malformed-old
+cycle scalar antibody, focused and integration regressions, a read-only canonical
+scalar benchmark, standard deployment, and natural receipts showing no late
+price-band preflight loop or out-of-band venue command.
