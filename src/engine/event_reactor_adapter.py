@@ -763,6 +763,23 @@ def _evict_global_probability_family_cache(
             _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
 
 
+def _evict_superseded_global_probability_family_cache(
+    namespace: str | None,
+    *,
+    reason: str,
+    actuation: object,
+) -> bool:
+    if not reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+        return False
+    decision = getattr(actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    family_key = str(getattr(candidate, "family_key", "") or "").strip()
+    if not namespace or not family_key:
+        return False
+    _evict_global_probability_family_cache(namespace, family_key=family_key)
+    return True
+
+
 def _cached_global_book_probabilities(epoch: object) -> dict[str, object] | None:
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         entry = _GLOBAL_BOOK_EPOCH_CACHE
@@ -8054,6 +8071,11 @@ def event_bound_live_adapter_from_trade_conn(
                     probability_tightening=probability_tightening,
                     reason=reason,
                 )
+            _evict_superseded_global_probability_family_cache(
+                probability_cache_namespace,
+                reason=reason,
+                actuation=actuation,
+            )
             status = _global_preflight_block_status(reason)
             logging.getLogger(__name__).info(
                 "global winner preflight rejected: event=%s status=%s reason=%s",

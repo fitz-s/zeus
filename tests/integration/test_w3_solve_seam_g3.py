@@ -4998,6 +4998,68 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
     assert expired_refresh.probability_witness.captured_at_utc == at_expired
 
 
+def test_superseded_preflight_evicts_only_selected_family_probability_cache(
+    monkeypatch,
+):
+    namespace = "probability-cache-test"
+    selected_family = "family-selected"
+    other_family = "family-other"
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",
+        namespace,
+    )
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_PROBABILITY_FAMILY_CACHE",
+        {
+            selected_family: ("event-selected", "binding-selected", object()),
+            other_family: ("event-other", "binding-other", object()),
+        },
+    )
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",
+        {
+            selected_family: ("event-selected", "snapshot", (1,), object()),
+            other_family: ("event-other", "snapshot", (1,), object()),
+        },
+    )
+    actuation = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(family_key=selected_family),
+        ),
+    )
+
+    evicted = era._evict_superseded_global_probability_family_cache(
+        namespace,
+        reason=(
+            "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
+            "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
+        ),
+        actuation=actuation,
+    )
+
+    assert evicted is True
+    assert selected_family not in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    assert selected_family not in era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE
+    assert other_family in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    assert other_family in era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE
+    assert (
+        era._evict_superseded_global_probability_family_cache(
+            namespace,
+            reason="GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError",
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate=SimpleNamespace(family_key=other_family),
+                )
+            ),
+        )
+        is False
+    )
+    assert other_family in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+
+
 def test_live_adapter_excludes_closed_forecast_family_before_probability_prepare(
     monkeypatch,
 ):
