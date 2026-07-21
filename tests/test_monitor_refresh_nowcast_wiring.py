@@ -1,5 +1,5 @@
 # Created: 2026-05-20
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-21
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
 # Lifecycle: created=2026-05-20; last_reviewed=2026-07-19; last_reused=2026-07-19
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
@@ -488,6 +488,11 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
     )
     assert any("FROM executable_market_snapshot_latest" in sql for sql in trade.queries)
     assert all("FROM executable_market_snapshots" not in sql for sql in trade.queries)
+    day0_event_query = next(
+        sql for sql in world.queries if "FROM opportunity_events" in sql
+    )
+    assert "INDEXED BY idx_opportunity_events_day0_family_extreme" in day0_event_query
+    assert "lower(json_extract(payload_json, '$.metric'))" not in day0_event_query
     assert world.closed is True
     assert forecasts.closed is True
 

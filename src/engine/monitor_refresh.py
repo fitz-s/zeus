@@ -4550,11 +4550,11 @@ def _build_current_global_day0_family_snapshot(
                    available_at, received_at, causal_snapshot_id, payload_hash,
                    idempotency_key, priority, expires_at, payload_json,
                    schema_version, created_at
-              FROM opportunity_events
+              FROM opportunity_events INDEXED BY idx_opportunity_events_day0_family_extreme
              WHERE event_type = 'DAY0_EXTREME_UPDATED'
                AND json_extract(payload_json, '$.city') = ?
                AND json_extract(payload_json, '$.target_date') = ?
-               AND lower(json_extract(payload_json, '$.metric')) = ?
+               AND json_extract(payload_json, '$.metric') = ?
              ORDER BY available_at DESC
              LIMIT 1
             """,
