@@ -16428,6 +16428,209 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
     return "advanced"
 
 
+def _review_required_matched_submit_trade_fact_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+) -> str:
+    """Promote an exact durable fill fact without waiting for venue I/O.
+
+    ``matched_submit_missing_trade_id`` means submit already returned a bound
+    order id and positive matched economics, but no trade identity.  The
+    continuous fill synchronizer later appends the authenticated trade fact.
+    Once exactly one canonical CONFIRMED fact covers the submitted BUY at a
+    limit-respecting price, another network snapshot cannot add authority; it
+    can only delay exposure projection and keep the governor in reduce-only.
+    """
+
+    if (
+        cmd.state != CommandState.REVIEW_REQUIRED
+        or cmd.intent_kind != IntentKind.ENTRY
+        or str(cmd.side or "").upper() != "BUY"
+        or not str(cmd.venue_order_id or "").strip()
+    ):
+        return "stayed"
+    latest_reason = _latest_review_required_payload(
+        _command_events(conn, cmd.command_id)
+    ).get("reason")
+    if latest_reason != "matched_submit_missing_trade_id":
+        return "stayed"
+
+    command = _dict_row(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (cmd.command_id,),
+        ).fetchone()
+    )
+    rows = conn.execute(
+        "WITH " + _canonical_trade_fact_cte() + """
+        SELECT trade_fact_id,
+               trade_id,
+               venue_order_id,
+               state,
+               filled_size,
+               fill_price,
+               source,
+               observed_at,
+               venue_timestamp,
+               tx_hash
+          FROM canonical_trade_fact
+         WHERE command_id = ?
+           AND venue_order_id = ?
+           AND state = 'CONFIRMED'
+           AND source IN ('REST', 'WS_USER')
+           AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
+         ORDER BY proof_rank DESC, local_sequence DESC
+        """,
+        (cmd.command_id, str(cmd.venue_order_id)),
+    ).fetchall()
+    if len(rows) != 1:
+        return "stayed"
+    trade_fact = _dict_row(rows[0])
+    filled_size = str(trade_fact.get("filled_size") or "")
+    fill_price = str(trade_fact.get("fill_price") or "")
+    if not _fill_price_respects_limit(
+        fill_price,
+        command.get("price"),
+        side=command.get("side"),
+    ) or not _fill_size_completes_limit_order(
+        filled_size,
+        command.get("size"),
+        side=command.get("side"),
+    ):
+        return "stayed"
+
+    venue_order_id = str(trade_fact.get("venue_order_id") or "")
+    trade_id = str(trade_fact.get("trade_id") or "")
+    observed_at = str(trade_fact.get("observed_at") or _now_iso())
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_confirmed_fill",
+        "command_id": cmd.command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "filled_size": filled_size,
+        "fill_price": fill_price,
+        "proof_class": "matched_submit_missing_trade_id_confirmed_trade",
+        "side_effect_boundary_crossed": True,
+        "sdk_submit_attempted": True,
+        "required_predicates": {
+            "latest_event_is_review_required": True,
+            "review_reason_matched_submit_missing_trade_id": True,
+            "positive_trade_fact": True,
+            "maker_order_token_matches_command": True,
+            "bound_venue_order_id_matches_trade": venue_order_id
+            == str(cmd.venue_order_id),
+            "maker_order_not_open": True,
+            "venue_size_quantization_residual_lt_0_01": True,
+        },
+        "trade_fact_proof": {
+            "trade_fact_id": trade_fact.get("trade_fact_id"),
+            "state": trade_fact.get("state"),
+            "source": trade_fact.get("source"),
+            "observed_at": trade_fact.get("observed_at"),
+            "venue_timestamp": trade_fact.get("venue_timestamp"),
+            "tx_hash": trade_fact.get("tx_hash"),
+        },
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": "command_recovery._reconcile_row",
+            "source_reason": "durable_confirmed_trade_fact_precedes_venue_snapshot",
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": observed_at,
+    }
+    safe_command_id = "".join(
+        ch if ch.isalnum() else "_" for ch in cmd.command_id
+    )
+    sp_name = f"sp_matched_submit_fact_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        append_order_fact(
+            conn,
+            venue_order_id=venue_order_id,
+            command_id=cmd.command_id,
+            state="MATCHED",
+            remaining_size="0",
+            matched_size=filled_size,
+            source=str(trade_fact.get("source") or "REST"),
+            observed_at=observed_at,
+            venue_timestamp=str(
+                trade_fact.get("venue_timestamp") or observed_at
+            ),
+            raw_payload_hash=_payload_hash({**payload, "fact_type": "order"}),
+            raw_payload_json=payload,
+        )
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.FILL_CONFIRMED.value,
+            occurred_at=observed_at,
+            payload=payload,
+        )
+        _append_matched_order_fill_projection(
+            conn,
+            command={**command, "venue_order_id": venue_order_id},
+            venue_order_id=venue_order_id,
+            matched_size=filled_size,
+            fill_price=fill_price,
+            observed_at=observed_at,
+            order_fact_source=str(trade_fact.get("source") or "REST"),
+        )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    logger.warning(
+        "recovery: command %s REVIEW_REQUIRED matched-submit durable fact -> "
+        "FILLED (venue_order_id=%s trade_id=%s filled_size=%s)",
+        cmd.command_id,
+        venue_order_id,
+        trade_id,
+        filled_size,
+    )
+    return "advanced"
+
+
+def reconcile_review_required_matched_submit_trade_facts(
+    conn: sqlite3.Connection,
+) -> dict:
+    """Recover durable matched-submit fills before any venue snapshot."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if not _table_exists(conn, "venue_commands"):
+        return summary
+    for row in find_unresolved_commands(conn):
+        if str(row.get("state") or "") != CommandState.REVIEW_REQUIRED.value:
+            continue
+        try:
+            cmd = VenueCommand.from_row(row)
+        except Exception:
+            summary["errors"] += 1
+            continue
+        latest_reason = _latest_review_required_payload(
+            _command_events(conn, cmd.command_id)
+        ).get("reason")
+        if latest_reason != "matched_submit_missing_trade_id":
+            continue
+        summary["scanned"] += 1
+        try:
+            outcome = _review_required_matched_submit_trade_fact_recovery(
+                conn, cmd
+            )
+        except Exception:
+            logger.exception(
+                "recovery: durable matched-submit fact repair failed for command %s",
+                cmd.command_id,
+            )
+            summary["errors"] += 1
+            continue
+        summary[outcome] += 1
+    return summary
+
+
 def clear_review_required_confirmed_fill(
     conn: sqlite3.Connection,
     command_id: str,
@@ -17683,6 +17886,16 @@ def _reconcile_passes_inline(
         summary["stayed"] += review_mutex_summary["stayed"]
         summary["errors"] += review_mutex_summary["errors"]
 
+        matched_submit_fact_summary = (
+            reconcile_review_required_matched_submit_trade_facts(conn)
+        )
+        summary["review_required_matched_submit_trade_fact"] = (
+            matched_submit_fact_summary
+        )
+        summary["advanced"] += matched_submit_fact_summary["advanced"]
+        summary["stayed"] += matched_submit_fact_summary["stayed"]
+        summary["errors"] += matched_submit_fact_summary["errors"]
+
         rows = find_unresolved_commands(conn)
         summary["scanned"] = len(rows)
 
@@ -18926,6 +19139,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         "review_required_exit_mutex_release",
         reconcile_review_required_exit_mutex_releases,
         "review_required_exit_mutex_release",
+    )
+    _db_pass(
+        "review_required_matched_submit_trade_fact",
+        reconcile_review_required_matched_submit_trade_facts,
+        "review_required_matched_submit_trade_fact",
     )
     if scope == "live_tick":
         # These passes consume facts that are already durable in zeus_trades.

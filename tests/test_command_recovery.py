@@ -4205,6 +4205,117 @@ class TestRecoveryResolutionTable:
             for row in _restart_preflight_unresolved_commands(conn)
         ] == [command_id]
 
+    def test_durable_confirmed_fact_recovers_matched_submit_without_venue_io(
+        self, conn
+    ):
+        from src.execution.command_recovery import (
+            reconcile_review_required_matched_submit_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-durable-matched-submit"
+        order_id = "ord-durable-matched-submit"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id="pos-durable-matched-submit",
+            decision_id="dec-durable-matched-submit",
+            token_id="tok-durable-matched-submit",
+            size=31.5,
+            price=0.74,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "matched_submit_missing_trade_id"},
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-durable-matched-submit",
+            filled_size="31.9",
+            fill_price="0.73",
+        )
+
+        summary = reconcile_review_required_matched_submit_trade_facts(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        events = _get_events(conn, command_id)
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == (
+            "matched_submit_missing_trade_id_confirmed_trade"
+        )
+        order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "31.9",
+        }
+
+    def test_durable_confirmed_fact_does_not_promote_partial_matched_submit(
+        self, conn
+    ):
+        from src.execution.command_recovery import (
+            reconcile_review_required_matched_submit_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-durable-matched-submit-partial"
+        order_id = "ord-durable-matched-submit-partial"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id="pos-durable-matched-submit-partial",
+            decision_id="dec-durable-matched-submit-partial",
+            token_id="tok-durable-matched-submit-partial",
+            size=31.5,
+            price=0.74,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "matched_submit_missing_trade_id"},
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-durable-matched-submit-partial",
+            filled_size="31.48",
+            fill_price="0.73",
+        )
+
+        summary = reconcile_review_required_matched_submit_trade_facts(conn)
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
     def test_review_required_recovery_no_venue_order_id_confirmed_trade_stays_when_order_open(
         self, conn, mock_client
     ):
