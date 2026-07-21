@@ -35,3 +35,31 @@ position_lots 被读于:`riskguard.py:693`、`risk_allocator/governor.py`、`can
 
 ## 结论
 按计划"码 W0-b"= 码一个无效改动。正确动作:不改门;W0-c 扩为 recovered_projection 合成(需先定 exposure 紧迫度 + position_lots per-fill 幂等)。此发现交操作员定 W0-c 范围与优先级。
+
+---
+
+## Fork 1 已解决(实测):缺口 lot **不是** live exposure 风险 — W0-c 降级低紧迫
+
+`w0b_exposure_probe.py`(只读活库)拆分 267 个 NEW 候选:
+
+| | 数 |
+|---|---|
+| 有 position_current 行 | **267(全部)** |
+| 无 position_current | **0** |
+
+相位分布(全有 position_current):`settled` **220(82%)** · day0_window 20 · voided 11 · active 8 · pending_exit 5 · admin_closed 3 → 仅 **33 个 open**。
+
+**定性**:
+1. exposure 由 **position_current 承载**(全 267 有行)。缺的 position_lots 是**二级 lot 明细账**,不是 live exposure 少算。RiskGuard 主 exposure 读 position_current;`_unprojected_entry_fill_equity_usd`(riskguard.py:671)另有网兜"有 fill 但无 position_current"的仓位——此处该网命中 0(全有 pc),证明 exposure 无缺口。
+2. **82% 已结算**——lot 是纯历史明细;governor `load_position_lots`(governor.py:798)也另读 position_current(:868)。
+3. 仅 33 个 open 仓位缺 lot 明细,且都有 position_current。
+
+**W0-c 重定级**:从"impaired money-path repair lane(疑真钱风险)"→ **二级账完整性补全,低紧迫,多为历史**。真钱 exposure/风险由 position_current 独立承载,不受缺 lot 影响。
+
+**修正原 FINDINGS G2 措辞**:G2 closure 写的"impaired money-path repair lane"过重——修复通道产出的是 position_lots 二级明细;live exposure 由 position_current 独立承载。准确表述:*trade_decisions 冻结导致 position_lots 明细补全通道停摆(二级账不完整),但不影响 live exposure/风险计量*。W0-a 解冻仍应做(让未来进场正常物化 lot),W0-c(补 247 历史缺口)可从容排期,非救火。
+
+## 净结论(交操作员)
+- **W0-a**(解冻迁移)= 独立、已测绿、值得落地:让未来进场的 lot 明细正常物化,并消除 trade_decisions 每次 INSERT 报错的噪音。仍操作员门运行。
+- **W0-b(去候选门)= 撤销**(no-op,不改 command_recovery)。
+- **W0-c** = 低紧迫二级账补全(recovered_projection 合成 247 历史行);可后排。
+- **架构**:position_lots 用 trade_decisions.trade_id 做身份 → REDESIGN money-hot 解耦目标(W4),非 W0。
