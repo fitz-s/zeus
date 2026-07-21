@@ -925,3 +925,24 @@ selection and claim and requires `in_transaction=False` at the callback. The
 focused claim/snapshot sets pass `62` and the wider global batch/winner set
 passes `57`; standard deployment and a natural positive-winner receipt remain
 the runtime acceptance evidence.
+
+## 2026-07-20 held Day0 probability producer priority
+
+Canonical loss attribution for Tokyo July 20 showed a fresh remaining-day
+probability expiring during an executable exit window. The last complete hourly
+bundle aged past its three-hour read limit at 04:36Z and the next bundle arrived
+about 40 minutes later. Live scheduler evidence reproduced the mechanism: the
+45-second producer skipped every tick while the reactor/redecision lane was
+active even though successful fetches reported no quota denial or exhausted
+budget. A probability consumer being busy cannot make held-capital truth
+optional.
+
+When a trading lane is active, the producer now performs only the bounded
+same-local-day held-city prefix. Pending candidates, open rests, and the static
+universe still defer; the existing HTTP budget, per-city throttle, critical
+quota tranche, and non-blocking forecast-DB persist lock remain unchanged. No
+stale vector is accepted and no exit is authorized by this producer. Acceptance
+requires a pre-fix failing test that proves an active trading lane still reaches
+the held-city refresh without scanning pending families, the focused scheduler
+and Day0 suites, standard live deployment, and new logs with `held_only=True`
+while trading remains active.

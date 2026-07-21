@@ -2188,8 +2188,58 @@ class TestMutexNoHttpSplit:
         assert "maybe_refresh_day0_hourly_vectors" in hourly_src
         assert 'id="edli_day0_hourly_refresh"' in main_source
 
-    def test_hourly_refresh_yields_before_priority_db_reads(self, monkeypatch):
+    def test_hourly_refresh_keeps_held_day0_truth_fresh_while_trading(self, monkeypatch):
         import src.config as config_module
+        import src.main  # load settings consumers before replacing the config singleton
+        from src.events import reactor as reactor_module
+
+        tokyo = _tokyo()
+        target_date = (datetime.now(UTC) + timedelta(hours=9)).date().isoformat()
+        calls = []
+
+        monkeypatch.setattr(
+            config_module,
+            "settings",
+            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        )
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: [tokyo, _london()])
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_current_held_position_family_keys",
+            lambda: {("Tokyo", target_date, "high")},
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_day0_hourly_priority_families",
+            lambda **_: pytest.fail("active trading lane must not scan pending families"),
+        )
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
+            lambda cities, **kwargs: calls.append((cities, kwargs))
+            or SimpleNamespace(
+                vectors_written=3,
+                cities_attempted=1,
+                cities_skipped_throttle=0,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=0,
+                budget_exhausted=False,
+            ),
+        )
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(
+            trading_lane_active=True,
+        )
+
+        assert len(calls) == 1
+        cities, kwargs = calls[0]
+        assert [city.name for city in cities] == ["Tokyo"]
+        assert kwargs["max_cities"] == 1
+        assert kwargs["quota_priority_cities"] == 1
+        assert kwargs["persist_lock_blocking"] is False
+
+    def test_hourly_refresh_does_not_scan_unheld_cities_while_trading(self, monkeypatch):
+        import src.config as config_module
+        import src.main  # load settings consumers before replacing the config singleton
         from src.events import reactor as reactor_module
 
         monkeypatch.setattr(
@@ -2197,10 +2247,20 @@ class TestMutexNoHttpSplit:
             "settings",
             SimpleNamespace(_data={"edli": {"enabled": True}}),
         )
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: [_tokyo()])
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_current_held_position_family_keys",
+            lambda: set(),
+        )
         monkeypatch.setattr(
             reactor_module,
             "_edli_day0_hourly_priority_families",
-            lambda: pytest.fail("active trading lane must defer before DB priority reads"),
+            lambda **_: pytest.fail("active trading lane must not scan pending families"),
+        )
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
+            lambda *_args, **_kwargs: pytest.fail("unheld universe must remain deferred"),
         )
 
         reactor_module.run_edli_day0_hourly_refresh_cycle(

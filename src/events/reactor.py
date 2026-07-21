@@ -5045,9 +5045,11 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     Refresh Day0 high-resolution hourly vectors off the trading reactor cadence.
     These vectors improve remaining-day Day0 pricing, but fetching Open-Meteo
     and writing ``zeus-forecasts.db`` must not pin the live event reactor. The
-    reactor consumes whatever is already fresh; this side job opportunistically
-    refreshes the carrier and yields whenever the trading reactor/redecision
-    lane is active.
+    producer therefore uses bounded HTTP work and a non-blocking persist lock.
+    While the trading reactor/redecision lane is active, it refreshes only
+    same-day cities with held capital; pending candidates and the universe sweep
+    wait. Held-position probability authority must not expire merely because
+    its consumer is busy.
 
     ``trading_lane_active`` is injected from src.main after atomic admission
     against the reactor, redecision, and held-monitor scheduling primitives.
@@ -5063,17 +5065,18 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     edli_cfg = _settings_source.get("edli", {}) if isinstance(_settings_source, dict) else {}
     if not edli_cfg.get("enabled"):
         return
-    if trading_lane_active:
-        _log.info("edli_day0_hourly_refresh deferred: trading lane active")
-        return
     try:
         from src.config import runtime_cities as _rc
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
 
         decision_time = datetime.now(timezone.utc)
         held_families = sorted(_edli_current_held_position_family_keys())
-        priority_families = _edli_day0_hourly_priority_families(
-            held_families=held_families,
+        priority_families = (
+            held_families
+            if trading_lane_active
+            else _edli_day0_hourly_priority_families(
+                held_families=held_families,
+            )
         )
         cities = _rc()
         ordered_cities, priority_city_count = _edli_order_day0_hourly_refresh_cities(
@@ -5092,6 +5095,15 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             held_city_count=held_city_count,
             cursor=_DAY0_HOURLY_REFRESH_CURSOR,
         )
+        if trading_lane_active:
+            if held_city_count <= 0:
+                _log.info(
+                    "edli_day0_hourly_refresh deferred: trading lane active; "
+                    "no same-day held cities"
+                )
+                return
+            ordered_cities = ordered_cities[:held_city_count]
+            priority_city_count = held_city_count
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
@@ -5114,11 +5126,14 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         if vectors_written or priority_city_count:
             _log.info(
                 "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
+                "held_cities=%d held_only=%s "
                 "max_cities=%d cities_attempted=%d skipped_throttle=%d "
                 "skipped_quota=%d incomplete_expected_bundles=%d "
                 "budget_exhausted=%s cursor=%d",
                 vectors_written,
                 priority_city_count,
+                held_city_count,
+                trading_lane_active,
                 max_cities,
                 cities_attempted,
                 int(getattr(stats, "cities_skipped_throttle", 0) or 0),

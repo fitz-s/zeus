@@ -102,6 +102,7 @@ in_scope:
 - tests/test_day0_exit_gate.py
 - tests/test_day0_observation_reader.py
 - tests/test_day0_obs_fastlane_optionbc.py
+- tests/test_day0_fast_obs_lane.py
 - tests/test_day0_source_health.py
 - tests/engine/test_day0_coverage_gate.py
 - tests/engine/test_day0_monitor_gap_and_stale_margin.py
