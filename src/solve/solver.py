@@ -59,6 +59,7 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional, Sequence
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.optimize import (
     Bounds,
     LinearConstraint,
@@ -1128,6 +1129,75 @@ class CandidatePortfolioEndowment:
 
 
 @dataclass(frozen=True)
+class FamilyPortfolioEndowment:
+    """Exact current same-family payoff vector for joint Fractional Kelly."""
+
+    family_key: str
+    payout_by_bin_usd: tuple[tuple[str, Decimal], ...]
+    current_token_shares: tuple[tuple[str, Decimal], ...]
+    wealth_floor_usd: Decimal
+    spendable_cash_usd: Decimal
+    ledger_snapshot_id: str
+
+    def __post_init__(self) -> None:
+        payouts = tuple(
+            (str(bin_id), Decimal(value))
+            for bin_id, value in self.payout_by_bin_usd
+        )
+        holdings = tuple(
+            (str(token_id), Decimal(shares))
+            for token_id, shares in self.current_token_shares
+        )
+        if (
+            not self.family_key.strip()
+            or not self.ledger_snapshot_id.strip()
+            or len(payouts) < 2
+            or len({bin_id for bin_id, _ in payouts}) != len(payouts)
+            or len({token_id for token_id, _ in holdings}) != len(holdings)
+            or any(
+                not bin_id or not value.is_finite() or value < 0
+                for bin_id, value in payouts
+            )
+            or any(
+                not token_id or not shares.is_finite() or shares <= 0
+                for token_id, shares in holdings
+            )
+            or not Decimal(self.wealth_floor_usd).is_finite()
+            or Decimal(self.wealth_floor_usd) <= 0
+            or not Decimal(self.spendable_cash_usd).is_finite()
+            or Decimal(self.spendable_cash_usd) < 0
+        ):
+            raise ValueError("family portfolio endowment is invalid")
+        object.__setattr__(self, "payout_by_bin_usd", payouts)
+        object.__setattr__(self, "current_token_shares", holdings)
+
+
+@dataclass(frozen=True)
+class FamilyJointBuyTarget:
+    """One native BUY target from the family-wide full-Kelly solution."""
+
+    candidate_id: str
+    shares: Decimal
+    current_token_shares: Decimal
+    full_kelly_target_shares: Decimal
+    fractional_kelly_target_shares: Decimal
+    standalone_robust_delta_log_wealth: float
+
+
+@dataclass(frozen=True)
+class FamilyJointBuyPlan:
+    """Joint full-Kelly vector projected once onto the family Fractional Kelly target."""
+
+    family_key: str
+    targets: tuple[FamilyJointBuyTarget, ...]
+    primary_candidate_id: str | None
+    robust_delta_log_wealth: float
+    full_kelly_cost_usd: Decimal
+    fractional_target_cost_usd: Decimal
+    no_trade_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class GlobalSingleOrderCandidate:
     """One current, native-side order hypothesis in the cross-family auction.
 
@@ -1652,6 +1722,7 @@ class GlobalSingleOrderCandidateEvaluation:
     buy_sizing_mode: Literal[
         "NOT_APPLICABLE",
         "FRACTIONAL_TARGET",
+        "FAMILY_JOINT_FRACTIONAL_TARGET",
         "MINIMUM_MARKETABLE_DISCRETE_REPAIR",
     ] = "NOT_APPLICABLE"
     resolution_at_utc: datetime | None = None
@@ -1842,7 +1913,10 @@ class GlobalSingleOrderCandidateEvaluation:
                 sizing_invalid = self.shares > (
                     self.fractional_kelly_target_shares
                     - self.current_token_shares
-                ) or self.buy_sizing_mode != "FRACTIONAL_TARGET"
+                ) or self.buy_sizing_mode not in {
+                    "FRACTIONAL_TARGET",
+                    "FAMILY_JOINT_FRACTIONAL_TARGET",
+                }
             else:
                 sizing_invalid = (
                     self.buy_sizing_mode
@@ -1901,6 +1975,7 @@ class GlobalSingleOrderDecision:
     buy_sizing_mode: Literal[
         "NOT_APPLICABLE",
         "FRACTIONAL_TARGET",
+        "FAMILY_JOINT_FRACTIONAL_TARGET",
         "MINIMUM_MARKETABLE_DISCRETE_REPAIR",
     ] = "NOT_APPLICABLE"
     resolution_at_utc: datetime | None = None
@@ -2056,7 +2131,10 @@ class GlobalSingleOrderDecision:
             sizing_invalid = self.shares > (
                 self.fractional_kelly_target_shares
                 - self.current_token_shares
-            ) or self.buy_sizing_mode != "FRACTIONAL_TARGET"
+            ) or self.buy_sizing_mode not in {
+                "FRACTIONAL_TARGET",
+                "FAMILY_JOINT_FRACTIONAL_TARGET",
+            }
         else:
             raw_min = _single_order_min_marketable_shares(
                 self.candidate.executable_cost_curve
@@ -2671,6 +2749,246 @@ def _single_order_metrics(
     robust_ev = float(robust_q) * float(shares) - float(cost)
     efficiency = robust_du / float(cost) if cost > 0 else float("-inf")
     return float(robust_du), float(robust_ev), float(efficiency), cost
+
+
+def plan_family_joint_buy_targets(
+    candidates: Sequence[GlobalSingleOrderCandidate],
+    *,
+    probability_witness: JointOutcomeProbabilityWitness,
+    endowment: FamilyPortfolioEndowment,
+    capital_limit_by_candidate: Mapping[str, Decimal],
+    fractional_kelly_multiplier: Decimal,
+) -> FamilyJointBuyPlan:
+    """Solve one MECE family jointly, then apply Fractional Kelly to the final vector.
+
+    The prior global selector solved each native token independently and applied κ to
+    every coordinate.  Repeated sibling BUYs therefore each received a fresh risk
+    budget.  Here the full-Kelly vector shares one cash constraint and one exact
+    same-family payoff axis.  κ is applied to the desired FINAL holding, so a later
+    epoch cannot re-apply the fraction to an already-owned target.
+    """
+
+    family = str(probability_witness.family_key)
+    multiplier = Decimal(fractional_kelly_multiplier)
+    empty = FamilyJointBuyPlan(
+        family_key=family,
+        targets=(),
+        primary_candidate_id=None,
+        robust_delta_log_wealth=0.0,
+        full_kelly_cost_usd=Decimal("0"),
+        fractional_target_cost_usd=Decimal("0"),
+        no_trade_reason="FAMILY_JOINT_NO_POSITIVE_TARGET",
+    )
+    if (
+        not candidates
+        or endowment.family_key != family
+        or endowment.ledger_snapshot_id
+        != str(candidates[0].ledger_snapshot_id)
+        or not Decimal("0") < multiplier <= Decimal("1")
+    ):
+        return empty
+    bins = probability_witness.bin_ids
+    payout_map = dict(endowment.payout_by_bin_usd)
+    if tuple(payout_map) != bins or any(c.family_key != family for c in candidates):
+        return empty
+
+    w0 = np.asarray(
+        [float(endowment.wealth_floor_usd + payout_map[bin_id]) for bin_id in bins],
+        dtype=np.float64,
+    )
+    if not np.isfinite(w0).all() or np.any(w0 <= 0.0):
+        return empty
+
+    tranche_owner: list[int] = []
+    tranche_caps: list[float] = []
+    tranche_costs: list[float] = []
+    tranche_payoffs: list[np.ndarray] = []
+    candidate_caps: list[Decimal] = []
+    for owner, candidate in enumerate(candidates):
+        limit = Decimal(capital_limit_by_candidate.get(candidate.candidate_id, 0))
+        if not limit.is_finite() or limit <= 0:
+            candidate_caps.append(Decimal("0"))
+            continue
+        curve = candidate.executable_cost_curve
+        try:
+            max_shares = _single_order_max_shares_by_cost(
+                curve,
+                cost_limit_usd=min(limit, endowment.spendable_cash_usd),
+            )
+        except ValueError:
+            max_shares = Decimal("0")
+        candidate_caps.append(max_shares)
+        remaining = max_shares
+        if remaining <= 0:
+            continue
+        try:
+            win_column = bins.index(candidate.bin_id)
+        except ValueError:
+            return empty
+        win_mask: NDArray[np.float64] = np.ones(len(bins), dtype=np.float64)
+        if candidate.side == "YES":
+            win_mask.fill(0.0)
+            win_mask[win_column] = 1.0
+        else:
+            win_mask[win_column] = 0.0
+        for level in curve.levels:
+            if level.price > LIVE_ORDER_MAX_UNIT_PRICE:
+                break
+            take = min(remaining, level.size)
+            if take <= 0:
+                continue
+            unit_cost = curve.fee_model.all_in_price(level.price)
+            tranche_owner.append(owner)
+            tranche_caps.append(float(take))
+            tranche_costs.append(float(unit_cost))
+            tranche_payoffs.append(win_mask - float(unit_cost))
+            remaining -= take
+            if remaining <= Decimal("1e-18"):
+                break
+    if not tranche_owner:
+        return empty
+
+    payoff = np.stack(tranche_payoffs)
+    caps = np.asarray(tranche_caps, dtype=np.float64)
+    costs = np.asarray(tranche_costs, dtype=np.float64)
+    cash = float(endowment.spendable_cash_usd)
+    weights = np.ones(probability_witness.yes_q_samples.shape[0], dtype=np.float64)
+    try:
+        full, _u, _top1, _top1_u, _sweeps = _optimize_continuous(
+            w0,
+            payoff,
+            caps,
+            costs,
+            cash,
+            probability_witness.yes_q_samples,
+            weights,
+            probability_witness.band_alpha,
+        )
+    except Exception:  # noqa: BLE001 - optimizer failure is a family no-trade
+        return empty
+
+    full_by_candidate = [Decimal("0") for _ in candidates]
+    for index, units in enumerate(full):
+        full_by_candidate[tranche_owner[index]] += Decimal(str(float(units)))
+    held_by_token = dict(endowment.current_token_shares)
+    desired: list[tuple[int, Decimal]] = []
+    for index, candidate in enumerate(candidates):
+        held = held_by_token.get(candidate.token_id, Decimal("0"))
+        final_full_target = held + full_by_candidate[index]
+        additional = multiplier * final_full_target - held
+        if additional <= 0:
+            continue
+        additional = min(additional, candidate_caps[index])
+        legal = _single_order_venue_legal_neighbor(
+            candidate,
+            additional,
+            at_most=True,
+        )
+        raw_min = _single_order_min_marketable_shares(
+            candidate.executable_cost_curve
+        )
+        legal_min = (
+            _single_order_venue_legal_neighbor(
+                candidate,
+                raw_min,
+                at_most=False,
+            )
+            if raw_min is not None
+            else None
+        )
+        if (
+            legal is None
+            or raw_min is None
+            or legal_min is None
+            or legal < legal_min
+        ):
+            continue
+        desired.append((index, legal))
+    if not desired:
+        return empty
+
+    def exact_delta(pairs: Sequence[tuple[int, Decimal]]) -> float:
+        w_end = w0.copy()
+        for index, shares in pairs:
+            candidate = candidates[index]
+            cost = _single_order_cost(candidate.executable_cost_curve, shares)
+            column = bins.index(candidate.bin_id)
+            claim: NDArray[np.float64] = np.ones(len(bins), dtype=np.float64)
+            if candidate.side == "YES":
+                claim.fill(0.0)
+                claim[column] = 1.0
+            else:
+                claim[column] = 0.0
+            w_end += claim * float(shares) - float(cost)
+        if np.any(w_end <= 0.0):
+            return float("-inf")
+        draw_du = probability_witness.yes_q_samples @ np.log(w_end / w0)
+        return _lower_cvar(draw_du, weights, probability_witness.band_alpha)
+
+    joint_du = exact_delta(desired)
+    if not math.isfinite(joint_du) or joint_du <= 0.0:
+        return empty
+    standalone = {
+        index: exact_delta(((index, shares),))
+        for index, shares in desired
+    }
+    standalone_cost = {
+        index: _single_order_cost(candidates[index].executable_cost_curve, shares)
+        for index, shares in desired
+    }
+    ranked = sorted(
+        desired,
+        key=lambda pair: (
+            -round(standalone[pair[0]] / float(standalone_cost[pair[0]]), 15),
+            -round(standalone[pair[0]], 15),
+            candidates[pair[0]].candidate_id,
+        ),
+    )
+    targets = tuple(
+        FamilyJointBuyTarget(
+            candidate_id=candidates[index].candidate_id,
+            shares=shares,
+            current_token_shares=held_by_token.get(
+                candidates[index].token_id,
+                Decimal("0"),
+            ),
+            full_kelly_target_shares=(
+                held_by_token.get(candidates[index].token_id, Decimal("0"))
+                + full_by_candidate[index]
+            ),
+            fractional_kelly_target_shares=(
+                multiplier
+                * (
+                    held_by_token.get(
+                        candidates[index].token_id,
+                        Decimal("0"),
+                    )
+                    + full_by_candidate[index]
+                )
+            ),
+            standalone_robust_delta_log_wealth=standalone[index],
+        )
+        for index, shares in ranked
+    )
+    full_cost = sum(
+        (Decimal(str(float(units))) * Decimal(str(tranche_costs[index]))
+         for index, units in enumerate(full)),
+        Decimal("0"),
+    )
+    target_cost = sum(
+        (_single_order_cost(candidates[index].executable_cost_curve, shares)
+         for index, shares in desired),
+        Decimal("0"),
+    )
+    return FamilyJointBuyPlan(
+        family_key=family,
+        targets=targets,
+        primary_candidate_id=targets[0].candidate_id,
+        robust_delta_log_wealth=float(joint_du),
+        full_kelly_cost_usd=full_cost,
+        fractional_target_cost_usd=target_cost,
+        no_trade_reason=None,
+    )
 
 
 def _binary_terminal_wealth_certificate(
@@ -3750,6 +4068,10 @@ def select_global_single_order(
         [GlobalSingleOrderAnyCandidate], CandidatePortfolioEndowment
     ]
     | None = None,
+    family_portfolio_endowment_resolver: Callable[
+        [str], FamilyPortfolioEndowment
+    ]
+    | None = None,
     candidate_payoff_q_lcb_resolver: Callable[
         [GlobalSingleOrderAnyCandidate], float | None
     ]
@@ -3868,6 +4190,12 @@ def select_global_single_order(
     scored: list[GlobalSingleOrderDecision] = []
     rejected_buy_economics_by_id: dict[
         str, GlobalBuyRejectionEconomics
+    ] = {}
+    buy_capital_limits: dict[str, Decimal] = {}
+    buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
+    buy_payoff_q_lcbs: dict[str, float | None] = {}
+    joint_buy_candidates_by_family: dict[
+        str, list[GlobalSingleOrderCandidate]
     ] = {}
 
     def selection_cancelled() -> bool:
@@ -4079,6 +4407,7 @@ def select_global_single_order(
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
             continue
+        buy_capital_limits[candidate.candidate_id] = candidate_capital_limit
         candidate_endowment = CandidatePortfolioEndowment(
             loss_wealth_floor_usd=wealth_witness.wealth_floor_usd,
             win_wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
@@ -4120,6 +4449,7 @@ def select_global_single_order(
                     ),
                     candidate_input_count=len(candidates),
                 )
+        buy_endowments[candidate.candidate_id] = candidate_endowment
         candidate_payoff_q_lcb = None
         if candidate_payoff_q_lcb_resolver is not None:
             try:
@@ -4133,6 +4463,17 @@ def select_global_single_order(
             ):
                 rejections[candidate.candidate_id] = "PAYOFF_Q_LCB_INVALID"
                 continue
+        buy_payoff_q_lcbs[candidate.candidate_id] = candidate_payoff_q_lcb
+        if (
+            family_portfolio_endowment_resolver is not None
+            and isinstance(
+                probability_witnesses.get(candidate.family_key),
+                JointOutcomeProbabilityWitness,
+            )
+        ):
+            joint_buy_candidates_by_family.setdefault(
+                candidate.family_key, []
+            ).append(candidate)
         score = _score_global_single_order(
             candidate,
             q_samples=q_samples,
@@ -4232,6 +4573,142 @@ def select_global_single_order(
                 ),
             )
             scored.append(score)
+
+    if family_portfolio_endowment_resolver is not None:
+        joint_actionable_families = {
+            score.candidate.family_key
+            for score in scored
+            if isinstance(score.candidate, GlobalSingleOrderCandidate)
+            and score.robust_delta_log_wealth > 0.0
+            and score.robust_ev_usd > _ROBUST_EV_EPS_USD
+            and score.candidate.candidate_id not in rejections
+        }
+        for family_key, family_candidates in joint_buy_candidates_by_family.items():
+            # With one native order per epoch, a family with no independently safe
+            # positive prefix cannot begin an atomic multi-leg bundle. Avoid paying
+            # for a joint solve that cannot produce an executable first action.
+            if family_key not in joint_actionable_families:
+                continue
+            witness = probability_witnesses.get(family_key)
+            if not isinstance(witness, JointOutcomeProbabilityWitness):
+                continue
+            try:
+                family_endowment = family_portfolio_endowment_resolver(family_key)
+                joint_plan = plan_family_joint_buy_targets(
+                    tuple(family_candidates),
+                    probability_witness=witness,
+                    endowment=family_endowment,
+                    capital_limit_by_candidate=buy_capital_limits,
+                    fractional_kelly_multiplier=multiplier,
+                )
+            except Exception:  # noqa: BLE001 - missing joint authority blocks this family
+                joint_plan = FamilyJointBuyPlan(
+                    family_key=family_key,
+                    targets=(),
+                    primary_candidate_id=None,
+                    robust_delta_log_wealth=0.0,
+                    full_kelly_cost_usd=Decimal("0"),
+                    fractional_target_cost_usd=Decimal("0"),
+                    no_trade_reason="FAMILY_JOINT_AUTHORITY_UNAVAILABLE",
+                )
+            family_ids = {
+                candidate.candidate_id for candidate in family_candidates
+            }
+            scored = [
+                score
+                for score in scored
+                if score.candidate is None
+                or score.candidate.candidate_id not in family_ids
+            ]
+            for candidate_id in family_ids:
+                rejections.pop(candidate_id, None)
+                rejected_buy_economics_by_id.pop(candidate_id, None)
+            primary_id = joint_plan.primary_candidate_id
+            if primary_id is None:
+                reason = joint_plan.no_trade_reason or "FAMILY_JOINT_NO_POSITIVE_TARGET"
+                rejections.update({candidate_id: reason for candidate_id in family_ids})
+                continue
+            target_by_id = {target.candidate_id: target for target in joint_plan.targets}
+            rejections.update(
+                {
+                    candidate_id: "FAMILY_JOINT_PLAN_NOT_PRIMARY"
+                    for candidate_id in family_ids
+                    if candidate_id != primary_id
+                }
+            )
+            primary = next(
+                candidate
+                for candidate in family_candidates
+                if candidate.candidate_id == primary_id
+            )
+            target = target_by_id[primary_id]
+            primary_endowment = buy_endowments[primary_id]
+            q_samples = family_payoff_q_samples(
+                witness,
+                bin_id=primary.bin_id,
+                side=primary.side,
+            )
+            assert q_samples is not None
+            try:
+                target_cost = _single_order_cost(
+                    primary.executable_cost_curve,
+                    target.shares,
+                )
+                fixed = _score_global_single_order(
+                    primary,
+                    q_samples=q_samples,
+                    band_alpha=witness.band_alpha,
+                    wealth_floor_usd=primary_endowment.loss_wealth_floor_usd,
+                    wealth_ceiling_usd=primary_endowment.win_wealth_ceiling_usd,
+                    spendable_cash_usd=wealth_witness.spendable_cash_usd,
+                    capital_limit_usd=target_cost,
+                    fractional_kelly_multiplier=Decimal("1"),
+                    payoff_q_lcb=buy_payoff_q_lcbs[primary_id],
+                    current_token_shares=Decimal("0"),
+                )
+            except Exception:  # noqa: BLE001 - repaired primary must remain executable
+                fixed = GlobalSingleOrderDecision(
+                    candidate=None,
+                    shares=Decimal("0"),
+                    cost_usd=Decimal("0"),
+                    robust_delta_log_wealth=0.0,
+                    robust_ev_usd=0.0,
+                    capital_efficiency=0.0,
+                    no_trade_reason="FAMILY_JOINT_PRIMARY_REPAIR_FAILED",
+                )
+            if fixed.candidate is None:
+                rejections[primary_id] = (
+                    fixed.no_trade_reason or "FAMILY_JOINT_PRIMARY_REPAIR_FAILED"
+                )
+                continue
+            resolution_at = universe_witness.resolution_at_by_family.get(family_key)
+            if resolution_at is None:
+                rejections[primary_id] = "CAPITAL_HORIZON_AUTHORITY_MISSING"
+                continue
+            capital_lock_hours = (
+                resolution_at - decision_at_utc.astimezone(timezone.utc)
+            ).total_seconds() / 3600.0
+            if not math.isfinite(capital_lock_hours) or capital_lock_hours <= 0.0:
+                rejections[primary_id] = "CAPITAL_HORIZON_NON_POSITIVE"
+                continue
+            scored.append(
+                replace(
+                    fixed,
+                    capital_action_mode="SETTLEMENT_LOCKED_BUY",
+                    resolution_at_utc=resolution_at,
+                    capital_lock_hours=capital_lock_hours,
+                    robust_log_growth_per_hour=(
+                        fixed.robust_delta_log_wealth
+                        / capital_lock_hours
+                    ),
+                    current_token_shares=target.current_token_shares,
+                    full_kelly_target_shares=target.full_kelly_target_shares,
+                    fractional_kelly_target_shares=(
+                        target.fractional_kelly_target_shares
+                    ),
+                    buy_sizing_mode="FAMILY_JOINT_FRACTIONAL_TARGET",
+                )
+            )
 
     positive_scored = tuple(
         score

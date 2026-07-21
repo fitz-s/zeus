@@ -1091,6 +1091,185 @@ def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
     )
 
 
+def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
+    family = "guangzhou-joint-kelly"
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    specs = (
+        ("33", "YES", "0.087", "550"),
+        ("35", "NO", "0.64", "1300.75"),
+        ("36", "NO", "0.76", "1121"),
+        ("other", "YES", "0.90", "1"),
+    )
+    bindings = tuple(
+        S.OutcomeTokenBinding(
+            bin_id=bin_id,
+            condition_id=f"condition-{bin_id}",
+            yes_token_id=f"yes-{bin_id}",
+            no_token_id=f"no-{bin_id}",
+        )
+        for bin_id, _side, _price, _depth in specs
+    )
+    samples = np.tile(np.array([0.62, 0.003, 0.00001, 0.37699]), (400, 1))
+    samples[:20] = np.array([0.62, 0.10, 0.00001, 0.27999])
+    witness_fields = {
+        "family_key": family,
+        "bindings": bindings,
+        "q_version": "q-joint",
+        "resolution_identity": "resolution-joint",
+        "topology_identity": "topology-joint",
+        "posterior_identity_hash": "posterior-joint",
+        "source_truth_identity": "source-joint",
+        "authority_certificate_hash": "certificate-joint",
+        "band_alpha": ALPHA,
+        "band_basis": "joint_q_band_samples",
+        "yes_q_samples": samples,
+        "captured_at_utc": captured_at,
+    }
+    witness = S.JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=timedelta(seconds=1),
+        witness_identity=S.joint_probability_witness_identity(**witness_fields),
+    )
+    candidates = []
+    for bin_id, side, price, depth in specs[:3]:
+        token = f"{side.lower()}-{bin_id}"
+        binding = next(binding for binding in bindings if binding.bin_id == bin_id)
+        if side == "YES":
+            binding = replace(binding, yes_token_id=token)
+        else:
+            binding = replace(binding, no_token_id=token)
+        rebound = tuple(binding if row.bin_id == bin_id else row for row in witness.bindings)
+        rebound_fields = {**witness_fields, "bindings": rebound}
+        rebound_witness = S.JointOutcomeProbabilityWitness(
+            **rebound_fields,
+            max_age=timedelta(seconds=1),
+            witness_identity=S.joint_probability_witness_identity(**rebound_fields),
+        )
+        witness = rebound_witness
+        curve = _global_curve(
+            side=side,
+            token=token,
+            levels=(
+                (("0.087", "10"), ("0.09", "540"))
+                if bin_id == "33"
+                else ((price, depth),)
+            ),
+            min_order="1",
+        )
+        candidates.append(
+            S.GlobalSingleOrderCandidate(
+                candidate_id=f"candidate-{bin_id}-{side}",
+                family_key=family,
+                bin_id=bin_id,
+                condition_id=f"condition-{bin_id}",
+                side=side,
+                token_id=token,
+                probability_witness_identity="unused-by-direct-planner",
+                book_snapshot_id=curve.snapshot_id,
+                book_captured_at_utc=captured_at,
+                execution_curve_identity=S.executable_curve_identity(curve),
+                ledger_snapshot_id="ledger-current",
+                executable_cost_curve=curve,
+                resolution_identity="resolution-joint",
+            )
+        )
+    endowment = S.FamilyPortfolioEndowment(
+        family_key=family,
+        payout_by_bin_usd=tuple((bin_id, Decimal("0")) for bin_id in witness.bin_ids),
+        current_token_shares=(),
+        wealth_floor_usd=Decimal("1449.166"),
+        spendable_cash_usd=Decimal("1449.166"),
+        ledger_snapshot_id="ledger-current",
+    )
+    plan = S.plan_family_joint_buy_targets(
+        tuple(candidates),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={
+            candidate.candidate_id: Decimal("1449.166")
+            for candidate in candidates
+        },
+        fractional_kelly_multiplier=Decimal("0.03125"),
+    )
+
+    assert plan.no_trade_reason is None
+    assert plan.primary_candidate_id == "candidate-33-YES"
+    assert plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
+    target_by_id = {target.candidate_id: target.shares for target in plan.targets}
+    assert Decimal("0") < target_by_id["candidate-33-YES"] <= Decimal("17.19")
+    assert target_by_id["candidate-35-NO"] < Decimal("40.5")
+
+    payout = {bin_id: Decimal("0") for bin_id in witness.bin_ids}
+    holdings = []
+    candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
+    for target in plan.targets:
+        candidate = candidate_by_id[target.candidate_id]
+        holdings.append((candidate.token_id, target.shares))
+        for bin_id in witness.bin_ids:
+            wins = (
+                bin_id == candidate.bin_id
+                if candidate.side == "YES"
+                else bin_id != candidate.bin_id
+            )
+            if wins:
+                payout[bin_id] += target.shares
+    filled = S.FamilyPortfolioEndowment(
+        family_key=family,
+        payout_by_bin_usd=tuple(payout.items()),
+        current_token_shares=tuple(holdings),
+        wealth_floor_usd=Decimal("1449.166") - plan.fractional_target_cost_usd,
+        spendable_cash_usd=Decimal("1449.166") - plan.fractional_target_cost_usd,
+        ledger_snapshot_id="ledger-current",
+    )
+    repeated = S.plan_family_joint_buy_targets(
+        tuple(candidates),
+        probability_witness=witness,
+        endowment=filled,
+        capital_limit_by_candidate={
+            candidate.candidate_id: Decimal("1449.166")
+            for candidate in candidates
+        },
+        fractional_kelly_multiplier=Decimal("0.03125"),
+    )
+
+    assert repeated.fractional_target_cost_usd <= Decimal("1")
+    assert repeated.fractional_target_cost_usd < plan.fractional_target_cost_usd / 20
+
+    bound_candidates = tuple(
+        replace(
+            candidate,
+            probability_witness_identity=witness.witness_identity,
+        )
+        for candidate in candidates
+    )
+    decision = _global_select(
+        bound_candidates,
+        floor="1449.166",
+        ceiling="1449.166",
+        cash="1449.166",
+        cap="1449.166",
+        probability_witnesses={family: witness},
+        family_portfolio_endowment_resolver=lambda _: endowment,
+        fractional_kelly_multiplier="0.03125",
+    )
+
+    assert decision.candidate is not None, tuple(
+        (row.candidate_id, row.status, row.rejection_reason)
+        for row in decision.candidate_evaluations
+    )
+    assert decision.candidate.candidate_id == "candidate-33-YES", tuple(
+        (
+            row.candidate_id,
+            row.status,
+            row.rejection_reason,
+            row.shares,
+            row.buy_sizing_mode,
+        )
+        for row in decision.candidate_evaluations
+    )
+    assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
+
+
 def _global_witness(
     *,
     floor="100",
@@ -1171,6 +1350,7 @@ def _global_select(
     current_universe_identity=None,
     candidate_capital_limit_resolver=None,
     candidate_portfolio_endowment_resolver=None,
+    family_portfolio_endowment_resolver=None,
     candidate_policy_rejection_resolver=None,
     fractional_kelly_multiplier="1",
     resolution_hours_by_family=None,
@@ -1230,6 +1410,7 @@ def _global_select(
         candidate_portfolio_endowment_resolver=(
             candidate_portfolio_endowment_resolver
         ),
+        family_portfolio_endowment_resolver=family_portfolio_endowment_resolver,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
         cancelled=cancelled,
     )
