@@ -1034,3 +1034,22 @@ proof is terminal for that deploy attempt, so a second four-minute queue wait
 cannot repair it and is skipped. The entry pause still clears only after
 runtime, monitor, queue, and sidecar proofs are all green; no money-path safety
 condition is waived.
+
+## 2026-07-20 incomplete global-book response retry amplification
+
+Production logs showed one incomplete two-token CLOB batch response being
+reclaimed roughly every four seconds. The reactor's unknown-reason fallback
+correctly preserved the opportunity, but the reason was absent from the
+explicit transient vocabulary, snapshot-refresh classifier, and retry-floor
+set. The same event therefore repeated the full book request before the venue
+or substrate could recover, multiplying API/quota pressure without adding any
+decision evidence.
+
+`GLOBAL_BOOK_RESPONSE_INCOMPLETE` is now an explicit refreshable transient. It
+queues the existing same-family snapshot refresh and applies the existing
+attempt-scaled, bounded snapshot retry floor; it remains horizon-bounded with
+no attempt cap and every retry re-runs the complete auction from fresh evidence.
+This adds no admission gate and cannot force an order. Acceptance requires the
+pre-fix-shaped incomplete-response antibody, the complete transient-requeue
+suite, standard live deployment, and post-restart logs with no immediate
+same-event incomplete-response loop.

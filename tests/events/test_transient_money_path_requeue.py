@@ -142,6 +142,32 @@ def test_executable_snapshot_stale_still_transient():
     assert _is_transient_money_path_reason("EXECUTABLE_SNAPSHOT_STALE")
 
 
+def test_incomplete_global_book_refreshes_and_uses_retry_floor():
+    conn, store = _store()
+    event = _event("snap-incomplete-global-book")
+    store.insert_or_ignore(event)
+    refreshed = []
+    reason = "GLOBAL_BOOK_RESPONSE_INCOMPLETE:2"
+
+    def refresh(*, city, target_date, metric):
+        refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = _reactor_with_reason(conn, store, reason)
+    reactor._family_snapshot_refresher = refresh
+    result = reactor.process_pending(decision_time=_DT, limit=1)
+
+    assert _is_transient_money_path_reason(reason)
+    assert _is_executable_snapshot_refresh_reason(reason)
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 1
+    assert refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
+    assert datetime.fromisoformat(_claimed_at(conn, event.event_id)) >= (
+        _DT + timedelta(seconds=60)
+    )
+
+
 def test_day0_remaining_day_members_unavailable_is_hourly_refresh_not_snapshot():
     from src.events.reactor import _is_executable_snapshot_refresh_reason
 

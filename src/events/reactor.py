@@ -2729,6 +2729,7 @@ class OpportunityEventReactor:
                 if _money_path_reason_base(last_reason or "") in {
                     "EXECUTABLE_SNAPSHOT_BLOCKED",
                     "EXECUTABLE_SNAPSHOT_STALE",
+                    "GLOBAL_BOOK_RESPONSE_INCOMPLETE",
                     "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY",
                     "GLOBAL_FAMILY_INELIGIBLE",
                 } or _is_day0_hourly_refresh_reason(last_reason):
@@ -4272,6 +4273,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Executable family snapshot not captured yet / went stale this cycle.
     "EXECUTABLE_SNAPSHOT_BLOCKED",
     "EXECUTABLE_SNAPSHOT_STALE",
+    # A batch CLOB response omitted one or more requested executable tokens.
+    # Re-capture the full epoch after a bounded retry floor; immediate replay
+    # only repeats the same incomplete request and amplifies venue quota use.
+    "GLOBAL_BOOK_RESPONSE_INCOMPLETE",
     # Day0 remaining-day q needs persisted high-resolution hourly weather
     # vectors. Missing vectors are a refreshable weather-substrate fault, not a
     # no-edge conclusion and not a CLOB executable-snapshot fault.
@@ -4612,6 +4617,7 @@ def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
         in {
             "EXECUTABLE_SNAPSHOT_BLOCKED",
             "EXECUTABLE_SNAPSHOT_STALE",
+            "GLOBAL_BOOK_RESPONSE_INCOMPLETE",
             "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
             "SUBMIT_ABORTED_PRICE_MOVED",
             "SUBMIT_ABORTED_MODE_FLIPPED",
