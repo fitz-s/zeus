@@ -1,7 +1,7 @@
 # finite_evidence_probability_symmetry -- Plan
 
 Date: 2026-07-11
-Branch: `p2-pending-exit-restart-redecision`
+Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
 ## 2026-07-15 current-evidence coherence correction

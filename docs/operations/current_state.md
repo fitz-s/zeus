@@ -1,6 +1,6 @@
 # Current State
 
-Last updated: 2026-07-07
+Last updated: 2026-07-20
 
 Role: single live control pointer for the repo. Thin by law — this file points, it does not narrate. Anything stated here that git or the runtime can show is a defect.
 
@@ -8,7 +8,7 @@ Role: single live control pointer for the repo. Thin by law — this file points
 
 - Posture: live; operator params in `config/settings.json`; runtime entry `src/main.py` (code-authoritative).
 - Deploy is operator-only via `scripts/deploy_live.py restart all` (never bare kickstart), then `resume_entries`.
-- Main HEAD: see `git log` — this file does not track SHAs (they rot here).
+- Live branch: `live` (renamed from `main` at 2026-07-20 cutover). HEAD = the `live` tip; see `git log` — this file does not track SHAs (they rot here).
 
 ## Active work
 
@@ -33,6 +33,7 @@ Closed packet bodies: `docs/archive_registry.md` (bodies untracked under `docs/a
 
 - `docs/operations/AGENTS.md` — packet/package routing and closeout rules
 - `architecture/history_lore.yaml` — durable lessons
+- `docs/operations/current/plans/live_branch_workflow_2026-07-20.md` — the `live`-branch workflow (worktree → cherry-pick/PR → live); AGENTS §5 is the summary
 - 2026-07-10 packet `current/runtime_open_exposure_snapshot` landed (head 6aa976985). <!-- zpkt landed: current/runtime_open_exposure_snapshot -->
 - 2026-07-10 packet `current/runtime_claim_contention` landed (head 666642225). <!-- zpkt landed: current/runtime_claim_contention -->
 - 2026-07-10 packet `current/chain_absence_livelock` landed (head 16cec04f6). <!-- zpkt landed: current/chain_absence_livelock -->

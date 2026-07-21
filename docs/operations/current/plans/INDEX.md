@@ -15,6 +15,8 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 | [`../../../rebuild/whole_system_first_principles_2026-07-07.md`](../../../rebuild/whole_system_first_principles_2026-07-07.md) | PROPOSED | 全系统第一性原理蓝图:8 子系统判决 + 疤痕根除审计(§7)+ consult 对撞(§8);执行细节看 EXECUTION_MASTER |
 | [`../../../rebuild/representation_contract_2026-07-08.md`](../../../rebuild/representation_contract_2026-07-08.md) | PROPOSED | 表示层契约(agent-first):注释/命名/元数据/锚点四法 + 实测底账 + 逐 surface 判决;R-wave 第四维,落地包 = R0-h |
 | [`percity_representativeness_debias.md`](percity_representativeness_debias.md) | OPEN | Per-city representativeness de-bias |
+| [`coarse_feed_retirement_2026-07-20.md`](coarse_feed_retirement_2026-07-20.md) | INVESTIGATION-COMPLETE | Retire coarse 0.25° ecmwf_open_data feed → fusion; ground-truth from forecasts.db; plan pending operator scope. Flags current_source_validity.md / current_data_state.md as 43d stale (still cite retired AIFS) |
+| [`auction_multiwinner_plan_2026-07-19.md`](auction_multiwinner_plan_2026-07-19.md) | PROPOSED | Multi-winner auction design (design only; no code changed) |
 | [`live_redecision_repair/PLAN.md`](live_redecision_repair/PLAN.md) | IMPLEMENTING | Held-position redecision + exit readiness repair |
 | [`live_unit_price_band_incident/PLAN.md`](live_unit_price_band_incident/PLAN.md) | IMPLEMENTING | Reopened live-money incident: restore absolute submit band and make regressions restart-blocking |
 | [`data_temporal_kernel/PLAN.md`](data_temporal_kernel/PLAN.md) | DORMANT | Ingest temporal control plane (additive; no commits since 2026-06) |

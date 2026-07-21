@@ -1,8 +1,8 @@
 # pending_exit_restart_redecision -- Plan
 
 Date: 2026-07-11
-Branch: `p2-pending-exit-restart-redecision`
-Status: active
+Branch: landed on `live` (packet closed — see receipt.json; source branch `p2-pending-exit-restart-redecision` deleted at main→live cutover)
+Status: landed
 
 ## Background
 

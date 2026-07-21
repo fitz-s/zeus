@@ -1,8 +1,8 @@
 # quarantine_chain_freshness -- Plan
 
 Date: 2026-07-11
-Branch: `p2-quarantine-chain-freshness`
-Status: active
+Branch: landed on `live` (packet closed — see receipt.json; source branch deleted at cutover)
+Status: landed
 
 ## Background
 
