@@ -2183,6 +2183,105 @@ def test_global_current_state_proof_preserves_rest_then_cross_policy():
     assert current.maker_limit_price == pytest.approx(0.31)
 
 
+def test_global_maker_preflight_does_not_require_taker_fragmentation_proof(
+    monkeypatch,
+):
+    """A resting plan is not refuted by an inadmissible immediate cross."""
+
+    from dataclasses import replace
+    from src.solve import solver
+
+    proof = replace(
+        _overlay_proof(
+            q_posterior=0.652,
+            q_lcb_5pct=0.617,
+            economics=_selected_economics(
+                edge_lcb=0.28,
+                cost=0.32,
+                q_dot_payoff=0.652,
+                point_ev=0.332,
+            ),
+        ),
+        execution_mode_intent="MAKER",
+        rest_then_cross_policy="REST_DEFAULT",
+        maker_limit_price=0.31,
+    )
+
+    def reject_taker_prefix(*_args, **_kwargs):
+        raise ValueError("buy FAK full-size worst-limit prefix is non-positive")
+
+    monkeypatch.setattr(
+        solver,
+        "global_buy_fak_prefix_certificate",
+        reject_taker_prefix,
+    )
+
+    assert era._global_buy_prefix_certificate_for_proof(
+        SimpleNamespace(),
+        proof,
+        execution_curve_identity="curve",
+    ) == {}
+
+    def reject_incoherent_decision(*_args, **_kwargs):
+        raise ValueError("buy FAK prefix curve is missing")
+
+    monkeypatch.setattr(
+        solver,
+        "global_buy_fak_prefix_certificate",
+        reject_incoherent_decision,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_BUY_WORST_FRAGMENTATION_NON_POSITIVE",
+    ):
+        era._global_buy_prefix_certificate_for_proof(
+            SimpleNamespace(),
+            proof,
+            execution_curve_identity="curve",
+        )
+
+
+def test_global_taker_preflight_still_requires_fragmentation_proof(monkeypatch):
+    """The maker exception cannot authorize a fee-fragmented cross."""
+
+    from dataclasses import replace
+    from src.solve import solver
+
+    proof = replace(
+        _overlay_proof(
+            q_posterior=0.652,
+            q_lcb_5pct=0.617,
+            economics=_selected_economics(
+                edge_lcb=0.28,
+                cost=0.32,
+                q_dot_payoff=0.652,
+                point_ev=0.332,
+            ),
+        ),
+        execution_mode_intent="TAKER",
+        rest_then_cross_policy="TAKER_IMMEDIATE",
+    )
+
+    def reject_taker_prefix(*_args, **_kwargs):
+        raise ValueError("buy FAK full-size worst-limit prefix is non-positive")
+
+    monkeypatch.setattr(
+        solver,
+        "global_buy_fak_prefix_certificate",
+        reject_taker_prefix,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_BUY_WORST_FRAGMENTATION_NON_POSITIVE",
+    ):
+        era._global_buy_prefix_certificate_for_proof(
+            SimpleNamespace(),
+            proof,
+            execution_curve_identity="curve",
+        )
+
+
 def test_global_live_command_builder_has_no_unconditional_taker_override():
     """Global and local BUYs must share the fresh rest-then-cross authority."""
 
@@ -2198,6 +2297,7 @@ def test_global_live_command_builder_has_no_unconditional_taker_override():
     )
     assert f"exact_taker_shares=(\n                str(global_decision.shares)\n                if {taker_only}" in source
     assert f"exact_taker_limit_price=(\n                str(global_decision.limit_price)\n                if {taker_only}" in source
+    assert "GLOBAL_TAKER_PREFIX_CERTIFICATE_INVALID" in source
 
 
 def test_global_current_state_proof_atomically_replaces_legacy_admission_reject(

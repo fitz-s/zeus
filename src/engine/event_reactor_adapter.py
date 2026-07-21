@@ -12217,6 +12217,35 @@ def _bind_global_selected_probability_parent(
     )
 
 
+def _global_buy_prefix_certificate_for_proof(
+    decision: object,
+    proof: "_CandidateProof",
+    *,
+    execution_curve_identity: str,
+) -> dict[str, object]:
+    """Require taker fragmentation proof only when this proof crosses now."""
+
+    from src.solve.solver import global_buy_fak_prefix_certificate
+
+    try:
+        return global_buy_fak_prefix_certificate(
+            decision,
+            execution_curve_identity=execution_curve_identity,
+        )
+    except ValueError as exc:
+        proof_mode = str(getattr(proof, "execution_mode_intent", "") or "").upper()
+        rest_policy = str(getattr(proof, "rest_then_cross_policy", "") or "")
+        if (
+            proof_mode == "MAKER"
+            and rest_policy
+            and str(exc) == "buy FAK full-size worst-limit prefix is non-positive"
+        ):
+            return {}
+        raise ValueError(
+            f"GLOBAL_BUY_WORST_FRAGMENTATION_NON_POSITIVE:{exc}"
+        ) from exc
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -12231,10 +12260,7 @@ def _global_actuation_selected_proof(
 ) -> "_CandidateProof":
     """Bind the exact global winner to its current proof and sealed economics."""
 
-    from src.solve.solver import (
-        executable_curve_identity,
-        global_buy_fak_prefix_certificate,
-    )
+    from src.solve.solver import executable_curve_identity
 
     decision = getattr(global_actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
@@ -12399,18 +12425,11 @@ def _global_actuation_selected_proof(
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         }
     )
-    try:
-        prefix = global_buy_fak_prefix_certificate(
-            decision,
-            execution_curve_identity=rebound.execution_curve_identity,
-        )
-    except ValueError as exc:
-        # FOK guarantees quantity, not a single counterparty match. Fee rounding
-        # can accumulate across fragmented fills in either FOK or FAK, so failure
-        # of the worst-fragmentation full endpoint invalidates both order types.
-        raise ValueError(
-            f"GLOBAL_BUY_WORST_FRAGMENTATION_NON_POSITIVE:{exc}"
-        ) from exc
+    prefix = _global_buy_prefix_certificate_for_proof(
+        decision,
+        proof,
+        execution_curve_identity=rebound.execution_curve_identity,
+    )
     cert.update(prefix)
     cert = _global_current_state_execution_economics(
         cert,
@@ -17554,14 +17573,22 @@ def _build_live_execution_command_certificates(
                 f"incremental_profit={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('incremental_expected_profit_usd')}:"
                 f"confidence={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('model_confidence')}"
             )
-        global_fak_authorized = bool(
+        if (
             global_decision is not None
             and str(order_mode).strip().upper() == "TAKER"
-            and qkernel_global_buy_fak_prefix_rejection_reason(
+        ):
+            prefix_reason = qkernel_global_buy_fak_prefix_rejection_reason(
                 actionable.payload.get("qkernel_execution_economics") or {},
                 direction=str(actionable.payload.get("direction") or ""),
             )
-            is None
+            if prefix_reason is not None:
+                raise ValueError(
+                    "GLOBAL_TAKER_PREFIX_CERTIFICATE_INVALID:"
+                    f"{prefix_reason}"
+                )
+        global_fak_authorized = bool(
+            global_decision is not None
+            and str(order_mode).strip().upper() == "TAKER"
         )
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
