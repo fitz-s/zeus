@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-19
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-21; last_reused=2026-07-21
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -7112,6 +7112,7 @@ def reconcile_terminal_entry_exposure_obligations(
         f"""
         SELECT obligation.command_id,
                command.state AS command_state,
+               command.position_id,
                command.venue_order_id,
                command.size AS command_size,
                command.side AS command_side,
@@ -7211,11 +7212,19 @@ def reconcile_terminal_entry_exposure_obligations(
             row.get("positive_trade_economics")
             or row.get("positive_execution_economics")
         )
+        aggregate_absorbed = _terminal_entry_execution_aggregate_absorbed(
+            conn,
+            command=row,
+            positive_economics=positive_economics,
+        )
         terminal_fill = (
             state == CommandState.FILLED.value
             and bool(row.get("fill_confirmed"))
             and positive_economics
-            and bool(row.get("positive_command_bound_position_projection"))
+            and (
+                bool(row.get("positive_command_bound_position_projection"))
+                or aggregate_absorbed
+            )
         )
         canonical_orders = canonical_orders_by_command.get(command_id, [])
         terminal_zero_orders = all(
@@ -7256,6 +7265,93 @@ def reconcile_terminal_entry_exposure_obligations(
             )
             summary["errors"] += 1
     return summary
+
+
+_ENTRY_AGGREGATE_ABSORPTION_TOLERANCE = Decimal("0.001")
+
+
+def _terminal_entry_execution_aggregate_absorbed(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    positive_economics: bool,
+) -> bool:
+    """Prove a terminal command is already inside canonical position economics.
+
+    A chain mirror can fold a filled top-up into ``position_current`` before the
+    command-specific ``ENTRY_ORDER_FILLED`` event is appended.  Keeping the
+    pre-submit obligation open after that point counts the same exposure twice.
+    Release is safe only when the command-deduped terminal execution aggregate
+    includes this command and independently equals both the canonical projection
+    and synchronized chain economics.  Any missing, partial, or divergent fact
+    leaves the obligation open.
+    """
+
+    if (
+        str(command.get("command_state") or "") != CommandState.FILLED.value
+        or not bool(command.get("fill_confirmed"))
+        or not positive_economics
+    ):
+        return False
+    command_id = str(command.get("command_id") or "").strip()
+    position_id = str(command.get("position_id") or "").strip()
+    if not command_id or not position_id:
+        return False
+    position = conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_state, chain_shares,
+               chain_cost_basis_usd, fill_authority
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if position is None:
+        return False
+    position = _dict_row(position)
+    if (
+        str(position.get("phase") or "") not in {"active", "day0_window"}
+        or str(position.get("chain_state") or "") != "synced"
+        or str(position.get("fill_authority") or "") in {"", "none"}
+    ):
+        return False
+
+    from src.state.db import query_entry_execution_fill_aggregate
+
+    aggregate = query_entry_execution_fill_aggregate(
+        conn,
+        position_id,
+        strict=True,
+    )
+    if not aggregate:
+        return False
+    command_ids = {
+        str(value)
+        for value in aggregate.get("execution_fact_command_ids", ())
+        if str(value)
+    }
+    if command_id not in command_ids:
+        return False
+    aggregate_shares = _decimal_or_none(aggregate.get("shares_filled"))
+    aggregate_cost = _decimal_or_none(aggregate.get("filled_cost_basis_usd"))
+    if aggregate_shares is None or aggregate_cost is None:
+        return False
+    if aggregate_shares <= 0 or aggregate_cost <= 0:
+        return False
+    witnesses = (
+        (_decimal_or_none(position.get("shares")), aggregate_shares),
+        (_decimal_or_none(position.get("cost_basis_usd")), aggregate_cost),
+        (_decimal_or_none(position.get("chain_shares")), aggregate_shares),
+        (_decimal_or_none(position.get("chain_cost_basis_usd")), aggregate_cost),
+    )
+    tolerance = _ENTRY_AGGREGATE_ABSORPTION_TOLERANCE
+    return all(
+        witness is not None
+        and witness > 0
+        and abs(witness - expected) <= tolerance
+        for witness, expected in witnesses
+    )
 
 
 def _terminal_partial_entry_obligation_proven(

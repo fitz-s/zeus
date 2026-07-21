@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-21; last_reused=2026-07-21
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-21
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -3504,6 +3504,222 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+
+    def test_terminal_entry_obligation_releases_when_execution_aggregate_is_absorbed(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A terminal top-up already present in chain truth is not exposure twice."""
+        from src.execution.command_recovery import (
+            ensure_live_entry_projection_for_command,
+            reconcile_terminal_entry_exposure_obligations,
+        )
+        from src.state.db import log_execution_fact
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-first")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-first", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-first",
+            trade_id="trade-first",
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        assert ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )["advanced"] == 1
+
+        _insert(
+            conn,
+            command_id="cmd-002",
+            position_id="pos-001",
+            decision_id="dec-002",
+            size=3.0,
+            price=0.40,
+            created_at="2026-04-26T00:07:00Z",
+        )
+        _open_test_entry_obligation(conn, "cmd-002")
+        _advance_to_acked(conn, command_id="cmd-002", venue_order_id="ord-second")
+        append_event(
+            conn,
+            command_id="cmd-002",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-second", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-002",
+            order_id="ord-second",
+            trade_id="trade-second",
+            state="CONFIRMED",
+            filled_size="3",
+            fill_price="0.40",
+        )
+        log_execution_fact(
+            conn,
+            intent_id="pos-001:entry:cmd-002",
+            position_id="pos-001",
+            decision_id="dec-002",
+            command_id="cmd-002",
+            order_role="entry",
+            posted_at="2026-04-26T00:07:00Z",
+            filled_at="2026-04-26T00:08:00Z",
+            submitted_price=0.40,
+            fill_price=0.40,
+            shares=3.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET shares = 8.0,
+                   cost_basis_usd = 2.9,
+                   size_usd = 2.9,
+                   entry_price = 2.9 / 8.0,
+                   chain_state = 'synced',
+                   chain_shares = 8.0,
+                   chain_cost_basis_usd = 2.9,
+                   chain_avg_price = 2.9 / 8.0
+             WHERE position_id = 'pos-001'
+            """
+        )
+        event_count = conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id='pos-001'"
+        ).fetchone()[0]
+
+        assert reconcile_terminal_entry_exposure_obligations(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        obligation = conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-002'"
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id='pos-001'"
+        ).fetchone()[0] == event_count
+
+    def test_terminal_entry_obligation_keeps_mismatched_execution_aggregate_open(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A command fill cannot discharge exposure against a divergent position."""
+        from src.execution.command_recovery import (
+            ensure_live_entry_projection_for_command,
+            reconcile_terminal_entry_exposure_obligations,
+        )
+        from src.state.db import log_execution_fact
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-first")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-first", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-first",
+            trade_id="trade-first",
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        assert ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )["advanced"] == 1
+
+        _insert(
+            conn,
+            command_id="cmd-002",
+            position_id="pos-001",
+            decision_id="dec-002",
+            size=3.0,
+            price=0.40,
+            created_at="2026-04-26T00:07:00Z",
+        )
+        _open_test_entry_obligation(conn, "cmd-002")
+        _advance_to_acked(conn, command_id="cmd-002", venue_order_id="ord-second")
+        append_event(
+            conn,
+            command_id="cmd-002",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-second", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-002",
+            order_id="ord-second",
+            trade_id="trade-second",
+            state="CONFIRMED",
+            filled_size="3",
+            fill_price="0.40",
+        )
+        log_execution_fact(
+            conn,
+            intent_id="pos-001:entry:cmd-002",
+            position_id="pos-001",
+            decision_id="dec-002",
+            command_id="cmd-002",
+            order_role="entry",
+            posted_at="2026-04-26T00:07:00Z",
+            filled_at="2026-04-26T00:08:00Z",
+            submitted_price=0.40,
+            fill_price=0.40,
+            shares=3.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET shares = 8.5,
+                   cost_basis_usd = 3.1,
+                   size_usd = 3.1,
+                   entry_price = 3.1 / 8.5,
+                   chain_state = 'synced',
+                   chain_shares = 8.5,
+                   chain_cost_basis_usd = 3.1,
+                   chain_avg_price = 3.1 / 8.5
+             WHERE position_id = 'pos-001'
+            """
+        )
+
+        assert reconcile_terminal_entry_exposure_obligations(conn) == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        obligation = conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-002'"
+        ).fetchone()
+        assert obligation["status"] == "OPEN"
 
     def test_edli_absorbed_fill_refuses_ambiguous_matching_leg(self, conn):
         def duplicate_matching_leg(proof):
