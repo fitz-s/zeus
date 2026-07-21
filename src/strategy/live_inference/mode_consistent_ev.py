@@ -179,7 +179,6 @@ TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END = 360.0
 
 # Policy verdicts (travel on receipts; the settlement loop groups by these).
 POLICY_REST_DEFAULT = "REST_DEFAULT"
-POLICY_TAKER_EDGE_CLEARS_BOUND = "TAKER_EDGE_CLEARS_BOUND"
 POLICY_HOLD_REST_IN_PROGRESS = "HOLD_REST_IN_PROGRESS"
 POLICY_TAKER_ESCALATED_AFTER_REST = "TAKER_ESCALATED_AFTER_REST"
 POLICY_TAKER_EVENT_END_NEAR = "TAKER_EVENT_END_NEAR"
@@ -500,10 +499,7 @@ def select_rest_then_cross_mode(
        the event ends; immediate cross while taker is admissible.
     5. TAKER_FLEETING_EDGE — raw taker edge >= the fleeting threshold; resting
        would likely forfeit it.
-    6. TAKER_EDGE_CLEARS_BOUND — a fresh taker may cross when it clears the
-       conservative q/q_exec bound and materially beats the maker leg under the
-       mode-consistent EV comparison.
-    7. REST_DEFAULT — everything else rests post_only GTC at the maker limit
+    6. REST_DEFAULT — everything else rests post_only GTC at the maker limit
        with the measured escalation deadline.
 
     EV provenance: both EVs are still computed (with the MEASURED deadline-
@@ -640,18 +636,12 @@ def select_rest_then_cross_mode(
     if escalated_after_rest and not taker_admissible:
         return _as_maker(POLICY_MAKER_TAKER_FORBIDDEN, chosen_ev=float("-inf"))
 
-    # 6a'. FRESH BOOK MATH: taker is allowed when it is both admissible
-    #    (spread guard + fee-adjusted cost <= min(q_lcb, q_exec_lcb)) and it
-    #    materially beats the maker leg under the same EV comparison/hysteresis
-    #    used by select_mode_consistent_ev. This is not a fill-forcing fallback:
-    #    it preserves the conservative q bound, fee/spread costs, and maker
-    #    adverse-selection haircut. It only removes the old far-from-event
-    #    forced-REST doctrine that could strand a clearly superior executable
-    #    edge as an unfilled maker rest.
-    if taker_admissible and mode_ev.chosen_mode == "TAKER":
-        return _as_taker(POLICY_TAKER_EDGE_CLEARS_BOUND)
-
-    # 6b. FALLBACK: the cross is inadmissible (cannot clear the conservative bound at the fresh
-    #    ask, or the spread is too wide) — rest post_only GTC at the maker limit with the measured
-    #    escalation deadline; it fills only if the market comes to us, else cleanly no-trades.
+    # 6. REST-THEN-CROSS is one policy, not a one-shot maker-versus-taker bet.
+    #    The maker leg retains the option to cancel and re-certify a fresh cross
+    #    at the deadline. Comparing immediate taker EV with p_fill*maker_profit
+    #    alone values that continuation branch at zero and therefore creates a
+    #    structural taker bias. Far from the event, rest first; the explicit
+    #    near-event, maker-impossible, and post-deadline lanes above own every
+    #    immediate cross. If the rest does not fill, the next decision uses new
+    #    probability and book truth rather than an invented edge-retention prior.
     return _as_maker(POLICY_REST_DEFAULT, deadline=float(escalation_deadline_minutes))

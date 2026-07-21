@@ -427,7 +427,7 @@ class TestSingleModeAuthorityFreshSide:
             "does not materially beat maker"
         )
 
-    def test_far_horizon_two_sided_book_material_taker_advantage_is_taker(self):
+    def test_far_horizon_two_sided_book_rests_before_cross(self):
         from types import SimpleNamespace
         from datetime import datetime, timezone
         from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
@@ -442,9 +442,9 @@ class TestSingleModeAuthorityFreshSide:
             tick_size=0.01,
             decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
         )
-        assert mode == "TAKER", (
-            "far-horizon does not force maker when fresh taker clears the "
-            "conservative bound and materially beats maker"
+        assert mode == "MAKER", (
+            "far-horizon must preserve the unfilled -> fresh redecision branch "
+            "instead of comparing taker with a maker-only first-leg EV"
         )
 
     def test_near_end_huge_edge_fresh_mode_is_taker(self):

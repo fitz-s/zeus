@@ -26,7 +26,6 @@ from src.strategy.live_inference.mode_consistent_ev import (
     POLICY_HOLD_REST_IN_PROGRESS,
     POLICY_MAKER_TAKER_FORBIDDEN,
     POLICY_REST_DEFAULT,
-    POLICY_TAKER_EDGE_CLEARS_BOUND,
     POLICY_TAKER_ESCALATED_AFTER_REST,
     POLICY_TAKER_EVENT_END_NEAR,
     POLICY_TAKER_FLEETING_EDGE,
@@ -66,15 +65,34 @@ class TestRestDefault:
         )
         assert decision.ev_maker is not None and decision.ev_maker > 0.0
 
-    def test_fresh_taker_crosses_when_materially_superior_after_costs(self):
-        """Taker is lawful when q/q_exec, spread, fee, and EV-margin all clear."""
+    def test_fresh_large_edge_rests_before_any_cross(self):
+        """One-shot maker EV omits the unfilled -> redecide continuation branch."""
         decision = _decide(q_lcb=0.82, minutes_to_event_end=20 * 60.0)
         assert decision.ev_taker is not None and decision.ev_maker is not None
         assert decision.ev_taker >= decision.ev_maker * (
             1.0 + decision.taker_over_maker_margin
         )
-        assert decision.chosen_mode == "TAKER"
-        assert decision.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_REST_DEFAULT
+
+    def test_wellington_shape_rests_and_preserves_three_dollars_per_173_shares(self):
+        """Current live shape: one tick plus taker fee is not free capital."""
+        decision = select_rest_then_cross_mode(
+            q_lcb=0.347440738965404,
+            taker_all_in_cost=34.201235 / 173.0,
+            p_fill_taker=1.0,
+            best_bid=0.18,
+            best_ask=0.19,
+            tick_size=0.01,
+            reservation=0.19,
+            minutes_to_event_end=48 * 60.0,
+        )
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_REST_DEFAULT
+        assert decision.maker_limit_price == pytest.approx(0.18)
+        immediate_cost = 34.201235
+        maker_raw_cost = 173.0 * decision.maker_limit_price
+        assert immediate_cost - maker_raw_cost == pytest.approx(3.061235)
 
     def test_measured_fill_prior_is_used_not_the_guess(self):
         decision = _decide(minutes_to_event_end=20 * 60.0)
@@ -177,16 +195,16 @@ class TestExceptionLanes:
         assert decision.chosen_mode == "MAKER"
 
     def test_fleeting_edge_crosses_only_near_event_end(self):
-        # A big edge far from event end is not the special fleeting lane, but it
-        # may still cross through the ordinary fresh-book EV superiority lane.
+        # A big edge far from event end rests first; edge size alone does not
+        # prove that waiting one deadline destroys the continuation value.
         far = _decide(
             q_lcb=HEALTHY["taker_all_in_cost"]
             + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
             + 0.01,
             minutes_to_event_end=20 * 60.0,
         )
-        assert far.chosen_mode == "TAKER"
-        assert far.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
+        assert far.chosen_mode == "MAKER"
+        assert far.policy == POLICY_REST_DEFAULT
         # Inside the near-end window (>= the 180m unconditional floor, < 360m)
         # the lane still crosses on a huge edge.
         near = _decide(
@@ -197,16 +215,15 @@ class TestExceptionLanes:
         )
         assert near.chosen_mode == "TAKER"
         assert near.policy == POLICY_TAKER_FLEETING_EDGE
-        # Unknown horizon is not enough to invoke the fleeting lane, but the
-        # ordinary EV-superiority lane can still cross when the book is strong.
+        # Unknown horizon cannot prove that an immediate cross is time-critical.
         unknown = _decide(
             q_lcb=HEALTHY["taker_all_in_cost"]
             + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
             + 0.01,
             minutes_to_event_end=None,
         )
-        assert unknown.chosen_mode == "TAKER"
-        assert unknown.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
+        assert unknown.chosen_mode == "MAKER"
+        assert unknown.policy == POLICY_REST_DEFAULT
         # Nesting relation: the fleeting window sits ABOVE the unconditional
         # event-end floor, else lane 5 is dead code.
         from src.strategy.live_inference.mode_consistent_ev import (
@@ -215,15 +232,15 @@ class TestExceptionLanes:
         )
         assert TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END > _floor
 
-    def test_sub_fleeting_edge_can_still_cross_when_ev_superior(self):
+    def test_sub_fleeting_edge_rests_far_from_event(self):
         decision = _decide(
             q_lcb=HEALTHY["taker_all_in_cost"]
             + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
             - 0.02,
             minutes_to_event_end=20 * 60.0,
         )
-        assert decision.chosen_mode == "TAKER"
-        assert decision.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_REST_DEFAULT
 
     def test_bidless_book_rests_at_ask_minus_tick(self):
         """No bid: the spread guard already forbids crossing (unmeasurable book)
