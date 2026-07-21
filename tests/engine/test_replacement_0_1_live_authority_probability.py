@@ -454,6 +454,7 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
         "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
         "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
         "GLOBAL_DAY0_SOURCE_CYCLE_INVALID",
+        "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
     ),
 )
 def test_current_probability_failure_is_family_local(reason: str) -> None:
