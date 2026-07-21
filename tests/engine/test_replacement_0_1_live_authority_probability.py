@@ -454,12 +454,43 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
         "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
         "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
         "GLOBAL_DAY0_SOURCE_CYCLE_INVALID",
+        "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
     ),
 )
 def test_current_probability_failure_is_family_local(reason: str) -> None:
     assert adapter._is_global_probability_family_unavailable(
         ValueError(reason)
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("metric", "physical", "settlement", "expected"),
+    (
+        ("high", 86.0, 84.0, True),
+        ("high", 84.0, 84.0, False),
+        ("low", 23.0, 25.0, True),
+        ("low", 25.0, 25.0, False),
+    ),
+)
+def test_day0_physical_frontier_invalidates_stale_entry_belief(
+    metric: str,
+    physical: float,
+    settlement: float,
+    expected: bool,
+) -> None:
+    assert adapter._day0_physical_frontier_supersedes_settlement(
+        metric=metric,
+        physical_fact={"observed_extreme_native": physical},
+        settlement_fact={"observed_extreme_native": settlement},
+    ) is expected
+
+
+def test_day0_physical_frontier_without_settlement_fact_blocks_entry_belief() -> None:
+    assert adapter._day0_physical_frontier_supersedes_settlement(
+        metric="high",
+        physical_fact={"observed_extreme_native": 86.0},
+        settlement_fact=None,
     ) is True
 
 

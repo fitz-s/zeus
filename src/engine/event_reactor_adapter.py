@@ -369,6 +369,7 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
         "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
         "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+        "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
@@ -387,6 +388,7 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING",
         "GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING",
         "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+        "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
@@ -28022,6 +28024,38 @@ def _assert_provisional_day0_replacement_bundle(
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH")
 
 
+def _day0_physical_frontier_supersedes_settlement(
+    *,
+    metric: str,
+    physical_fact: Mapping[str, object] | None,
+    settlement_fact: Mapping[str, object] | None,
+) -> bool:
+    """Return whether faster same-station evidence invalidates entry belief.
+
+    A provisional channel cannot create settlement certainty.  It can prove
+    that a posterior conditioned on a less-extreme settlement-channel value is
+    stale: a running HIGH cannot fall and a running LOW cannot rise.
+    """
+
+    if physical_fact is None:
+        return False
+    if settlement_fact is None:
+        return True
+    try:
+        physical = float(physical_fact["observed_extreme_native"])
+        settlement = float(settlement_fact["observed_extreme_native"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    if not math.isfinite(physical) or not math.isfinite(settlement):
+        return True
+    normalized = str(metric or "").strip().lower()
+    if normalized == "high":
+        return physical > settlement + 1e-9
+    if normalized == "low":
+        return physical < settlement - 1e-9
+    return True
+
+
 def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bool, str]:
     """Return (live_eligible, mode) for a replacement posterior bundle. Fail-closed.
 
@@ -29686,6 +29720,22 @@ def _prepare_current_global_probability_family(
                     decision_time=decision_time,
                     require_settlement_channel=True,
                 )
+                physical_day0_fact = _latest_authorized_day0_fact(
+                    day0_observation_conn,
+                    city=str(family.city),
+                    target_date=str(family.target_date),
+                    temperature_metric=str(family.metric),
+                    decision_time=decision_time,
+                    require_settlement_channel=False,
+                )
+                if entry_authority and _day0_physical_frontier_supersedes_settlement(
+                    metric=str(family.metric),
+                    physical_fact=physical_day0_fact,
+                    settlement_fact=provisional_day0_fact,
+                ):
+                    raise ValueError(
+                        "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
+                    )
             provisional_day0_observation = bool(
                 provisional_day0_fact is not None
                 and day0_evidence_finality(
