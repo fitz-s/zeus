@@ -7474,6 +7474,8 @@ def run_exit_monitor_cycle(
                         exc,
                     )
 
+        artifact.completed_at = datetime.now(timezone.utc).isoformat()
+
         # INV-17 / DT#1: commit the DB transaction (monitoring state transitions) FIRST,
         # then export the derived portfolio/tracker JSON with the committed artifact id —
         # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can

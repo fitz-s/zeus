@@ -6366,6 +6366,7 @@ def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
     active = threading.Event()
     completed: list[bool] = []
     health: list[tuple[bool, str | None]] = []
+    artifacts = []
 
     monkeypatch.setattr(
         config_module,
@@ -6392,11 +6393,11 @@ def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
         "commit_then_export",
         lambda _conn, *, db_op, json_exports: db_op(),
     )
-    monkeypatch.setattr(
-        decision_chain_module,
-        "store_artifact",
-        lambda *_args, **_kwargs: 1,
-    )
+    def store_artifact(_conn, artifact):
+        artifacts.append(artifact)
+        return 1
+
+    monkeypatch.setattr(decision_chain_module, "store_artifact", store_artifact)
     monkeypatch.setattr(status_module, "write_cycle_pulse", lambda _summary: None)
     monkeypatch.setattr(
         health_module,
@@ -6418,6 +6419,8 @@ def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
     assert conn.closed is True
     assert completed == [True]
     assert health == [(True, "monitor failed")]
+    assert len(artifacts) == 1
+    assert artifacts[0].completed_at
     exit_module._reset_held_monitor_clob_client()
 
 
