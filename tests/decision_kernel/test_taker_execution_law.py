@@ -89,6 +89,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
                  sweep_expected_fill_price: str | None = None,
                  exact_taker_shares: str | None = None,
                  exact_taker_limit_price: str | None = None,
+                 exact_maker_shares: str | None = None,
                  order_type: str | None = None,
                  time_in_force: str | None = None,
                  fee_rate: float = 0.0,
@@ -243,6 +244,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         sweep_expected_fill_price=sweep_expected_fill_price,
         exact_taker_shares=exact_taker_shares,
         exact_taker_limit_price=exact_taker_limit_price,
+        exact_maker_shares=exact_maker_shares,
         taker_quality_proof=taker_quality_proof,
     )
     if return_parents:
@@ -335,6 +337,27 @@ def test_governor_taker_accepted_by_all_three_layers_and_submittable():
         executor_native_intent_hash=native_hash,
     )
     verify_executor_expressibility(expressibility, (final_intent, executable, live_cap))
+
+
+def test_global_maker_preserves_selected_terminal_shares_at_better_price():
+    _, _, final_intent = _taker_chain(
+        order_mode="MAKER",
+        actionable_overrides={"live_cap_reserved_notional_usd": 4.97516},
+        quote_overrides={"best_bid": 0.59, "best_ask": 0.61},
+        exact_maker_shares="8.00",
+    )
+
+    assert final_intent.payload["post_only"] is True
+    assert final_intent.payload["limit_price"] == pytest.approx(0.50)
+    assert final_intent.payload["size"] == pytest.approx(8.0)
+
+
+def test_exact_maker_shares_cannot_be_reused_by_taker_mode():
+    with pytest.raises(ValueError, match="EXACT_MAKER_SHARES_REQUIRES_MAKER_MODE"):
+        _taker_chain(
+            order_mode="TAKER",
+            exact_maker_shares="8.00",
+        )
 
 
 def test_global_buy_fak_requires_positive_prefix_certificate_and_exact_fee_binding():

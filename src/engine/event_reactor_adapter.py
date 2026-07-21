@@ -17647,6 +17647,18 @@ def _build_live_execution_command_certificates(
                 and str(order_mode).strip().upper() == "TAKER"
                 else None
             ),
+            # The global solve owns terminal shares. A maker execution may improve
+            # their unit price, but recomputing shares from the same notional at
+            # that lower price silently increases payoff exposure beyond the
+            # selected family optimum. Preserve the selected shares exactly; a
+            # future maker-specific curve must compete in the global solve rather
+            # than being invented at this downstream seam.
+            exact_maker_shares=(
+                str(global_decision.shares)
+                if global_decision is not None
+                and str(order_mode).strip().upper() == "MAKER"
+                else None
+            ),
             executable_market_context=executable_market_context,
             taker_quality_proof=taker_quality_proof,
         )

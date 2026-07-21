@@ -70,6 +70,7 @@ def build_final_intent_certificate_from_actionable(
     sweep_expected_fill_price: str | None = None,
     exact_taker_shares: float | str | Decimal | None = None,
     exact_taker_limit_price: float | str | Decimal | None = None,
+    exact_maker_shares: float | str | Decimal | None = None,
     executable_market_context: Mapping[str, object] | None = None,
     taker_quality_proof: Mapping[str, object] | None = None,
 ) -> DecisionCertificate:
@@ -88,10 +89,15 @@ def build_final_intent_certificate_from_actionable(
     exact_taker = (exact_taker_shares is not None) or (
         exact_taker_limit_price is not None
     )
+    exact_maker = exact_maker_shares is not None
+    if exact_taker and exact_maker:
+        raise ValueError("EXACT_ORDER_SHARES_MODE_AMBIGUOUS")
     if exact_taker and (
         exact_taker_shares is None or exact_taker_limit_price is None
     ):
         raise ValueError("EXACT_TAKER_ORDER_REQUIRES_SHARES_AND_LIMIT")
+    if exact_maker and order_spec.mode != "MAKER":
+        raise ValueError("EXACT_MAKER_SHARES_REQUIRES_MAKER_MODE")
     if exact_taker:
         if order_spec.mode != "TAKER":
             raise ValueError("EXACT_TAKER_ORDER_REQUIRES_TAKER_MODE")
@@ -136,13 +142,14 @@ def build_final_intent_certificate_from_actionable(
                 f" strategy_key={action.get('strategy_key')!r}"
                 f" direction={action.get('direction')!r}"
             )
-    size = (
-        float(Decimal(str(exact_taker_shares)))
-        if exact_taker
-        else desired_shares_for_reserved_notional(
+    if exact_taker:
+        size = float(Decimal(str(exact_taker_shares)))
+    elif exact_maker:
+        size = float(Decimal(str(exact_maker_shares)))
+    else:
+        size = desired_shares_for_reserved_notional(
             min_order_size, reserved_notional, limit_price
         )
-    )
     # SIZE-TO-AVAILABLE-DEPTH (Wall B / 2026-06-01): for TAKER FOK orders cap the
     # requested size to the crossable book depth so the FOK can fully fill on a thin
     # book.  available_crossable_shares is computed by the caller (ERA) via
@@ -172,6 +179,12 @@ def build_final_intent_certificate_from_actionable(
         raise ValueError(
             "EXACT_TAKER_SIZE_NOT_VENUE_EXPRESSIBLE:"
             f"target_shares={Decimal(str(exact_taker_shares))}:"
+            f"quantized_shares={quantized_size}"
+        )
+    if exact_maker and quantized_size != Decimal(str(exact_maker_shares)):
+        raise ValueError(
+            "EXACT_MAKER_SIZE_NOT_VENUE_EXPRESSIBLE:"
+            f"target_shares={Decimal(str(exact_maker_shares))}:"
             f"quantized_shares={quantized_size}"
         )
     if order_spec.mode == "TAKER" and available_crossable_shares is not None:

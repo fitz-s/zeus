@@ -1402,7 +1402,19 @@ def _pre_submit_cost_bound(
         raise LiveOrderAggregateError(
             "PreSubmitRevalidated global target shares mismatch"
         )
-    if not math.isclose(limit_price, global_limit, rel_tol=0.0, abs_tol=1e-9):
+    maker = payload.get("post_only") is True
+    if maker:
+        if limit_price > global_limit + 1e-9:
+            raise LiveOrderAggregateError(
+                "PreSubmitRevalidated global maker limit worsened"
+            )
+        if limit_price * size > max_spend + 1e-9:
+            raise LiveOrderAggregateError(
+                "PreSubmitRevalidated global maker spend exceeds max spend"
+            )
+    elif not math.isclose(
+        limit_price, global_limit, rel_tol=0.0, abs_tol=1e-9
+    ):
         raise LiveOrderAggregateError(
             "PreSubmitRevalidated global limit price mismatch"
         )

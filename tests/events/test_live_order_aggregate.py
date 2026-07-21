@@ -983,6 +983,101 @@ def test_global_exact_submit_uses_fee_aware_max_spend_not_raw_limit_or_base_cost
     assert event.event_type == "PreSubmitRevalidated"
 
 
+def test_global_maker_accepts_same_terminal_shares_at_better_limit():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    payload = _pre_submit_payload(
+        order_type="GTC",
+        time_in_force="GTC",
+        post_only=True,
+        would_cross_book=False,
+        limit_price=0.40,
+        size=10.0,
+        q_live=0.70,
+        q_lcb_5pct=0.60,
+        expected_edge=0.15,
+    )
+    economics = dict(payload["qkernel_execution_economics"])
+    economics.update(
+        {
+            "cost": 0.40,
+            "edge_lcb": 0.20,
+            "global_actuation_identity": "global-actuation-1",
+            "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_target_shares": "10",
+            "global_limit_price": "0.44",
+            "global_expected_fill_price_before_fee": "0.41",
+            "global_expected_cost_usd": "4.2",
+            "global_max_spend_usd": "4.5",
+            "global_robust_delta_log_wealth": 0.01,
+            "global_robust_ev_usd": 1.0,
+        }
+    )
+    payload["qkernel_execution_economics"] = economics
+
+    event = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=payload,
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    assert event.event_type == "PreSubmitRevalidated"
+
+
+def test_global_maker_rejects_limit_worse_than_selected_curve():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    payload = _pre_submit_payload(
+        order_type="GTC",
+        time_in_force="GTC",
+        post_only=True,
+        would_cross_book=False,
+        limit_price=0.45,
+        size=10.0,
+        q_live=0.70,
+        q_lcb_5pct=0.60,
+        expected_edge=0.14,
+    )
+    economics = dict(payload["qkernel_execution_economics"])
+    economics.update(
+        {
+            "cost": 0.40,
+            "edge_lcb": 0.20,
+            "global_actuation_identity": "global-actuation-1",
+            "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_target_shares": "10",
+            "global_limit_price": "0.44",
+            "global_expected_fill_price_before_fee": "0.41",
+            "global_expected_cost_usd": "4.2",
+            "global_max_spend_usd": "4.5",
+        }
+    )
+    payload["qkernel_execution_economics"] = economics
+
+    with pytest.raises(LiveOrderAggregateError, match="global maker limit worsened"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=payload,
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
 def test_global_exact_submit_rejects_edge_above_fee_aware_max_spend_bound():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
