@@ -28,9 +28,6 @@
 | `sd3_validation_evidence/` | keep | SD3 validation evidence. |
 | `before_after_fixture_2026-05-29/` | closed-evidence | Dated fixture; archive candidate on next sweep. |
 | `tribunal_verification_2026-05-29/` | closed-evidence | Dated verification packet; archive candidate on next sweep. |
-| `task_2026-05-21_mainline_completion_authority/` | closed (PR #284 merged) | Archive on next sweep. |
-| `task_2026-05-23_probability_phantom_edge/` | closed (PR #323 merged) | Archive on next sweep. |
-| `task_2026-06-14_percity_representativeness_debias/` | open | Per-city representativeness de-bias plan. |
 
 ## Removed 2026-07-07
 
@@ -38,4 +35,4 @@ Five never-written "permanent observation surface" shells (`attribution_drift/`,
 
 ## Archive
 
-Closed packet bodies live untracked under `docs/archive/` — lookup via `docs/archive_registry.md`.
+Closed packet bodies live untracked under `docs/archive/<YYYY>-Q<N>/`, with a tracked `.archived` stub (carrying `restore_command`) at the original path — see `docs/authority/ARCHIVAL_RULES.md`. (`docs/archive_registry.md` is historical-only, not updated.)

@@ -27,7 +27,7 @@ Active execution packet: `current/finite_evidence_probability_symmetry`
 
 ## Archive
 
-Closed packet bodies: `docs/archive_registry.md` (bodies untracked under `docs/archive/`).
+Closed packet bodies: moved to `docs/archive/<YYYY>-Q<N>/` (untracked), with a tracked `.archived` stub (carrying `restore_command`) at the original path — procedure in `docs/authority/ARCHIVAL_RULES.md`. (`docs/archive_registry.md` is historical-only, no longer updated.)
 
 ## Routing
 

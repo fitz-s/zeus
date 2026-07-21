@@ -57,9 +57,9 @@ When the anchor PR merges or the operator declares done:
 1. Move the row in `INDEX.md` from §"Active operation" to §"Task
    directories — closeout status".  Status: `closed` or `superseded`.
 2. Either:
-   - **(preferred)** Move the directory to
-     `docs/archive/<YYYY>-Q<N>/<original-name>/` and add a row to
-     `docs/archive_registry.md`. Do NOT leave a stub in `docs/operations/`.
+   - **(preferred)** Run the `docs/authority/ARCHIVAL_RULES.md` procedure: move the
+     directory to `docs/archive/<YYYY>-Q<N>/<original-name>/` and leave a tracked
+     `.archived` stub (with `restore_command`) at the original path.
    - **(if cross-references exist)** Leave the directory in place but
      add `STATUS.md` containing:
      - closeout date

@@ -1,8 +1,9 @@
 # Archive Registry
 
 **UPDATED 2026-05-23.** Archive content lives at `docs/archive/<YYYY>-Q<N>/` (outside operations/).
-See `docs/archive/2026-Q2/` for the 2026-Q2 archive. When archiving a packet, move it to
-`docs/archive/<YYYY>-Q<N>/` and add a row here. Do NOT leave a stub in `docs/operations/`.
+See `docs/archive/2026-Q2/` for the 2026-Q2 archive. Archival procedure is now
+`docs/authority/ARCHIVAL_RULES.md` (move to `docs/archive/<YYYY>-Q<N>/` + a tracked
+`.archived` stub at the original path); this registry is historical-only, no longer updated (see below).
 Active archival rules: `ARCHIVAL_RULES.md` (at `docs/authority/ARCHIVAL_RULES.md`).
 
 This file is retained to preserve back-references. Do not update it; it is historical only.

@@ -56,10 +56,10 @@ the workflow look complete.
 
 Discrete `task_*` packet folders are agent-closeable by default once their
 work log, report, or committed code proves the task is complete or superseded.
-The closing agent must move the packet body to `docs/archive/<YYYY>-Q<N>/`,
-record the move in `docs/archive_registry.md`, remove active pointers,
-and promote any residual OPEN work into `docs/operations/known_gaps.md` or a
-new admitted packet. Do NOT leave a stub file in `docs/operations/`.
+The closing agent runs the `docs/authority/ARCHIVAL_RULES.md` procedure: move the
+packet body to `docs/archive/<YYYY>-Q<N>/`, leave a tracked `.archived` stub (with
+`restore_command`) at the original path, remove active pointers, and promote any
+residual OPEN work into `docs/operations/known_gaps.md` or a new admitted packet.
 Operator-only closeout is required only when the packet
 itself says `awaiting operator`, `operator-deferred`, `STAGED, NOT COMMITTED`,
 or carries an active runtime-gating artifact.
@@ -122,11 +122,9 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 | `docs/archive/2026-Q2/` | closed packet archive (outside operations/) |
 | `AGENTS.md` | operations router |
 
-Archived packet evidence (physically moved to `docs/archive/<YYYY>-Q<N>/`) is
-listed in `docs/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
-When a packet closes and is archived, move it to `docs/archive/<YYYY>-Q<N>/`
-and add a row to `docs/archive_registry.md`. Do NOT leave a stub file in
-`docs/operations/`. Active archival rules: see `docs/authority/ARCHIVAL_RULES.md`.
+Archived packet evidence is physically moved to `docs/archive/<YYYY>-Q<N>/` (untracked),
+with a tracked `.archived` stub left at the original path; do not re-list archived
+packets here. Archival procedure: `docs/authority/ARCHIVAL_RULES.md`.
 
 ## Single Operations Home
 
