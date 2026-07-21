@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-07-21
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-20; last_reused=2026-07-20
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-21; last_reused=2026-07-21
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -6480,6 +6480,8 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     acknowledgements: list[str] = []
     reactor_calls: list[bool] = []
     pending = threading.Event()
+    bootstrap_complete = threading.Event()
+    bootstrap_complete.set()
 
     class IdleLock:
         def locked(self) -> bool:
@@ -6497,6 +6499,11 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", IdleMonitor())
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
     monkeypatch.setattr(main_module, "_day0_urgent_wake_pending", pending)
     monkeypatch.setattr(main_module, "_exit_monitor_cycle", lambda **_kwargs: False)
     monkeypatch.setattr(
@@ -6621,6 +6628,47 @@ def test_entry_reactor_monitor_defer_contract_is_effective(monkeypatch) -> None:
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
     handoff_pending.set()
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+
+
+def test_monitor_bootstrap_owns_database_io_before_background_jobs(monkeypatch) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    handoff_pending = type(main_module._held_position_monitor_handoff_pending)()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_handoff_pending",
+        handoff_pending,
+    )
+
+    for job_name in (
+        "edli_event_reactor",
+        "edli_command_recovery",
+        "c3_staleness_cancel",
+        "live_health_composite",
+    ):
+        assert main_module._defer_for_held_position_monitor(job_name) is True
+
+    monkeypatch.setattr(
+        wake_module,
+        "read_reactor_wake",
+        lambda: pytest.fail("wake queue must not scan before monitor bootstrap"),
+    )
+    assert main_module._edli_reactor_wake_poll_once() is False
+
+    bootstrap_complete.set()
+    for job_name in (
+        "edli_command_recovery",
+        "c3_staleness_cancel",
+        "live_health_composite",
+    ):
+        assert main_module._defer_for_held_position_monitor(job_name) is False
 
 
 def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> None:

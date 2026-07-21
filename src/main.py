@@ -104,6 +104,16 @@ _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
         "EDLI mainstream warm",
     }
 )
+_HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = (
+    _HELD_POSITION_MONITOR_DEFER_JOBS
+    | frozenset(
+        {
+            "edli_command_recovery",
+            "c3_staleness_cancel",
+            "live_health_composite",
+        }
+    )
+)
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 _EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
@@ -226,18 +236,20 @@ def _utc_run_time_after(seconds: float) -> datetime:
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
-    """Return True while the monitor is claiming the reactor handoff boundary.
+    """Give initial held monitoring first access to DB I/O and reactor work.
 
-    The monitor itself is non-reentrant, but its network and per-position work
-    must not globally stop the live money path. A new entry-reactor cycle yields
-    only until the in-flight auction reaches a cancellation boundary and releases
-    the shared reactor lock; after that handoff both lanes may make progress.
+    Database-heavy background jobs wait only for the first full monitor pass.
+    Reactor competitors also yield during later handoffs; after the handoff both
+    live lanes may make progress concurrently.
     """
 
-    if job_name not in _HELD_POSITION_MONITOR_DEFER_JOBS:
+    if job_name not in _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS:
         return False
 
-    if _held_position_monitor_handoff_pending.is_set():
+    if (
+        job_name in _HELD_POSITION_MONITOR_DEFER_JOBS
+        and _held_position_monitor_handoff_pending.is_set()
+    ):
         logger.info("%s deferred: held-position monitor reactor handoff pending", job_name)
         return True
     if not _held_position_monitor_bootstrap_complete.is_set():
@@ -1333,6 +1345,8 @@ def _write_heartbeat() -> None:
 def _live_health_composite_cycle() -> None:
     """Refresh composite live-health without blocking the heartbeat pulse."""
 
+    if _defer_for_held_position_monitor("live_health_composite"):
+        return
     if _defer_for_active_entry_reactor("live_health_composite"):
         return
 
@@ -4309,6 +4323,9 @@ def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
     global _edli_last_reactor_wake_id
+
+    if _defer_for_held_position_monitor("edli_event_reactor"):
+        return False
 
     from src.runtime.reactor_wake import (
         coalescible_reactor_wakes,
