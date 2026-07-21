@@ -25,6 +25,7 @@ from src.data.replacement_forecast_seed_discovery import (
     _load_manifests,
     _manifest_allows_target_date,
     _latest_manifest,
+    _ordered_seed_targets,
     _seed_target_sort_key,
     discover_replacement_forecast_materialization_seeds,
 )
@@ -52,6 +53,87 @@ def test_seed_target_sort_keeps_day0_retries_from_starving_pre_settlement_q() ->
     )
 
     assert ordered == [future, day0_held]
+
+
+def test_seed_target_order_reserves_one_day0_refresh_without_starving_future_q() -> None:
+    day0 = SimpleNamespace(
+        city="Hong Kong",
+        target_date="2026-07-21",
+        temperature_metric="high",
+        day0_observed_extreme_required=True,
+    )
+    future_a = SimpleNamespace(
+        city="London",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        day0_observed_extreme_required=False,
+    )
+    future_b = SimpleNamespace(
+        city="Paris",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        day0_observed_extreme_required=False,
+    )
+
+    ordered = _ordered_seed_targets(
+        (future_b, day0, future_a),
+        {},
+        limit=8,
+    )
+
+    assert ordered == (day0, future_a, future_b)
+
+
+def test_seed_target_order_interleaves_multiple_day0_and_future_targets() -> None:
+    day0_a = SimpleNamespace(
+        city="Hong Kong",
+        target_date="2026-07-21",
+        temperature_metric="high",
+        day0_observed_extreme_required=True,
+    )
+    day0_b = SimpleNamespace(
+        city="Paris",
+        target_date="2026-07-21",
+        temperature_metric="high",
+        day0_observed_extreme_required=True,
+    )
+    future_a = SimpleNamespace(
+        city="London",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        day0_observed_extreme_required=False,
+    )
+    future_b = SimpleNamespace(
+        city="Milan",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        day0_observed_extreme_required=False,
+    )
+
+    ordered = _ordered_seed_targets(
+        (future_b, day0_b, future_a, day0_a),
+        {},
+        limit=8,
+    )
+
+    assert ordered == (day0_a, future_a, day0_b, future_b)
+
+
+def test_single_slot_seed_target_order_preserves_future_priority() -> None:
+    day0 = SimpleNamespace(
+        city="Hong Kong",
+        target_date="2026-07-21",
+        temperature_metric="high",
+        day0_observed_extreme_required=True,
+    )
+    future = SimpleNamespace(
+        city="London",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        day0_observed_extreme_required=False,
+    )
+
+    assert _ordered_seed_targets((day0, future), {}, limit=1) == (future, day0)
 
 
 def test_hko_seed_preserves_provisional_provider_source(monkeypatch) -> None:

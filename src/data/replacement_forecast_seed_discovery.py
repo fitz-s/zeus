@@ -649,6 +649,36 @@ def _seed_target_sort_key(
     )
 
 
+def _ordered_seed_targets(
+    rows: Sequence[object],
+    held_family_priority: Mapping[tuple[str, str, str], int],
+    *,
+    limit: int,
+) -> tuple[object, ...]:
+    """Interleave Day0 and future targets so neither probability lane starves."""
+
+    ordered = tuple(
+        sorted(rows, key=lambda row: _seed_target_sort_key(row, held_family_priority))
+    )
+    if limit < 2:
+        return ordered
+    day0 = tuple(
+        row for row in ordered if bool(getattr(row, "day0_observed_extreme_required"))
+    )
+    future = tuple(
+        row for row in ordered if not bool(getattr(row, "day0_observed_extreme_required"))
+    )
+    if not day0 or not future:
+        return ordered
+    interleaved: list[object] = []
+    for index in range(max(len(day0), len(future))):
+        if index < len(day0):
+            interleaved.append(day0[index])
+        if index < len(future):
+            interleaved.append(future[index])
+    return tuple(interleaved)
+
+
 def _unchanged_blocked_seed_attempt(
     *,
     seed: Mapping[str, object],
@@ -766,8 +796,9 @@ def discover_replacement_forecast_materialization_seeds(
             #      06-13 failures, zero seeds written, fusion-grade 06-11/06-12 starved).
             #      The budget now counts only WRITTEN seeds (enforced in the loop below);
             #      manifest-missing targets are recorded as failures for observability
-            #      but consume no budget.
-            for row in sorted(
+            #      but consume no budget. Day0 and future targets are interleaved so
+            #      shrinking-horizon q refresh and first-price discovery both progress.
+            for row in _ordered_seed_targets(
                 (
                     row for row in target_plan.rows
                     if row.can_seed
@@ -777,11 +808,8 @@ def discover_replacement_forecast_materialization_seeds(
                         and row.openmeteo_manifest_count > 0
                     )
                 ),
-                # Same-day scopes with an observed extreme have their own
-                # current-evidence Day0 probability lane. Do not let their
-                # repeated materialization attempts consume every bounded
-                # recovery slot while pre-settlement families have no q.
-                key=lambda row: _seed_target_sort_key(row, held_family_priority),
+                held_family_priority,
+                limit=limit,
             )
         )
         if not targets:
