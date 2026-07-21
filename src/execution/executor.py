@@ -923,7 +923,7 @@ def _global_limit_edge_bound_authorized(
     q_lcb: float,
     expected_edge: float,
 ) -> bool:
-    """Prove a multi-level global FOK limit is bounded by its exact max spend."""
+    """Prove the submitted limit is no worse than the global max-spend bound."""
 
     if not str(economics.get("global_actuation_identity") or "").strip():
         return False
@@ -947,7 +947,7 @@ def _global_limit_edge_bound_authorized(
     if (
         global_shares <= 0.0
         or max_spend <= 0.0
-        or not math.isclose(global_limit, limit_price, rel_tol=0.0, abs_tol=1e-6)
+        or limit_price > global_limit + 1e-6
         or not math.isclose(
             global_shares,
             submitted_shares,

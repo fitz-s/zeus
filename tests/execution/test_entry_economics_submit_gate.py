@@ -14,6 +14,7 @@ from src.decision_kernel.canonicalization import (
 from src.execution.executor import (
     _actionable_certificate_intent_mismatch_reason,
     _entry_economics_component,
+    _global_limit_edge_bound_authorized,
 )
 
 
@@ -836,6 +837,50 @@ def test_entry_economics_allows_global_multilevel_limit_bound_by_max_spend():
 
     assert verdict["allowed"] is True
     assert verdict["details"]["global_limit_bound_authorized"] is True
+
+
+def test_entry_economics_allows_global_maker_price_improvement_under_taker_bound():
+    q_lcb = 0.7875214971298645
+    shares = 40.5
+    global_limit = 0.62
+    max_spend = 25.58709
+    global_edge = q_lcb - (max_spend / shares)
+    economics = _econ(
+        side="NO",
+        payoff_q_point=0.9729032271729646,
+        payoff_q_lcb=q_lcb,
+        cost=0.6298054407407407,
+        edge_lcb=0.15771605638912375,
+        optimal_delta_u=0.00010390057123414731,
+        selection_guard_q_safe=q_lcb,
+        global_actuation_identity="global-miami-no",
+        global_limit_price=str(global_limit),
+        global_target_shares=str(shares),
+        global_max_spend_usd=str(max_spend),
+    )
+
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_no"),
+            limit_price=0.60,
+            q_live=0.9729032271729646,
+            q_lcb_5pct=q_lcb,
+            expected_edge=global_edge,
+            qkernel_execution_economics=economics,
+        ),
+        shares=shares,
+    )
+
+    assert verdict["allowed"] is True
+    assert verdict["details"]["global_limit_bound_authorized"] is True
+    assert verdict["details"]["limit_price"] < global_limit
+    assert not _global_limit_edge_bound_authorized(
+        economics,
+        limit_price=0.63,
+        submitted_shares=shares,
+        q_lcb=q_lcb,
+        expected_edge=global_edge,
+    )
 
 
 def test_entry_economics_rejects_global_limit_without_matching_max_spend():
