@@ -1154,7 +1154,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector():
                 if bin_id == "33"
                 else ((price, depth),)
             ),
-            min_order="1",
+            min_order="20",
         )
         candidates.append(
             S.GlobalSingleOrderCandidate(

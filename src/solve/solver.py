@@ -4650,10 +4650,28 @@ def select_global_single_order(
             and score.robust_ev_usd > _ROBUST_EV_EPS_USD
             and score.candidate.candidate_id not in rejections
         }
+        joint_actionable_families.update(
+            candidate.family_key
+            for family_candidates in joint_buy_candidates_by_family.values()
+            for candidate in family_candidates
+            for economics in (
+                rejected_buy_economics_by_id.get(candidate.candidate_id),
+            )
+            if economics is not None
+            and economics.rejection_reason
+            in {
+                "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT",
+                "FRACTIONAL_KELLY_TARGET_REACHED",
+            }
+            and economics.probe_robust_delta_log_wealth > 0.0
+            and economics.probe_robust_ev_usd > _ROBUST_EV_EPS_USD
+        )
         for family_key, family_candidates in joint_buy_candidates_by_family.items():
-            # With one native order per epoch, a family with no independently safe
-            # positive prefix cannot begin an atomic multi-leg bundle. Avoid paying
-            # for a joint solve that cannot produce an executable first action.
+            # The family budget can concentrate capital into one native leg even when
+            # independent per-token Fractional Kelly falls below that venue's minimum.
+            # A positive executable probe is therefore sufficient to reach the joint
+            # solve; requiring a pre-sized standalone order here would erase the very
+            # family optimum this stage owns.
             if family_key not in joint_actionable_families:
                 continue
             witness = probability_witnesses.get(family_key)
