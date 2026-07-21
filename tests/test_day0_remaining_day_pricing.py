@@ -799,6 +799,146 @@ class TestRemainingDayMembers:
         )
         assert sorted(members.tolist()) == [25.0, 27.5]
 
+    def test_live_members_condition_future_path_on_current_state(self, monkeypatch):
+        """An already-observed model miss must move the remaining trajectory."""
+        import src.engine.event_reactor_adapter as era
+
+        vector = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T12:30:00+00:00",
+            times=tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24)),
+            temps_c=tuple(
+                26.0 if hour == 16 else 25.0 if hour == 17 else 24.0
+                for hour in range(24)
+            ),
+        )
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **kw: [vector],
+        )
+        monkeypatch.setattr(
+            era,
+            "_latest_day0_current_temperature_native",
+            lambda **kw: (
+                23.0,
+                datetime(2026, 6, 10, 14, 0, tzinfo=UTC),  # local 16:00
+                "wu_icao_history",
+            ),
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 24.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+            "settlement_source": "wu_api",
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
+            world_conn=object(),
+        )
+
+        assert members is not None
+        # At local 16:00 the model said 26 while reality was 23. The -3C
+        # innovation moves the local 17:00 future value 25 -> 22; the already
+        # observed daily high remains the 24C absorbing floor.
+        assert members.tolist() == [24.0]
+        assert payload["_edli_day0_model_innovations_c"] == {"ecmwf_ifs": -3.0}
+        assert payload["_edli_day0_remaining_window_start_utc"] == (
+            "2026-06-10T14:00:00+00:00"
+        )
+
+    def test_live_members_exclude_the_observed_model_grid_point(self, monkeypatch):
+        """The grid point used as the state anchor is not future support."""
+        import src.engine.event_reactor_adapter as era
+
+        vector = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T12:30:00+00:00",
+            times=tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24)),
+            temps_c=tuple(30.0 if hour == 16 else 20.0 for hour in range(24)),
+        )
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **kw: [vector],
+        )
+        monkeypatch.setattr(
+            era,
+            "_latest_day0_current_temperature_native",
+            lambda **kw: (
+                20.0,
+                datetime(2026, 6, 10, 14, 0, tzinfo=UTC),
+                "wu_icao_history",
+            ),
+        )
+
+        members = era._day0_remaining_day_members(
+            payload={
+                "metric": "high",
+                "rounded_value": 25.0,
+                "observation_time": "2026-06-10T13:00:00+00:00",
+            },
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
+            world_conn=object(),
+        )
+
+        assert members is not None
+        # The 30C anchor itself has occurred. Applying its -10C innovation to
+        # the strictly-future 20C path yields 10C; including the anchor as
+        # future support would incorrectly return 20C.
+        assert members.tolist() == [10.0]
+
+    def test_current_state_conditioning_is_persisted_in_probability_authority(self):
+        import src.engine.event_reactor_adapter as era
+
+        authority = era._global_day0_probability_authority_payload(
+            {
+                "_edli_global_day0_binding": {
+                    "probability_base_identity": "base-1",
+                },
+                "probability_authority": "day0_remaining_day_global_probability_v1",
+                "q_source": "day0_remaining_day",
+                "_edli_day0_q_mode": "remaining_day",
+                "_edli_day0_current_temperature_native": 23.0,
+                "_edli_day0_current_temperature_observed_at_utc": (
+                    "2026-07-21T20:00:00+00:00"
+                ),
+                "_edli_day0_current_temperature_source": "wu_icao_history",
+                "_edli_day0_trajectory_conditioning_basis": (
+                    "current_state_persistent_additive_innovation_v1"
+                ),
+                "_edli_day0_model_innovations_c": {
+                    "ecmwf_ifs": -1.3,
+                    "icon_global": -3.3,
+                },
+            }
+        )
+
+        assert authority["current_temperature_native"] == 23.0
+        assert authority["current_temperature_observed_at_utc"] == (
+            "2026-07-21T20:00:00+00:00"
+        )
+        assert authority["current_temperature_source"] == "wu_icao_history"
+        assert authority["trajectory_conditioning_basis"] == (
+            "current_state_persistent_additive_innovation_v1"
+        )
+        assert authority["model_innovations_c"] == {
+            "ecmwf_ifs": -1.3,
+            "icon_global": -3.3,
+        }
+
     def test_f_city_members_are_converted_at_the_seam(self, monkeypatch):
         vectors = [_vector(model="ncep_nbm_conus", temps=[25.0] * 24)]
         monkeypatch.setattr(

@@ -27891,6 +27891,21 @@ def _live_yes_probabilities(
                     "remaining_expected_models": payload.get(
                         "_edli_day0_remaining_expected_models"
                     ),
+                    "current_temperature_native": payload.get(
+                        "_edli_day0_current_temperature_native"
+                    ),
+                    "current_temperature_observed_at_utc": payload.get(
+                        "_edli_day0_current_temperature_observed_at_utc"
+                    ),
+                    "current_temperature_source": payload.get(
+                        "_edli_day0_current_temperature_source"
+                    ),
+                    "trajectory_conditioning_basis": payload.get(
+                        "_edli_day0_trajectory_conditioning_basis"
+                    ),
+                    "model_innovations_c": payload.get(
+                        "_edli_day0_model_innovations_c"
+                    ),
                     "exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
                     "exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
                     "bound_classification": payload.get("_edli_day0_bound_classification"),
@@ -28975,6 +28990,23 @@ def _global_day0_probability_authority_payload(
                 "_edli_day0_remaining_capture_times_utc",
             ),
             ("remaining_expected_models", "_edli_day0_remaining_expected_models"),
+            (
+                "current_temperature_native",
+                "_edli_day0_current_temperature_native",
+            ),
+            (
+                "current_temperature_observed_at_utc",
+                "_edli_day0_current_temperature_observed_at_utc",
+            ),
+            (
+                "current_temperature_source",
+                "_edli_day0_current_temperature_source",
+            ),
+            (
+                "trajectory_conditioning_basis",
+                "_edli_day0_trajectory_conditioning_basis",
+            ),
+            ("model_innovations_c", "_edli_day0_model_innovations_c"),
             ("exit_authority_status", "_edli_day0_exit_authority_status"),
             ("exit_authority_reason", "_edli_day0_exit_authority_reason"),
             ("bound_classification", "_edli_day0_bound_classification"),
@@ -30356,6 +30388,11 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_source_cycle_time_utc",
             "_edli_day0_remaining_capture_times_utc",
             "_edli_day0_remaining_expected_models",
+            "_edli_day0_current_temperature_native",
+            "_edli_day0_current_temperature_observed_at_utc",
+            "_edli_day0_current_temperature_source",
+            "_edli_day0_trajectory_conditioning_basis",
+            "_edli_day0_model_innovations_c",
             "_edli_day0_exit_authority_status",
             "_edli_day0_exit_authority_reason",
             "_edli_day0_bound_classification",
@@ -30380,6 +30417,21 @@ def _prepare_current_global_probability_family(
             "remaining_models": payload.get("_edli_day0_remaining_model_names"),
             "remaining_capture_times": payload.get(
                 "_edli_day0_remaining_capture_times_utc"
+            ),
+            "current_temperature_native": payload.get(
+                "_edli_day0_current_temperature_native"
+            ),
+            "current_temperature_observed_at_utc": payload.get(
+                "_edli_day0_current_temperature_observed_at_utc"
+            ),
+            "current_temperature_source": payload.get(
+                "_edli_day0_current_temperature_source"
+            ),
+            "trajectory_conditioning_basis": payload.get(
+                "_edli_day0_trajectory_conditioning_basis"
+            ),
+            "model_innovations_c": payload.get(
+                "_edli_day0_model_innovations_c"
             ),
             "finite_evidence_member_count": payload.get(
                 "_edli_day0_finite_evidence_member_count"
@@ -35346,6 +35398,167 @@ def _day0_remaining_day_q_enabled() -> bool:
     return True
 
 
+def _latest_day0_current_temperature_native(
+    *,
+    world_conn: sqlite3.Connection,
+    family,
+    decision_time: datetime,
+) -> tuple[float, datetime, str] | None:
+    """Return the latest causal same-station current temperature.
+
+    This is trajectory state, not a settlement extreme.  Only the append-only
+    publication ledger is admissible: a derived running max/min cannot reveal
+    the current level needed to condition the remaining forecast path.
+    """
+
+    table = world_conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'observation_prints'"
+    ).fetchone()
+    if table is None:
+        return None
+    city = runtime_cities_by_name().get(str(family.city))
+    if city is None:
+        return None
+    source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+    from src.events.triggers.day0_extreme_updated import (
+        _expected_station_for_city,
+        _station_matches,
+    )
+
+    expected_station = _expected_station_for_city(city)
+    if not expected_station:
+        return None
+    if source_type == "wu_icao":
+        channels = ("wu_icao_history",)
+    elif source_type == "hko":
+        # Instantaneous HKO spot temperature may condition a forecast path;
+        # it still cannot create a settlement extreme or deterministic payoff.
+        channels = ("hko_rhrread_spot",)
+    elif source_type == "noaa":
+        channels = (f"ogimet_metar_{expected_station.lower()}",)
+    else:
+        return None
+    try:
+        target = date.fromisoformat(str(family.target_date)[:10])
+        tz = ZoneInfo(str(getattr(city, "timezone", "") or ""))
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+    start = datetime.combine(target, time.min, tzinfo=tz).astimezone(UTC)
+    end = datetime.combine(target + timedelta(days=1), time.min, tzinfo=tz).astimezone(UTC)
+    placeholders = ",".join("?" for _ in channels)
+    rows = world_conn.execute(
+        f"""
+        SELECT publish_ts_utc, value_native, unit, station_id, source_channel
+          FROM observation_prints
+         WHERE city = ?
+           AND source_channel IN ({placeholders})
+           AND publish_ts_utc >= ?
+           AND publish_ts_utc < ?
+           AND publish_ts_utc <= ?
+         ORDER BY publish_ts_utc DESC, id DESC
+        """,
+        (
+            str(family.city),
+            *channels,
+            start.isoformat(),
+            end.isoformat(),
+            decision_time.astimezone(UTC).isoformat(),
+        ),
+    ).fetchall()
+    expected_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+    for row in rows:
+        publish_raw, value_raw, unit_raw, station_raw, channel_raw = row
+        if (
+            str(unit_raw or "").strip().upper() != expected_unit
+            or not _station_matches(
+                str(station_raw or "").strip().upper(), expected_station
+            )
+        ):
+            continue
+        try:
+            published = datetime.fromisoformat(
+                str(publish_raw).replace("Z", "+00:00")
+            )
+            value = float(value_raw)
+        except (TypeError, ValueError):
+            continue
+        if published.tzinfo is None or not math.isfinite(value):
+            continue
+        return value, published.astimezone(UTC), str(channel_raw)
+    return None
+
+
+def _condition_remaining_day_extremes_c_on_current_state(
+    vectors: list[object],
+    *,
+    target_date: str,
+    decision_time: datetime,
+    observation_time: datetime,
+    current_temp_c: float,
+    metric: str,
+) -> tuple[list[float], dict[str, float]]:
+    """Condition each future model path on its observed current innovation.
+
+    For model ``m``, the only untuned current-evidence update is the persistent
+    additive state error ``e_m = T_obs - T_m(t_obs)``.  Future grid values use
+    ``T_m(t) + e_m`` and the already observed grid point is excluded.  This
+    prevents a model that is wrong *now* from manufacturing a Day0 excursion
+    while preserving its remaining trajectory shape.
+    """
+
+    from src.data.day0_hourly_vectors import (
+        day0_hourly_vector_target_values_utc,
+    )
+
+    if metric not in {"high", "low"}:
+        raise ValueError(f"unsupported metric: {metric}")
+    observed_utc = observation_time.astimezone(UTC)
+    if observed_utc > decision_time.astimezone(UTC):
+        return [], {}
+    target = date.fromisoformat(str(target_date)[:10])
+    out: list[float] = []
+    innovations: dict[str, float] = {}
+    for vector in vectors:
+        try:
+            tz = ZoneInfo(str(vector.timezone_name))
+        except Exception:
+            return [], {}
+        values = day0_hourly_vector_target_values_utc(
+            vector,
+            target=target,
+            tz=tz,
+        )
+        if values is None:
+            return [], {}
+        anchors = [
+            (instant, float(temp))
+            for instant, temp in values
+            if instant <= observed_utc
+        ]
+        if not anchors:
+            return [], {}
+        anchor_time, anchor_temp = max(anchors, key=lambda item: item[0])
+        if not timedelta(0) <= observed_utc - anchor_time <= timedelta(hours=1):
+            return [], {}
+        innovation = float(current_temp_c) - anchor_temp
+        future = [
+            float(temp) + innovation
+            for instant, temp in values
+            if instant > observed_utc
+        ]
+        if not future:
+            local_end = datetime.combine(
+                target + timedelta(days=1), time.min, tzinfo=tz
+            ).astimezone(UTC)
+            if not timedelta(0) < local_end - observed_utc <= timedelta(hours=1):
+                return [], {}
+            future = [float(current_temp_c)]
+        out.append(max(future) if metric == "high" else min(future))
+        innovations[str(vector.model)] = innovation
+    return out, innovations
+
+
 def _day0_remaining_day_members(
     *,
     payload: dict[str, object],
@@ -35381,6 +35594,18 @@ def _day0_remaining_day_members(
         if city_obj is None:
             payload["_edli_day0_remaining_unavailable_reason"] = "city_config_missing_for_hourly_bundle"
             return None
+        current_state: tuple[float, datetime, str] | None = None
+        if world_conn is not None:
+            current_state = _latest_day0_current_temperature_native(
+                world_conn=world_conn,
+                family=family,
+                decision_time=decision_time,
+            )
+            if current_state is None:
+                payload["_edli_day0_remaining_unavailable_reason"] = (
+                    "current_temperature_state_unavailable"
+                )
+                return None
         window_start = decision_time
         raw_observation_time = payload.get("observation_time")
         if raw_observation_time:
@@ -35404,6 +35629,8 @@ def _day0_remaining_day_members(
                     "observation_time_after_decision"
                 )
                 return None
+        if current_state is not None:
+            window_start = current_state[1]
         payload["_edli_day0_remaining_window_start_utc"] = (
             window_start.astimezone(timezone.utc).isoformat()
         )
@@ -35424,14 +35651,46 @@ def _day0_remaining_day_members(
                 payload["_edli_day0_remaining_expected_models"] = list(expected_models)
                 payload["_edli_day0_remaining_unavailable_reason"] = "incomplete_hourly_model_bundle"
             return None
-        extremes_c = remaining_day_extremes_c(
-            vectors,
-            target_date=str(family.target_date),
-            now=decision_time,
-            metric=metric,
-            window_start=window_start,
-        )
+        if current_state is None:
+            # Diagnostic/test callers without the canonical world connection
+            # retain the pure forecast seam. Live callers always pass it.
+            extremes_c = remaining_day_extremes_c(
+                vectors,
+                target_date=str(family.target_date),
+                now=decision_time,
+                metric=metric,
+                window_start=window_start,
+            )
+        else:
+            current_native, current_observed_at, current_source = current_state
+            current_c = (
+                current_native
+                if str(unit).upper() == "C"
+                else (current_native - 32.0) * 5.0 / 9.0
+            )
+            extremes_c, innovations = (
+                _condition_remaining_day_extremes_c_on_current_state(
+                    vectors,
+                    target_date=str(family.target_date),
+                    decision_time=decision_time,
+                    observation_time=current_observed_at,
+                    current_temp_c=current_c,
+                    metric=metric,
+                )
+            )
+            payload["_edli_day0_current_temperature_native"] = current_native
+            payload["_edli_day0_current_temperature_observed_at_utc"] = (
+                current_observed_at.isoformat()
+            )
+            payload["_edli_day0_current_temperature_source"] = current_source
+            payload["_edli_day0_trajectory_conditioning_basis"] = (
+                "current_state_persistent_additive_innovation_v1"
+            )
+            payload["_edli_day0_model_innovations_c"] = innovations
         if not extremes_c:
+            payload["_edli_day0_remaining_unavailable_reason"] = (
+                "current_state_conditioned_trajectory_unavailable"
+            )
             return None
         values = np.asarray(extremes_c, dtype=float)
         if str(unit).upper() == "F":
