@@ -35,18 +35,20 @@ AND position_lots 中该精确不可变 fill 身份的经济量 < canonical fill
 错误锚点的失败模式(consult 表):position_current confirmed→漏修(投影可能同崩溃缺失)+过修(乐观/管理/链创建);position_events ENTRY→过修(ENTRY 是意图非终态)+漏修+重复 lot;裸 venue_trade_facts→过修(exit/reverted/错 token);trade_decisions→漏修(现案已证)。**唯一正确 = 精确 ENTRY command + 精确 canonical 正 fill,幂等键锚定 fill 身份。**
 **必须先测的运行事实**:venue_trade_facts 是 **fill-grain(一 fill 一不可变行)还是 cumulative-snapshot-grain**?这一条决定最终 SQL(fill-grain→按 stable fill id 建 lot;cumulative→取 canonical 最新累计事实,只插正 shortfall)。→ W0-b 前置探针。
 
-## 激活顺序(consult 定;答我原问题 f)
-1. 实现 W0-b,以 **report-only 一次性校验**(仅计算并记录新旧谓词的 diff,**不插 lot、非变更**)跑对比。**禁 shadow**:这不是 shadow 模式、不是常驻并行分层——Zeus 已根除 shadow tier(operator 指令 2026-06-12,root AGENTS §2);这是激活前的一次性 log-only 验证,验完即切,不留常驻旁路。consult 原文用 "shadow-read/shadow mode",系外部术语,此处按 Zeus 法改为 report-only。
-2. 落地目标 db.py DDL + 迁移脚本 + antibody + schema 指纹。
+## 激活顺序
+
+**W0-b 无 shadow 阶段。** consult 提议的 "B shadow → …" 被删除,不是改名。shadow mode 的本质是在 live 进程里常驻并行跑另一套逻辑当 staging tier——Zeus 已根除(operator 指令 2026-06-12,root AGENTS §2)。W0-b 是修一个 bug(旧谓词锚在冻结投影,错;新谓词锚在 canonical fill,对);修 bug **live-direct 换**,信心来自**离线证明**而非并行旁路:
+
+1. **离线证明 W0-b**(不在 live 进程、不常驻):(a) antibody recovery matrix 全绿(见下矩阵);(b) 一次性只读历史分析 query——对现有 fills 各跑旧谓词、新谓词,列出两者选中的行集,断言:新集 = 合法 canonical-fill 全集,新∖旧 = 预期的 07-02→今缺口,旧∖新 = 旧谓词的漏/误(应可解释),且新谓词无过修(每选中行都对应真实 canonical 正 fill 且经济量确有 shortfall)。这是操作员/我跑一次的 diagnostic,读态,验完即弃,**不落任何常驻旁路代码**。
+2. 落地目标 db.py DDL + W0-a 迁移脚本 + antibody + schema 指纹;**同一改动把 command_recovery.py:6500 的谓词直接换成新 fill-authority 谓词**(live-direct,无并行开关)。
 3. 取**全 trades 写者 fence** + 暂停显式 checkpoint owner。
 4. 采集并校验 rollback capsule。
-5. 执行修正版 W0-a。
+5. 执行 W0-a。
 6. 新连接验 schema/data/sequence + 回滚版编译 smoke test(EXPLAIN 或 savepoint no-op UPDATE 回滚——**不提交合成假决策行到活库**)+ 重启/重开每个 fenced 写者连接。
-7. 释放写者,验真实 trade_decisions 写恢复且无新 `main.ensemble_snapshots` 错。
-8. 激活 W0-b 的 fill-authority 谓词。
-9. W0-c dry-run → 操作员审 manifest → apply → 第二次跑须零修复。
+7. 释放写者,验真实 trade_decisions 写恢复且无新 `main.ensemble_snapshots` 错;新谓词随代码已生效(步 2)。
+8. W0-c dry-run → 操作员审 manifest → apply → 第二次跑须零修复(见 W0-c 前置:position_lots per-fill UNIQUE 先落)。
 
-**为何 A 先于 active-B**:W0-a 恢复现有 gate 给新决策,停止再制造投影缺失;未充分验证的 B 先行会立刻过修真钱。A-first 只留已知历史缺口一小段,不造双破态。
+**为何 A 先于 W0-c**:W0-a 恢复现有 gate 给新决策、停止再造投影缺失。W0-b 的谓词修复随 A 的同一 PR live-direct 落地(不留旧谓词、不并行),其正确性由步 1 的离线证明 + antibody 兜底——不靠在 live 里"先影子跑一阵"。A-first 只留已知历史缺口一小段,W0-c 幂等对账收口,不造双破态。
 
 ## W0-c(consult:repair lots,不伪造决策)
 - fill→lot 对账(非合成 trade_decisions 回填);先 dry-run manifest(source_fill_id/command_id/position_id/token/state/qty/cost/fee/已表示 lot 量/proposed delta/eligibility/quarantine)。
