@@ -970,20 +970,25 @@ def _certified_global_increment_authorized(
     economics_component: Mapping[str, Any],
     *,
     order_type: str,
+    post_only: bool = False,
 ) -> bool:
     """Recognize one current-wealth-bound incremental global BUY.
 
     This is not a general same-token bypass.  The verified actionable payload
     must carry the complete global-auction identity, and the executor economics
     check must already have proved that the submitted shares/limit/max-spend
-    tuple retains positive conservative edge.  FOK is atomic at the target
-    size.  FAK is admitted only when its independent worst-limit certificate
-    proves every non-zero fill prefix beneficial; it terminates immediately, so
-    the resulting fill is one bounded increment rather than a resting exposure.
+    tuple retains positive conservative edge. FOK is atomic at the target size.
+    FAK requires an independent positive-prefix certificate. A post-only GTC/GTD
+    is also bounded: every fill is at or below the certified limit, its collateral
+    and EntryExposureObligation are persisted before submit, and the same-token
+    component below rejects a second open command. A crossing/resting GTC without
+    post_only is not an authorized increment.
     """
 
     normalized_order_type = str(order_type or "").upper()
-    if normalized_order_type not in {"FOK", "FAK"}:
+    if normalized_order_type not in {"FOK", "FAK", "GTC", "GTD"}:
+        return False
+    if normalized_order_type in {"GTC", "GTD"} and not post_only:
         return False
     if not isinstance(actionable_payload, Mapping):
         return False
@@ -7044,6 +7049,7 @@ def _live_order(
             actionable_payload,
             entry_economics_component,
             order_type=effective_order_type,
+            post_only=submit_post_only,
         )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
             intent,

@@ -1002,10 +1002,17 @@ def test_global_increment_authority_requires_atomic_wealth_bound():
         component,
         order_type="FAK",
     )
+    assert _certified_global_increment_authorized(
+        {"qkernel_execution_economics": economics},
+        component,
+        order_type="GTC",
+        post_only=True,
+    )
     assert not _certified_global_increment_authorized(
         {"qkernel_execution_economics": economics},
         component,
         order_type="GTC",
+        post_only=False,
     )
     assert not _certified_global_increment_authorized(
         {"qkernel_execution_economics": {**economics, "global_wealth_witness_identity": ""}},
