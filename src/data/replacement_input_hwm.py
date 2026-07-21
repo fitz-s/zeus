@@ -36,6 +36,10 @@ from src.data.market_topology_rows import (
     _table_ref_columns,
     _table_ref_exists,
 )
+from src.data.openmeteo_ecmwf_ifs9_anchor import (
+    PRODUCT_ID as OPENMETEO_ANCHOR_PRODUCT_ID,
+    SOURCE_ID as OPENMETEO_ANCHOR_SOURCE_ID,
+)
 
 UTC = timezone.utc
 _LOG = logging.getLogger(__name__)
@@ -198,7 +202,11 @@ def latest_raw_artifact_input_cycle(
         decision_iso,
     ]
     if "source_id" in columns:
-        predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
+        predicates.append("source_id = ?")
+        params.append(OPENMETEO_ANCHOR_SOURCE_ID)
+    if "product_id" in columns:
+        predicates.append("product_id = ?")
+        params.append(OPENMETEO_ANCHOR_PRODUCT_ID)
     can_verify_payload = "artifact_path" in columns
     select_payload = ", artifact_path" if can_verify_payload else ""
     if conn.in_transaction:
@@ -294,7 +302,11 @@ def _raw_artifact_cycles_for_frozen_target(
     ]
     params: list[object] = [target_date, metric, decision_iso, decision_iso]
     if "source_id" in columns:
-        predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
+        predicates.append("source_id = ?")
+        params.append(OPENMETEO_ANCHOR_SOURCE_ID)
+    if "product_id" in columns:
+        predicates.append("product_id = ?")
+        params.append(OPENMETEO_ANCHOR_PRODUCT_ID)
     select_path = "artifact_path" if "artifact_path" in columns else "NULL"
     rows = conn.execute(
         f"""
@@ -335,6 +347,7 @@ def _artifact_cycles_from_rows(
     rows: Iterable[sqlite3.Row | tuple[object, ...]],
     *,
     columns: frozenset[str],
+    requested_keys: frozenset[tuple[str, str, str]] | None = None,
 ) -> dict[tuple[str, str, str], datetime]:
     from src.config import cities_by_name
     from src.data.replacement_forecast_current_target_plan import (
@@ -364,7 +377,11 @@ def _artifact_cycles_from_rows(
             payload_path = row[7]
             metadata_raw = row[8]
         key = (artifact_city, target_date, metric)
-        if not all(key) or key in cycles:
+        if (
+            not all(key)
+            or key in cycles
+            or (requested_keys is not None and key not in requested_keys)
+        ):
             continue
         if metadata_type != "object":
             continue
@@ -397,6 +414,102 @@ def _artifact_cycles_from_rows(
     return cycles
 
 
+def _batch_product_cycle_artifact_cycles(
+    conn: sqlite3.Connection,
+    *,
+    table_ref: str,
+    columns: frozenset[str],
+    requests: frozenset[tuple[str, str, str]],
+    decision_iso: str,
+) -> dict[tuple[str, str, str], datetime]:
+    """Resolve requested HWMs from newest product-cycle partitions first."""
+
+    cycle_rows = conn.execute(
+        f"""
+        SELECT source_cycle_time
+          FROM {table_ref}
+         WHERE source_id = ?
+           AND product_id = ?
+           AND datetime(captured_at) <= datetime(?)
+           AND datetime(source_available_at) <= datetime(?)
+           AND datetime(source_cycle_time) <= datetime(?)
+         GROUP BY source_cycle_time
+         ORDER BY datetime(source_cycle_time) DESC
+        """,
+        (
+            OPENMETEO_ANCHOR_SOURCE_ID,
+            OPENMETEO_ANCHOR_PRODUCT_ID,
+            decision_iso,
+            decision_iso,
+            decision_iso,
+        ),
+    ).fetchall()
+    select_path = "artifact_path" if "artifact_path" in columns else "NULL"
+    cycles: dict[tuple[str, str, str], datetime] = {}
+    for cycle_row in cycle_rows:
+        try:
+            source_cycle = cycle_row["source_cycle_time"]
+        except Exception:  # noqa: BLE001 - tuple row compatibility
+            source_cycle = cycle_row[0]
+        remaining = requests.difference(cycles)
+        if not remaining:
+            break
+        rows = conn.execute(
+            f"""
+            SELECT CASE WHEN json_valid(artifact_metadata_json)
+                        THEN json_extract(artifact_metadata_json, '$.city')
+                   END AS artifact_city,
+                   CASE WHEN json_valid(artifact_metadata_json)
+                        THEN json_extract(artifact_metadata_json, '$.target_date')
+                   END AS artifact_target_date,
+                   CASE WHEN json_valid(artifact_metadata_json)
+                        THEN json_extract(artifact_metadata_json, '$.metric')
+                   END AS artifact_metric,
+                   source_cycle_time,
+                   {select_path} AS artifact_path,
+                   CASE WHEN json_valid(artifact_metadata_json)
+                        THEN json_type(artifact_metadata_json)
+                   END AS metadata_type,
+                   CASE WHEN json_valid(artifact_metadata_json)
+                        THEN json_type(
+                            artifact_metadata_json,
+                            '$.openmeteo_payload_json'
+                        )
+                   END AS payload_path_type,
+                   CASE WHEN json_valid(artifact_metadata_json)
+                        THEN json_extract(
+                            artifact_metadata_json,
+                            '$.openmeteo_payload_json'
+                        )
+                   END AS payload_path,
+                   artifact_metadata_json
+              FROM {table_ref}
+             WHERE source_id = ?
+               AND product_id = ?
+               AND source_cycle_time = ?
+               AND datetime(captured_at) <= datetime(?)
+               AND datetime(source_available_at) <= datetime(?)
+             ORDER BY datetime(captured_at) DESC,
+                      datetime(source_available_at) DESC
+            """,
+            (
+                OPENMETEO_ANCHOR_SOURCE_ID,
+                OPENMETEO_ANCHOR_PRODUCT_ID,
+                source_cycle,
+                decision_iso,
+                decision_iso,
+            ),
+        ).fetchall()
+        cycles.update(
+            _artifact_cycles_from_rows(
+                rows,
+                columns=columns,
+                requested_keys=frozenset(remaining),
+            )
+        )
+    return cycles
+
+
 def _batch_artifact_cycles(
     conn: sqlite3.Connection,
     *,
@@ -415,6 +528,14 @@ def _batch_artifact_cycles(
     }
     if not required.issubset(columns):
         return True, {}
+    if {"source_id", "product_id"}.issubset(columns):
+        return True, _batch_product_cycle_artifact_cycles(
+            conn,
+            table_ref=table_ref,
+            columns=columns,
+            requests=requests,
+            decision_iso=decision_iso,
+        )
     select_path = "artifact.artifact_path" if "artifact_path" in columns else "NULL"
     source_predicate = (
         "artifact.source_id = 'openmeteo_ecmwf_ifs_9km'"

@@ -588,3 +588,78 @@ def test_global_frozen_artifact_prime_matches_scalar_selector(monkeypatch) -> No
         "FROM RAW_FORECAST_ARTIFACTS" in statement.upper()
         for statement in fallback_trace
     )
+
+
+def test_global_frozen_artifact_prime_uses_product_cycle_partition() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            product_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_raw_forecast_artifacts_product_cycle
+            ON raw_forecast_artifacts(source_id, product_id, source_cycle_time)
+        """
+    )
+    conn.executemany(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+                "2026-06-07T00:00:00+00:00",
+                "2026-06-07T06:00:00+00:00",
+                "2026-06-07T06:00:00+00:00",
+                "{malformed",
+            ),
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+                "2026-06-07T06:00:00+00:00",
+                "2026-06-07T12:00:00+00:00",
+                "2026-06-07T12:00:00+00:00",
+                json.dumps(
+                    {"city": _CITY, "target_date": _TARGET_DATE, "metric": _METRIC}
+                ),
+            ),
+        ),
+    )
+    conn.commit()
+    conn.execute("BEGIN")
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    decision_time = datetime(2026, 6, 7, 13, tzinfo=UTC)
+
+    release = prime_frozen_replacement_artifact_hwm(
+        conn,
+        requests=((_CITY, _TARGET_DATE, _METRIC),),
+        decision_time=decision_time,
+    )
+    cycle = latest_raw_artifact_input_cycle(
+        conn,
+        city=_CITY,
+        target_date=_TARGET_DATE,
+        metric=_METRIC,
+        decision_time=decision_time,
+    )
+    release()
+    conn.set_trace_callback(None)
+    conn.rollback()
+
+    assert cycle == datetime(2026, 6, 7, 6, tzinfo=UTC)
+    assert any(
+        "PRODUCT_ID" in statement.upper()
+        and "SOURCE_CYCLE_TIME = '2026-06-07T06:00:00+00:00'" in statement.upper()
+        for statement in traced
+    )
+    assert not any("JOIN REQUESTED" in statement.upper() for statement in traced)

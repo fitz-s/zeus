@@ -946,3 +946,23 @@ requires a pre-fix failing test that proves an active trading lane still reaches
 the held-city refresh without scanning pending families, the focused scheduler
 and Day0 suites, standard live deployment, and new logs with `held_only=True`
 while trading remains active.
+
+## 2026-07-20 frozen artifact HWM product-cycle scan
+
+Production sampling attributed the auction's 140–193 second
+`prepare_families` stage to the frozen raw-artifact HWM query. The query joined
+requested family identity through `json_extract(artifact_metadata_json, ...)`
+before narrowing the source cycle, so SQLite scanned wide historical artifact
+JSON and the auction's otherwise complete q/book evidence expired before
+selection. Freshness rejection was correct; the read path feeding it was not
+capital-efficient.
+
+The current structured artifact schema already owns a
+`(source_id, product_id, source_cycle_time)` index. Frozen selection now walks
+those product-cycle partitions newest-first, parses only one exact partition at
+a time, validates payload coverage only for still-unresolved requested
+families, and stops when the request set is complete. Legacy tables without the
+structured product identity retain the generic fail-closed path. Acceptance
+requires the pre-fix malformed-old-cycle antibody, focused HWM tests, a
+read-only canonical-DB benchmark with an indexed query plan, standard live
+deployment, and natural auction evidence below the 180-second evidence horizon.
