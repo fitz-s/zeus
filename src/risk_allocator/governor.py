@@ -403,15 +403,13 @@ class RiskAllocator:
     def reduce_only_mode_active(self, governor_state: GovernorState) -> bool:
         if governor_state.kill_switch_armed:
             return True
-        # Missing current venue-liveness truth blocks new risk.  UNCONFIGURED
-        # is bootstrap/configuration absence; STARTING has no successful lease
-        # witness yet; LOST includes expired external keeper snapshots.
-        if governor_state.heartbeat_health in {
-            HeartbeatHealth.UNCONFIGURED,
-            HeartbeatHealth.STARTING,
-            HeartbeatHealth.LOST,
-        }:
-            return True
+        # Heartbeat owns resting-order leases, not immediate execution.  Its
+        # health is enforced by maker_or_taker()/allowed_order_types() and again
+        # at the executor's concrete order-type boundary: non-HEALTHY forces
+        # FOK/FAK while GTC/GTD fail closed.  Treating the same signal as a
+        # portfolio-wide reduce-only latch made that safe immediate path
+        # unreachable and stopped economically valid entry during a heartbeat-
+        # only venue outage.
         # M5 reconcile-required (src.control.ws_gap_guard) is an independent
         # WS-recovery latch: proof that no fills were missed during a user-
         # channel gap. It is a binary "has this been swept yet" state, not a

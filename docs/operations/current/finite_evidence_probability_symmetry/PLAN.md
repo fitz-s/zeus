@@ -1053,3 +1053,27 @@ This adds no admission gate and cannot force an order. Acceptance requires the
 pre-fix-shaped incomplete-response antibody, the complete transient-requeue
 suite, standard live deployment, and post-restart logs with no immediate
 same-event incomplete-response loop.
+
+## 2026-07-21 heartbeat lease scope and failure backoff
+
+The authenticated heartbeat service remained unavailable with repeated HTTP
+503 responses after the deployment-order repair. Heartbeat authority owns the
+lease for resting GTC/GTD orders; it does not add evidence to an immediate
+FOK/FAK fill. The risk allocator already forced non-healthy heartbeat states to
+TAKER and allowed only FOK/FAK, and the executor rechecked the concrete order
+type before command persistence. A separate portfolio-wide reduce-only latch
+made that safe path unreachable, stopping every otherwise valid entry because
+an unrelated resting-order lease was unavailable.
+
+Heartbeat health no longer activates portfolio-wide reduce-only mode. LOST,
+STARTING, and UNCONFIGURED states permit only immediate FOK/FAK execution;
+resting GTC/GTD still fail closed at discovery and the final executor boundary.
+Failed heartbeat POSTs use bounded 10/20/30-second retry backoff after lease
+loss while the keeper continues writing a fresh typed status at its normal
+cadence. Economics, current book/probability, price band, global robust
+delta-log-wealth/EV, Fractional Kelly, and submit-time revalidation remain
+cumulative requirements. Acceptance requires LOST/stale/unconfigured
+antibodies, resting-order rejection, immediate-order permission, bounded POST
+rate with fresh status writes, standard deployment, and a natural receipt that
+selects CASH or a positive executable order without heartbeat priority
+inversion.

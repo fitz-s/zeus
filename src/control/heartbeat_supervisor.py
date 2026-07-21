@@ -51,6 +51,7 @@ DEFAULT_HEARTBEAT_HTTP_TIMEOUT_SECONDS = 1.0
 DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 12
 DEFAULT_HEARTBEAT_RESTART_SEED_MAX_AGE_SECONDS = 30
 DEFAULT_HEARTBEAT_LEASE_RECOVERY_SUCCESS_TICKS = 3
+DEFAULT_HEARTBEAT_FAILURE_BACKOFF_MAX_SECONDS = 30
 HEARTBEAT_KEEPER_STATUS_FILENAME = "venue-heartbeat-keeper.json"
 LIVE_TRADING_WATCHDOG_STATUS_FILENAME = "live-trading-launchd-watchdog.json"
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
@@ -90,6 +91,23 @@ class OrderType(str, Enum):
 
 class HeartbeatNotHealthy(RuntimeError):
     """Raised before live resting-order submit when heartbeat is not healthy."""
+
+
+def heartbeat_retry_delay_seconds(
+    status: "HeartbeatStatus",
+    *,
+    cadence_seconds: int,
+) -> int:
+    """Bound failed POST amplification while preserving fast healthy cadence."""
+
+    cadence = max(1, int(cadence_seconds))
+    if status.health is not HeartbeatHealth.LOST:
+        return cadence
+    exponent = min(max(int(status.consecutive_failures) - 1, 1), 6)
+    return min(
+        DEFAULT_HEARTBEAT_FAILURE_BACKOFF_MAX_SECONDS,
+        cadence * (2**exponent),
+    )
 
 
 @dataclass(frozen=True)
@@ -1394,21 +1412,12 @@ def assert_heartbeat_allows_order_type(
     normalized = _normalize_order_type(order_type)
     supervisor, status = _status_snapshot()
     immediate = not heartbeat_required_for(normalized)
-    current_snapshot = status.health in {
-        HeartbeatHealth.HEALTHY,
-        HeartbeatHealth.DEGRADED,
-        HeartbeatHealth.DISABLED_FOR_NON_RESTING_ONLY,
-    }
     provider_allowed = (
         _provider_gate_allows(supervisor, normalized, status)
         if supervisor is not None
-        else immediate and reduce_only
+        else immediate
     )
-    allowed = provider_allowed and (
-        immediate and reduce_only
-        or immediate and current_snapshot
-        or status.resting_order_safe()
-    )
+    allowed = provider_allowed and (immediate or status.resting_order_safe())
     if not allowed:
         raise HeartbeatNotHealthy(f"heartbeat={status.health.value}; order_type={normalized}; {status.last_error or ''}")
 
@@ -1420,22 +1429,24 @@ def summary() -> dict[str, Any]:
         OrderType.GTC.value,
         status,
     )
-    current_snapshot = status.health in {
-        HeartbeatHealth.HEALTHY,
-        HeartbeatHealth.DEGRADED,
-        HeartbeatHealth.DISABLED_FOR_NON_RESTING_ONLY,
-    }
-    # Immediate order types remain valid for held-position reduction even when
-    # entry is blocked for missing current heartbeat truth.
-    allowed_order_types = [OrderType.FOK.value, OrderType.FAK.value]
+    immediate_allowed = (
+        _provider_gate_allows(supervisor, OrderType.FOK.value, status)
+        if supervisor is not None
+        else True
+    )
+    allowed_order_types = (
+        [OrderType.FOK.value, OrderType.FAK.value]
+        if immediate_allowed
+        else []
+    )
     if resting_allowed:
         allowed_order_types = [order_type.value for order_type in OrderType]
     payload = status.to_dict()
     payload["entry"] = {
-        "allow_submit": current_snapshot,
+        "allow_submit": bool(allowed_order_types),
         "allowed_order_types": allowed_order_types,
         "resting_allow_submit": resting_allowed,
-        "immediate_allow_submit": current_snapshot,
+        "immediate_allow_submit": immediate_allowed,
         "required_order_types": sorted(_RESTING_ORDER_TYPES),
     }
     if not resting_allowed:
@@ -1537,6 +1548,7 @@ def run_heartbeat_keeper(
     cadence_seconds: int | None = None,
     max_ticks: int | None = None,
     sleep_fn: Any = time.sleep,
+    monotonic_fn: Any | None = None,
 ) -> None:
     """Run the minimal CLOB heartbeat lease owner.
 
@@ -1545,6 +1557,7 @@ def run_heartbeat_keeper(
     """
 
     cadence = heartbeat_cadence_seconds_from_env() if cadence_seconds is None else int(cadence_seconds)
+    monotonic_fn = time.monotonic if monotonic_fn is None else monotonic_fn
     owns_transport = adapter is None
     if owns_transport:
         install_dedicated_heartbeat_http_timeout(cadence_seconds=cadence)
@@ -1569,9 +1582,18 @@ def run_heartbeat_keeper(
         else None,
     )
     ticks = 0
+    next_post_monotonic = 0.0
     while True:
         started = datetime.now(timezone.utc)
-        status = asyncio.run(supervisor.run_once())
+        now_monotonic = monotonic_fn()
+        if now_monotonic >= next_post_monotonic:
+            status = asyncio.run(supervisor.run_once())
+            next_post_monotonic = now_monotonic + heartbeat_retry_delay_seconds(
+                status,
+                cadence_seconds=cadence,
+            )
+        else:
+            status = supervisor.status()
         write_heartbeat_keeper_status(status, path=status_path)
         try:
             maybe_recover_missing_live_trading_launchd(now=started)

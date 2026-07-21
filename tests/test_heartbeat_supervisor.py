@@ -16,6 +16,7 @@ import json
 import plistlib
 import sqlite3
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from src.control.heartbeat_supervisor import (
     HeartbeatNotHealthy,
     HeartbeatStatus,
     HeartbeatSupervisor,
+    heartbeat_retry_delay_seconds,
     OrderType,
     configure_global_supervisor,
     fresh_heartbeat_id_from_status,
@@ -759,6 +761,26 @@ def test_one_miss_degraded_two_misses_lost():
     assert "miss-2" in (lost.last_error or "")
 
 
+def test_lost_heartbeat_retries_back_off_without_delaying_healthy_cadence():
+    cadence = 5
+    healthy = HeartbeatStatus(
+        health=HeartbeatHealth.HEALTHY,
+        last_success_at=datetime.now(timezone.utc),
+        consecutive_failures=0,
+        heartbeat_id="id-1",
+        cadence_seconds=cadence,
+    )
+
+    assert heartbeat_retry_delay_seconds(healthy, cadence_seconds=cadence) == cadence
+    for failures, expected in ((2, 10), (3, 20), (4, 30), (100, 30)):
+        lost = replace(
+            healthy,
+            health=HeartbeatHealth.LOST,
+            consecutive_failures=failures,
+        )
+        assert heartbeat_retry_delay_seconds(lost, cadence_seconds=cadence) == expected
+
+
 def test_lost_generic_request_failure_retries_preserved_chain_on_next_tick():
     """Generic failures never add an empty-chain POST to their failed tick.
 
@@ -877,7 +899,7 @@ def test_lost_state_allows_FOK_FAK_immediate_only():
     assert supervisor.gate_for_order_type("FAK") is True
 
 
-def test_lost_summary_blocks_new_entry_but_preserves_immediate_exit_type():
+def test_lost_summary_allows_immediate_entry_but_blocks_resting_type():
     from src.engine.cycle_runner import _discovery_gates_allow_entries
     from src.events.reactor import _edli_heartbeat_authority_summary
     from src.observability.status_summary import _heartbeat_component
@@ -890,16 +912,16 @@ def test_lost_summary_blocks_new_entry_but_preserves_immediate_exit_type():
 
     payload = heartbeat_supervisor_module.summary()
 
-    assert payload["entry"]["allow_submit"] is False
+    assert payload["entry"]["allow_submit"] is True
     assert payload["entry"]["resting_allow_submit"] is False
-    assert payload["entry"]["immediate_allow_submit"] is False
+    assert payload["entry"]["immediate_allow_submit"] is True
     assert payload["entry"]["allowed_order_types"] == ["FOK", "FAK"]
     assert _edli_heartbeat_authority_summary("GTC")["allow_submit"] is False
-    assert _edli_heartbeat_authority_summary("FOK")["allow_submit"] is False
-    assert _heartbeat_component(payload)["allowed"] is False
+    assert _edli_heartbeat_authority_summary("FOK")["allow_submit"] is True
+    assert _heartbeat_component(payload)["allowed"] is True
     assert _heartbeat_component(payload, order_type="FAK")["allowed"] is True
     assert _heartbeat_component(payload, order_type="GTC")["allowed"] is False
-    assert not _discovery_gates_allow_entries(
+    assert _discovery_gates_allow_entries(
         risk_level=RiskLevel.GREEN,
         heartbeat_status=payload,
         ws_gap_status={"entry": {"allow_submit": True}},
@@ -1169,8 +1191,7 @@ def test_external_heartbeat_supervisor_rejects_future_status_for_entry(tmp_path)
         assert status.age_seconds is not None and status.age_seconds < 0
         with pytest.raises(HeartbeatNotHealthy):
             heartbeat_supervisor_module.assert_heartbeat_allows_order_type("GTC")
-        with pytest.raises(HeartbeatNotHealthy):
-            heartbeat_supervisor_module.assert_heartbeat_allows_order_type("FOK")
+        heartbeat_supervisor_module.assert_heartbeat_allows_order_type("FOK")
         heartbeat_supervisor_module.assert_heartbeat_allows_order_type(
             "FAK",
             reduce_only=True,
@@ -1382,6 +1403,51 @@ def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
     assert payload["resting_order_safe"] is True
     assert payload["consecutive_successes"] == 1
     assert adapter.heartbeat_ids == [""]
+
+
+def test_heartbeat_keeper_keeps_status_fresh_while_failed_posts_back_off(
+    tmp_path,
+    monkeypatch,
+):
+    status_path = tmp_path / "venue-heartbeat-keeper.json"
+    adapter = FakeHeartbeatAdapter(
+        [RuntimeError("503") for _ in range(3)]
+    )
+    monotonic = iter((0.0, 5.0, 10.0, 15.0))
+    sleeps: list[float] = []
+    writes: list[int] = []
+    real_write = heartbeat_supervisor_module.write_heartbeat_keeper_status
+
+    def record_write(status, *, path=None):
+        writes.append(status.consecutive_failures)
+        return real_write(status, path=path)
+
+    monkeypatch.setattr(
+        heartbeat_supervisor_module,
+        "maybe_recover_missing_live_trading_launchd",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        heartbeat_supervisor_module,
+        "write_heartbeat_keeper_status",
+        record_write,
+    )
+
+    run_heartbeat_keeper(
+        adapter=adapter,
+        status_path=status_path,
+        cadence_seconds=5,
+        max_ticks=4,
+        sleep_fn=sleeps.append,
+        monotonic_fn=lambda: next(monotonic),
+    )
+
+    payload = json.loads(status_path.read_text())
+    assert adapter.heartbeat_ids == ["", "", ""]
+    assert writes == [1, 2, 2, 3]
+    assert payload["health"] == "LOST"
+    assert payload["consecutive_failures"] == 3
+    assert len(sleeps) == 3
 
 
 def test_heartbeat_keeper_bypasses_dead_proxy_before_client_creation(tmp_path, monkeypatch):

@@ -230,7 +230,7 @@ def test_current_entry_capacity_exposes_same_remaining_envelope_as_submit_gate()
         clear_global_allocator()
 
 
-def test_auction_capital_snapshot_excludes_health_but_current_entry_stays_blocked():
+def test_auction_capital_and_current_entry_exclude_resting_only_heartbeat_health():
     allocator = RiskAllocator(
         CapPolicy(max_per_market_micro=150_000_000),
         [
@@ -257,14 +257,12 @@ def test_auction_capital_snapshot_excludes_health_but_current_entry_stays_blocke
         resolution_window="day0",
         correlation_key="corr-1",
     ) == Decimal("50")
-    with pytest.raises(AllocationDenied) as current_exc:
-        current_global_entry_capacity_usd(
-            market_id="m1",
-            event_id="e1",
-            resolution_window="day0",
-            correlation_key="corr-1",
-        )
-    assert current_exc.value.decision.reason == "reduce_only_mode_active"
+    assert current_global_entry_capacity_usd(
+        market_id="m1",
+        event_id="e1",
+        resolution_window="day0",
+        correlation_key="corr-1",
+    ) == Decimal("50")
 
     clear_global_allocator()
 
@@ -497,18 +495,18 @@ def test_heartbeat_degraded_switches_to_FOK_FAK_only():
     assert not allocator.reduce_only_mode_active(state)
 
 
-def test_heartbeat_lost_blocks_new_risk_in_reduce_only_mode():
+def test_heartbeat_lost_forces_immediate_order_without_blocking_new_risk():
     allocator = RiskAllocator()
     state = _state(heartbeat_health=HeartbeatHealth.LOST)
 
     assert allocator.maker_or_taker(SimpleNamespace(orderbook_depth_micro=100_000_000), state) == "TAKER"
     assert allocator.allowed_order_types(state) == ("FOK", "FAK")
-    assert not allocator.can_allocate(_intent(size=1), state).allowed
-    assert allocator.reduce_only_mode_active(state)
+    assert allocator.can_allocate(_intent(size=1), state).allowed
+    assert not allocator.reduce_only_mode_active(state)
     assert allocator.kill_switch_reason(state) is None
 
 
-def test_expired_external_snapshot_remains_lost_and_reduce_only(tmp_path):
+def test_expired_external_snapshot_remains_lost_and_immediate_only(tmp_path):
     status_path = tmp_path / "venue-heartbeat-keeper.json"
     write_heartbeat_keeper_status(
         HeartbeatStatus(
@@ -538,8 +536,9 @@ def test_expired_external_snapshot_remains_lost_and_reduce_only(tmp_path):
     assert status.status_reason == "heartbeat_snapshot_expired"
     assert status.written_at is not None
     assert status.age_seconds is not None and status.age_seconds >= 8
-    assert allocator.reduce_only_mode_active(state)
-    assert not allocator.can_allocate(_intent(size=1), state).allowed
+    assert not allocator.reduce_only_mode_active(state)
+    assert allocator.can_allocate(_intent(size=1), state).allowed
+    assert allocator.allowed_order_types(state) == ("FOK", "FAK")
 
 
 def test_submit_rechecks_current_heartbeat_after_healthy_allocator_snapshot(
@@ -581,8 +580,9 @@ def test_submit_rechecks_current_heartbeat_after_healthy_allocator_snapshot(
     )
     try:
         assert _assert_risk_allocator_allows_submit(_intent(size=1)).allowed
+        _assert_heartbeat_allows_submit("FOK")
         with pytest.raises(HeartbeatNotHealthy):
-            _assert_heartbeat_allows_submit("FOK")
+            _assert_heartbeat_allows_submit("GTC")
 
         assert _assert_risk_allocator_allows_exit_submit().allowed
         exit_component = _assert_heartbeat_allows_submit(
@@ -596,7 +596,7 @@ def test_submit_rechecks_current_heartbeat_after_healthy_allocator_snapshot(
     assert exit_component["allowed"] is True
 
 
-def test_unconfigured_heartbeat_is_typed_and_cannot_become_green(monkeypatch):
+def test_unconfigured_heartbeat_is_typed_and_forces_immediate_only(monkeypatch):
     monkeypatch.setenv("ZEUS_VENUE_HEARTBEAT_MODE", "internal")
     configure_global_supervisor(None)
     try:
@@ -611,7 +611,9 @@ def test_unconfigured_heartbeat_is_typed_and_cannot_become_green(monkeypatch):
     assert status.written_at is None
     assert status.age_seconds is None
     assert state.heartbeat_health is HeartbeatHealth.UNCONFIGURED
-    assert RiskAllocator().reduce_only_mode_active(state)
+    allocator = RiskAllocator()
+    assert not allocator.reduce_only_mode_active(state)
+    assert allocator.allowed_order_types(state) == ("FOK", "FAK")
 
 
 def test_reduce_only_not_tripped_by_subthreshold_ws_gap_alone():
@@ -770,21 +772,20 @@ def test_global_allocator_defaults_fail_closed_until_cycle_refresh():
     }
 
 
-def test_executor_pre_submit_allocator_blocks_entry_when_heartbeat_lost():
+def test_executor_pre_submit_allocator_routes_entry_to_fok_when_heartbeat_lost():
     from src.execution.executor import _assert_risk_allocator_allows_submit
 
     configure_global_allocator(RiskAllocator(), _state(heartbeat_health=HeartbeatHealth.LOST))
 
     try:
-        with pytest.raises(AllocationDenied) as submit_exc:
-            _assert_risk_allocator_allows_submit(_intent(size=1))
+        submit_decision = _assert_risk_allocator_allows_submit(_intent(size=1))
         order_type = select_global_order_type(
             SimpleNamespace(orderbook_depth_micro=100_000_000)
         )
     finally:
         clear_global_allocator()
 
-    assert submit_exc.value.decision.reason == "reduce_only_mode_active"
+    assert submit_decision.allowed
     assert order_type == "FOK"
 
 
