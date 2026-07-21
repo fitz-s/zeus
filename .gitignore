@@ -255,8 +255,8 @@ docs/archive/
 docs/historical_evidence/
 docs/artifacts/
 docs/reports/generated/
-# Daily settlement scorecards are runtime-generated evidence. Historical
-# reports already tracked by Git remain tracked; ignore future dated outputs.
+# Daily settlement scorecards are runtime-generated evidence; keep all dated
+# outputs local rather than tracking them in Git.
 docs/evidence/settlement_guard/????-??-??_settlement_guard.md
 # dead top-level report snapshots untracked in 2026-05-23 housekeeping (bodies on disk)
 docs/reports/*.md
