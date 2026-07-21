@@ -3256,12 +3256,69 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
+        ("launch", heartbeat_supervisor),
         ("monitor", "post-start"),
         ("queue", "post-start"),
-        ("launch", heartbeat_supervisor),
         ("resume_entries", tuple(expanded_labels)),
     ]
     assert "live restart preflight passed" in capsys.readouterr().out
+
+
+def test_deploy_live_starts_heartbeat_before_monitor_and_stops_after_failure(
+    monkeypatch,
+):
+    dl = _load("deploy_live_heartbeat_before_monitor", "deploy_live.py")
+    calls = []
+    monkeypatch.setattr(
+        dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, [])
+    )
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "e" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda labels: (True, "pause armed"),
+    )
+    monkeypatch.setattr(dl, "_stop_label", lambda label: (True, f"stopped {label}"))
+    monkeypatch.setattr(
+        dl, "_run_restart_recovery_if_needed", lambda labels: (True, "recovered")
+    )
+    monkeypatch.setattr(
+        dl, "_run_restart_preflight_if_needed", lambda labels: (True, "preflight")
+    )
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (calls.append(("launch", label)) or (True, f"launched {label}")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda labels, **kwargs: (True, "prerequisites"),
+    )
+    monkeypatch.setattr(
+        dl, "_wait_for_live_runtime_fresh", lambda **kwargs: (True, "runtime")
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_monitor_cadence",
+        lambda **kwargs: (
+            calls.append(("monitor", "failed"))
+            or (False, "monitor failed")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_edli_queue_progress",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("queue wait cannot repair a failed monitor proof")
+        ),
+    )
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 1
+    heartbeat = ("launch", dl.DAEMONS["venue-heartbeat"])
+    assert calls.index(heartbeat) < calls.index(("monitor", "failed"))
 
 
 def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch, tmp_path):
@@ -3552,7 +3609,8 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
     heartbeat_launch_index = calls.index(("launch", dl.DAEMONS["venue-heartbeat"]))
-    assert heartbeat_launch_index > calls.index(("monitor", "post-start"))
+    assert calls.index(("verify", "dddddddd")) < heartbeat_launch_index
+    assert heartbeat_launch_index < calls.index(("monitor", "post-start"))
     assert calls.index(("verify", "dddddddd")) > live_launch_index
     assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))

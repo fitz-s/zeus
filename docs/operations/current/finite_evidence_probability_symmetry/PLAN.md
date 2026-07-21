@@ -1014,3 +1014,23 @@ Acceptance requires the pre-fix failing complete-WU antibody, incomplete/future
 counterexamples, a cross-connection global-simplex integration test, current
 canonical read-only proof, standard deployment, and a natural held-position
 receipt showing the stale WU probability is replaced without a forced order.
+
+## 2026-07-20 deploy heartbeat priority inversion
+
+The WU deployment exposed a restart-ordering failure rather than a strategy
+gate. `deploy_live` deliberately kept the external venue-heartbeat supervisor
+unloaded while it waited up to four minutes for every held position and then up
+to four more minutes for reactor progress. Those proofs themselves need current
+CLOB and heartbeat authority, so the verifier created `heartbeat LOST`,
+`reduce_only`, and request-lease failures and could leave its temporary entry
+pause in place.
+
+The heartbeat watchdog already acquires a shared nonblocking lease on the same
+restart lock held exclusively by deploy; while deploy owns that lock the
+watchdog records `deploy_restart_in_progress` and cannot restart `src.main`.
+Deployment must therefore restart venue-heartbeat immediately after the new
+process identity is verified, before monitor and queue proofs. A failed monitor
+proof is terminal for that deploy attempt, so a second four-minute queue wait
+cannot repair it and is skipped. The entry pause still clears only after
+runtime, monitor, queue, and sidecar proofs are all green; no money-path safety
+condition is waived.

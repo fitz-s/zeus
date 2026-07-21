@@ -1494,6 +1494,20 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                 launched_after=launched_after,
             )
             print(runtime_detail)
+            # The venue-heartbeat watchdog already takes a shared lease on this
+            # deploy's exclusive restart lock before it may repair launchd. Run
+            # the sidecar as soon as process identity is known so CLOB liveness
+            # can recover while monitor/queue proofs execute; the held lock
+            # prevents it from restarting the process under verification.
+            post_live_ok = True
+            for label in post_live_labels:
+                deferred_ok, deferred_detail = _launch_or_restart_label(label)
+                if deferred_ok:
+                    print(deferred_detail)
+                else:
+                    post_live_ok = False
+                    rc_all = 1
+                    print(deferred_detail, file=sys.stderr)
             queue_ok = False
             monitor_ok = False
             if not runtime_ok:
@@ -1508,25 +1522,13 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                 print(monitor_detail)
                 if not monitor_ok:
                     rc_all = 1
-                queue_ok, queue_detail = _wait_for_post_start_edli_queue_progress(
-                    launched_after=launched_after,
-                )
-                print(queue_detail)
-                if not queue_ok:
-                    rc_all = 1
-            # The supervisor must not observe the new daemon until its first
-            # queue and monitor writes have replaced stale PID-bearing status.
-            # Otherwise it correctly repairs the stale PID by restarting the
-            # process that deploy_live is still trying to verify.
-            post_live_ok = True
-            for label in post_live_labels:
-                deferred_ok, deferred_detail = _launch_or_restart_label(label)
-                if deferred_ok:
-                    print(deferred_detail)
                 else:
-                    post_live_ok = False
-                    rc_all = 1
-                    print(deferred_detail, file=sys.stderr)
+                    queue_ok, queue_detail = _wait_for_post_start_edli_queue_progress(
+                        launched_after=launched_after,
+                    )
+                    print(queue_detail)
+                    if not queue_ok:
+                        rc_all = 1
             if runtime_ok and queue_ok and monitor_ok and post_live_ok:
                 resume_ok, resume_detail = (
                     _resume_entries_after_verified_live_restart_if_needed(labels)
