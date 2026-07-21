@@ -16,7 +16,38 @@
 
 ---
 
-（以下为 design-B 原始交件，未改动）
+## ⚠️ CRITIC-MATRIX 修正(BLOCKING,已应用 2026-07-21)— 覆盖下方原始交件的错误行
+
+opus critic 对本矩阵做 money-data-loss 复核,判 **REJECT(as-is 不安全)**,并用**代码证据**抓出一个 authority 完全搞反——**design-B 与 GPT-5.6 round-2 consult 都错了这一处**。全文 `critic_matrix_review.md`。下列修正**覆盖**原始交件对应行:
+
+**B1 BLOCKING — `decision_certificates` + `decision_certificate_edges` authority 反转(必须去反转)**
+- 原始交件错:world 副本(1.35M 行)→ raw-evidence/learning-mart(可删);trade 副本(58K)→ ledger。
+- **修正**:world = **immutable-ledger(活钱权威)**,整体保留;trade = **DEAD-drop**(pre-PR-S4b ghost,非 selected-grain)。
+- 代码证据:两个证书写者都落 world/world-class 连接(reactor.py:1194-1197;event_reactor_adapter.py:7161,7270 `build_conn=live_cap_conn or trade_conn`);money-path 门读 world(check_edli_live_canary_gate.py:342/365、check_live_restart_preflight.py:1144-1166、live_profit_audit.py:594);`fact_revocations` world 实例在此表撤销 LIVE money-certificate(db_table_ownership.yaml:2812);manifest 说 world 是"authority table for proof-carrying decision certificates"(:1257);trade 副本 manifest = `legacy_archived`/"Drop after 2026-08-09"(:2649),**无 live 写者**。证书是密码学承诺,**不可重建** → learning-mart 断然错。
+- 若按原矩阵执行:W5/W3 epoch 删除 world 活权威 → EDLI 赎回证明、live-canary promotion、restart-preflight 父链验证、结算 skill 评级全失源;money-ledger 反把 stale ghost 奉为正典。**永久钱记录丢失。**
+- 若日后对 world 证书行拆分:必须带**祖先保留契约**(保留任何是 selected/settled/VERIFIED 证书的 Merkle 祖先的 cert,经 `decision_certificate_edges` 连线)——原矩阵给了 decision_log 这条,漏了证书本身。
+
+**M1 MATERIAL — `decision_log` 证据纠错 + manifest rot 门**
+- 原始交件 §c#3 误读:说 trade `decision_log` 是 `schema_class: trade_class`——**实为两副本都 `legacy_archived`**(db_table_ownership.yaml:2626 trade、:789 world)。
+- 但 decision_log **是活的 money-recovery 表**:写者 decision_chain.py:153,194;读者 command_recovery.py:3335(命令恢复路径)。
+- 结论(保留为 ledger)不变,但证据换正,且**双 legacy_archived + 活表 = 独立 W2 门**:任何按 `legacy_archived` 触发的 drop 脚本会删活恢复表。
+
+**M2 MATERIAL — needs-probe 的不安全删除默认(翻转)**
+- `market_events`(forecasts,活 forecast_class,17,256 行,结算相关生命周期)与 `selection_hypothesis_fact`(world,活 world_class,fact_revocations 标记):原默认 **raw-evidence(可删)** → **翻转为保留**(ledger/current-cache)直到 reader 探针跑。
+- **规则(矩阵须采纳)**:needs-probe 行默认取**最保留的合理类,永不默认删**。
+
+**M3/缺漏 — 采纳 writers/readers 重导规则 + 正列遗漏表**
+- **根因规则**:凡分类依赖 manifest 标签**或** round-2 断言,一律从**实际 writer/reader 重导**(对证书做了就不会有 B1)。→ 进 EXECUTION_MASTER 作 W2 强制门。
+- `outcome_fact`(trade,结算真相,harvester log_settlement_event 写,18 行低于 top-40 截断)**未分类** → 显式 **ledger/money-hot**(结算真相不可留给推断)。
+- money-hot 控制面(position_current/lots、venue_commands/_events、settlement_commands、collateral_reservations、trade_decisions、execution_fact)**正列 money-hot**,不靠"小即安全"推断;trade_decisions 尤是 W0 修复表。
+
+**critic 确认 sound(无需改)**:collateral→money-hot、book_hash head→money-hot、position/venue facts→ledger、calibration_pairs→learning-mart、settlement_outcomes→ledger、opportunity_events 拆分、第 6 类——全对。矩阵约 80% 正确,B1 是唯一 catastrophic 反转。
+
+**传播**:此修正也纠正 `REDESIGN_v2.md §2` 与 `consult_gpt56_answer.md §2` 的 decision_certificates grain-story(它们说 world=candidate-only-evidence,错;world 是含 selected 的权威 superset)。
+
+---
+
+（以下为 design-B 原始交件,未改动——上方 CRITIC 修正覆盖 decision_certificates/edges、decision_log、market_events、selection_hypothesis_fact 四处)
 
 # 5-Class Authority Matrix — Zeus DB First-Principles Redesign
 
