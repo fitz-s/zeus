@@ -1802,7 +1802,10 @@ def _validate_review_no_exposure_payload(
     if payload.get("command_id") != command_id:
         raise ValueError("review no-exposure clearance payload command_id must match appended command")
     proof_class = payload.get("proof_class")
-    if proof_class == "cancel_unknown_terminal_no_fill":
+    if proof_class in {
+        "cancel_unknown_terminal_no_fill",
+        "cancel_failed_already_canceled_terminal_no_fill",
+    }:
         _validate_review_cancel_unknown_no_fill_payload(
             conn=conn,
             current_state=current_state,
@@ -1930,6 +1933,22 @@ def _latest_payload_is_cancel_unknown(payload: dict) -> bool:
     return str(payload.get("reason") or "") == "post_cancel_unknown_possible_side_effect"
 
 
+def _latest_payload_is_cancel_failed_already_canceled(payload: dict) -> bool:
+    outcome = payload.get("cancel_outcome")
+    outcome = outcome if isinstance(outcome, dict) else {}
+    text = " ".join(
+        str(value or "")
+        for value in (
+            payload.get("reason"),
+            outcome.get("reason"),
+            outcome.get("errorMsg"),
+            outcome.get("errorMessage"),
+            outcome.get("message"),
+        )
+    ).replace("_", " ").replace("-", " ").lower()
+    return "already canceled" in text or "already cancelled" in text
+
+
 _POINT_ORDER_LIVE_DATA_KEYS = (
     "size",
     "original_size",
@@ -1966,16 +1985,35 @@ def _validate_review_cancel_unknown_no_fill_payload(
     required_predicates = payload.get("required_predicates")
     if not isinstance(required_predicates, dict):
         raise ValueError("cancel-unknown no-fill clearance requires required_predicates")
+    already_canceled = (
+        payload.get("proof_class")
+        == "cancel_failed_already_canceled_terminal_no_fill"
+    )
     required_true = (
-        "latest_event_is_cancel_replace_blocked",
-        "semantic_cancel_status_cancel_unknown",
-        "requires_m5_reconcile",
-        "venue_order_id_present",
-        "point_order_terminal_no_fill",
-        "point_order_matched_size_zero",
-        "no_trade_facts",
-        "no_matching_open_orders",
-        "no_matching_trades",
+        (
+            "latest_event_is_cancel_failed",
+            "cancel_failed_already_canceled",
+            "venue_order_id_present",
+            "venue_order_id_matches_point_read",
+            "point_order_terminal_no_fill",
+            "point_order_matched_size_zero",
+            "no_trade_facts",
+            "no_matching_open_orders",
+            "no_matching_trades",
+            "position_projection_not_bound_to_command",
+        )
+        if already_canceled
+        else (
+            "latest_event_is_cancel_replace_blocked",
+            "semantic_cancel_status_cancel_unknown",
+            "requires_m5_reconcile",
+            "venue_order_id_present",
+            "point_order_terminal_no_fill",
+            "point_order_matched_size_zero",
+            "no_trade_facts",
+            "no_matching_open_orders",
+            "no_matching_trades",
+        )
     )
     missing = [name for name in required_true if required_predicates.get(name) is not True]
     if missing:
@@ -1988,9 +2026,13 @@ def _validate_review_cancel_unknown_no_fill_payload(
             "cancel-unknown no-fill clearance requires point order match, authenticated absence, "
             "or authenticated no-live-record proof"
         )
-    if payload.get("side_effect_boundary_crossed") != "unknown":
-        raise ValueError("cancel-unknown no-fill clearance requires side_effect_boundary_crossed=unknown")
-    if payload.get("sdk_submit_attempted") != "unknown":
+    expected_boundary = True if already_canceled else "unknown"
+    if payload.get("side_effect_boundary_crossed") != expected_boundary:
+        raise ValueError("cancel no-fill clearance has invalid side-effect boundary")
+    if already_canceled:
+        if payload.get("sdk_cancel_attempted") is not True:
+            raise ValueError("already-canceled no-fill clearance requires sdk_cancel_attempted=true")
+    elif payload.get("sdk_submit_attempted") != "unknown":
         raise ValueError("cancel-unknown no-fill clearance requires sdk_submit_attempted=unknown")
     with _row_factory_as(conn, sqlite3.Row):
         command = conn.execute(
@@ -2003,7 +2045,7 @@ def _validate_review_cancel_unknown_no_fill_payload(
         ).fetchone()
         current = conn.execute(
             """
-            SELECT phase, shares, cost_basis_usd
+            SELECT phase, shares, cost_basis_usd, order_id
               FROM position_current
              WHERE position_id = (SELECT position_id FROM venue_commands WHERE command_id = ?)
              LIMIT 1
@@ -2043,27 +2085,44 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError("cancel-unknown no-fill clearance requires command venue_order_id")
     if current is None:
         raise ValueError("cancel-unknown no-fill clearance requires position_current")
-    # voided is the projection lane's own zero-fill terminal for a canceled
-    # entry (live 2026-07-05: venue-canceled maker rests projected to voided
-    # before command recovery ran) — equally zero-exposure as pending_entry.
-    if str(current["phase"] or "") not in ("pending_entry", "voided"):
-        raise ValueError("cancel-unknown no-fill clearance requires zero-exposure projection")
+    # An unfilled incremental order can share an already-active position row
+    # with older fills.  Command-specific CLOB facts prove whether this order
+    # added exposure; the aggregate position must not be mistaken for its fill.
+    phase = str(current["phase"] or "")
     try:
         shares = Decimal(str(current["shares"] or "0"))
         cost_basis = Decimal(str(current["cost_basis_usd"] or "0"))
     except (InvalidOperation, TypeError) as exc:
         raise ValueError("cancel-unknown no-fill position_current exposure is invalid") from exc
-    if shares != Decimal("0") or cost_basis != Decimal("0"):
-        raise ValueError("cancel-unknown no-fill clearance requires zero local exposure")
-    if latest_event is None or latest_event["event_type"] != "CANCEL_REPLACE_BLOCKED":
-        raise ValueError("cancel-unknown no-fill clearance requires latest CANCEL_REPLACE_BLOCKED")
+    zero_pending = (
+        phase in {"pending_entry", "voided"}
+        and shares == Decimal("0")
+        and cost_basis == Decimal("0")
+    )
+    existing_position = (
+        phase in {"active", "day0_window", "pending_exit"}
+        and shares > 0
+        and cost_basis > 0
+        and str(current["order_id"] or "") != str(command["venue_order_id"] or "")
+    )
+    if already_canceled:
+        if not (zero_pending or existing_position):
+            raise ValueError("already-canceled no-fill projection is bound to the command")
+    elif not zero_pending:
+        raise ValueError("cancel-unknown no-fill clearance requires zero-exposure projection")
+    expected_event = "CANCEL_FAILED" if already_canceled else "CANCEL_REPLACE_BLOCKED"
+    if latest_event is None or latest_event["event_type"] != expected_event:
+        raise ValueError(f"cancel no-fill clearance requires latest {expected_event}")
     try:
         latest_payload = json.loads(str(latest_event["payload_json"] or "{}"))
     except json.JSONDecodeError as exc:
         raise ValueError("cancel-unknown no-fill latest payload is invalid") from exc
     if not isinstance(latest_payload, dict):
         raise ValueError("cancel-unknown no-fill latest payload is invalid")
-    if not _latest_payload_is_cancel_unknown(latest_payload):
+    if already_canceled:
+        if not _latest_payload_is_cancel_failed_already_canceled(latest_payload):
+            raise ValueError("cancel no-fill latest payload must prove already canceled")
+    elif not _latest_payload_is_cancel_unknown(latest_payload):
         raise ValueError("cancel-unknown no-fill latest payload must be CANCEL_UNKNOWN")
     if fact is None:
         raise ValueError("cancel-unknown no-fill clearance requires terminal order fact")
@@ -2152,11 +2211,16 @@ def _validate_review_cancel_unknown_no_fill_payload(
     for key in ("source_commit", "source_function", "source_reason"):
         if not str(source.get(key) or "").strip():
             raise ValueError(f"cancel-unknown no-fill source_proof missing {key}")
-    if source.get("source_reason") not in {
-        "cancel_unknown_point_order_terminal_no_fill",
-        "cancel_unknown_point_order_absent_terminal_no_fill",
-        "cancel_unknown_point_order_no_live_record_terminal_no_fill",
-    }:
+    supported_source_reasons = (
+        {"cancel_failed_already_canceled_point_order_terminal_no_fill"}
+        if already_canceled
+        else {
+            "cancel_unknown_point_order_terminal_no_fill",
+            "cancel_unknown_point_order_absent_terminal_no_fill",
+            "cancel_unknown_point_order_no_live_record_terminal_no_fill",
+        }
+    )
+    if source.get("source_reason") not in supported_source_reasons:
         raise ValueError("cancel-unknown no-fill source_reason is unsupported")
 
 
@@ -2878,7 +2942,7 @@ def _actual_review_confirmed_fill_predicates(
         aggregate_filled += size
         aggregate_count += 1
         aggregate_authenticated_confirmed = aggregate_authenticated_confirmed and (
-            str(row["source"] or "").upper() == "WS_USER"
+            str(row["source"] or "").upper() in {"REST", "WS_USER"}
             and str(row["state"] or "").upper() == "CONFIRMED"
         )
         source_time = _review_clearance_parse_utc(

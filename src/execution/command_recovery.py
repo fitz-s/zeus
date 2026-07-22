@@ -16482,7 +16482,7 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         """,
         (cmd.command_id, str(cmd.venue_order_id)),
     ).fetchall()
-    if len(rows) != 1:
+    if not rows:
         logger.info(
             "recovery: command %s REVIEW_REQUIRED already-canceled stayed; "
             "positive trade fact count=%d",
@@ -16490,19 +16490,32 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
             len(rows),
         )
         return "stayed"
-    trade_fact = _dict_row(rows[0])
-    filled_size = str(trade_fact.get("filled_size") or "")
-    fill_price = str(trade_fact.get("fill_price") or "")
-    trade_id = str(trade_fact.get("trade_id") or "")
-    venue_order_id = str(trade_fact.get("venue_order_id") or cmd.venue_order_id or "")
-    observed_at = str(trade_fact.get("observed_at") or _now_iso())
-    if not (
-        venue_order_id
-        and trade_id
-        and _positive_decimal_or_none(filled_size) is not None
-        and _positive_decimal_or_none(fill_price) is not None
-    ):
+    trade_facts = sorted(
+        (_dict_row(row) for row in rows),
+        key=lambda fact: str(fact.get("trade_id") or ""),
+    )
+    venue_order_id = str(cmd.venue_order_id or "")
+    total_size = Decimal("0")
+    total_cost = Decimal("0")
+    observed_at = ""
+    for trade_fact in trade_facts:
+        if str(trade_fact.get("venue_order_id") or "") != venue_order_id:
+            return "stayed"
+        size = _positive_decimal_or_none(trade_fact.get("filled_size"))
+        price = _positive_decimal_or_none(trade_fact.get("fill_price"))
+        trade_id = str(trade_fact.get("trade_id") or "")
+        if size is None or price is None or not trade_id:
+            return "stayed"
+        total_size += size
+        total_cost += size * price
+        fact_time = str(trade_fact.get("venue_timestamp") or trade_fact.get("observed_at") or "")
+        if fact_time > observed_at:
+            observed_at = fact_time
+    if total_size <= 0 or total_cost <= 0:
         return "stayed"
+    filled_size = format(total_size, "f")
+    fill_price = format(total_cost / total_size, "f")
+    observed_at = observed_at or _now_iso()
     command = _dict_row(
         conn.execute(
             "SELECT * FROM venue_commands WHERE command_id = ?",
@@ -16514,6 +16527,18 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         command.get("size"),
         side=command.get("side"),
     )
+    aggregate_confirmed = all(
+        str(fact.get("state") or "").upper() == "CONFIRMED"
+        and str(fact.get("source") or "").upper() in {"REST", "WS_USER"}
+        for fact in trade_facts
+    )
+    if complete and not aggregate_confirmed:
+        return "stayed"
+    order_fact_source = (
+        "REST"
+        if any(str(fact.get("source") or "").upper() == "REST" for fact in trade_facts)
+        else "WS_USER"
+    )
     payload = {
         "schema_version": 1,
         "reason": (
@@ -16524,11 +16549,12 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         "command_id": cmd.command_id,
         "decision_id": str(command.get("decision_id") or ""),
         "venue_order_id": venue_order_id,
-        "trade_id": trade_id,
+        "trade_id": str(trade_facts[0].get("trade_id") or ""),
+        "trade_ids": [str(fact.get("trade_id") or "") for fact in trade_facts],
         "filled_size": filled_size,
         "fill_price": fill_price,
         "proof_class": (
-            "review_required_matched_order_fact_with_positive_trade_fact"
+            "authenticated_trade_fact_full_fill"
             if complete
             else "terminal_partial_order_fact"
         ),
@@ -16539,9 +16565,10 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
                 {
                     "command_state_review_required": True,
                     "latest_event_is_review_boundary": True,
-                    "positive_trade_fact": True,
-                    "matched_order_fact_positive": True,
+                    "authenticated_confirmed_trade_facts": True,
+                    "bound_venue_order_id_matches_trade": True,
                     "trade_facts_cover_command_or_leave_only_dust": True,
+                    "source_fill_time_valid": True,
                 }
                 if complete
                 else {
@@ -16554,14 +16581,20 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         "matched_size": filled_size,
         "remaining_size": "0",
         "requested_size": str(command.get("size") or ""),
-        "trade_fact_proof": {
-            "trade_fact_id": trade_fact.get("trade_fact_id"),
-            "state": trade_fact.get("state"),
-            "source": trade_fact.get("source"),
-            "observed_at": trade_fact.get("observed_at"),
-            "venue_timestamp": trade_fact.get("venue_timestamp"),
-            "tx_hash": trade_fact.get("tx_hash"),
-        },
+        "trade_fact_proof": [
+            {
+                "trade_fact_id": fact.get("trade_fact_id"),
+                "trade_id": fact.get("trade_id"),
+                "state": fact.get("state"),
+                "source": fact.get("source"),
+                "filled_size": fact.get("filled_size"),
+                "fill_price": fact.get("fill_price"),
+                "observed_at": fact.get("observed_at"),
+                "venue_timestamp": fact.get("venue_timestamp"),
+                "tx_hash": fact.get("tx_hash"),
+            }
+            for fact in trade_facts
+        ],
         "source_proof": {
             "source_commit": "runtime",
             "source_function": "command_recovery._reconcile_row",
@@ -16581,9 +16614,9 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
             state="MATCHED" if complete else "PARTIALLY_MATCHED",
             remaining_size="0",
             matched_size=filled_size,
-            source=str(trade_fact.get("source") or "REST"),
+            source=order_fact_source,
             observed_at=observed_at,
-            venue_timestamp=str(trade_fact.get("venue_timestamp") or observed_at),
+            venue_timestamp=observed_at,
             raw_payload_hash=_payload_hash({**payload, "fact_type": "order"}),
             raw_payload_json=payload,
         )
@@ -16605,7 +16638,7 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
             matched_size=filled_size,
             fill_price=fill_price,
             observed_at=observed_at,
-            order_fact_source=str(trade_fact.get("source") or "REST"),
+            order_fact_source=order_fact_source,
         )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
@@ -16618,8 +16651,207 @@ def _review_required_cancel_failed_already_canceled_entry_fill_recovery(
         cmd.command_id,
         "FILLED" if complete else "PARTIAL",
         venue_order_id,
-        trade_id,
+        str(trade_facts[0].get("trade_id") or ""),
         filled_size,
+    )
+    return "advanced"
+
+
+def _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+) -> str:
+    """Expire a proven unfilled maker increment after an idempotent cancel race."""
+
+    if (
+        cmd.state != CommandState.REVIEW_REQUIRED
+        or cmd.intent_kind != IntentKind.ENTRY
+        or str(cmd.side or "").upper() != "BUY"
+        or not str(cmd.venue_order_id or "").strip()
+    ):
+        return "stayed"
+    events = _command_events(conn, cmd.command_id)
+    if _cancel_failed_already_canceled_payload(events) is None:
+        return "stayed"
+    if _trade_fact_count(conn, cmd.command_id) != 0:
+        return "stayed"
+
+    command = _dict_row(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (cmd.command_id,),
+        ).fetchone()
+    )
+    venue_order_id = str(cmd.venue_order_id or "")
+    try:
+        point_order = _venue_order_payload(client.get_order(venue_order_id))
+        open_orders = _client_open_orders(client)
+        trades = _client_trades(client)
+    except Exception as exc:  # noqa: BLE001 - authenticated proof may retry later.
+        logger.warning(
+            "recovery: command %s REVIEW_REQUIRED already-canceled no-fill read failed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+    if point_order is None or _extract_order_id(point_order) != venue_order_id:
+        return "stayed"
+    status = _order_status(point_order)
+    fact_state = _terminal_fact_state_for_venue_status(
+        status,
+        venue_resp_present=True,
+    )
+    no_fill_proven, _ = _terminal_point_order_zero_fill_proven(
+        conn,
+        command_id=cmd.command_id,
+        point_order=point_order,
+    )
+    matching_open_orders = _matching_open_orders_for_command(
+        client,
+        command,
+        open_orders=open_orders,
+    )
+    matching_trades = _matching_trades_for_command(
+        client,
+        command,
+        trades=trades,
+    )
+    if fact_state is None or not no_fill_proven or matching_open_orders or matching_trades:
+        return "stayed"
+
+    current = _dict_row(
+        conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_id "
+            "FROM position_current WHERE position_id = ? LIMIT 1",
+            (str(command.get("position_id") or ""),),
+        ).fetchone()
+    )
+    try:
+        shares = Decimal(str(current.get("shares") or "0"))
+        cost_basis = Decimal(str(current.get("cost_basis_usd") or "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        return "stayed"
+    phase = str(current.get("phase") or "")
+    zero_pending = (
+        phase in {"pending_entry", "voided"}
+        and shares == 0
+        and cost_basis == 0
+    )
+    existing_position = (
+        phase in {"active", "day0_window", "pending_exit"}
+        and shares > 0
+        and cost_basis > 0
+        and str(current.get("order_id") or "") != venue_order_id
+    )
+    if not (zero_pending or existing_position):
+        return "stayed"
+
+    now = _now_iso()
+    source_reason = "cancel_failed_already_canceled_point_order_terminal_no_fill"
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+    sp_name = f"sp_already_cancelled_entry_no_fill_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        fact_id, fact_payload = _append_point_order_terminal_no_fill_fact(
+            conn,
+            command=command,
+            observed_at=now,
+            venue_status=status,
+            point_order=point_order,
+            matching_open_orders=matching_open_orders,
+            matching_trades=matching_trades,
+            source_reason=source_reason,
+        )
+        payload = {
+            "schema_version": 1,
+            "reason": "review_cleared_no_venue_exposure",
+            "command_id": cmd.command_id,
+            "venue_order_id": venue_order_id,
+            "proof_class": "cancel_failed_already_canceled_terminal_no_fill",
+            "side_effect_boundary_crossed": True,
+            "sdk_cancel_attempted": True,
+            "required_predicates": {
+                "latest_event_is_cancel_failed": True,
+                "cancel_failed_already_canceled": True,
+                "venue_order_id_present": True,
+                "venue_order_id_matches_point_read": True,
+                "point_order_terminal_no_fill": True,
+                "point_order_matched_size_zero": True,
+                "no_trade_facts": True,
+                "no_matching_open_orders": True,
+                "no_matching_trades": True,
+                "position_projection_not_bound_to_command": True,
+            },
+            "terminal_order_fact_id": fact_id,
+            "terminal_order_fact": fact_payload,
+            "venue_absence_proof": {
+                "source": "authenticated_clob_user_read",
+                "owner_scope": "authenticated_funder",
+                "observed_at": now,
+                "command_id": cmd.command_id,
+                "decision_id": str(command.get("decision_id") or ""),
+                "market_id": str(command.get("market_id") or ""),
+                "token_id": str(command.get("token_id") or ""),
+                "side": str(command.get("side") or ""),
+                "price": str(Decimal(str(command.get("price")))),
+                "size": str(Decimal(str(command.get("size")))),
+                "time_window_start": command.get("created_at"),
+                "time_window_end": now,
+                "open_orders_checked": True,
+                "trades_checked": True,
+                "open_orders_query_complete": True,
+                "trades_query_complete": True,
+                "pagination_scope": "sdk_get_trades_returned_all_visible_user_trades",
+                "matching_open_order_count": 0,
+                "matching_trade_count": 0,
+                "matching_open_orders": [],
+                "matching_trades": [],
+                "point_order_status": status,
+                "point_order": point_order,
+            },
+            "source_proof": {
+                "source_commit": "runtime",
+                "source_function": "command_recovery._reconcile_row",
+                "source_reason": source_reason,
+            },
+            "reviewed_by": "command_recovery",
+            "cleared_at": now,
+        }
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
+            occurred_at=now,
+            payload=payload,
+        )
+        if zero_pending:
+            _append_entry_order_voided_projection(
+                conn,
+                command=command,
+                order_fact={
+                    **command,
+                    "order_fact_id": fact_id,
+                    "order_fact_state": fact_state,
+                    "order_fact_observed_at": now,
+                    "order_fact_venue_order_id": venue_order_id,
+                    "order_fact_remaining_size": "0",
+                    "order_fact_matched_size": "0",
+                    "order_fact_source": "REST",
+                },
+                occurred_at=now,
+            )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    logger.info(
+        "recovery: command %s REVIEW_REQUIRED already-canceled -> EXPIRED "
+        "(venue_order_id=%s status=%s)",
+        cmd.command_id,
+        venue_order_id,
+        status,
     )
     return "advanced"
 
@@ -17417,6 +17649,13 @@ def _reconcile_row(
 
         if state == CommandState.REVIEW_REQUIRED:
             outcome = _review_required_cancel_failed_already_canceled_entry_fill_recovery(conn, cmd)
+            if outcome != "stayed":
+                return outcome
+            outcome = _review_required_cancel_failed_already_canceled_entry_no_fill_recovery(
+                conn,
+                cmd,
+                client,
+            )
             if outcome != "stayed":
                 return outcome
             outcome = _review_required_post_ack_terminal_no_fill_recovery(conn, cmd, client)

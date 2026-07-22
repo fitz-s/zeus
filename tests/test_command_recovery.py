@@ -9679,6 +9679,172 @@ class TestRecoveryResolutionTable:
         payload = json.loads(events[-1]["payload_json"])
         assert payload["proof_class"] == "terminal_partial_order_fact"
 
+    def test_already_canceled_full_fill_aggregates_multiple_confirmed_trades(
+        self,
+        conn,
+    ):
+        """One maker order split across trades is one fully filled command."""
+        _insert(conn, size=22.5, price=0.93)
+        _advance_to_acked(conn, venue_order_id="ord-split-fill")
+        _append_trade_fact(
+            conn,
+            order_id="ord-split-fill",
+            trade_id="trade-split-fill-1",
+            filled_size="7.5",
+            fill_price="0.93",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-split-fill",
+            trade_id="trade-split-fill-2",
+            filled_size="15",
+            fill_price="0.93",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-split-fill"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-split-fill",
+                "reason": "ord-split-fill: order is already canceled",
+                "cancel_outcome": {
+                    "orderID": "ord-split-fill",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "ord-split-fill: order is already canceled",
+                },
+            },
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+
+        assert reconcile_matched_cancel_review_required_entries(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        event = _get_events(conn, "cmd-001")[-1]
+        assert event["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "authenticated_trade_fact_full_fill"
+        assert payload["trade_ids"] == [
+            "trade-split-fill-1",
+            "trade-split-fill-2",
+        ]
+        assert Decimal(payload["filled_size"]) == Decimal("22.5")
+        fact = conn.execute(
+            "SELECT state, matched_size, remaining_size FROM venue_order_facts "
+            "WHERE command_id = 'cmd-001' ORDER BY local_sequence DESC LIMIT 1"
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "MATCHED",
+            "matched_size": "22.5",
+            "remaining_size": "0",
+        }
+
+    def test_already_canceled_zero_fill_expires_increment_without_voiding_existing_position(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A canceled unfilled increment must release only its command commitment."""
+        _insert(conn, size=60.0, price=0.71)
+        _advance_to_acked(conn, venue_order_id="ord-unfilled-increment")
+        _seed_pending_entry_projection(
+            conn,
+            order_id="ord-unfilled-increment",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 6.0,
+                   cost_basis_usd = 4.08,
+                   size_usd = 4.08,
+                   entry_price = 0.68,
+                   chain_state = 'synced',
+                   chain_shares = 6.0,
+                   chain_avg_price = 0.68,
+                   chain_cost_basis_usd = 4.08,
+                   order_id = 'ord-prior-fill',
+                   order_status = 'filled',
+                   fill_authority = 'venue_confirmed_full'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-unfilled-increment"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-unfilled-increment",
+                "reason": "ord-unfilled-increment: order can't be found - already canceled or matched",
+                "cancel_outcome": {
+                    "orderID": "ord-unfilled-increment",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "ord-unfilled-increment: order can't be found - already canceled or matched",
+                },
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "ord-unfilled-increment",
+            "status": "CANCELED",
+            "original_size": "60",
+            "size_matched": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        event = _get_events(conn, "cmd-001")[-1]
+        assert event["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "cancel_failed_already_canceled_terminal_no_fill"
+        fact = conn.execute(
+            "SELECT state, matched_size FROM venue_order_facts "
+            "WHERE command_id = 'cmd-001' ORDER BY local_sequence DESC LIMIT 1"
+        ).fetchone()
+        assert dict(fact) == {"state": "CANCEL_CONFIRMED", "matched_size": "0"}
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_id FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 6.0,
+            "cost_basis_usd": 4.08,
+            "order_id": "ord-prior-fill",
+        }
+
     def test_filled_entry_repair_without_trade_case_stays_non_error(
         self,
         conn,

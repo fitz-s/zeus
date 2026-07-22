@@ -1980,7 +1980,7 @@ files:
   src/execution/command_recovery.py:
     zone: K2_runtime
     authority_role: venue_command_recovery
-    why: Scans unresolved durable venue commands and appends recovery events without bypassing command grammar.
+    why: Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Cancel-failed maker races aggregate all canonical confirmed trade legs for one order, while authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill.
     downstream:
     - src/engine/cycle_runner.py
     - src/state/venue_command_repo.py
@@ -2599,7 +2599,7 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95] before persistence while preserving CANCEL; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
+    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95] before persistence while preserving CANCEL; R3 Z4 terminal command transitions release collateral reservations atomically; authenticated already-canceled zero-fill clearance validates command-specific absence without confusing an older same-position fill for exposure from the canceled increment; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
     write_routes:
     - venue_command_write
     downstream:
