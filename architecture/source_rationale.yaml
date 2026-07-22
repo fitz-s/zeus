@@ -1904,6 +1904,13 @@ files:
     why: Materializes confirmed EDLI fills into canonical position_current rows, including deterministic 68-char position ids and guarded recovery of qkernel posterior authority from certificates or EDLI event payloads.
     downstream:
     - src/state/projection.py
+  src/events/event_store.py:
+    zone: K2_runtime
+    authority_role: edli_opportunity_event_processing_store
+    why: Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting so changing q/book/wealth epochs revalidate execution without replacing the pending claim.
+    downstream:
+    - src/events/reactor.py
+    - src/engine/global_batch_runtime.py
   src/events/reactor.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_runtime

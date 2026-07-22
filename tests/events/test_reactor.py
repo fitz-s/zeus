@@ -1672,6 +1672,38 @@ def test_global_target_atomically_supersedes_only_older_pending_targets():
     assert states[unrelated.event_id] == ("pending", None)
 
 
+def test_global_target_keeps_same_causal_fact_across_economic_epochs():
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    source = _forecast_event("same-causal-fact", target_date="2026-05-24")
+    first = _next_claim_carrier(
+        source,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="book-epoch-1",
+        payload=json.loads(source.payload_json),
+    )
+    second = _next_claim_carrier(
+        source,
+        targeted_at=_DT_VENUE_OPEN + timedelta(seconds=5),
+        economic_identity="book-epoch-2",
+        payload=json.loads(source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(first)
+    assert store.prioritize_global_winner(second) is False
+
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (first.event_id,),
+    ).fetchone() == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (second.event_id,),
+    ).fetchone() is None
+
+
 def test_global_target_processing_lease_blocks_new_target_materialization():
     conn, store = _store()
     inflight = _forecast_event("inflight-target", target_date="2026-05-25")

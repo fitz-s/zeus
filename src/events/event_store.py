@@ -20,6 +20,7 @@ from typing import Any, Callable
 from src.events.opportunity_event import OpportunityEvent
 
 GLOBAL_WINNER_TARGETED_CLAIM = "GLOBAL_WINNER_TARGETED_CLAIM"
+_GLOBAL_WINNER_TARGET_SOURCE_PREFIX = "global_auction_winner_target:"
 
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane. EDLI_REDECISION_PENDING
 # carries the same FSR-shaped city/target payload and gets the same timeliness floor. Literal here
@@ -108,6 +109,18 @@ def _safe_int(value: object, default: int = 0) -> int:
 
 def _safe_bool_int(value: object) -> int:
     return 1 if _safe_int(value, 0) > 0 else 0
+
+
+def _global_winner_target_source_event_id(source: object) -> str | None:
+    text = str(source or "").strip()
+    if not text.startswith(_GLOBAL_WINNER_TARGET_SOURCE_PREFIX):
+        return None
+    source_event_id, separator, economic_identity = text[
+        len(_GLOBAL_WINNER_TARGET_SOURCE_PREFIX) :
+    ].partition(":")
+    if not separator or not source_event_id or not economic_identity:
+        return None
+    return source_event_id
 
 
 def _default_family_normalizer(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
@@ -2510,6 +2523,10 @@ class EventStore:
 
         old_ids: set[str] = set()
         processing_claims: dict[str, str] = {}
+        target_source_event_id = _global_winner_target_source_event_id(
+            event.source
+        )
+        same_source_target_pending = False
         for event_type, index_name in (
             ("FORECAST_SNAPSHOT_READY", "idx_opportunity_events_fsr_target_date"),
             ("EDLI_REDECISION_PENDING", "idx_opportunity_events_fsr_target_date"),
@@ -2522,7 +2539,7 @@ class EventStore:
             }[event_type]
             rows = self.conn.execute(
                 f"""
-                SELECT e.event_id, p.processing_status, p.claimed_at
+                SELECT e.event_id, p.processing_status, p.claimed_at, e.source
                   FROM opportunity_events e INDEXED BY {index_name}
                   JOIN opportunity_event_processing p
                     ON p.consumer_name = ? AND p.event_id = e.event_id
@@ -2551,12 +2568,25 @@ class EventStore:
                 if str(row[1] or "") == "processing":
                     processing_claims[event_id] = str(row[2] or "")
                 elif event_id != event.event_id:
-                    old_ids.add(event_id)
+                    if (
+                        target_source_event_id is not None
+                        and _global_winner_target_source_event_id(row[3])
+                        == target_source_event_id
+                    ):
+                        same_source_target_pending = True
+                    else:
+                        old_ids.add(event_id)
 
         if any(
             allowed_claims.get(event_id) != claimed_at
             for event_id, claimed_at in processing_claims.items()
         ):
+            return False
+
+        # The claim belongs to the immutable causal source fact, while q/book/
+        # wealth economics are revalidated at actuation.  A newer economic epoch
+        # for that same fact must not replace its pending claim before it can run.
+        if same_source_target_pending:
             return False
 
         self.insert_or_ignore(event)
