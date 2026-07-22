@@ -11451,6 +11451,7 @@ def _global_preflight_block_status(reason: str) -> str:
         (
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",
             "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:",
+            "GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:",
         )
     ):
         return "CANDIDATE_BLOCKED"
@@ -11608,6 +11609,9 @@ def _global_preflight_entry_jit_receipt(
             current_candidate_override,
             checked_at_utc=checked_at_utc,
         )
+        fresh_best_bid: float | None = None
+        fresh_best_ask: float | None = None
+        mode_checked_at = checked_at_utc
         if current_candidate is None:
             raw_book: dict[str, object] = {}
 
@@ -11644,16 +11648,32 @@ def _global_preflight_entry_jit_receipt(
                 raw_book,
                 captured_at_utc=jit[3],
             )
-            mode_receipt = _global_preflight_candidate_mode_receipt(
-                event,
-                receipt,
-                current_candidate=current_candidate,
-                fresh_best_bid=jit[0],
-                fresh_best_ask=jit[1],
-                checked_at_utc=checked_at_utc or jit[3],
+            fresh_best_bid = jit[0]
+            fresh_best_ask = jit[1]
+            mode_checked_at = checked_at_utc or jit[3]
+        else:
+            curve = getattr(current_candidate, "executable_cost_curve", None)
+            asks = tuple(getattr(curve, "levels", ()) or ())
+            bids = tuple(getattr(current_candidate, "native_bid_levels", ()) or ())
+            fresh_best_ask = float(min(level.price for level in asks)) if asks else None
+            fresh_best_bid = float(max(level.price for level in bids)) if bids else None
+            mode_checked_at = checked_at_utc or getattr(
+                current_candidate,
+                "book_captured_at_utc",
+                None,
             )
-            if mode_receipt is not receipt:
-                return mode_receipt
+        if not isinstance(mode_checked_at, datetime) or mode_checked_at.tzinfo is None:
+            raise ValueError("GLOBAL_PREFLIGHT_MODE_CLOCK_REQUIRED")
+        mode_receipt = _global_preflight_candidate_mode_receipt(
+            event,
+            receipt,
+            current_candidate=current_candidate,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+            checked_at_utc=mode_checked_at,
+        )
+        if mode_receipt is not receipt:
+            return mode_receipt
         drift = _global_selected_order_economics_drift(
             decision=decision,
             current_candidate=current_candidate,
@@ -11708,10 +11728,10 @@ def _global_preflight_candidate_mode_receipt(
     fresh_best_ask: float | None,
     checked_at_utc: datetime,
 ) -> EventSubmissionReceipt:
-    """Reject a stale taker winner while the complete auction can fall through."""
+    """Reject a stale mode or unsubmitable maker price before winner binding."""
 
     proof_mode = str(receipt.execution_mode_intent or "").strip().upper()
-    if proof_mode != "TAKER":
+    if proof_mode not in {"MAKER", "TAKER"}:
         return receipt
     proof_bundle = receipt.decision_proof_bundle
     executable_snapshot = getattr(proof_bundle, "executable_snapshot", None)
@@ -11759,7 +11779,7 @@ def _global_preflight_candidate_mode_receipt(
             tick_size=float(curve.min_tick),
             decision_time=checked_at_utc,
         )
-        _validate_final_order_mode_or_abort(
+        order_mode = _validate_final_order_mode_or_abort(
             proof_mode=proof_mode,
             fresh_mode=fresh_mode,
             fresh_best_bid=fresh_best_bid,
@@ -11771,6 +11791,32 @@ def _global_preflight_candidate_mode_receipt(
             submitted=False,
             side_effect_status="NO_SUBMIT",
             reason=f"GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:{exc}",
+            proof_accepted=False,
+        )
+    if order_mode != "MAKER":
+        return receipt
+    try:
+        from src.decision_kernel.certificates.execution import (
+            _branch_limit_price,
+            _side_for_direction,
+        )
+
+        limit_price = _branch_limit_price(
+            side=_side_for_direction(str(receipt.direction or "")),
+            order_mode="MAKER",
+            reservation=float(receipt.c_fee_adjusted),
+            best_bid=fresh_best_bid,
+            best_ask=fresh_best_ask,
+            tick_size=float(curve.min_tick),
+            passive_maker_context=None,
+        )
+        assert_live_order_unit_price(limit_price)
+    except (TypeError, ValueError) as exc:
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=f"GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:{exc}",
             proof_accepted=False,
         )
     return receipt

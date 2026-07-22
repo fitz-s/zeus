@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-21
+# Last reused/audited: 2026-07-22
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -9212,6 +9212,78 @@ def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unpr
         "SUBMIT_ABORTED_MODE_FLIPPED:proof_mode=TAKER:fresh_mode=None:"
     )
     assert era._global_preflight_block_status(revalidated.reason) == "CANDIDATE_BLOCKED"
+
+
+def test_global_preflight_falls_through_sub_band_maker_winner(monkeypatch):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    curve = ExecutableCostCurve(
+        token_id="token-a",
+        side="YES",
+        snapshot_id="selected-book",
+        book_hash="selected-hash",
+        levels=(BookLevel(price=Decimal("0.04"), size=Decimal("400")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    candidate = GlobalSingleOrderCandidate(
+        candidate_id="candidate-a",
+        family_key="family-a",
+        bin_id="bin-a",
+        condition_id="condition-a",
+        side="YES",
+        token_id="token-a",
+        probability_witness_identity="probability-a",
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=at,
+        execution_curve_identity=executable_curve_identity(curve),
+        ledger_snapshot_id="ledger-a",
+        executable_cost_curve=curve,
+        resolution_identity="resolution-a",
+    )
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        direction="buy_yes",
+        q_lcb_5pct=0.31,
+        c_fee_adjusted=0.058,
+        execution_mode_intent="MAKER",
+        proof_accepted=True,
+        decision_proof_bundle=SimpleNamespace(
+            executable_snapshot=SimpleNamespace(payload={})
+        ),
+    )
+    actuation = SimpleNamespace(
+        winner_event_id=event.event_id,
+        decision=SimpleNamespace(
+            candidate=candidate,
+            limit_price=Decimal("0.058"),
+            shares=Decimal("340"),
+        ),
+    )
+    monkeypatch.setattr(era, "_fresh_rest_then_cross_mode", lambda **_kwargs: "MAKER")
+
+    rejected = era._global_preflight_entry_jit_receipt(
+        event,
+        receipt,
+        global_actuation=actuation,
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "hash": "fresh-book",
+            "bids": [{"price": "0.035", "size": "500"}],
+            "asks": [{"price": "0.04", "size": "400"}],
+            "tick_size": "0.001",
+        },
+        checked_at_utc=at,
+    )
+
+    assert rejected.proof_accepted is False
+    assert rejected.side_effect_status == "NO_SUBMIT"
+    assert rejected.reason.endswith("submit band: price=0.036")
+    assert era._global_preflight_block_status(rejected.reason) == "CANDIDATE_BLOCKED"
 
 
 def test_global_preflight_reuses_provider_observation_without_second_fetch():

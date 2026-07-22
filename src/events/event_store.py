@@ -2889,7 +2889,7 @@ class EventStore:
         self,
         event_id: str,
     ) -> bool:
-        """Recognize a terminalized fresh-book mode race with no venue call."""
+        """Recognize a terminalized pre-venue book race with no venue call."""
 
         status = self.conn.execute(
             "SELECT processing_status FROM opportunity_event_processing "
@@ -2905,14 +2905,23 @@ class EventStore:
             "WHERE event_id = ? ORDER BY created_at DESC LIMIT 1",
             (event_id,),
         ).fetchone()
+        reason = str(reason_row[0] if reason_row else "")
         segments = {
             segment.strip()
-            for segment in str(reason_row[0] if reason_row else "").split(":")
+            for segment in reason.split(":")
         }
-        if not {
+        mode_race = {
             "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE",
             "policy=MAKER_TAKER_FORBIDDEN",
-        }.issubset(segments):
+        }.issubset(segments)
+        sub_band_price_race = reason.startswith(
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "PreSubmitRevalidated live order unit price out of bounds:"
+        ) and (
+            "live order unit price outside absolute inclusive "
+            "[0.05, 0.95] submit band"
+        ) in reason
+        if not (mode_race or sub_band_price_race):
             return False
         if not _table_exists(self.conn, "edli_live_order_events"):
             return True
