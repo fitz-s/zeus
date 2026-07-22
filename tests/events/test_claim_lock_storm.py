@@ -244,7 +244,7 @@ def test_global_unpaged_winner_claim_lock_bounces_then_recovers(
     try:
         started = time.monotonic()
         with caplog.at_level(logging.WARNING, logger="zeus.events.reactor"):
-            claimed_at, lock_bounced = reactor._claim_global_winner_for_actuation(
+            claimed_event, claimed_at, lock_bounced = reactor._claim_global_winner_for_actuation(
                 target,
                 current_batch_claim_generations={base.event_id: generation},
                 result=result,
@@ -255,6 +255,7 @@ def test_global_unpaged_winner_claim_lock_bounces_then_recovers(
         blocker.close()
 
     assert claimed_at is None
+    assert claimed_event is None
     assert lock_bounced is True
     assert elapsed < 1.0, f"global winner claim waited too long: {elapsed:.3f}s"
     assert result.claim_lock_bounces == 1
@@ -265,13 +266,14 @@ def test_global_unpaged_winner_claim_lock_bounces_then_recovers(
         "SELECT 1 FROM opportunity_events WHERE event_id = ?", (target.event_id,)
     ).fetchone() is None
 
-    recovered_at, recovered_bounced = reactor._claim_global_winner_for_actuation(
+    recovered_event, recovered_at, recovered_bounced = reactor._claim_global_winner_for_actuation(
         target,
         current_batch_claim_generations={base.event_id: generation},
         result=result,
     )
 
     assert recovered_at is not None
+    assert recovered_event == target
     assert recovered_bounced is False
     assert _status(conn, target.event_id) == "processing"
     assert result.claim_lock_bounces == 1

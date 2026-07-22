@@ -15529,7 +15529,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     def _claim(target):
         assert world.in_transaction is False
         claimed_targets.append(target)
-        return True
+        return target
 
     def _actuate(event, actuation, _at):
         actuated.append((event, actuation))

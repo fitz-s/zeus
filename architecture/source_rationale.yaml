@@ -1869,7 +1869,7 @@ files:
   src/engine/global_batch_runtime.py:
     zone: K2_K3_coordination
     authority_role: current_global_single_order_runtime
-    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set.
+    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set. An unpaged claim callback returns the exact immutable carrier actually claimed, so causal-carrier reuse cannot bind actuation to a newly proposed but unclaimed economic ID.
     downstream:
     - src/engine/global_auction_universe.py
     - src/engine/global_single_order_auction.py
@@ -1907,14 +1907,14 @@ files:
   src/events/event_store.py:
     zone: K2_runtime
     authority_role: edli_opportunity_event_processing_store
-    why: Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting and atomic supersession of obsolete cross-family targets so changing q/book/wealth epochs revalidate execution without starving the current global winner. A processed winner carrier may return to pending only for an explicitly refreshable maker/taker book race with no VenueSubmitAttempted evidence.
+    why: Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting and atomic supersession of obsolete cross-family targets so changing q/book/wealth epochs revalidate execution without starving the current global winner. Winner prioritization exposes the exact retained carrier event, not only a boolean, so the claim boundary uses the ID that was actually prioritized. A processed winner carrier may return to pending only for an explicitly refreshable maker/taker book race with no VenueSubmitAttempted evidence.
     downstream:
     - src/events/reactor.py
     - src/engine/global_batch_runtime.py
   src/events/reactor.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_runtime
-    why: Owns canonical EDLI opportunity discovery, bounded claim and processing, producer-wake preemption, durable event finalization, and fail-safe dispatcher-lock release across setup and teardown faults while routing venue side effects through injected engine and executor contracts. Qkernel MAKER_TAKER_FORBIDDEN after fresh-book revalidation is a transient re-rank condition, not a terminal event verdict.
+    why: Owns canonical EDLI opportunity discovery, bounded claim and processing, producer-wake preemption, durable event finalization, and fail-safe dispatcher-lock release across setup and teardown faults while routing venue side effects through injected engine and executor contracts. The unpaged winner claim path threads the actual retained carrier through claimed-set coverage and actuation. Qkernel MAKER_TAKER_FORBIDDEN after fresh-book revalidation is a transient re-rank condition, not a terminal event verdict.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/engine/global_batch_runtime.py

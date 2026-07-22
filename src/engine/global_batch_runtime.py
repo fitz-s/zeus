@@ -2750,7 +2750,10 @@ def process_current_global_batch(
     | None = None,
     buy_candidates_enabled: bool = True,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
-    claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
+    claim_unpaged_winner: Callable[
+        [OpportunityEvent], OpportunityEvent | None
+    ]
+    | None = None,
     epoch_superseded: Callable[[], bool] | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
     restrict_to_family_keys: frozenset[str] | None = None,
@@ -3042,8 +3045,14 @@ def process_current_global_batch(
                     raise ValueError("GLOBAL_WINNER_TARGET_CARRIER_MISMATCH")
                 target = existing_target
             else:
-                if claim_unpaged_winner is None or not claim_unpaged_winner(target):
+                claimed_target = (
+                    claim_unpaged_winner(target)
+                    if claim_unpaged_winner is not None
+                    else None
+                )
+                if claimed_target is None:
                     return selected, None, target
+                target = claimed_target
                 event_tuple = (*event_tuple, target)
             claimed_target_by_scope_and_economics[target_key] = target
         return rebound(target)

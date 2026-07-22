@@ -1485,19 +1485,23 @@ class OpportunityEventReactor:
 
         process_batch = getattr(self._submit, "process_global_batch")
 
-        def _claim_unpaged_winner(event: OpportunityEvent) -> bool:
-            generation, lock_bounced = self._claim_global_winner_for_actuation(
+        def _claim_unpaged_winner(
+            event: OpportunityEvent,
+        ) -> OpportunityEvent | None:
+            claimed_event, generation, lock_bounced = (
+                self._claim_global_winner_for_actuation(
                 event,
                 current_batch_claim_generations=dict(claim_generations),
                 result=result,
             )
+            )
             if lock_bounced:
                 claim_lock_bounced_event_ids.add(event.event_id)
-            if generation is None:
-                return False
-            claimed.append(event)
-            claim_generations[event.event_id] = generation
-            return True
+            if claimed_event is None or generation is None:
+                return None
+            claimed.append(claimed_event)
+            claim_generations[claimed_event.event_id] = generation
+            return claimed_event
 
         def _finalization_time(event: OpportunityEvent) -> datetime:
             raw = claim_generations.get(event.event_id)
@@ -1697,7 +1701,7 @@ class OpportunityEventReactor:
         *,
         current_batch_claim_generations: dict[str, str],
         result: ReactorResult,
-    ) -> tuple[str | None, bool]:
+    ) -> tuple[OpportunityEvent | None, str | None, bool]:
         """Atomically materialize and claim one unpaged cut-time winner."""
 
         wait_ms = _reactor_claim_busy_timeout_ms()
@@ -1710,25 +1714,29 @@ class OpportunityEventReactor:
                 event.event_id,
                 wait_ms,
             )
-            return None, True
+            return None, None, True
         try:
             if self._store.conn.in_transaction:
                 raise RuntimeError("GLOBAL_WINNER_CLAIM_WORLD_TXN_OPEN")
             try:
                 with _scoped_sqlite_busy_timeout(self._store.conn, wait_ms):
                     self._store.conn.execute("BEGIN IMMEDIATE")
-                    if not self._store.prioritize_global_winner(
+                    prioritized_event = self._store.prioritized_global_winner_event(
                         event,
                         current_batch_claim_generations=current_batch_claim_generations,
+                    )
+                    if prioritized_event is None:
+                        self._store.conn.rollback()
+                        return None, None, False
+                    claimed_at = datetime.now(UTC).isoformat()
+                    if not self._store.claim(
+                        prioritized_event.event_id,
+                        claimed_at=claimed_at,
                     ):
                         self._store.conn.rollback()
-                        return None, False
-                    claimed_at = datetime.now(UTC).isoformat()
-                    if not self._store.claim(event.event_id, claimed_at=claimed_at):
-                        self._store.conn.rollback()
-                        return None, False
+                        return None, None, False
                     self._store.conn.commit()
-                    return claimed_at, False
+                    return prioritized_event, claimed_at, False
             except Exception as exc:
                 with contextlib.suppress(Exception):
                     self._store.conn.rollback()
@@ -1742,7 +1750,7 @@ class OpportunityEventReactor:
                         wait_ms,
                         exc,
                     )
-                    return None, True
+                    return None, None, True
                 raise
         finally:
             mutex.release()

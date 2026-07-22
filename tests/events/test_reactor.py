@@ -1314,7 +1314,7 @@ def test_global_batch_claims_unpaged_winner_inside_same_epoch():
 
     def _same_epoch_batch(events, _decision_time, *, claim_unpaged_winner):
         assert tuple(event.event_id for event in events) == (claimed.event_id,)
-        assert claim_unpaged_winner(target) is True
+        assert claim_unpaged_winner(target) == target
         assert _processing_status(conn, target.event_id) == "processing"
         receipts = {
             event.event_id: EventSubmissionReceipt(
@@ -1340,6 +1340,51 @@ def test_global_batch_claims_unpaged_winner_inside_same_epoch():
     assert _processing_status(conn, target.event_id) == "pending"
 
 
+def test_global_batch_claims_retained_causal_carrier_not_new_economic_id():
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    source = _forecast_event("retained-causal-owner", target_date="2099-05-25")
+    old_target = _next_claim_carrier(
+        source,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="old-economic-identity",
+        payload=json.loads(source.payload_json),
+    )
+    new_target = _next_claim_carrier(
+        source,
+        targeted_at=_DT_VENUE_OPEN + timedelta(seconds=30),
+        economic_identity="new-economic-identity",
+        payload=json.loads(source.payload_json),
+    )
+    store.insert_or_ignore(source)
+    generation = "2026-05-25T06:10:00+00:00"
+    assert store.claim(source.event_id, claimed_at=generation)
+    assert store.prioritize_global_winner(
+        old_target,
+        current_batch_claim_generations={source.event_id: generation},
+    )
+    conn.commit()
+    reactor = _global_batch_probe_reactor(store, {})
+
+    claimed_event, claimed_at, lock_bounced = (
+        reactor._claim_global_winner_for_actuation(
+            new_target,
+            current_batch_claim_generations={source.event_id: generation},
+            result=ReactorResult(),
+        )
+    )
+
+    assert claimed_event == old_target
+    assert claimed_at is not None
+    assert lock_bounced is False
+    assert _processing_status(conn, old_target.event_id) == "processing"
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (new_target.event_id,),
+    ).fetchone() is None
+
+
 def test_global_batch_recovers_unpaged_claim_when_batch_raises():
     from src.engine.global_batch_runtime import _next_claim_carrier
 
@@ -1356,7 +1401,7 @@ def test_global_batch_recovers_unpaged_claim_when_batch_raises():
     reactor = _global_batch_probe_reactor(store, observations)
 
     def _raise_after_claim(events, _decision_time, *, claim_unpaged_winner):
-        assert claim_unpaged_winner(target) is True
+        assert claim_unpaged_winner(target) == target
         raise RuntimeError("post-claim test failure")
 
     reactor._submit.process_global_batch = _raise_after_claim
@@ -1390,7 +1435,7 @@ def test_same_epoch_winner_claim_rejects_changed_batch_generation():
     reactor = _global_batch_probe_reactor(store, {})
 
     reactor_result = ReactorResult()
-    result, lock_bounced = reactor._claim_global_winner_for_actuation(
+    claimed_event, result, lock_bounced = reactor._claim_global_winner_for_actuation(
         target,
         current_batch_claim_generations={
             claimed.event_id: "2026-05-25T06:10:00+00:00"
@@ -1399,6 +1444,7 @@ def test_same_epoch_winner_claim_rejects_changed_batch_generation():
     )
 
     assert result is None
+    assert claimed_event is None
     assert lock_bounced is False
     assert reactor_result.claim_lock_bounces == 0
     assert conn.execute(
@@ -1443,13 +1489,14 @@ def test_global_winner_claim_mutex_busy_is_bounded(monkeypatch):
     )
 
     reactor_result = ReactorResult()
-    result, lock_bounced = reactor._claim_global_winner_for_actuation(
+    claimed_event, result, lock_bounced = reactor._claim_global_winner_for_actuation(
         target,
         current_batch_claim_generations={claimed.event_id: actual_generation},
         result=reactor_result,
     )
 
     assert result is None
+    assert claimed_event is None
     assert lock_bounced is True
     assert waits == [pytest.approx(0.75)]
     assert reactor_result.claim_lock_bounces == 1

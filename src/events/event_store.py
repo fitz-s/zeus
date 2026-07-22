@@ -2617,30 +2617,45 @@ class EventStore:
         *,
         current_batch_claim_generations: dict[str, str] | None = None,
     ) -> bool:
+        """Return whether a current carrier was prioritized for this winner."""
+
+        return self.prioritized_global_winner_event(
+            event,
+            current_batch_claim_generations=current_batch_claim_generations,
+        ) is not None
+
+    def prioritized_global_winner_event(
+        self,
+        event: OpportunityEvent,
+        *,
+        current_batch_claim_generations: dict[str, str] | None = None,
+    ) -> OpportunityEvent | None:
         """Materialize one current auction winner as the next legal claim.
 
         The global feasible set is independent of queue pagination, but venue
         actuation remains event-claim-bound.  Insert the scope event when needed
         and mark only an untouched/previously-targeted pending row; never revive a
-        terminal event or erase an unrelated transient retry floor.
+        terminal event or erase an unrelated transient retry floor. Return the
+        exact retained carrier because its immutable event ID can differ from the
+        newly proposed carrier when only book economics changed.
         """
 
         try:
             payload = json.loads(event.payload_json)
         except (TypeError, ValueError, json.JSONDecodeError):
-            return False
+            return None
         family = (
             str(payload.get("city") or "").strip(),
             str(payload.get("target_date") or "").strip(),
             str(payload.get("metric") or "").strip().lower(),
         )
         if not family[0] or not family[1] or family[2] not in {"high", "low"}:
-            return False
+            return None
 
         allowed_claims = current_batch_claim_generations or {}
         if allowed_claims:
             if not self.conn.in_transaction:
-                return False
+                return None
             current_claims: dict[str, str] = {}
             ordered_ids = sorted(allowed_claims)
             for start in range(0, len(ordered_ids), 250):
@@ -2663,7 +2678,7 @@ class EventStore:
                     if row[0] and row[1]
                 )
             if current_claims != allowed_claims:
-                return False
+                return None
 
         processing_claims: dict[str, str] = {}
         target_source_event_id = _global_winner_target_source_event_id(
@@ -2706,7 +2721,7 @@ class EventStore:
             allowed_claims.get(event_id) != claimed_at
             for event_id, claimed_at in processing_claims.items()
         ):
-            return False
+            return None
 
         now = _utc_now()
         pending_targets = self.conn.execute(
@@ -2796,7 +2811,16 @@ class EventStore:
                     if str(row[0] or "") == retained_target_id
                 )
                 self._remember_winner(retained_target_id, retained_received_at)
-            return prioritized
+                event_cols = ", ".join(_EVENT_ROW_KEYS)
+                row = self.conn.execute(
+                    f"SELECT {event_cols} FROM opportunity_events "
+                    "WHERE event_id = ?",
+                    (retained_target_id,),
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("GLOBAL_WINNER_RETAINED_EVENT_MISSING")
+                return _event_from_row(row)
+            return None
 
         self.insert_or_ignore(event)
         if self._processed_global_target_is_refreshable_no_submit(event.event_id):
@@ -2830,7 +2854,8 @@ class EventStore:
         prioritized = cur.rowcount == 1
         if prioritized:
             self._remember_winner(event.event_id, event.received_at)
-        return prioritized
+            return event
+        return None
 
     def _processed_global_target_is_refreshable_no_submit(
         self,
