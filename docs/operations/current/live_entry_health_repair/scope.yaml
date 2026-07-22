@@ -11,6 +11,7 @@ in_scope:
 - src/engine/global_batch_runtime.py
 - src/engine/global_auction_universe.py
 - src/signal/ensemble_signal.py
+- src/data/polymarket_request_governor.py
 - src/risk_allocator/governor.py
 - src/riskguard/riskguard.py
 - src/engine/global_single_order_auction.py
@@ -41,6 +42,7 @@ in_scope:
 - tests/test_phase2_exit_emitter_revival.py
 - tests/test_live_safety_invariants.py
 - tests/test_ensemble_signal.py
+- tests/test_polymarket_request_governor.py
 - tests/test_command_recovery.py
 - tests/test_fill_synchronizer.py
 - tests/execution/test_venue_sync_contract.py

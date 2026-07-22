@@ -447,8 +447,9 @@ class PolymarketRequestGovernor:
                 route_state["last_success_at"] = now.isoformat()
                 route_state["rate_limit_generation"] = lease.rate_limit_generation
                 routes[lease.rate_limit_route] = route_state
-            # Keep generation after recovery so a response from a probe that
-            # started before the failure can never become authoritative later.
+            # Keep generation after recovery so an earlier probe cannot clear
+            # a later failure circuit. Its owned response remains independently
+            # subject to the caller's payload and freshness validation.
             endpoints[lease.endpoint] = {
                 "generation": current_generation,
                 "priority": int(lease.priority),
@@ -631,7 +632,7 @@ class PolymarketRequestGovernor:
         elif status_code >= 500:
             self.record_failure(lease)
         elif 200 <= status_code < 300:
-            if not self.record_success(lease):
+            if not self.record_success(lease) and not self.record_neutral(lease):
                 raise RequestAdmissionDenied("POLYMARKET_REQUEST_LEASE_LOST")
         elif not self.record_neutral(lease):
             raise RequestAdmissionDenied("POLYMARKET_REQUEST_LEASE_LOST")

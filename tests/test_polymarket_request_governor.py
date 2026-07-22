@@ -1,5 +1,4 @@
-# Created: 2026-07-18
-# Last reused/audited: 2026-07-18
+# Lifecycle: created=2026-07-18; last_reviewed=2026-07-22; last_reused=2026-07-22
 # Authority basis: live Polymarket HTTP attempt governance and first-principles capital-preservation task
 
 from __future__ import annotations
@@ -365,7 +364,7 @@ def test_expired_attempt_transport_failure_preserves_host_circuit(tmp_path: Path
         )
 
 
-def test_old_inflight_success_cannot_clear_newer_host_failure(tmp_path: Path) -> None:
+def test_owned_inflight_success_survives_without_clearing_newer_host_failure(tmp_path: Path) -> None:
     state = tmp_path / "governor.json"
     old = PolymarketRequestGovernor(state_file=state)
     breaker = PolymarketRequestGovernor(state_file=state)
@@ -382,7 +381,7 @@ def test_old_inflight_success_cannot_clear_newer_host_failure(tmp_path: Path) ->
     def run_old() -> None:
         try:
             outcome.append(old.request(old_send, "GET", url, params={"token_id": "old"}))
-        except Exception as exc:  # noqa: BLE001 - asserting generation fencing
+        except Exception as exc:  # noqa: BLE001 - asserting response ownership
             outcome.append(exc)
 
     thread = threading.Thread(target=run_old)
@@ -398,7 +397,8 @@ def test_old_inflight_success_cannot_clear_newer_host_failure(tmp_path: Path) ->
     release.set()
     thread.join(2.0)
 
-    assert isinstance(outcome[0], RequestAdmissionDenied)
+    assert isinstance(outcome[0], httpx.Response)
+    assert outcome[0].status_code == 200
     with pytest.raises(RequestAdmissionDenied, match="ENDPOINT_EMBARGOED"):
         old.acquire("GET", url, params={"token_id": "scan-after-failure"})
 
