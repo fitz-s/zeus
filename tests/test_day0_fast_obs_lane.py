@@ -2892,6 +2892,81 @@ class TestAnomalyFreshnessGates:
         assert fetches["n"] == 1
         assert checked == ["Tokyo", "Tokyo-B"]
 
+    def test_cached_anomaly_check_prioritizes_flag_without_starving_rotation(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        tokyo = _tokyo()
+        tokyo_b = SimpleNamespace(
+            name="Tokyo-B",
+            timezone=tokyo.timezone,
+            settlement_unit=tokyo.settlement_unit,
+            wu_station=tokyo.wu_station,
+            settlement_source_type=tokyo.settlement_source_type,
+        )
+        tokyo_c = SimpleNamespace(
+            name="Tokyo-C",
+            timezone=tokyo.timezone,
+            settlement_unit=tokyo.settlement_unit,
+            wu_station=tokyo.wu_station,
+            settlement_source_type=tokyo.settlement_source_type,
+        )
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        checked: list[str] = []
+        emitter = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: reports,
+            min_fetch_interval_s=0.0,
+        )
+        emitter.prefetch(cities=[tokyo, tokyo_b, tokyo_c], decision_time=t0)
+
+        for offset in (5, 10):
+            emitter.cached_anomaly_actions(
+                cities=[tokyo, tokyo_b, tokyo_c],
+                decision_time=t0 + timedelta(seconds=offset),
+                anomaly_check=lambda city, *_args: checked.append(city.name),
+                max_cities=2,
+                priority_city_names=("Tokyo-C",),
+            )
+
+        assert checked == ["Tokyo-C", "Tokyo", "Tokyo-C", "Tokyo-B"]
+
+    def test_cached_anomaly_priority_rotates_with_bounded_api_budget(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        tokyo = _tokyo()
+        cities = [
+            SimpleNamespace(
+                name=name,
+                timezone=tokyo.timezone,
+                settlement_unit=tokyo.settlement_unit,
+                wu_station=tokyo.wu_station,
+                settlement_source_type=tokyo.settlement_source_type,
+            )
+            for name in ("Tokyo-A", "Tokyo-B", "Tokyo-C", "Tokyo-D")
+        ]
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        checked: list[str] = []
+        emitter = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: reports,
+            min_fetch_interval_s=0.0,
+        )
+        emitter.prefetch(cities=cities, decision_time=t0)
+
+        for offset in (5, 10):
+            emitter.cached_anomaly_actions(
+                cities=cities,
+                decision_time=t0 + timedelta(seconds=offset),
+                anomaly_check=lambda city, *_args: checked.append(city.name),
+                max_cities=3,
+                priority_city_names=("Tokyo-B", "Tokyo-C", "Tokyo-D"),
+            )
+
+        assert checked == [
+            "Tokyo-B", "Tokyo-C", "Tokyo-A",
+            "Tokyo-D", "Tokyo-B", "Tokyo-A",
+        ]
+
     def test_ledger_projection_cold_load_then_primary_key_delta(self):
         from src.data.day0_fast_obs import (
             FAST_OBS_SOURCE_ID,

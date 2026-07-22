@@ -39,6 +39,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger("zeus.ingest")
 
@@ -1598,7 +1599,11 @@ def _day0_oracle_anomaly_tick():
         apply_day0_oracle_anomaly_action,
         wu_metar_anomaly_action,
     )
-    from src.state.db import get_world_connection, world_write_mutex
+    from src.state.db import (
+        get_world_connection,
+        get_world_connection_read_only,
+        world_write_mutex,
+    )
 
     edli_cfg = settings["edli"]
     if not (
@@ -1609,11 +1614,59 @@ def _day0_oracle_anomaly_tick():
     ):
         return {"status": "DISABLED"}
 
+    cities = runtime_cities()
+    decision_time = datetime.now(timezone.utc)
+    priority_city_names: tuple[str, ...] = ()
+    read_conn = None
+    try:
+        read_conn = get_world_connection_read_only()
+        rows = read_conn.execute(
+            "SELECT city, target_date, flagged_at, ttl_hours "
+            "FROM day0_oracle_anomaly_flags ORDER BY flagged_at"
+        ).fetchall()
+        city_by_name = {
+            str(getattr(city, "name", "") or ""): city for city in cities
+        }
+        priority = []
+        for city_name, target_date, flagged_at, ttl_hours in rows:
+            city = city_by_name.get(str(city_name))
+            if city is None:
+                continue
+            try:
+                flagged = datetime.fromisoformat(
+                    str(flagged_at).replace("Z", "+00:00")
+                )
+                if flagged.tzinfo is None:
+                    flagged = flagged.replace(tzinfo=timezone.utc)
+                ttl = float(ttl_hours)
+                local_date = decision_time.astimezone(
+                    ZoneInfo(str(city.timezone))
+                ).date().isoformat()
+            except (TypeError, ValueError, ZoneInfoNotFoundError):
+                continue
+            if (
+                ttl > 0.0
+                and str(target_date) == local_date
+                and decision_time
+                <= flagged.astimezone(timezone.utc) + timedelta(hours=ttl)
+            ):
+                priority.append(str(city_name))
+        priority_city_names = tuple(priority)
+    except sqlite3.Error:
+        logger.warning(
+            "DAY0_ORACLE_ANOMALY_PRIORITY_READ_FAILED",
+            exc_info=True,
+        )
+    finally:
+        if read_conn is not None:
+            read_conn.close()
+
     actions = _day0_metar_emitter().cached_anomaly_actions(
-        cities=runtime_cities(),
-        decision_time=datetime.now(timezone.utc),
+        cities=cities,
+        decision_time=decision_time,
         anomaly_check=wu_metar_anomaly_action,
-        max_cities=1,
+        max_cities=1 + min(2, len(priority_city_names)),
+        priority_city_names=priority_city_names,
     )
     if not actions:
         return {"status": "CURRENT"}
@@ -1643,7 +1696,14 @@ def _day0_oracle_anomaly_tick():
         mutex.release()
         conn.close()
 
-    logger.info("DAY0_ORACLE_ANOMALY_ACTIONS_COMMITTED count=%d", len(actions))
+    logger.info(
+        "DAY0_ORACLE_ANOMALY_ACTIONS_COMMITTED count=%d actions=%s",
+        len(actions),
+        ",".join(
+            f"{str(action.action).lower()}:{action.city}:{action.target_date}"
+            for action in actions
+        ),
+    )
     return {"status": "COMMITTED", "actions": len(actions)}
 
 

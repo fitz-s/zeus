@@ -1947,12 +1947,18 @@ class TestDay0MetarSourceClockTick:
 
 
 class TestDay0OracleAnomalyTick:
-    def test_current_cache_does_not_open_world_db(self, monkeypatch):
+    def test_current_cache_does_not_open_world_write_db(self, monkeypatch):
         import src.ingest_main as im
 
         TestDay0MetarSourceClockTick._enable(monkeypatch)
         emitter = SimpleNamespace(cached_anomaly_actions=lambda **_kw: ())
+        read_conn = MagicMock()
+        read_conn.execute.return_value.fetchall.return_value = []
         monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: read_conn,
+        )
         monkeypatch.setattr(
             "src.state.db.get_world_connection",
             lambda **_kw: (_ for _ in ()).throw(
@@ -1963,6 +1969,41 @@ class TestDay0OracleAnomalyTick:
         result = im._day0_oracle_anomaly_tick.__wrapped__()
 
         assert result == {"status": "CURRENT"}
+        read_conn.close.assert_called_once_with()
+
+    def test_current_durable_flags_are_prioritized_with_bounded_budget(
+        self, monkeypatch
+    ):
+        import src.ingest_main as im
+
+        TestDay0MetarSourceClockTick._enable(monkeypatch)
+        now = datetime.now(UTC)
+        city = SimpleNamespace(name="Los Angeles", timezone="UTC")
+        captured = {}
+        emitter = SimpleNamespace(
+            cached_anomaly_actions=lambda **kw: captured.update(kw) or ()
+        )
+        read_conn = MagicMock()
+        read_conn.execute.return_value.fetchall.return_value = [
+            (
+                city.name,
+                now.date().isoformat(),
+                (now - timedelta(hours=1)).isoformat(),
+                24.0,
+            )
+        ]
+        monkeypatch.setattr("src.config.runtime_cities", lambda: [city])
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: read_conn,
+        )
+
+        result = im._day0_oracle_anomaly_tick.__wrapped__()
+
+        assert result == {"status": "CURRENT"}
+        assert captured["priority_city_names"] == ("Los Angeles",)
+        assert captured["max_cities"] == 2
 
     def test_cached_action_commits_in_short_write_phase(self, monkeypatch):
         import src.ingest_main as im
@@ -1996,6 +2037,12 @@ class TestDay0OracleAnomalyTick:
                 order.append("release")
 
         monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        read_conn = MagicMock()
+        read_conn.execute.return_value.fetchall.return_value = []
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: read_conn,
+        )
         monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
         monkeypatch.setattr(

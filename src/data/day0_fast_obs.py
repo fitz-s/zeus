@@ -1313,6 +1313,7 @@ class Day0FastObsEmitter:
     _ledger_report_keys_loaded: bool = field(default=False, init=False)
     _ledger_cursor_id: int = field(default=0, init=False)
     _anomaly_cursor: int = field(default=0, init=False)
+    _anomaly_priority_cursor: int = field(default=0, init=False)
     # Per-station source-clock timestamps.  The legacy aggregate cache clock
     # remains for fetch-window sizing only; it must not make one priority poll
     # authorize a different station's retained report.
@@ -2305,6 +2306,7 @@ class Day0FastObsEmitter:
         decision_time: datetime,
         anomaly_check: Callable[[Any, FastObsExtremes, list[MetarReport]], Any],
         max_cities: int = 1,
+        priority_city_names: Iterable[str] = (),
     ) -> tuple[Any, ...]:
         """Check cached METAR truth without opening another source request.
 
@@ -2331,6 +2333,7 @@ class Day0FastObsEmitter:
         with self._lock:
             reports = list(self._cached_reports)
             cursor = self._anomaly_cursor % len(eligible)
+            priority_cursor = self._anomaly_priority_cursor
         station_statuses = {
             station: (status, age)
             for station, status, age in self._station_statuses(
@@ -2342,18 +2345,52 @@ class Day0FastObsEmitter:
         if not reports or source_failed:
             return ()
 
+        priority_rank = {
+            name: rank
+            for rank, raw_name in enumerate(priority_city_names)
+            if (name := str(raw_name or "").strip())
+        }
+        priority = sorted(
+            (
+                item
+                for item in eligible
+                if str(getattr(item[0], "name", "") or "") in priority_rank
+                and self._station_is_current(item[1].station_id, station_statuses)
+            ),
+            key=lambda item: priority_rank[
+                str(getattr(item[0], "name", "") or "")
+            ],
+        )
+        if priority:
+            priority_cursor %= len(priority)
+            priority = priority[priority_cursor:] + priority[:priority_cursor]
+        priority_names = {
+            str(getattr(city, "name", "") or "")
+            for city, _source, _target_date in priority
+        }
         rotated = [
             item
             for item in eligible[cursor:] + eligible[:cursor]
+            if str(getattr(item[0], "name", "") or "") not in priority_names
             if self._station_is_current(item[1].station_id, station_statuses)
         ]
-        if not rotated:
+        priority_budget = min(
+            len(priority),
+            max_cities if not rotated else max(0, max_cities - 1),
+        )
+        priority = priority[:priority_budget]
+        scan = priority + rotated
+        if not scan:
             return ()
         actions: list[Any] = []
-        visited = 0
+        priority_visited = 0
+        regular_visited = 0
         checked = 0
-        for city, _source, target_date in rotated:
-            visited += 1
+        for city, _source, target_date in scan:
+            if str(getattr(city, "name", "") or "") in priority_names:
+                priority_visited += 1
+            else:
+                regular_visited += 1
             try:
                 extremes = running_extremes_for_local_day(
                     reports,
@@ -2377,7 +2414,13 @@ class Day0FastObsEmitter:
                     exc,
                 )
         with self._lock:
-            self._anomaly_cursor = (cursor + max(1, visited)) % len(eligible)
+            self._anomaly_cursor = (
+                cursor + max(1, regular_visited)
+            ) % len(eligible)
+            if priority_names:
+                self._anomaly_priority_cursor = (
+                    priority_cursor + max(1, priority_visited)
+                ) % len(priority_names)
         return tuple(actions)
 
     def prefetch(
