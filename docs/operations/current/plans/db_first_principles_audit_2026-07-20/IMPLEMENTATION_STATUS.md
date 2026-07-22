@@ -14,8 +14,12 @@
 - `cert-v1-freeze` → **证书 v1 golden-vector 冻结**(commit 3d7bf34d1,9 测试)。pin 真实生产路径(build_certificate/canonicalization.stable_hash/ledger.insert_idempotent/no_submit_receipts)的 payload/cert/receipt hash 为硬编码字面量 → E1/E4/任何 canonicalization 改动移动 v1 preimage 字节即 loud fail。证 edge 顺序 load-bearing、timestamp reparse 陷阱、E4 双身份 mutation。**诚实 gap**:global-auction receipt_hash(E1)未 pin(需活 conn+大量内部态,重构不可信)。
 - `outbox-recon` → **settlement 对账只读监控**(commit 63ce61a1,4 测试)。见上。
 
+**连接层 findings-fix + E4 契约(第二波并行,已交付+亲验+提交)**
+- `checkpoint-fix` → **W5-2/3/4 checkpoint false-green 修复**(commit c4be91179,90 抗体全绿)。`_wal_checkpoint_is_starved(log,ckpt)` 提取纯 helper 替换死码 `busy==0`(PASSIVE busy 恒 0);真信号 `ckpt<log AND log>131072帧(512MiB)`;新增 `checkpoint_forecasts_wal()` 孪生(W5-4,forecasts 之前无 backstop)。**合法纠错**了一个既有 RED 测试(旧断言"PASSIVE 截断"= SQLite 假语义)。**操作员注意**:落 live 新增定时任务 `_forecasts_wal_checkpoint_cycle`@偏移150s。**KEEP-PASSIVE**,TRUNCATE-vs-PASSIVE 张力正确留给操作员/consult(未冒险实现阻塞 TRUNCATE)。
+- `cert-v2-design`(opus)→ **证书 v2 envelope spec**(commit cb04f536e,设计-only)。核心最小:仅 `schema_version==2 时 payload_hash=stable_hash(identity_view(payload))` 剥离**仅** `_diagnostics` 键;`certificate_hash_for` 不动(已验 schema_version 在其 preimage 内 = discriminator hash-bound)。揪出前设计 4 真错(§3 混淆 identity/retention;freeze §4 重造 header 破坏 verifier by-name 读;`_audit_existing_payload_hash` 对 v2 break = 格式落 W2 之因;receipt schema_version 未 hash-bound)。W2 最小改 = 4 处(identity_view + 版本感知 audit + 版本感知 receipt + v2 golden vectors),无 DDL。W3 写、W5 relocate-never-summarize。authority 方向对(world=live)。
+
 **在途**
-- Consult `REQ-20260721-204133-420956`:4 锁+336 零锁写者统一 cutover 对撞(bridge-lock 增量 vs fenced big-bang;connection-factory pushdown;BULK-yield 保 K3;world 进程内锁跨进程折叠)。答案落 `/tmp/cgc/answer_REQ-20260721-204133-420956.txt`。
+- Consult `REQ-20260721-204133-420956`:4 锁+336 零锁写者统一 cutover 对撞(bridge-lock 增量 vs fenced big-bang;connection-factory pushdown;BULK-yield 保 K3;world 进程内锁跨进程折叠)。**GPT-5.6 Pro 深推超 60min 首个 await 窗,daemon 自身 resume 检索中(pid 27389/27390,conversation 6a6011c7),已重新 await 挂接**。答案落 `/tmp/cgc/answer_REQ-20260721-204133-420956.txt`。W5-8 fail-open connect 设计就绪(scratchpad),排此 consult 后(同处 `_connect`)。
 
 **连接层已确认(consult 落地即可实现)**:`world_write_mutex`(scheme 4)= 进程内 threading.Lock、只跨线程、**不跨进程**;`world_write_lock` 对已开事务幂等(re-entrancy 模式);checkpoint 助手与写锁子系统正交(W5-2/3 独立)。待批:W5-2 false-green alert(`busy==0` 恒真→WARNING 死码;真信号 `checkpointed<log`)、W5-3 TRUNCATE-vs-PASSIVE 张力(需判断/consult)、W5-8 fail-open rwc(`no such table` 源)。
 
