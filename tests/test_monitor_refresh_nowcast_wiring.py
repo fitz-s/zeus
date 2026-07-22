@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused/audited: 2026-07-21
+# Last reused/audited: 2026-07-22
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-05-20; last_reviewed=2026-07-22; last_reused=2026-07-22
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -440,6 +440,7 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
         assert kwargs["observation_conn"] is world
         assert kwargs["required_condition_id"] == condition_id
         assert kwargs["allow_provisional_day0_replacement"] is True
+        assert kwargs["entry_authority"] is False
         kwargs["day0_payload_out"].update(
             {
                 "_edli_global_day0_binding": {
