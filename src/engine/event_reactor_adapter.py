@@ -12161,29 +12161,36 @@ def _positive_global_current_objective(cert: Mapping[str, Any]) -> bool:
     )
 
 
-def _global_current_one_sided_escalation(
+def _global_current_taker_escalation(
     proof: "_CandidateProof",
     cert: Mapping[str, Any],
 ) -> bool:
-    """Admit an ask-only cross only after a real maker window and global solve.
+    """Let one sealed global objective own its post-rest taker decision.
 
-    ``MAKER_TAKER_FORBIDDEN`` plus a measurable maker limit means the shared
-    rest-then-cross policy reached its post-rest escalation lane but rejected the
-    executable ask solely because no bid existed to define a spread.  For a sealed
-    global winner, terminal payoff, ask depth, fee, correlated family endowment and
-    robust utility are already priced together.  A missing resale bid is therefore
-    not a second economic objective.  Wide *two-sided* books remain forbidden.
+    The ordinary route may tighten a NO probability with the walk-forward
+    selection-curse table.  A global current-state certificate has already priced
+    the exact full ask curve, fee, correlated family endowment and current posterior
+    band together.  Applying the historical scalar correction after that solve
+    changes the argmax without re-solving the portfolio.  Once a real maker window
+    has expired, cross only when that sealed all-in unit cost still clears its own
+    current-evidence payoff bound; final JIT and taker-quality walls re-check the
+    fresh touch before submit.
     """
 
-    reason = str(getattr(proof, "taker_forbidden_reason", "") or "")
+    reason = str(getattr(proof, "taker_forbidden_reason", "") or "").strip()
+    spread_compatible = not reason or "spread=unmeasurable" in reason
     ev_taker = _optional_float(getattr(proof, "ev_taker", None))
+    cost = _optional_float(cert.get("cost"))
+    payoff_q_lcb = _optional_float(cert.get("payoff_q_lcb"))
     return bool(
         str(getattr(proof, "rest_then_cross_policy", "") or "").strip().upper()
         == "MAKER_TAKER_FORBIDDEN"
-        and getattr(proof, "maker_limit_price", None) is not None
-        and "spread=unmeasurable" in reason
         and ev_taker is not None
         and ev_taker > 0.0
+        and spread_compatible
+        and cost is not None
+        and payoff_q_lcb is not None
+        and cost <= payoff_q_lcb + 1e-12
         and _positive_global_current_objective(cert)
     )
 
@@ -12237,7 +12244,7 @@ def _bind_global_current_state_economics_to_proof(
         "qkernel_execution_economics": dict(cert),
         "selection_authority_applied": "qkernel_spine",
     }
-    if _global_current_one_sided_escalation(proof, cert):
+    if _global_current_taker_escalation(proof, cert):
         replacement.update(
             execution_mode_intent="TAKER",
             rest_then_cross_policy="TAKER_ESCALATED_AFTER_REST",
@@ -13554,6 +13561,7 @@ def _build_event_bound_no_submit_receipt_core(
             allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             honor_admission_rejections=False,
             allow_global_near_settled_rebind=True,
+            allow_global_current_state_rebind=True,
             enforce_win_rate_floor=False,
             diagnostic_out=_selection_scope_diagnostic,
         )
@@ -13578,6 +13586,7 @@ def _build_event_bound_no_submit_receipt_core(
             allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             honor_admission_rejections=False,
             allow_global_near_settled_rebind=global_actuation is not None,
+            allow_global_current_state_rebind=global_actuation is not None,
             enforce_win_rate_floor=False,
             diagnostic_out=_selection_scope_diagnostic,
         )
@@ -16546,12 +16555,15 @@ def _fresh_rest_then_cross_mode(
     # quality proof gate uses (_build_event_bound_taker_quality_proof), else mode could pick TAKER
     # off the plain q_lcb while the proof refuses it -> a MODE_FLIPPED abort loop. Absent/thin
     # cell -> q_exec_lcb == q_lcb (identity).
-    q_exec_lcb_value, _ = _event_bound_q_exec_lcb(
-        direction=str(actionable_payload.get("direction") or ""),
-        price=fresh_best_ask,
-        q_decision_lcb=float(q_lcb),
-    )
     economics = actionable_payload.get("qkernel_execution_economics")
+    if _qkernel_current_state_solve_economics(economics):
+        q_exec_lcb_value = float(q_lcb)
+    else:
+        q_exec_lcb_value, _ = _event_bound_q_exec_lcb(
+            direction=str(actionable_payload.get("direction") or ""),
+            price=fresh_best_ask,
+            q_decision_lcb=float(q_lcb),
+        )
     if (
         escalated_after_rest
         and fresh_best_bid is None
@@ -23633,6 +23645,7 @@ def _selection_scoped_proofs(
     allow_same_family_monitor_owned: bool = False,
     honor_admission_rejections: bool = True,
     allow_global_near_settled_rebind: bool = False,
+    allow_global_current_state_rebind: bool = False,
     enforce_win_rate_floor: bool = True,
     diagnostic_out: dict[str, object] | None = None,
 ) -> tuple[_CandidateProof, ...]:
@@ -23669,7 +23682,11 @@ def _selection_scoped_proofs(
             decision_time=decision_time,
             enforce_win_rate_floor=enforce_win_rate_floor,
         )
-        if rejection is None:
+        if rejection is None or (
+            allow_global_current_state_rebind
+            and rejection
+            == "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+        ):
             live_admitted.append(proof)
         else:
             live_rejections.append(rejection)

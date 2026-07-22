@@ -2504,7 +2504,10 @@ def test_retired_near_settled_rejection_is_rescored_by_current_economics(monkeyp
     monkeypatch.setattr(
         era,
         "_live_selection_rejection_reason",
-        lambda *_args, **_kwargs: "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE",
+        lambda *_args, **_kwargs: (
+            "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+            "policy=MAKER_TAKER_FORBIDDEN"
+        ),
     )
     dynamically_blocked = era._selection_scoped_proofs(
         proofs=(proof,),
@@ -2512,8 +2515,15 @@ def test_retired_near_settled_rejection_is_rescored_by_current_economics(monkeyp
         allow_global_near_settled_rebind=True,
         enforce_win_rate_floor=False,
     )
+    deferred_to_global_current_state = era._selection_scoped_proofs(
+        proofs=(proof,),
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    )
 
     assert dynamically_blocked == ()
+    assert deferred_to_global_current_state == (proof,)
 
 
 def test_overlay_rejects_qkernel_point_probability_that_is_not_served_belief():

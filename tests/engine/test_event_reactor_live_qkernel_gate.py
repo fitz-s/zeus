@@ -1816,6 +1816,47 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
     assert proof["q_exec_lcb_basis"] == "CURRENT_POSTERIOR_BAND"
 
 
+def test_global_current_post_rest_escalation_uses_sealed_current_objective():
+    cert = _global_current_qkernel_cert(side="NO")
+    proof = SimpleNamespace(
+        rest_then_cross_policy="MAKER_TAKER_FORBIDDEN",
+        ev_taker=0.03,
+    )
+
+    assert era._global_current_taker_escalation(proof, cert) is True
+
+    more_expensive = dict(cert, cost=0.61, edge_lcb=-0.01)
+    _seal_current_qkernel_cert(more_expensive)
+    assert era._global_current_taker_escalation(proof, more_expensive) is False
+
+
+def test_global_current_fresh_mode_does_not_reapply_selection_curse(monkeypatch):
+    cert = _global_current_qkernel_cert(side="NO")
+
+    def historical_bound_must_not_run(**_kwargs):
+        raise AssertionError("sealed global current-state winner was historically retightened")
+
+    monkeypatch.setattr(era, "_event_bound_q_exec_lcb", historical_bound_must_not_run)
+    mode = era._fresh_rest_then_cross_mode(
+        actionable_payload={
+            "direction": "buy_no",
+            "q_lcb_5pct": cert["payoff_q_lcb"],
+            "c_fee_adjusted": cert["cost"],
+            "rest_then_cross_policy": "TAKER_ESCALATED_AFTER_REST",
+            "qkernel_execution_economics": cert,
+        },
+        executable_snapshot=SimpleNamespace(
+            payload={"market_end_at": "2026-07-23T12:00:00+00:00"}
+        ),
+        fresh_best_bid=0.09,
+        fresh_best_ask=0.10,
+        tick_size=0.01,
+        decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert mode == "TAKER"
+
+
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
 def test_low_probability_current_band_taker_is_symmetric_positive_growth(
     side,
