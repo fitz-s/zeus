@@ -13476,10 +13476,21 @@ def _review_required_post_ack_terminal_no_fill_recovery(
         and str(latest_fact.get("state") or "").upper() in _LIVE_ORDER_STATUSES
         and _decimal_is_zero(latest_fact.get("matched_size"))
     )
+    point_order_status_normalized = str(point_order_status or "").upper()
+    point_order_is_terminal_no_fill = (
+        point_order_status_normalized in _TERMINAL_NO_FILL_VENUE_STATUSES
+        and _decimal_is_zero(point_order_matched)
+    )
+    # The authenticated point-order read is narrower and newer than an
+    # asynchronous account/WS mirror.  Once it proves this exact order
+    # terminal with zero fill, a stale LIVE fact must not resurrect the
+    # command as ACKED and keep capital/duplicate locks alive.
     order_is_live = (
-        bool(matching_open_orders)
-        or latest_fact_is_live
-        or str(point_order_status or "").upper() in _LIVE_ORDER_STATUSES
+        point_order_status_normalized in _LIVE_ORDER_STATUSES
+        or (
+            not point_order_is_terminal_no_fill
+            and (bool(matching_open_orders) or latest_fact_is_live)
+        )
     )
     if (
         order_is_live
@@ -13501,7 +13512,8 @@ def _review_required_post_ack_terminal_no_fill_recovery(
                 "venue_order_id_matches_live_proof": True,
                 "authenticated_live_order_seen": True,
                 "latest_order_fact_live": bool(latest_fact_is_live),
-                "point_order_status_live": str(point_order_status or "").upper() in _LIVE_ORDER_STATUSES,
+                "point_order_status_live": point_order_status_normalized
+                in _LIVE_ORDER_STATUSES,
                 "matching_open_order_seen": bool(matching_open_orders),
                 "point_order_matched_size_not_positive": True,
                 "no_trade_facts": True,
@@ -19766,6 +19778,21 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     if scope == "live_tick":
         _already_canceled_review_fast_pass()
 
+    # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
+    # narrowest capital truth: it resolves unknown exposure and can release the
+    # allocator's global reduce-only posture without venue I/O.  Run it before
+    # broad partial-order maintenance so the live-tick budget cannot starve it.
+    _db_pass(
+        "review_required_matched_submit_trade_fact",
+        reconcile_review_required_matched_submit_trade_facts,
+        "review_required_matched_submit_trade_fact",
+    )
+    _db_pass(
+        "review_required_exit_mutex_release",
+        reconcile_review_required_exit_mutex_releases,
+        "review_required_exit_mutex_release",
+    )
+
     if scope in {"restart_preflight", "live_tick"}:
         _db_pass(
             "completed_partial_order_facts",
@@ -19775,17 +19802,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
     if scope == "live_tick":
         _post_submit_unknown_absence_fast_pass()
-
-    _db_pass(
-        "review_required_exit_mutex_release",
-        reconcile_review_required_exit_mutex_releases,
-        "review_required_exit_mutex_release",
-    )
-    _db_pass(
-        "review_required_matched_submit_trade_fact",
-        reconcile_review_required_matched_submit_trade_facts,
-        "review_required_matched_submit_trade_fact",
-    )
     if scope == "live_tick":
         # These passes consume facts that are already durable in zeus_trades.
         # Run them before the venue snapshot so one slow CLOB point-order read

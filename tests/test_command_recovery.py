@@ -967,6 +967,72 @@ def test_live_tick_db_budget_defers_remaining_passes(monkeypatch):
     }
 
 
+def test_live_tick_recovers_confirmed_review_fill_before_maintenance_budget_defer(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        return sqlite3.connect(":memory:")
+
+    def _matched_review(_conn):
+        calls.append("review_required_matched_submit_trade_fact")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    def _completed_partial(_conn):
+        calls.append("completed_partial_order_facts")
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    original_run = command_recovery._run_recovery_pass_with_lock_policy
+
+    def _run_priority_pass(label, fn, **kwargs):
+        if label in {
+            "already_canceled_review_fast",
+            "review_required_exit_mutex_release",
+        }:
+            return None
+        return original_run(label, fn, **kwargs)
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        _matched_review,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_completed_partial_order_facts",
+        _completed_partial,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_run_recovery_pass_with_lock_policy",
+        _run_priority_pass,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-07-22T00:00:00+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        "review_required_matched_submit_trade_fact",
+        "completed_partial_order_facts",
+    ]
+    assert summary["review_required_matched_submit_trade_fact"]["advanced"] == 1
+    assert summary["db_budget_deferred"] is True
+    assert summary["db_budget_deferred_at"] == "completed_partial_order_facts"
+
+
 def test_live_tick_prioritizes_capital_releases_before_terminal_order_budget_defer(monkeypatch):
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
@@ -1107,7 +1173,9 @@ def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
 
     assert apply_attempts == [{"blocking": False, "busy_timeout_ms": 0}]
     assert summary["db_lock_deferred"] is True
-    assert summary["db_lock_deferred_at"] == "completed_partial_order_facts"
+    assert summary["db_lock_deferred_at"] == (
+        "review_required_matched_submit_trade_fact"
+    )
     assert summary["db_lock_deferred_count"] == 1
     assert summary["deferred_full_sweep"] is True
     assert summary["scope"] == "live_tick"
@@ -4537,6 +4605,74 @@ class TestRecoveryResolutionTable:
         assert payload["proof_class"] == "acked_submit_terminal_no_fill"
         assert payload["required_predicates"]["terminal_order_fact_no_fill"] is True
         assert payload["required_predicates"]["no_matching_open_orders"] is True
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
+    def test_post_ack_terminal_point_order_overrides_stale_live_fact(
+        self, conn, mock_client
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-post-ack-stale-live"
+        order_id = "ord-post-ack-stale-live"
+        _insert(conn, command_id=command_id, position_id="pos-post-ack-stale-live")
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "reason": "entry_ack_persistence_failed_after_side_effect",
+                "venue_order_id": order_id,
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_returned_order_id": True,
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10",
+            source="WS_USER",
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        mock_client.get_order.return_value = {
+            "orderID": order_id,
+            "status": "CANCELED",
+            "size_matched": "0",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, command_id) == "EXPIRED"
+        events = _get_events(conn, command_id)
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        order_fact = conn.execute(
+            """
+            SELECT state, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "state": "CANCEL_CONFIRMED",
+            "matched_size": "0",
+            "source": "REST",
+        }
         after_count, after_markets = count_unknown_side_effects(conn)
         assert after_count == 0
         assert after_markets == ()
