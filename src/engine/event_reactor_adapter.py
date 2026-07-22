@@ -29123,7 +29123,7 @@ _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS = (
     "day0_deterministic_bin_payoff_v1"
 )
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
-    "current_coherent_day0_remaining_finite_evidence_v2"
+    "current_coherent_day0_remaining_model_bootstrap_v3"
 )
 _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "final_daily_observation_exact_settlement_simplex_v1"
@@ -29395,75 +29395,6 @@ def _replacement_global_probability_components(
     )
 
 
-def _day0_current_evidence_yes_ucb_floors(
-    *,
-    analysis: object,
-    family: object,
-    payload: dict[str, object],
-) -> np.ndarray:
-    """Return current-member UCB floors without widening observed impossibilities."""
-
-    from src.data.replacement_forecast_materializer import (
-        _finite_evidence_binomial_ucb,
-    )
-
-    members = np.asarray(getattr(analysis, "_member_maxes", ()), dtype=float).ravel()
-    members = members[np.isfinite(members)]
-    bins = list(getattr(analysis, "bins", ()) or ())
-    candidates = list(getattr(family, "candidates", ()) or ())
-    if members.size < 1 or len(bins) != len(candidates):
-        raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_MEMBERS_INVALID")
-    measured = np.asarray(analysis._settle(members), dtype=float)
-    hits = bin_counts_from_array(measured, bins).astype(int)
-    conditions = [
-        str(getattr(candidate, "condition_id", "") or "")
-        for candidate in candidates
-    ]
-    if any(not condition for condition in conditions):
-        raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_CONDITION_ID_MISSING")
-    absorbing_mask = _day0_absorbing_mask(payload=payload, family=family)
-    if absorbing_mask.shape != (len(conditions),):
-        raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_ABSORBING_MASK_INVALID")
-    absorbing_no = {
-        condition
-        for condition, alive in zip(conditions, absorbing_mask, strict=True)
-        if float(alive) <= 0.0
-    }
-    transform = payload.get("_edli_day0_lcb_transform")
-    if isinstance(transform, Mapping):
-        declared_absorbing_no = {
-            str(value)
-            for value in transform.get("absorbing_no_conditions", ())
-        }
-        if declared_absorbing_no != absorbing_no:
-            raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_ABSORBING_MASK_MISMATCH")
-    # Member-dependence effective-n (2026-07-17): thread the family metric so the
-    # CP bound reads the per-metric fitted rho; artifact-absent => exact identity.
-    _dependence_metric = str(payload.get("metric") or "").strip().lower() or None
-    floors = np.asarray(
-        [
-            0.0
-            if condition in absorbing_no
-            else _finite_evidence_binomial_ucb(
-                int(hit), int(members.size), metric=_dependence_metric
-            )
-            for condition, hit in zip(conditions, hits, strict=True)
-        ],
-        dtype=float,
-    )
-    payload["_edli_day0_finite_evidence_member_count"] = int(members.size)
-    payload["_edli_day0_finite_evidence_hits_by_condition"] = dict(
-        zip(conditions, (int(hit) for hit in hits), strict=True)
-    )
-    payload["_edli_day0_finite_evidence_yes_ucb_by_condition"] = dict(
-        zip(conditions, (float(value) for value in floors), strict=True)
-    )
-    payload["_edli_day0_finite_evidence_absorbing_no_conditions"] = sorted(
-        absorbing_no
-    )
-    return floors
-
-
 def _day0_remaining_global_probability_components(
     event: OpportunityEvent,
     *,
@@ -29526,19 +29457,16 @@ def _day0_remaining_global_probability_components(
         or not math.isclose(float(point_q.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
     ):
         raise ValueError("GLOBAL_DAY0_REMAINING_SIMPLEX_INVALID")
-    required_ucb = _day0_current_evidence_yes_ucb_floors(
-        analysis=analysis,
-        family=family,
-        payload=payload,
-    )
-    from src.data.replacement_forecast_materializer import (
-        _stress_coherent_samples_to_marginal_ucb_floors,
-    )
-
-    samples = _stress_coherent_samples_to_marginal_ucb_floors(
-        samples,
-        required_ucb,
-    )
+    # The remaining-day members are one deterministic trajectory per current
+    # provider. They are alternative forecasts of this one settlement, not
+    # exchangeable Bernoulli outcomes. The coherent model/process bootstrap
+    # above already carries provider spread, observation latency, instrument
+    # noise, the absorbing physical boundary, and exact settlement binning.
+    # Applying an ENS-member Clopper-Pearson tail to these 3-5 provider centers
+    # treats forecasts as settled trials and makes a zero-hit bin retain a
+    # 53-66% UCB, structurally preventing capital-releasing exits. CP remains
+    # authoritative on the source-clock path where the evidence is the current
+    # target-specific ENS member population; it does not apply at this seam.
     return samples, point_q, _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
 
 
@@ -30487,10 +30415,6 @@ def _prepare_current_global_probability_family(
             "_edli_day0_exit_authority_reason",
             "_edli_day0_bound_classification",
             "_edli_day0_lcb_transform",
-            "_edli_day0_finite_evidence_member_count",
-            "_edli_day0_finite_evidence_hits_by_condition",
-            "_edli_day0_finite_evidence_yes_ucb_by_condition",
-            "_edli_day0_finite_evidence_absorbing_no_conditions",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
@@ -30522,18 +30446,6 @@ def _prepare_current_global_probability_family(
             ),
             "model_innovations_c": payload.get(
                 "_edli_day0_model_innovations_c"
-            ),
-            "finite_evidence_member_count": payload.get(
-                "_edli_day0_finite_evidence_member_count"
-            ),
-            "finite_evidence_hits_by_condition": payload.get(
-                "_edli_day0_finite_evidence_hits_by_condition"
-            ),
-            "finite_evidence_yes_ucb_by_condition": payload.get(
-                "_edli_day0_finite_evidence_yes_ucb_by_condition"
-            ),
-            "finite_evidence_absorbing_no_conditions": payload.get(
-                "_edli_day0_finite_evidence_absorbing_no_conditions"
             ),
         }
         source_truth_identity = stable_hash(source_truth)

@@ -2873,47 +2873,15 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
         decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
     )
 
-    zero_hit_ucb = 1.0 - 0.05 ** (1.0 / 2.0)
-    assert np.percentile(samples[:, 0], 95.0) >= zero_hit_ucb - 1e-15
+    # These are deterministic provider trajectories for one future settlement,
+    # not exchangeable Bernoulli outcomes. The already-coherent current model /
+    # process bootstrap is the complete Day0 band and must not be widened by a
+    # 0/2 Clopper-Pearson floor.
+    assert np.array_equal(samples, matrix)
     assert point.tolist() == pytest.approx([0.0, 1.0])
-    assert basis == "current_coherent_day0_remaining_finite_evidence_v2"
+    assert basis == "current_coherent_day0_remaining_model_bootstrap_v3"
     assert np.allclose(samples.sum(axis=1), 1.0)
-    assert payload["_edli_day0_finite_evidence_member_count"] == 2
-    assert payload["_edli_day0_finite_evidence_hits_by_condition"] == {
-        "condition-22": 0,
-        "condition-23-plus": 2,
-    }
-    assert payload["_edli_day0_finite_evidence_absorbing_no_conditions"] == []
-    hard_fact_payload = {
-        "metric": "high",
-        "rounded_value": 23.0,
-        "settlement_source": "wu_icao_history",
-    }
-    hard_fact_floors = era._day0_current_evidence_yes_ucb_floors(
-        analysis=analysis,
-        family=family,
-        payload=hard_fact_payload,
-    )
-    assert hard_fact_floors[0] == 0.0
-    assert hard_fact_payload[
-        "_edli_day0_finite_evidence_absorbing_no_conditions"
-    ] == ["condition-22"]
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_DAY0_FINITE_EVIDENCE_ABSORBING_MASK_MISMATCH",
-    ):
-        era._day0_current_evidence_yes_ucb_floors(
-            analysis=analysis,
-            family=family,
-            payload={
-                "metric": "high",
-                "rounded_value": 23.0,
-                "settlement_source": "wu_icao_history",
-                "_edli_day0_lcb_transform": {
-                    "absorbing_no_conditions": [],
-                },
-            },
-        )
+    assert not any("finite_evidence" in key for key in payload)
 
 
 def test_global_day0_candidate_caps_preserve_immature_finite_yes_before_auction():
@@ -3082,9 +3050,8 @@ def test_global_day0_components_never_parse_full_day_members_when_remaining_vect
     assert samples.shape[1] == 2
     assert np.allclose(samples.sum(axis=1), 1.0)
     assert point.tolist() == pytest.approx([0.0, 1.0])
-    assert basis == "current_coherent_day0_remaining_finite_evidence_v2"
+    assert basis == "current_coherent_day0_remaining_model_bootstrap_v3"
     assert payload["_edli_q_source"] == "day0_remaining_day"
-    assert payload["_edli_day0_finite_evidence_member_count"] == 3
 
     monkeypatch.setattr(
         era,
@@ -3147,9 +3114,6 @@ def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
             "absorbing_yes_conditions": [],
             "absorbing_no_conditions": ["condition-dead"],
         },
-        "_edli_day0_finite_evidence_absorbing_no_conditions": [
-            "condition-dead"
-        ],
         "q_live": 1.0,
         "q_lcb_5pct": 1.0,
         "qkernel_execution_economics": economics,
@@ -3167,7 +3131,7 @@ def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
         probability_payload=payload,
     )
 
-    payload["_edli_day0_finite_evidence_absorbing_no_conditions"] = []
+    payload["_edli_day0_lcb_transform"]["absorbing_no_conditions"] = []
     with pytest.raises(ValueError, match="degenerate with q_live"):
         assert_live_day0_probability_authority(
             payload,
@@ -3877,27 +3841,13 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
                 "_edli_day0_remaining_capture_times_utc": [
                     "2026-07-11T17:30:00+00:00"
                 ],
-                "_edli_day0_finite_evidence_member_count": 3,
-                "_edli_day0_finite_evidence_hits_by_condition": {
-                    "c0": 0,
-                    "c1": 0,
-                    "c2": 2,
-                },
-                "_edli_day0_finite_evidence_yes_ucb_by_condition": {
-                    "c0": 0.1,
-                    "c1": 0.1,
-                    "c2": 0.8,
-                },
-                "_edli_day0_finite_evidence_absorbing_no_conditions": [
-                    "c0",
-                ],
             }
         )
         matrix = np.asarray([[0.0, 0.2, 0.8]] * 400, dtype=float)
         return (
             matrix,
             np.asarray([0.0, 0.2, 0.8], dtype=float),
-            "current_coherent_day0_remaining_finite_evidence_v2",
+            "current_coherent_day0_remaining_model_bootstrap_v3",
         )
 
     monkeypatch.setattr(
@@ -3919,7 +3869,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     witness = prepared.probability_witness
     binding = day0_payload["_edli_global_day0_binding"]
     assert witness.band_alpha == pytest.approx(0.05)
-    assert witness.band_basis == "current_coherent_day0_remaining_finite_evidence_v2"
+    assert witness.band_basis == "current_coherent_day0_remaining_model_bootstrap_v3"
     assert witness.yes_q_samples.shape == (400, 3)
     assert witness.posterior_identity_hash
     assert binding["probability_base_identity"]
@@ -4143,7 +4093,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         return (
             matrix,
             np.asarray([0.1, 0.1, 0.8], dtype=float),
-            "current_coherent_day0_remaining_finite_evidence_v2",
+            "current_coherent_day0_remaining_model_bootstrap_v3",
         )
 
     monkeypatch.setattr(

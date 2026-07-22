@@ -305,13 +305,6 @@ def _remaining_day_lcb_has_current_absorbing_certainty(
         return False
     if direction_text.endswith("_no"):
         absorbing_key = "absorbing_no_conditions"
-        finite_absorbing = payload.get(
-            "_edli_day0_finite_evidence_absorbing_no_conditions"
-        )
-        if not isinstance(finite_absorbing, (list, tuple, set)) or (
-            selected_condition not in {str(value) for value in finite_absorbing}
-        ):
-            return False
         expected_side = "NO"
     elif direction_text.endswith("_yes"):
         absorbing_key = "absorbing_yes_conditions"
