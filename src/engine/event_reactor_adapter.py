@@ -6164,6 +6164,41 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     return _pause_reason_from_state(state)
 
 
+def _entry_strategy_policy_blocks_live_submit(
+    conn: sqlite3.Connection | None,
+    strategy_key: str | None,
+) -> str | None:
+    """Re-read per-strategy authority at the final EDLI submit boundary."""
+
+    strategy = str(strategy_key or "").strip()
+    if not strategy:
+        # Preserve the existing certificate boundary for legacy/test receipts:
+        # _assert_event_bound_strategy_live_admitted rejects a missing strategy
+        # before venue submit. This helper only re-checks a named strategy's
+        # mutable control policy; it does not become a second identity authority.
+        return None
+    if conn is None:
+        return f"STRATEGY_POLICY_UNAVAILABLE:{strategy}:missing_connection"
+    try:
+        from src.riskguard.policy import resolve_strategy_policy
+
+        policy = resolve_strategy_policy(
+            conn,
+            strategy,
+            datetime.now(timezone.utc),
+        )
+    except Exception as exc:  # noqa: BLE001 - unreadable control authority blocks submit
+        return f"STRATEGY_POLICY_UNAVAILABLE:{strategy}:{type(exc).__name__}"
+
+    sources = tuple(str(source) for source in policy.sources)
+    source_text = ",".join(sources) or "none"
+    if policy.gated and _strategy_policy_has_selection_gate(sources):
+        return f"STRATEGY_POLICY_GATED:{strategy}:sources={source_text}"
+    if policy.exit_only:
+        return f"STRATEGY_POLICY_EXIT_ONLY:{strategy}:sources={source_text}"
+    return None
+
+
 _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES = (
     "heartbeat",
     "venue_heartbeat",
@@ -7193,6 +7228,25 @@ def event_bound_live_adapter_from_trade_conn(
                         submitted=False,
                         side_effect_status="NO_SUBMIT",
                         reason=f"entries_paused:{entries_pause_reason}",
+                        proof_accepted=False,
+                    )
+                strategy_policy_reason = _entry_strategy_policy_blocks_live_submit(
+                    build_conn,
+                    no_submit_receipt.strategy_key,
+                )
+                if strategy_policy_reason is not None:
+                    _abort_family_rebalance_entry_payloads_after_no_submit(
+                        trade_conn,
+                        fill_up_lease_payload=no_submit_receipt.fill_up_lease_payload,
+                        shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
+                        now_iso=decision_time.astimezone(UTC).isoformat(),
+                        reason=strategy_policy_reason,
+                    )
+                    return dataclass_replace(
+                        no_submit_receipt,
+                        submitted=False,
+                        side_effect_status="NO_SUBMIT",
+                        reason=strategy_policy_reason,
                         proof_accepted=False,
                     )
                 _shift_entry_lease = no_submit_receipt.shift_bin_lease_payload

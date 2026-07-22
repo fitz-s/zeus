@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-07
+# Lifecycle: created=2026-06-07; last_reviewed=2026-07-22; last_reused=2026-07-22
 # Purpose: FIX-2b OperatorArm gate — modes x operator_authorized matrix for the EDLI live-submit boundary; mainline executor remains unaffected.
 # Reuse: Run with pytest; update if OperatorArm, EDLI submit guard, or mode definitions change.
 # Created: 2026-06-07
-# Last reused/audited: 2026-06-07
+# Last reused/audited: 2026-07-22
 # Authority basis: PR_SPEC.md §2 FIX-2b (operator arm must gate every real submit, by TYPE)
 #   + ITEM A. The mainline executor (293 orders) goes main.py:7239 ->
 #   cycle_runtime.py:5950 execute_final_intent DIRECTLY and never constructs the EDLI
@@ -217,6 +217,164 @@ def test_live_adapter_entries_pause_blocks_before_live_cap_and_command(monkeypat
     assert receipt.proof_accepted is False
     assert receipt.reason == "entries_paused:external:manual_command"
     assert executor_called["called"] is False
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN "
+            "('edli_live_cap_usage', 'edli_live_order_events')"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_live_adapter_strategy_gate_rechecked_before_live_cap_and_command(monkeypatch) -> None:
+    """A gate issued after selection must still stop the final venue submit."""
+    from dataclasses import replace
+
+    from src.engine import event_reactor_adapter as adapter
+    from src.events.reactor import require_operator_arm
+    from src.state.schema.family_rebalance_intents_schema import ensure_table
+    from src.strategy import family_rebalance
+    from src.strategy import fill_up_wiring
+    from src.strategy import shift_bin_wiring
+
+    event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE control_overrides (
+            override_id TEXT,
+            target_type TEXT,
+            target_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_by TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            reason TEXT,
+            precedence INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO control_overrides (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence
+        ) VALUES (
+            'control_plane:strategy:settlement_capture:gate',
+            'strategy', 'settlement_capture', 'gate', 'true',
+            'codex_operator', '2026-07-22T05:35:15+00:00', NULL,
+            'loss containment', 100
+        )
+        """
+    )
+    ensure_table(conn)
+    fill_up_lease = fill_up_wiring.acquire_rebalance_lease(
+        conn,
+        family_key="live|Paris|2026-07-22|high|fill",
+        operation="FILL_UP",
+        now_iso="2026-07-22T05:35:00+00:00",
+        held_position_id="held-fill",
+        held_token_id="tok-fill",
+        held_bin_id="26C",
+        selected_token_id="tok-fill",
+        selected_bin_id="26C",
+        event_id=event.event_id,
+    )
+    shift_bin_lease = shift_bin_wiring.acquire_rebalance_lease(
+        conn,
+        family_key="live|Paris|2026-07-22|high|shift",
+        operation="SHIFT_BIN",
+        now_iso="2026-07-22T05:35:00+00:00",
+        held_position_id="held-shift",
+        held_token_id="tok-old",
+        held_bin_id="25C",
+        selected_token_id="tok-new",
+        selected_bin_id="26C",
+        event_id=event.event_id,
+    )
+    assert fill_up_lease is not None
+    assert shift_bin_lease is not None
+    shift_bin_wiring.record_entry_submitted(
+        conn,
+        shift_bin_lease,
+        now_iso="2026-07-22T05:35:01+00:00",
+        reason="SHIFT_BIN_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+    )
+    assert (
+        adapter._entry_strategy_policy_blocks_live_submit(
+            conn,
+            "forecast_qkernel_entry",
+        )
+        is None
+    )
+    monkeypatch.setattr(adapter, "_entry_pause_blocks_live_submit", lambda *_args: None)
+    monkeypatch.setattr(
+        adapter,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: replace(
+            _accepted_no_submit_receipt(event),
+            strategy_key="settlement_capture",
+            fill_up_lease_payload={"intent_id": fill_up_lease},
+            shift_bin_lease_payload={
+                "intent_id": shift_bin_lease,
+                "phase": "ENTER_NEW_BIN",
+            },
+        ),
+    )
+    executor_called = {"called": False}
+
+    def _executor_submit(_final_intent, _command):
+        executor_called["called"] = True
+        raise AssertionError("executor_submit must not run while strategy is gated")
+
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        durable_submit_outbox_enabled=True,
+        executor_submit=_executor_submit,
+        operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
+    )
+
+    receipt = submit(event, datetime(2026, 7, 22, 5, 36, tzinfo=timezone.utc))
+
+    assert receipt.submitted is False
+    assert receipt.proof_accepted is False
+    assert receipt.reason == (
+        "STRATEGY_POLICY_GATED:settlement_capture:sources=manual_override:gate"
+    )
+    assert executor_called["called"] is False
+    lease_rows = {
+        row["intent_id"]: (row["status"], row["abort_reason"])
+        for row in conn.execute(
+            "SELECT intent_id, status, abort_reason FROM family_rebalance_intents"
+        )
+    }
+    assert lease_rows[fill_up_lease] == (
+        "ABORTED",
+        "FILL_UP_POST_PLAN_NO_SUBMIT:" + receipt.reason,
+    )
+    assert lease_rows[shift_bin_lease] == (
+        "ABORTED",
+        "SHIFT_BIN_ENTRY_POST_PLAN_NO_SUBMIT:" + receipt.reason,
+    )
+    assert (
+        family_rebalance.active_lease_for_family(
+            conn,
+            "live|Paris|2026-07-22|high|fill",
+        )
+        is None
+    )
+    assert (
+        family_rebalance.active_lease_for_family(
+            conn,
+            "live|Paris|2026-07-22|high|shift",
+        )
+        is None
+    )
     assert (
         conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE name IN "
