@@ -1907,7 +1907,7 @@ files:
   src/events/event_store.py:
     zone: K2_runtime
     authority_role: edli_opportunity_event_processing_store
-    why: Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting and atomic supersession of obsolete cross-family targets so changing q/book/wealth epochs revalidate execution without starving the current global winner. Winner prioritization exposes the exact retained carrier event, not only a boolean, so the claim boundary uses the ID that was actually prioritized. A processed winner carrier may return to pending only for an explicitly refreshable maker/taker book race with no VenueSubmitAttempted evidence.
+    why: Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting and atomic supersession of obsolete cross-family targets so changing q/book/wealth epochs revalidate execution without starving the current global winner. Winner prioritization exposes the exact retained carrier event, not only a boolean, so the claim boundary uses the ID that was actually prioritized. A processed winner carrier may return to pending only for an explicitly refreshable maker/taker book race with no VenueSubmitAttempted evidence; a side-effect-free carrier terminalized solely by cross-family supersession gets a new immutable claim identity instead of illegally reviving the terminal row.
     downstream:
     - src/events/reactor.py
     - src/engine/global_batch_runtime.py

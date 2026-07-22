@@ -19,7 +19,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
-from src.events.opportunity_event import OpportunityEvent
+from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 
 GLOBAL_WINNER_TARGETED_CLAIM = "GLOBAL_WINNER_TARGETED_CLAIM"
 _GLOBAL_WINNER_TARGET_SOURCE_PREFIX = "global_auction_winner_target:"
@@ -2823,6 +2823,34 @@ class EventStore:
             return None
 
         self.insert_or_ignore(event)
+        terminal = self.conn.execute(
+            "SELECT processing_status, last_error "
+            "FROM opportunity_event_processing "
+            "WHERE consumer_name = ? AND event_id = ?",
+            (self.consumer_name, event.event_id),
+        ).fetchone()
+        if terminal is not None and tuple(terminal) == (
+            "expired",
+            "GLOBAL_WINNER_TARGET_SUPERSEDED",
+        ):
+            # The deterministic carrier was side-effect-free when another
+            # cross-family winner superseded it, but immutable terminal event
+            # rows cannot be claimed again. Materialize a new carrier identity;
+            # the pending same-source retention above prevents duplicates.
+            event = make_opportunity_event(
+                event_type=event.event_type,
+                entity_key=event.entity_key,
+                source=f"{event.source}:claim_retry:{now}",
+                observed_at=event.observed_at,
+                available_at=event.available_at,
+                received_at=now,
+                causal_snapshot_id=event.causal_snapshot_id,
+                payload=json.loads(event.payload_json),
+                priority=event.priority,
+                expires_at=event.expires_at,
+                created_at=now,
+            )
+            self.insert_or_ignore(event)
         if self._processed_global_target_is_refreshable_no_submit(event.event_id):
             self.conn.execute(
                 "UPDATE opportunity_event_processing "

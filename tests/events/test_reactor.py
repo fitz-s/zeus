@@ -1914,6 +1914,44 @@ def test_global_target_keeps_same_causal_fact_across_economic_epochs():
     ).fetchone() is None
 
 
+def test_superseded_global_target_gets_new_claim_carrier_identity():
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    source = _forecast_event("superseded-causal-fact", target_date="2026-05-24")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="stable-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("other-causal-fact", target_date="2026-05-24")
+    other = _next_claim_carrier(
+        other_source,
+        targeted_at=_DT_VENUE_OPEN + timedelta(seconds=1),
+        economic_identity="other-economics",
+        payload=json.loads(other_source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(target)
+    assert store.prioritize_global_winner(other)
+    recovered = store.prioritized_global_winner_event(target)
+
+    assert recovered is not None
+    assert recovered.event_id != target.event_id
+    assert recovered.source.startswith(f"{target.source}:claim_retry:")
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (target.event_id,),
+    ).fetchone() == ("expired", "GLOBAL_WINNER_TARGET_SUPERSEDED")
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (recovered.event_id,),
+    ).fetchone() == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
+
+
 @pytest.mark.parametrize("venue_attempted", (False, True))
 def test_global_target_recovers_processed_refreshable_no_submit_carrier(
     venue_attempted,
