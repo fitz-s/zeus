@@ -1659,6 +1659,8 @@ files:
       qkernel_spine_bridge.py:1332 behind w3_solve_enabled (seam swap = next packet); nothing imports it yet.
       The current global one-order path scores held-token SELL as a venue-cent partial-reduction
       optimization against HOLD, including every FAK fill prefix, rather than requiring full-position depth.
+      BUY branch wealth uses one shared spendable-cash floor plus exact same-family lower payoffs;
+      unrelated held-token upside cannot be coupled only to the candidate's win branch.
     downstream:
     - src/engine/qkernel_spine_bridge.py
   src/solve/kappa.py:

@@ -1051,7 +1051,7 @@ def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
     )
     initial_endowment = S.CandidatePortfolioEndowment(
         loss_wealth_floor_usd=Decimal("100"),
-        win_wealth_ceiling_usd=Decimal("100"),
+        win_wealth_floor_usd=Decimal("100"),
         current_token_shares=Decimal("0"),
         ledger_snapshot_id="ledger-current",
     )
@@ -1066,7 +1066,7 @@ def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
     cash_after = Decimal("100") - first.cost_usd
     held_endowment = S.CandidatePortfolioEndowment(
         loss_wealth_floor_usd=cash_after,
-        win_wealth_ceiling_usd=cash_after + first.shares,
+        win_wealth_floor_usd=cash_after + first.shares,
         current_token_shares=first.shares,
         ledger_snapshot_id="ledger-current",
     )
@@ -3570,14 +3570,16 @@ def test_global_single_order_rejects_stale_wealth_values_not_bound_to_current_le
     assert decision.no_trade_reason == "CAPITAL_IDENTITY_SUPERSEDED"
 
 
-def test_global_single_order_uses_coupling_robust_endowment_bounds():
+def test_global_single_order_does_not_couple_unmodelled_portfolio_upside_to_win():
     candidate = _global_candidate(
         candidate_id="yes", family="a", side="YES", q=0.70
     )
-    cash_only = _global_select((candidate,))
-    exposed = _global_select((candidate,), floor="50", ceiling="150")
+    cash_only = _global_select((candidate,), floor="50", ceiling="50")
+    unrelated_upside = _global_select((candidate,), floor="50", ceiling="150")
 
-    assert exposed.robust_delta_log_wealth < cash_only.robust_delta_log_wealth
+    assert unrelated_upside.candidate is candidate
+    assert unrelated_upside.shares == cash_only.shares
+    assert unrelated_upside.robust_delta_log_wealth == cash_only.robust_delta_log_wealth
 
 
 def test_global_single_order_maximizes_authority_bound_log_growth_rate():

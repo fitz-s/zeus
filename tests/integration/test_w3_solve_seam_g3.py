@@ -12752,10 +12752,10 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
     )
 
     # If NO-c loses, outcome c still pays the existing NO-b holding ($20).
-    # If NO-c wins, outcome a is the family maximum ($35), while impossible
-    # simultaneous family payouts are removed from the global ceiling first.
+    # If NO-c wins, its two possible outcomes pay $35 or $5, so the certified
+    # branch floor uses $5. Unrelated-family upside cannot be coupled to this win.
     assert endowment.loss_wealth_floor_usd == Decimal("120")
-    assert endowment.win_wealth_ceiling_usd == Decimal("135")
+    assert endowment.win_wealth_floor_usd == Decimal("105")
     assert endowment.current_token_shares == Decimal("5")
     assert endowment.ledger_snapshot_id == "ledger-current"
 
@@ -12771,7 +12771,7 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
         wealth_witness=wealth,
     )
     assert yes_endowment.loss_wealth_floor_usd == Decimal("105")
-    assert yes_endowment.win_wealth_ceiling_usd == Decimal("135")
+    assert yes_endowment.win_wealth_floor_usd == Decimal("135")
     assert yes_endowment.current_token_shares == Decimal("10")
 
     # A fresh sibling token is a legitimate marginal portfolio candidate. Its
@@ -12799,7 +12799,7 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
         wealth_witness=wealth,
     )
     assert sibling_endowment.loss_wealth_floor_usd == Decimal("105")
-    assert sibling_endowment.win_wealth_ceiling_usd == Decimal("135")
+    assert sibling_endowment.win_wealth_floor_usd == Decimal("100")
     assert sibling_endowment.current_token_shares == Decimal("0")
 
 

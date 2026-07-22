@@ -54,7 +54,12 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   resolvers must confirm the probability, native ask-depth/fee/tick/book, and reconciled wealth
   identities before scoring. A current venue-universe witness must prove every active family is
   represented; a partial reactor page is not global and fails closed. One `PortfolioWealthWitness` binds ledger generation, positions,
-  reservations, spendable cash, and wealth bounds. Stale, mismatched, maker-contingent, or
+  reservations, spendable cash, and wealth bounds. The candidate's binary log-wealth projection
+  uses the same spendable-cash baseline in both branches plus the minimum exact same-family payout
+  in each branch. Cross-family holdings enter neither branch until a joint law exists; coupling a
+  candidate loss to the global floor and its win to the unrelated portfolio ceiling invents a
+  correlation and can make an existing winner freeze every new family. Cross-family exposure stays
+  on the correlation-cap rail. Stale, mismatched, maker-contingent, or
   non-positive candidates are unrankable. Before sizing a new BUY, the current owner strategy's
   native entry-price floor removes unlicensed longshots from the feasible set. Inside that set,
   admission is `q_lcb > fee-inclusive executable cost` plus positive robust delta-log wealth and
@@ -64,7 +69,7 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   FAK fill prefix, even when the favorable SELL branch itself is below one half.
   A full-size and every-FAK-prefix positive reduce-only SELL remains eligible, but direction does
   not override the capital objective: rank all positive BUY and SELL alternatives by
-  coupling-robust lower-CVaR Δlog-wealth per remaining family-resolution hour. The horizon is
+  current-family lower-CVaR Δlog-wealth per remaining family-resolution hour. The horizon is
   derived from the immutable family city and target local date plus the configured settlement
   timezone, and is bound into the current scope/universe witness identity — never authored by a
   candidate. Numerical ties prefer higher robust Δlog, then robust Δlog per dollar, then lower

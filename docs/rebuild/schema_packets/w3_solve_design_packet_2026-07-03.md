@@ -252,9 +252,13 @@ MECE row-simplex matrix with ordered `(bin_id, condition_id, YES token, NO token
 YES takes the bound column and NO its pointwise complement. Independent current resolvers confirm
 the probability certificate and exact native book/curve. A current venue-universe witness proves
 that every active family is present; a bounded reactor page is never renamed "global". The wealth witness binds ledger
-generation, reconciled positions, reservations, spendable cash, and wealth bounds. Unknown
-coupling is lower-bounded by evaluating wins against the portfolio ceiling and losses against
-the floor. Before scoring, the current owner strategy's native entry-price floor removes
+generation, reconciled positions, reservations, spendable cash, and wealth bounds. Until the
+probability authority serves a cross-family joint law, one candidate's binary projection uses the
+same spendable-cash baseline in both branches plus the minimum exact same-family payout in each
+branch. Cross-family held-token upside is excluded from both branches and remains governed by the
+correlation-cap rail. Pairing a candidate loss with the global floor and its win with the unrelated
+portfolio ceiling is forbidden: that is an invented adverse coupling, not a probability bound, and
+lets one large holding erase every otherwise-positive family. Before scoring, the current owner strategy's native entry-price floor removes
 unlicensed longshots. Inside that feasible set, a BUY must have payoff-side lower-tail-CVaR
 probability above fee-inclusive executable cost plus positive robust delta-log wealth and EV;
 there is no price-independent `q > 0.5` wall, and the exact binary median follows the probability

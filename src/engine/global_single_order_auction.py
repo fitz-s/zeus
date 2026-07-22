@@ -437,7 +437,6 @@ def _candidate_portfolio_endowment(
         raise ValueError("candidate holdings topology is not ledger aligned")
 
     payout_by_outcome = {outcome: Decimal("0") for outcome in outcomes}
-    family_gross_shares = Decimal("0")
     current_token_shares = Decimal("0")
     claims = getattr(holdings_snapshot, "endowment_claims", None)
     if claims is None:
@@ -454,7 +453,6 @@ def _candidate_portfolio_endowment(
             or holding_side not in {"YES", "NO"}
         ):
             raise ValueError("candidate family holding is invalid")
-        family_gross_shares += shares
         if holding_side == "YES":
             payout_by_outcome[holding_bin] += shares
         else:
@@ -486,10 +484,8 @@ def _candidate_portfolio_endowment(
         loss_wealth_floor_usd=(
             wealth_witness.wealth_floor_usd + min(loss_payouts)
         ),
-        win_wealth_ceiling_usd=(
-            wealth_witness.wealth_ceiling_usd
-            - family_gross_shares
-            + max(win_payouts)
+        win_wealth_floor_usd=(
+            wealth_witness.wealth_floor_usd + min(win_payouts)
         ),
         current_token_shares=current_token_shares,
         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,

@@ -1116,20 +1116,22 @@ class PortfolioWealthWitness:
 class CandidatePortfolioEndowment:
     """Ledger-aligned branch wealth before one additional native BUY.
 
-    The loss branch is a lower bound and the win branch is an upper bound, so
-    their use in incremental log utility remains conservative.  Current shares
-    name the already-owned exposure to this exact native token; Fractional Kelly
-    uses them to constrain the final holding across repeated auction epochs.
+    Both branches are lower bounds on the same cash baseline plus exact
+    same-family payoffs.  Cross-family holdings stay outside this binary
+    projection until the probability authority serves their joint law; their
+    exposure remains governed by the correlation allocator.  Current shares name
+    the already-owned exposure to this exact native token; Fractional Kelly uses
+    them to constrain the final holding across repeated auction epochs.
     """
 
     loss_wealth_floor_usd: Decimal
-    win_wealth_ceiling_usd: Decimal
+    win_wealth_floor_usd: Decimal
     current_token_shares: Decimal
     ledger_snapshot_id: str
 
     def __post_init__(self) -> None:
         loss = Decimal(self.loss_wealth_floor_usd)
-        win = Decimal(self.win_wealth_ceiling_usd)
+        win = Decimal(self.win_wealth_floor_usd)
         shares = Decimal(self.current_token_shares)
         if (
             not self.ledger_snapshot_id.strip()
@@ -4547,7 +4549,7 @@ def select_global_single_order(
         buy_capital_limits[candidate.candidate_id] = candidate_capital_limit
         candidate_endowment = CandidatePortfolioEndowment(
             loss_wealth_floor_usd=wealth_witness.wealth_floor_usd,
-            win_wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+            win_wealth_floor_usd=wealth_witness.wealth_floor_usd,
             current_token_shares=Decimal("0"),
             ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
         )
@@ -4616,7 +4618,7 @@ def select_global_single_order(
             q_samples=q_samples,
             band_alpha=band_alpha,
             wealth_floor_usd=candidate_endowment.loss_wealth_floor_usd,
-            wealth_ceiling_usd=candidate_endowment.win_wealth_ceiling_usd,
+            wealth_ceiling_usd=candidate_endowment.win_wealth_floor_usd,
             spendable_cash_usd=wealth_witness.spendable_cash_usd,
             capital_limit_usd=candidate_capital_limit,
             fractional_kelly_multiplier=multiplier,
@@ -4764,7 +4766,7 @@ def select_global_single_order(
                     q_samples=q_samples,
                     band_alpha=witness.band_alpha,
                     wealth_floor_usd=primary_endowment.loss_wealth_floor_usd,
-                    wealth_ceiling_usd=primary_endowment.win_wealth_ceiling_usd,
+                    wealth_ceiling_usd=primary_endowment.win_wealth_floor_usd,
                     spendable_cash_usd=wealth_witness.spendable_cash_usd,
                     capital_limit_usd=target_cost,
                     fractional_kelly_multiplier=Decimal("1"),
