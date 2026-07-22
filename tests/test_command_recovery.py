@@ -11120,9 +11120,21 @@ class TestRecoveryResolutionTable:
         )
 
         clob = FakeClob()
-        summary = reconcile_invalid_pending_entry_authority_cancels(conn, clob)
+        traced_sql: list[str] = []
+        conn.set_trace_callback(traced_sql.append)
+        try:
+            summary = reconcile_invalid_pending_entry_authority_cancels(conn, clob)
+        finally:
+            conn.set_trace_callback(None)
 
         assert clob.cancelled == ["ord-invalid-pending"]
+        candidate_query = next(
+            sql
+            for sql in traced_sql
+            if "WITH candidate_commands AS" in sql
+            and "canonical_order_truth AS" in sql
+        )
+        assert "JOIN candidate_commands scope ON scope.command_id = fact.command_id" in candidate_query
         assert summary["scanned"] == 1
         assert summary["advanced"] == 1
         assert summary["errors"] == 0

@@ -5773,8 +5773,25 @@ def _invalid_pending_entry_authority_rows(conn: sqlite3.Connection) -> list[dict
         "NULL AS latest_order_fact_remaining_size"
     )
     if _table_exists(conn, "venue_order_facts"):
-        fact_join = "WITH " + _canonical_order_truth_cte(cte_name="canonical_order_truth") + """
-        """
+        fact_join = """
+        WITH candidate_commands AS (
+            SELECT cmd.command_id
+              FROM position_current pc
+              JOIN venue_commands cmd
+                ON cmd.position_id = pc.position_id
+             WHERE pc.phase = 'pending_entry'
+               AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+               AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+               AND CAST(COALESCE(pc.chain_shares, '0') AS REAL) = 0
+               AND cmd.intent_kind = 'ENTRY'
+               AND cmd.side = 'BUY'
+               AND cmd.state IN ('ACKED', 'POST_ACKED')
+               AND COALESCE(cmd.venue_order_id, '') != ''
+        ),
+        """ + _canonical_order_truth_cte(
+            cte_name="canonical_order_truth",
+            command_scope_cte="candidate_commands",
+        )
         fact_select = (
             "fact.state AS latest_order_fact_state, "
             "fact.matched_size AS latest_order_fact_matched_size, "
