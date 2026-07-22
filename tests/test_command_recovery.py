@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-21; last_reused=2026-07-21
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-22
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-21
+# Last reused/audited: 2026-07-22
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -12792,6 +12792,153 @@ class TestRecoveryResolutionTable:
             "venue_status": "FILLED",
             "terminal_exec_status": "filled",
         }
+
+    def test_cancelled_rest_entry_repairs_confirmed_fill_past_stale_order_fact(
+        self,
+        conn,
+    ):
+        """A cancel-after-fill race must not hide confirmed partial exposure."""
+
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+        )
+
+        _insert(conn, size=5.0, price=0.43)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            "UPDATE venue_commands SET state = 'CANCELLED' WHERE command_id = 'cmd-001'"
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 4.0,
+                   cost_basis_usd = 1.72,
+                   entry_price = 0.43,
+                   order_status = 'filled',
+                   fill_authority = 'venue_confirmed_full',
+                   chain_state = 'synced',
+                   chain_shares = 4.0,
+                   chain_avg_price = 0.43,
+                   chain_cost_basis_usd = 1.72,
+                   chain_seen_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _append_order_fact(
+            conn,
+            state="LIVE",
+            matched_size="0",
+            remaining_size="5",
+        )
+        _append_trade_fact(
+            conn,
+            trade_id="trade-cancel-race-1",
+            state="CONFIRMED",
+            filled_size="2.5",
+            fill_price="0.43",
+        )
+        from src.riskguard.riskguard import _load_riskguard_portfolio_truth
+
+        _portfolio, before = _load_riskguard_portfolio_truth(conn)
+        assert before["consistency_lock"] == "degraded"
+        assert before["unloadable_rows"] == [
+            {
+                "trade_id": "pos-001",
+                "state": "entered",
+                "reason": "fill-grade loader row missing execution_fact source provenance",
+                "classification": "excluded_unaccounted",
+            }
+        ]
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        _append_trade_fact(
+            conn,
+            trade_id="trade-cancel-race-2",
+            state="CONFIRMED",
+            filled_size="1.5",
+            fill_price="0.43",
+        )
+
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status,
+                   terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 4.0,
+            "fill_price": 0.43,
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "filled",
+        }
+        portfolio, after = _load_riskguard_portfolio_truth(conn)
+        assert len(portfolio.positions) == 1
+        assert after["unloadable_count"] == 0
+        assert after["consistency_lock"] == "pass"
+        conn.execute(
+            """
+            UPDATE execution_fact
+               SET command_id = NULL,
+                   filled_at = '1999-01-01T00:00:00Z',
+                   shares = 3.0,
+                   fill_price = 0.2
+             WHERE intent_id = 'pos-001:entry'
+            """
+        )
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        preserved = conn.execute(
+            """
+            SELECT command_id, filled_at, shares, fill_price
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(preserved) == {
+            "command_id": None,
+            "filled_at": "1999-01-01T00:00:00Z",
+            "shares": 3.0,
+            "fill_price": 0.2,
+        }
+
+    def test_filled_entry_execution_fact_repair_skips_without_position_current(
+        self,
+    ):
+        from src.execution.command_recovery import (
+            _filled_entry_execution_fact_repair_candidates,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            for table in (
+                "venue_commands",
+                "venue_order_facts",
+                "venue_trade_facts",
+                "execution_fact",
+            ):
+                conn.execute(f"CREATE TABLE {table} (id INTEGER)")
+            assert _filled_entry_execution_fact_repair_candidates(conn) == []
+        finally:
+            conn.close()
 
     def test_review_required_entry_recovers_fill_time_without_order_fact_or_alias_double_count(
         self,

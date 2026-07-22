@@ -6717,6 +6717,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
         "venue_order_facts",
         "venue_trade_facts",
         "execution_fact",
+        "position_current",
     }
     if not all(_table_exists(conn, table) for table in required):
         return []
@@ -6758,6 +6759,8 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                    MAX(fact.observed_at) AS observed_at,
                    MAX(fact.venue_timestamp) AS venue_timestamp,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
+                   MAX(CASE WHEN fact.state = 'CONFIRMED' THEN 1 ELSE 0 END)
+                       AS has_confirmed_fill,
                    MAX(fact.trade_fact_id) AS trade_fact_id
               FROM economic_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
@@ -6822,6 +6825,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                entry_fill.trade_fact_id,
                NULL AS trade_id,
                entry_fill.fill_states AS trade_state,
+               entry_fill.has_confirmed_fill,
                entry_fill.filled_size,
                entry_fill.fill_price,
                'REST' AS source,
@@ -6855,13 +6859,62 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
            AND ef.order_role = 'entry'
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state IN ('FILLED', 'PARTIAL', 'EXPIRED', 'REVIEW_REQUIRED')
+           AND cmd.state IN (
+               'FILLED', 'PARTIAL', 'EXPIRED', 'REVIEW_REQUIRED', 'CANCELLED'
+           )
+           AND (
+               cmd.state != 'CANCELLED'
+               OR (
+                   entry_fill.has_confirmed_fill = 1
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM execution_fact existing_entry_fact
+                        WHERE existing_entry_fact.position_id = cmd.position_id
+                          AND existing_entry_fact.order_role = 'entry'
+                   )
+                   AND EXISTS (
+                       SELECT 1
+                         FROM position_current current_position
+                        WHERE current_position.position_id = cmd.position_id
+                          AND current_position.phase IN (
+                              'active', 'day0_window', 'pending_exit'
+                          )
+                          AND current_position.chain_state = 'synced'
+                          AND current_position.fill_authority IN (
+                              'venue_confirmed_full',
+                              'cancelled_remainder',
+                              'venue_position_observed'
+                          )
+                          AND current_position.order_id = cmd.venue_order_id
+                          AND ABS(
+                              COALESCE(current_position.shares, 0)
+                              - entry_fill.filled_size
+                          ) <= 0.0001
+                          AND ABS(
+                              COALESCE(current_position.cost_basis_usd, 0)
+                              - (entry_fill.filled_size * entry_fill.fill_price)
+                          ) <= 0.0001
+                          AND ABS(
+                              COALESCE(current_position.chain_shares, 0)
+                              - entry_fill.filled_size
+                          ) <= 0.0001
+                          AND ABS(
+                              COALESCE(current_position.chain_cost_basis_usd, 0)
+                              - (entry_fill.filled_size * entry_fill.fill_price)
+                          ) <= 0.0001
+                   )
+               )
+           )
            AND (
                latest_order.command_id IS NULL
                OR ABS(
                    CAST(entry_fill.filled_size AS REAL)
                    - CAST(latest_order.matched_size AS REAL)
                ) <= 0.000001
+               OR (
+                   cmd.state = 'CANCELLED'
+                   AND entry_fill.has_confirmed_fill = 1
+               )
            )
          ORDER BY entry_fill.observed_at, entry_fill.trade_fact_id
         """
@@ -6889,6 +6942,7 @@ def _log_filled_entry_trade_candidate_execution_fact(
     from src.state.db import log_execution_fact
 
     terminal_status = _entry_execution_fact_terminal_status(candidate)
+    venue_status = _entry_execution_fact_venue_status(candidate, terminal_status)
     position_id = str(candidate.get("position_id") or "")
     observed_at = str(
         candidate.get("execution_filled_at")
@@ -6914,7 +6968,7 @@ def _log_filled_entry_trade_candidate_execution_fact(
         submitted_price=_float_or_none(candidate.get("cmd_price") or candidate.get("price")),
         fill_price=_float_or_none(candidate.get("fill_price")),
         shares=_float_or_none(candidate.get("filled_size")),
-        venue_status="FILLED" if terminal_status == "filled" else "PARTIAL",
+        venue_status=venue_status,
         terminal_exec_status=terminal_status,
     )
     return intent_id
@@ -6985,8 +7039,15 @@ def _entry_execution_fact_terminal_status(candidate: Mapping[str, object]) -> st
         and command_size is not None
         and filled_size + Decimal("0.000001") >= command_size
     )
+    cancelled_remainder_is_final = (
+        command_state == CommandState.CANCELLED.value
+        and bool(candidate.get("has_confirmed_fill"))
+        and filled_size is not None
+        and filled_size > 0
+    )
     if (
         trade_facts_cover_command
+        or cancelled_remainder_is_final
         or (
             command_state == CommandState.FILLED.value
             and remaining == 0
@@ -6995,6 +7056,18 @@ def _entry_execution_fact_terminal_status(candidate: Mapping[str, object]) -> st
     ):
         return "filled"
     return "partial"
+
+
+def _entry_execution_fact_venue_status(
+    candidate: Mapping[str, object],
+    terminal_status: str,
+) -> str:
+    if (
+        str(candidate.get("cmd_state") or "").upper()
+        == CommandState.CANCELLED.value
+    ):
+        return "PARTIAL"
+    return "FILLED" if terminal_status == "filled" else "PARTIAL"
 
 
 def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> dict:
@@ -7022,7 +7095,10 @@ def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> d
                 (intent_id,),
             ).fetchone()
             expected_status = _entry_execution_fact_terminal_status(candidate)
-            expected_venue_status = "FILLED" if expected_status == "filled" else "PARTIAL"
+            expected_venue_status = _entry_execution_fact_venue_status(
+                candidate,
+                expected_status,
+            )
             if verified is None:
                 raise RuntimeError("filled entry execution_fact repair missing post-write row")
             if (
