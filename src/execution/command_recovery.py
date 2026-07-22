@@ -11438,6 +11438,15 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
                     "status": "UNKNOWN",
                     "source_error": "empty_point_order_response",
                 }
+            if (
+                point_order is None
+                and getattr(client, "venue_reads_are_complete", False) is True
+            ):
+                point_order = {
+                    "orderID": venue_order_id,
+                    "status": "UNKNOWN",
+                    "source_error": "complete_snapshot_point_order_absence",
+                }
             venue_status = (
                 str((point_order or {}).get("status") or (point_order or {}).get("state") or "NOT_FOUND")
                 .upper()

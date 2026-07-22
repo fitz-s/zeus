@@ -6048,24 +6048,16 @@ class TestRecoveryResolutionTable:
         _advance_to_acked(conn, venue_order_id="ord-001")
         _seed_pending_entry_projection(conn)
         _append_order_fact(conn, state="LIVE", matched_size="0", remaining_size="10")
-        from src.venue.response_contracts import VenueResponseShapeError
-        from src.execution.venue_sync_contract import SnapshotMissError
-
-        def missing_point_order(_order_id):
-            shape_error = VenueResponseShapeError(
-                "get_order",
-                {},
-                "point-order response requires original_size and size_matched fields",
-            )
-            raise SnapshotMissError("captured empty point-order response") from shape_error
-
-        mock_client.get_order.side_effect = missing_point_order
-        mock_client.get_open_orders.return_value = []
-        mock_client.get_trades.return_value = []
+        complete_snapshot = SimpleNamespace(
+            venue_reads_are_complete=True,
+            get_order=lambda _order_id: None,
+            get_open_orders=lambda: [],
+            get_trades=lambda: [],
+        )
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 
-        summary = reconcile_unresolved_commands(conn, mock_client)
+        summary = reconcile_unresolved_commands(conn, complete_snapshot)
 
         assert summary["terminal_point_orders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         assert summary["terminal_order_facts"]["advanced"] == 1
