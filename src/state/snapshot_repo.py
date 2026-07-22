@@ -31,6 +31,21 @@ ABSENT_ORDERBOOK_SIDE = "ABSENT"
 
 logger = logging.getLogger(__name__)
 
+# capture_policy_spec.md §2 full-capture trigger taxonomy. The DB column is
+# deliberately UNCONSTRAINED (a CHECK on ADD COLUMN full-scans the ~43GB live
+# table at boot), so the domain is enforced HERE at the write API boundary
+# (consult re-review 2026-07-22): insert_snapshot rejects any value outside this
+# set. NULL is allowed (pre-migration rows / callers not yet threading it).
+CAPTURE_TRIGGER_TAXONOMY: frozenset[str] = frozenset({
+    "PRIORITY_HELD_POSITION",
+    "PRIORITY_OPEN_ORDER",
+    "PRIORITY_MARKER",
+    "NEAR_THRESHOLD_MATCH",
+    "KEYFRAME",
+    "JIT_SUBMIT",
+    "DISCOVERY_SWEEP",
+})
+
 
 def _snapshot_table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute(
@@ -200,6 +215,13 @@ def insert_snapshot(
     """
 
     row = _row_from_snapshot(snapshot)
+    if capture_trigger is not None and capture_trigger not in CAPTURE_TRIGGER_TAXONOMY:
+        raise ValueError(
+            f"insert_snapshot: capture_trigger {capture_trigger!r} is not in the "
+            f"capture_policy_spec.md §2 taxonomy {sorted(CAPTURE_TRIGGER_TAXONOMY)}. "
+            "The DB column is unconstrained (an O(rows) boot scan was avoided); the "
+            "taxonomy is enforced here at the write boundary."
+        )
     row["capture_trigger"] = capture_trigger
     conn.execute(
         """

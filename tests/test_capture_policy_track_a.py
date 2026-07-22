@@ -119,30 +119,34 @@ def test_capture_trigger_migration_idempotent(conn):
     assert row["capture_trigger"] == "KEYFRAME"
 
 
-def test_capture_trigger_column_is_unconstrained_no_db_check(conn):
-    """The ADD COLUMN is deliberately unconstrained TEXT (no CHECK): a CHECK on
-    ADD COLUMN forces SQLite to full-scan every existing row of the ~43GB live
-    trade table at boot. The taxonomy is enforced by the application at write,
-    so the DB accepts any TEXT and the ALTER stays O(1) metadata-only."""
-    # A value outside the taxonomy inserts without a DB-level IntegrityError.
-    insert_snapshot(
-        conn,
-        _snapshot(snapshot_id="snap-arbitrary"),
-        capture_trigger="NOT_IN_TAXONOMY",
-    )
-    row = conn.execute(
-        "SELECT capture_trigger FROM executable_market_snapshots WHERE snapshot_id = ?",
-        ("snap-arbitrary",),
-    ).fetchone()
-    assert row["capture_trigger"] == "NOT_IN_TAXONOMY"
-
-    # The table DDL (sqlite_master.sql is rewritten by ADD COLUMN) carries the
-    # column but NO CHECK clause naming it.
+def test_capture_trigger_column_unconstrained_but_api_validates(conn):
+    """The ADD COLUMN is deliberately unconstrained TEXT (no DB CHECK — a CHECK on
+    ADD COLUMN full-scans every existing row of the ~43GB live table at boot). The
+    taxonomy is enforced at the write API boundary (insert_snapshot) instead, so the
+    ALTER stays O(1) metadata-only while out-of-taxonomy values are still rejected
+    (consult re-review 2026-07-22)."""
+    # (1) The DB column carries NO CHECK clause (sqlite_master.sql is rewritten by
+    #     ADD COLUMN) — the column is unconstrained at the storage layer.
     ddl = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='executable_market_snapshots'"
     ).fetchone()[0]
     assert "capture_trigger" in ddl
     assert not re.search(r"CHECK\s*\([^)]*capture_trigger", ddl, re.IGNORECASE)
+
+    # (2) The write API enforces the §2 taxonomy: a value outside it raises ValueError.
+    with pytest.raises(ValueError, match="taxonomy"):
+        insert_snapshot(
+            conn,
+            _snapshot(snapshot_id="snap-bad-trigger"),
+            capture_trigger="NOT_IN_TAXONOMY",
+        )
+
+    # A valid taxonomy value still inserts fine.
+    insert_snapshot(conn, _snapshot(snapshot_id="snap-ok-trigger"), capture_trigger="KEYFRAME")
+    row = conn.execute(
+        "SELECT capture_trigger FROM executable_market_snapshots WHERE snapshot_id='snap-ok-trigger'"
+    ).fetchone()
+    assert row["capture_trigger"] == "KEYFRAME"
 
 
 # --- (b) each trigger class stamps the correct capture_trigger --------------
