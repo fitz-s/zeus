@@ -252,7 +252,7 @@ test_trust_policy:
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-07-10", note: "EDLI arm/no-submit relationship antibodies, including portfolio snapshot fail-closed helper-to-adapter selection."}
-    tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-07-17", note: "Extended live entry provenance and startup-latency antibody: recoverable global entry pauses retain events, and the durable wake listener starts before APScheduler."}
+    tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-07-22", note: "Extended live entry provenance and startup-latency antibody: submit outcomes retain admitted qkernel economics and durable venue-command side-effect identity; recoverable global entry pauses retain events, and the durable wake listener starts before APScheduler."}
     tests/money_path/test_mainstream_enforce_on_submit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (B) F1 enforce: mainstream_agreement_enforce_on_submit blocks armed submit when selected candidate's verdict != True (fail-closed); reference selector stays reference-only"}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}

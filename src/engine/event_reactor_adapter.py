@@ -7639,6 +7639,20 @@ def event_bound_live_adapter_from_trade_conn(
                         reason=terminal_result.reason_code,
                         proof_accepted=True,
                         decision_proof_bundle=command_certificates + (receipt_cert, transition_cert),
+                        venue_call_started=terminal_result.venue_call_started,
+                        venue_ack_received=terminal_result.venue_ack_received,
+                        venue_command_id=_execution_command_id_from_command_certificate(command),
+                        venue_command_state=(
+                            "ACKED"
+                            if terminal_result.status == "SUBMITTED"
+                            else "SUBMIT_UNKNOWN_SIDE_EFFECT"
+                            if _submit_result_requires_reconcile(terminal_result)
+                            else "REJECTED"
+                        ),
+                        venue_order_type=str(
+                            final_intent.payload.get("time_in_force") or ""
+                        )
+                        or None,
                     )
                 except Exception as terminal_exc:  # noqa: BLE001
                     return dataclass_replace(
@@ -7658,79 +7672,36 @@ def event_bound_live_adapter_from_trade_conn(
                 reason=f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{exc}",
                 proof_accepted=False,
             )
-        return EventSubmissionReceipt(
+        return dataclass_replace(
+            no_submit_receipt,
             submitted=submitted,
-            event_id=no_submit_receipt.event_id,
-            causal_snapshot_id=no_submit_receipt.causal_snapshot_id,
-            city=no_submit_receipt.city,
-            target_date=no_submit_receipt.target_date,
-            metric=no_submit_receipt.metric,
-            condition_id=no_submit_receipt.condition_id,
-            token_id=no_submit_receipt.token_id,
-            outcome_label=no_submit_receipt.outcome_label,
-            candidate_id=no_submit_receipt.candidate_id,
-            executable_snapshot_id=no_submit_receipt.executable_snapshot_id,
-            family_id=no_submit_receipt.family_id,
-            bin_label=no_submit_receipt.bin_label,
-            direction=no_submit_receipt.direction,
-            q_live=no_submit_receipt.q_live,
-            q_lcb_5pct=no_submit_receipt.q_lcb_5pct,
-            c_fee_adjusted=no_submit_receipt.c_fee_adjusted,
-            c_cost_95pct=no_submit_receipt.c_cost_95pct,
-            p_fill_lcb=no_submit_receipt.p_fill_lcb,
-            trade_score=no_submit_receipt.trade_score,
-            native_quote_available=no_submit_receipt.native_quote_available,
-            source_status=no_submit_receipt.source_status,
-            family_complete=no_submit_receipt.family_complete,
-            trade_score_positive=no_submit_receipt.trade_score_positive,
-            fdr_pass=no_submit_receipt.fdr_pass,
-            fdr_family_id=no_submit_receipt.fdr_family_id,
-            fdr_hypothesis_count=no_submit_receipt.fdr_hypothesis_count,
-            kelly_pass=no_submit_receipt.kelly_pass,
-            kelly_execution_price_type=no_submit_receipt.kelly_execution_price_type,
-            kelly_price_fee_deducted=no_submit_receipt.kelly_price_fee_deducted,
-            kelly_size_usd=no_submit_receipt.kelly_size_usd,
-            kelly_cost_basis_id=no_submit_receipt.kelly_cost_basis_id,
-            kelly_decision_id=no_submit_receipt.kelly_decision_id,
-            risk_decision_id=no_submit_receipt.risk_decision_id,
-            final_intent_id=no_submit_receipt.final_intent_id,
-            neg_risk=no_submit_receipt.neg_risk,
             side_effect_status=side_effect_status,
             reason=reason,
             proof_accepted=True,
             decision_proof_bundle=certificates,
-            mainstream_agreement_pass=no_submit_receipt.mainstream_agreement_pass,
-            mainstream_agreement_fail_reason=no_submit_receipt.mainstream_agreement_fail_reason,
-            mainstream_point=no_submit_receipt.mainstream_point,
-            mainstream_delta=no_submit_receipt.mainstream_delta,
-            mainstream_bin_label=no_submit_receipt.mainstream_bin_label,
-            mainstream_source=no_submit_receipt.mainstream_source,
-            mainstream_fetched_at_utc=no_submit_receipt.mainstream_fetched_at_utc,
-            alpha_gap=no_submit_receipt.alpha_gap,
-            q_source=no_submit_receipt.q_source,
-            strategy_key=no_submit_receipt.strategy_key,
-            opportunity_book=no_submit_receipt.opportunity_book,
-            replacement_forecast=no_submit_receipt.replacement_forecast,
-            unit=no_submit_receipt.unit,
-            # P0 mode-authority: carry the proven proof mode + maker limit forward onto
-            # the submit-outcome receipt for settlement attribution (operator 2026-06-10).
-            execution_mode_intent=no_submit_receipt.execution_mode_intent,
-            maker_limit_price=no_submit_receipt.maker_limit_price,
-            # FIX (third-path input starvation, 2026-06-11): same_bin_yes_posterior and
-            # settlement_coverage_status were omitted here, so the buy_no gate in
-            # _receipt_money_path_blocker always received None → ADMISSION_BUY_NO_INDEPENDENT_
-            # YES_POSTERIOR_MISSING → receipt.reason set, trade_score_positive=False,
-            # rejection_stage=TRADE_SCORE. Thread them unconditionally from no_submit_receipt
-            # (single authority: same field names, same values set by _generate_candidate_proofs).
-            # Also carry q_lcb_calibration_source, posterior_id, probability_authority for
-            # provenance completeness — same omission category.
-            q_lcb_calibration_source=no_submit_receipt.q_lcb_calibration_source,
-            same_bin_yes_posterior=no_submit_receipt.same_bin_yes_posterior,
-            settlement_coverage_status=no_submit_receipt.settlement_coverage_status,
-            replacement_no_bound_certificate=no_submit_receipt.replacement_no_bound_certificate,
-            posterior_id=no_submit_receipt.posterior_id,
-            probability_authority=no_submit_receipt.probability_authority,
-            global_actuation=no_submit_receipt.global_actuation,
+            venue_call_started=bool(submit_result and submit_result.venue_call_started),
+            venue_ack_received=bool(submit_result and submit_result.venue_ack_received),
+            venue_command_id=(
+                _execution_command_id_from_command_certificate(command)
+                if command_certificates_persisted and command is not None
+                else None
+            ),
+            venue_command_state=(
+                "ACKED"
+                if submit_result is not None and submit_result.status == "SUBMITTED"
+                else "SUBMIT_UNKNOWN_SIDE_EFFECT"
+                if submit_result is not None
+                and _submit_result_requires_reconcile(submit_result)
+                else "REJECTED"
+                if submit_result is not None
+                and submit_result.status in {"REJECTED", "PRE_SUBMIT_ERROR"}
+                else None
+            ),
+            venue_order_type=(
+                str(final_intent.payload.get("time_in_force") or "") or None
+                if command_certificates_persisted and final_intent is not None
+                else None
+            ),
         )
 
     def _process_global_batch(

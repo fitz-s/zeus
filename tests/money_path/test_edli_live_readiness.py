@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-22
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 from __future__ import annotations
 
@@ -3652,6 +3652,14 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
         )
         assert receipt.submitted is True
         assert receipt.side_effect_status == "SUBMITTED"
+        assert receipt.qkernel_execution_economics == accepted.qkernel_execution_economics
+        assert receipt.selection_authority_applied == "qkernel_spine"
+        assert receipt.candidate_bin_id == "bin-1"
+        assert receipt.venue_call_started is True
+        assert receipt.venue_ack_received is True
+        assert receipt.venue_command_id
+        assert receipt.venue_command_state == "ACKED"
+        assert receipt.venue_order_type == "FOK"
         assert _receipt_status(receipt) == "SUBMITTED"
         assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "CONSUMED"
         assert _cap_transition_status(receipt) == "CONSUMED"
@@ -4000,6 +4008,12 @@ def test_post_command_executor_exception_terminalizes_aggregate(monkeypatch, tmp
         assert receipt.proof_accepted is True
         assert receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
         assert receipt.reason.startswith("EDLI_LIVE_POST_COMMAND_SUBMIT_FAILURE:calling_executor_submit")
+        assert receipt.qkernel_execution_economics == accepted.qkernel_execution_economics
+        assert receipt.venue_call_started is True
+        assert receipt.venue_ack_received is False
+        assert receipt.venue_command_id
+        assert receipt.venue_command_state == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        assert receipt.venue_order_type == "FOK"
         assert _receipt_status(receipt) == "POST_SUBMIT_UNKNOWN"
         event_types = [
             row["event_type"]
@@ -4143,6 +4157,12 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
 
         assert receipt.submitted is False
         assert receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
+        assert receipt.qkernel_execution_economics == accepted.qkernel_execution_economics
+        assert receipt.venue_call_started is True
+        assert receipt.venue_ack_received is False
+        assert receipt.venue_command_id
+        assert receipt.venue_command_state == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        assert receipt.venue_order_type == "FOK"
         assert _receipt_status(receipt) == "POST_SUBMIT_UNKNOWN"
         receipt_cert = _receipt_cert(receipt)
         assert receipt_cert.payload["venue_call_started"] is True
