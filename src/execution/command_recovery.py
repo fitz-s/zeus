@@ -11417,7 +11417,22 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
             if _trade_fact_count(conn, command_id) > 0:
                 summary["stayed"] += 1
                 continue
-            point_order = _venue_order_payload(get_order(venue_order_id))
+            try:
+                point_order = _venue_order_payload(get_order(venue_order_id))
+            except Exception as exc:
+                from src.venue.response_contracts import VenueResponseShapeError
+
+                if not (
+                    isinstance(exc, VenueResponseShapeError)
+                    and exc.endpoint == "get_order"
+                    and exc.raw == {}
+                ):
+                    raise
+                point_order = {
+                    "orderID": venue_order_id,
+                    "status": "UNKNOWN",
+                    "source_error": "empty_point_order_response",
+                }
             venue_status = (
                 str((point_order or {}).get("status") or (point_order or {}).get("state") or "NOT_FOUND")
                 .upper()
@@ -11433,7 +11448,7 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
             if (
                 fact_state is None
                 and not (
-                    str(row.get("intent_kind") or "").upper() == "EXIT"
+                    str(row.get("intent_kind") or "").upper() in {"ENTRY", "EXIT"}
                     and point_order_no_live_record
                 )
             ):
@@ -11487,14 +11502,18 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
             venue_resp_present_for_terminal_state = None
             if (
                 not no_fill_proven
-                and intent_kind == "EXIT"
+                and intent_kind in {"ENTRY", "EXIT"}
                 and point_order_no_live_record
                 and not matching_open_orders
                 and not matching_trades
                 and _fill_trade_fact_count(conn, command_id) == 0
             ):
                 no_fill_proven = True
-                no_fill_reason = "exit_point_order_no_live_record_terminal_no_fill"
+                no_fill_reason = (
+                    "entry_point_order_no_live_record_terminal_no_fill"
+                    if intent_kind == "ENTRY"
+                    else "exit_point_order_no_live_record_terminal_no_fill"
+                )
                 source_reason = no_fill_reason
                 venue_resp_present_for_terminal_state = False
             if not no_fill_proven:

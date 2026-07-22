@@ -6048,11 +6048,13 @@ class TestRecoveryResolutionTable:
         _advance_to_acked(conn, venue_order_id="ord-001")
         _seed_pending_entry_projection(conn)
         _append_order_fact(conn, state="LIVE", matched_size="0", remaining_size="10")
-        mock_client.get_order.return_value = {
-            "orderID": "ord-001",
-            "status": "CANCELED",
-            "matched_size": "0",
-        }
+        from src.venue.response_contracts import VenueResponseShapeError
+
+        mock_client.get_order.side_effect = VenueResponseShapeError(
+            "get_order",
+            {},
+            "point-order response requires original_size and size_matched fields",
+        )
         mock_client.get_open_orders.return_value = []
         mock_client.get_trades.return_value = []
 
@@ -6075,7 +6077,7 @@ class TestRecoveryResolutionTable:
         order_fact = dict(order_fact)
         payload = json.loads(order_fact.pop("raw_payload_json"))
         assert order_fact == {
-            "state": "CANCEL_CONFIRMED",
+            "state": "VENUE_WIPED",
             "remaining_size": "0",
             "matched_size": "0",
             "source": "REST",
