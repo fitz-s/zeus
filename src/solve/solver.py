@@ -1244,6 +1244,7 @@ class GlobalSingleOrderCandidate:
     ledger_snapshot_id: str
     executable_cost_curve: ExecutableCostCurve
     resolution_identity: str
+    native_bid_levels: tuple[BookLevel, ...] = ()
     execution_mode: Literal["TAKER_LIMIT"] = "TAKER_LIMIT"
     eligibility_reason: GlobalEligibilityReason | None = None
 
@@ -1284,6 +1285,7 @@ def global_candidate_from_native(
     probability_witness: FamilyPayoffWitness,
     ledger_snapshot_id: str,
     book_captured_at_utc: datetime,
+    native_bid_levels: Sequence[BookLevel] = (),
     eligibility_reason: GlobalEligibilityReason | None = None,
 ) -> GlobalSingleOrderCandidate:
     """Materialize one order only after proving payoff/token membership."""
@@ -1337,6 +1339,7 @@ def global_candidate_from_native(
         ledger_snapshot_id=str(ledger_snapshot_id),
         executable_cost_curve=curve,
         resolution_identity=probability_witness.resolution_identity,
+        native_bid_levels=tuple(native_bid_levels),
         eligibility_reason=eligibility_reason,
     )
 

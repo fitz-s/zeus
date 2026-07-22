@@ -87,7 +87,12 @@ class CurrentGlobalAuctionScope:
 
 @dataclass(frozen=True)
 class CurrentGlobalBookAsset:
-    """One current side-native ask ladder in a complete venue epoch."""
+    """One current side-native book in a complete venue epoch.
+
+    ``curve`` owns executable BUY asks. ``bid_levels`` preserves the same
+    immutable capture's native bids so downstream maker/taker policy does not
+    reinterpret an ask-only projection as a one-sided venue book.
+    """
 
     family_key: str
     bin_id: str
@@ -98,6 +103,7 @@ class CurrentGlobalBookAsset:
     token_id: str
     curve: ExecutableCostCurve
     captured_at_utc: datetime
+    bid_levels: tuple[BookLevel, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -734,6 +740,9 @@ def _current_global_book_asset_state(
             token_id=token_id,
             curve=curve,
             captured_at_utc=captured_at_utc,
+            bid_levels=(
+                tuple(sell_curve.levels) if sell_curve is not None else ()
+            ),
         )
         if curve is not None
         else None

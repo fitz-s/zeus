@@ -109,6 +109,7 @@ from src.contracts.executable_market_snapshot import (
     ExecutableMarketSnapshot,
     canonicalize_fee_details,
 )
+from src.contracts.execution_price import ExecutionPrice
 from src.contracts.semantic_types import Direction
 from src.strategy import utility_ranker
 from src.state.collateral_ledger import (
@@ -9362,6 +9363,10 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
     raw_book = {
         "asset_id": "token-no-a",
         "hash": "opaque-venue-hash",
+        "bids": [
+            {"price": "0.35", "size": "10"},
+            {"price": "0.36", "size": "40"},
+        ],
         "asks": [
             {"price": "0.37", "size": "20"},
             {"price": "0.38", "size": "30"},
@@ -9404,20 +9409,66 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
     assert snapshot.min_tick_size == curve.min_tick
     assert snapshot.min_order_size == curve.min_order_size
     assert snapshot.selected_outcome_token_id == curve.token_id
+    assert snapshot.orderbook_top_bid == Decimal("0.36")
+    assert candidate.native_bid_levels == (
+        BookLevel(price=Decimal("0.36"), size=Decimal("40")),
+        BookLevel(price=Decimal("0.35"), size=Decimal("10")),
+    )
     assert snapshot.fee_details["fee_rate_fraction"] == 0.05
     assert snapshot.fee_details["feeSchedule_taker_only"] is True
     assert snapshot.fee_details["source"] == "global_current_gamma_fee_schedule"
     assert snapshot.orderbook_depth_jsonb == json.dumps(
         {
+            "asset_id": "token-no-a",
             "asks": [
                 {"price": "0.37", "size": "20"},
                 {"price": "0.38", "size": "30"},
             ],
-            "bids": [],
+            "bids": [
+                {"price": "0.36", "size": "40"},
+                {"price": "0.35", "size": "10"},
+            ],
         },
         sort_keys=True,
         separators=(",", ":"),
     )
+    proof_mode = era._mode_consistent_ev_for_proof(
+        row=row,
+        direction="buy_no",
+        q_lcb=0.70,
+        execution_price=ExecutionPrice(
+            value=0.39,
+            price_type="fee_adjusted",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        c_cost_95pct=0.39,
+        p_fill_lcb=1.0,
+        minutes_to_event_end=360.0,
+    )
+    assert proof_mode is not None
+    assert proof_mode.chosen_mode == "MAKER"
+    assert proof_mode.policy == "REST_DEFAULT"
+    fresh_mode = era._fresh_rest_then_cross_mode(
+        actionable_payload={
+            "q_lcb_5pct": 0.70,
+            "c_fee_adjusted": 0.39,
+            "direction": "buy_no",
+            "rest_then_cross_policy": "REST_DEFAULT",
+        },
+        executable_snapshot=SimpleNamespace(
+            payload={
+                "market_end_at": (
+                    captured + _dt.timedelta(hours=6)
+                ).isoformat()
+            }
+        ),
+        fresh_best_bid=0.36,
+        fresh_best_ask=0.37,
+        tick_size=0.01,
+        decision_time=captured,
+    )
+    assert fresh_mode == proof_mode.chosen_mode
     assert get_snapshot(conn, curve.snapshot_id) == snapshot
     newer_substrate = replace(
         old,
@@ -10530,6 +10581,12 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
     assert {asset.side for asset in epoch.assets} == {"YES", "NO"}
     assert {asset.side for asset in epoch.sell_assets} == {"YES", "NO"}
     assert all(asset.curve.token_id == asset.token_id for asset in epoch.assets)
+    assert all(
+        asset.bid_levels == (
+            BookLevel(price=Decimal("0.20"), size=Decimal("100")),
+        )
+        for asset in epoch.assets
+    )
     assert all(
         asset.curve.token_id == asset.token_id for asset in epoch.sell_assets
     )

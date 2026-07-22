@@ -1660,7 +1660,9 @@ files:
       The current global one-order path scores held-token SELL as a venue-cent partial-reduction
       optimization against HOLD, including every FAK fill prefix, rather than requiring full-position depth.
       BUY branch wealth uses one shared spendable-cash floor plus exact same-family lower payoffs;
-      unrelated held-token upside cannot be coupled only to the candidate's win branch.
+      unrelated held-token upside cannot be coupled only to the candidate's win branch. A global
+      BUY candidate also carries the same captured native bid levels as its executable ask curve;
+      bids are execution-policy provenance, never a second probability or objective authority.
     downstream:
     - src/engine/qkernel_spine_bridge.py
   src/solve/kappa.py:
@@ -1846,21 +1848,21 @@ files:
   src/engine/event_reactor_adapter.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_adapter
-    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler through the executor boundary. Submit-outcome receipts preserve the complete admitted economics plus durable command and venue-side-effect identity so an acknowledged or unknown submit cannot be reclassified as a retryable pre-venue rejection. A persisted current-evidence shape must carry the shared current probability-semantics revision before it can become forecast authority. The global SELL actuation binds the solver-selected reduction size and close-vs-reduce intent into the exit boundary. Global BUY winner preflight consumes the full current JIT bid/ask before curve re-auction; an unproven fresh mode falls through candidate-locally, while a valid fresh passive-maker verdict reaches the final mode-specific builder without weakening submit authority.
+    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler through the executor boundary. Submit-outcome receipts preserve the complete admitted economics plus durable command and venue-side-effect identity so an acknowledged or unknown submit cannot be reclassified as a retryable pre-venue rejection. A persisted current-evidence shape must carry the shared current probability-semantics revision before it can become forecast authority. The global SELL actuation binds the solver-selected reduction size and close-vs-reduce intent into the exit boundary. Global BUY winner preflight consumes and persists the same immutable native JIT bid/ask book before curve re-auction; an unproven fresh mode falls through candidate-locally, while a valid fresh mode reaches the final mode-specific builder without weakening submit authority or inventing maker availability from an ask-only projection.
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
   src/engine/global_single_order_auction.py:
     zone: K2_K3_coordination
     authority_role: global_single_order_auction_coordinator
-    why: Pure cross-family coordinator that refuses partial or malformed family sets, binds every prepared full-simplex family and native full-depth YES/NO order to one current portfolio witness, and returns at most one terminal-wealth-optimal winner; it performs no DB or venue I/O.
+    why: Pure cross-family coordinator that refuses partial or malformed family sets, binds every prepared full-simplex family and native full-depth YES/NO order to one current portfolio witness, preserves each current asset's native bid levels for later execution-policy proof, and returns at most one terminal-wealth-optimal winner; it performs no DB or venue I/O.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/events/reactor.py
   src/engine/global_auction_universe.py:
     zone: K2_K3_coordination
     authority_role: current_global_auction_scope_reader
-    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds full condition/native-token probability witnesses to current Gamma tradeability and requests CLOB books only for currently executable legs, so neither a reactor queue page, local-date rollover, nor a closed sibling can silently erase or block a feasible reduce-only SELL.
+    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds full condition/native-token probability witnesses to current Gamma tradeability and captures each BUY asset's native ask curve together with the same book's bid levels, so neither a reactor queue page, local-date rollover, a closed sibling, nor an ask-only projection can silently erase a feasible action or falsify maker availability.
     hazards:
     - NO_WRITE_PATH
     downstream:

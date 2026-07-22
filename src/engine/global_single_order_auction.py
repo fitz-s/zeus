@@ -769,6 +769,7 @@ def select_prepared_global_auction(
                         probability_witness=probability,
                         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
                         book_captured_at_utc=asset.captured_at_utc,
+                        native_bid_levels=asset.bid_levels,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - one malformed asset invalidates globality

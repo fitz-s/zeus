@@ -10491,8 +10491,11 @@ def _global_buy_candidate_from_raw_book(
     if raw_token != token_id:
         raise ValueError("GLOBAL_BUY_JIT_TOKEN_MISMATCH")
     raw_asks = raw_book.get("asks")
+    raw_bids = raw_book.get("bids")
     if not isinstance(raw_asks, list) or not raw_asks:
         raise ValueError("GLOBAL_BUY_JIT_ASKS_MISSING")
+    if raw_bids is not None and not isinstance(raw_bids, list):
+        raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID")
     try:
         levels = tuple(
             BookLevel(
@@ -10506,6 +10509,25 @@ def _global_buy_candidate_from_raw_book(
         raise ValueError("GLOBAL_BUY_JIT_ASK_LEVEL_INVALID") from exc
     if len(levels) != len(raw_asks):
         raise ValueError("GLOBAL_BUY_JIT_ASK_LEVEL_INVALID")
+    try:
+        bid_levels = tuple(
+            sorted(
+                (
+                    BookLevel(
+                        price=Decimal(str(raw["price"])),
+                        size=Decimal(str(raw["size"])),
+                    )
+                    for raw in (raw_bids or ())
+                    if isinstance(raw, Mapping)
+                ),
+                key=lambda level: level.price,
+                reverse=True,
+            )
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID") from exc
+    if len(bid_levels) != len(raw_bids or ()):
+        raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID")
     try:
         min_tick = Decimal(
             str(raw_book.get("tick_size") or selected_curve.min_tick)
@@ -10550,6 +10572,7 @@ def _global_buy_candidate_from_raw_book(
         book_captured_at_utc=captured_at_utc,
         execution_curve_identity=executable_curve_identity(curve),
         executable_cost_curve=curve,
+        native_bid_levels=bid_levels,
         eligibility_reason=None,
     )
 
@@ -10611,13 +10634,19 @@ def _persist_global_candidate_executable_snapshot(
     raw_orderbook_hash = str(getattr(curve, "book_hash", "") or "")
     if len(raw_orderbook_hash) != 64:
         raise ValueError("GLOBAL_JIT_SNAPSHOT_BOOK_HASH_INVALID")
+    bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
+    best_bid = max((level.price for level in bid_levels), default=None)
     depth = json.dumps(
         {
+            "asset_id": candidate_token,
             "asks": [
                 {"price": str(level.price), "size": str(level.size)}
                 for level in levels
             ],
-            "bids": [],
+            "bids": [
+                {"price": str(level.price), "size": str(level.size)}
+                for level in bid_levels
+            ],
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -10657,7 +10686,7 @@ def _persist_global_candidate_executable_snapshot(
             curve.min_tick,
             curve.min_order_size,
             fee_details,
-            None,
+            best_bid,
             levels[0].price,
             depth,
             raw_orderbook_hash,
@@ -10694,7 +10723,7 @@ def _persist_global_candidate_executable_snapshot(
             min_tick_size=curve.min_tick,
             min_order_size=curve.min_order_size,
             fee_details=fee_details,
-            orderbook_top_bid=None,
+            orderbook_top_bid=best_bid,
             orderbook_top_ask=levels[0].price,
             orderbook_depth_jsonb=depth,
             raw_orderbook_hash=raw_orderbook_hash,
