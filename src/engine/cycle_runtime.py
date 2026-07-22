@@ -129,7 +129,19 @@ _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
-_HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_LIMIT = 2
+_HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_MIN = 2
+_HELD_POSITION_MONITOR_FULL_COVERAGE_CYCLES = 3
+
+
+def _held_position_monitor_positive_progress_limit(position_count: int) -> int:
+    """Keep one full held book inside three nominal monitor cycles."""
+
+    return max(
+        _HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_MIN,
+        math.ceil(max(0, int(position_count)) / _HELD_POSITION_MONITOR_FULL_COVERAGE_CYCLES),
+    )
+
+
 def _held_position_monitor_budget_seconds(override: float | None = None) -> float:
     raw = override
     if raw is None:
@@ -5802,6 +5814,10 @@ def execute_monitoring_phase(
     )
     network_prefetch_started = False
     network_prefetch_unavailable = False
+    monitor_progress_limit = _held_position_monitor_positive_progress_limit(
+        len(monitor_positions)
+    )
+    summary["held_monitor_positive_progress_limit"] = monitor_progress_limit
 
     for position_index, pos in enumerate(monitor_positions):
         if urgent_preemption_requested():
@@ -5816,7 +5832,7 @@ def execute_monitoring_phase(
         monitor_progress_limit_reached = (
             monitor_budget_seconds > 0.0
             and monitor_progress_count
-            >= _HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_LIMIT
+            >= monitor_progress_limit
         )
         if (
             (

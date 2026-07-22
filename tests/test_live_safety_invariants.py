@@ -443,6 +443,16 @@ def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress
     assert len(monitor_results) == expected_count
 
 
+def test_monitor_progress_limit_covers_large_held_book_within_three_cycles():
+    """A fixed two-position cap cannot satisfy the ten-minute live freshness SLO."""
+    from src.engine import cycle_runtime
+
+    assert cycle_runtime._held_position_monitor_positive_progress_limit(0) == 2
+    assert cycle_runtime._held_position_monitor_positive_progress_limit(3) == 2
+    assert cycle_runtime._held_position_monitor_positive_progress_limit(9) == 3
+    assert cycle_runtime._held_position_monitor_positive_progress_limit(23) == 8
+
+
 @pytest.mark.parametrize(
     ("defer_partial_gaps", "expected_events", "prefetched"),
     (
