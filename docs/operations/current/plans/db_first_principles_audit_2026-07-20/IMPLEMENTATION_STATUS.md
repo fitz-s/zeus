@@ -7,9 +7,14 @@
 **本续跑新交(worktree 已提交,live 零接触)**
 - `scripts/ops/reconcile_settlement_outcomes.py` + 抗体(4 测试绿,commit 63ce61a1)— 只读跨库对账门(§3.5 anti-join)。**活库只读实测确证**:settled-无-outcome gap 从审计时 16 增至 **27**,27/27 全 `VENUE_RESOLVED`(系统性路径分歧、非 partial-commit;根治=W4 durable outbox 操作员门)。修了 brief 的 schema 误设(`settlement_authority` 非 position_current 列、在 position_events.payload_json)。
 
-**在途(本 session 并行)**
-- Agent `capture-track-a`:capture-policy Track-A 首个可落地增量(additive-only:`capture_trigger` 幂等 ALTER + compact 表 DDL + 单写点分支打标 + Track-A log-only hydration 断言 + 抗体)。设计 `implementation/capture_policy_spec.md`。
-- Agent `cert-v1-freeze`:证书 v1 golden-vector 冻结抗体(护结算身份 preimage 字节)。设计 `implementation/certificate_v1_freeze.md`。
+**本 session 并行三 agent — 全部已交付+主线程亲验+提交(81 抗体全绿 @ 40760942f)**
+- `capture-track-a` → **capture-policy Track-A**(commit 40760942f,25 测试)。additive-only:`capture_trigger` 幂等 ALTER+CHECK、`executable_market_snapshot_compact` 表(创建但未用)、每个 insert_snapshot 写点打标(JIT→JIT_SUBMIT、bulk→PRIORITY_MARKER/DISCOVERY_SWEEP)、`_snapshot_from_row` 单入口 log-only hydration check(`try/except pass` 永不 raise)。diff 逐行确认零控制流改动、零既有读者改动。
+  - **操作员落地要点**:①落 live 前须 `python scripts/check_schema_fingerprint.py --write-pin`(新增列+表→schema 指纹变,full-conftest 会 SCHEMA DRIFT 硬退)②Track-A check 在 money-path 读 DISCOVERY_SWEEP 行时 log warning = 设计要测的 false-negative 信号,可能高频,部署留意。
+  - **named assumptions**(留后续增量):全 flattened-priority 记 PRIORITY_MARKER(无法在此还原 held/open-rest 子因,不影响 Track-A 安全/路由);未造 NEAR_THRESHOLD/KEYFRAME 机制(env var 零命中,非"给既有捕获打标"范畴)。
+- `cert-v1-freeze` → **证书 v1 golden-vector 冻结**(commit 3d7bf34d1,9 测试)。pin 真实生产路径(build_certificate/canonicalization.stable_hash/ledger.insert_idempotent/no_submit_receipts)的 payload/cert/receipt hash 为硬编码字面量 → E1/E4/任何 canonicalization 改动移动 v1 preimage 字节即 loud fail。证 edge 顺序 load-bearing、timestamp reparse 陷阱、E4 双身份 mutation。**诚实 gap**:global-auction receipt_hash(E1)未 pin(需活 conn+大量内部态,重构不可信)。
+- `outbox-recon` → **settlement 对账只读监控**(commit 63ce61a1,4 测试)。见上。
+
+**在途**
 - Consult `REQ-20260721-204133-420956`:4 锁+336 零锁写者统一 cutover 对撞(bridge-lock 增量 vs fenced big-bang;connection-factory pushdown;BULK-yield 保 K3;world 进程内锁跨进程折叠)。答案落 `/tmp/cgc/answer_REQ-20260721-204133-420956.txt`。
 
 **连接层已确认(consult 落地即可实现)**:`world_write_mutex`(scheme 4)= 进程内 threading.Lock、只跨线程、**不跨进程**;`world_write_lock` 对已开事务幂等(re-entrancy 模式);checkpoint 助手与写锁子系统正交(W5-2/3 独立)。待批:W5-2 false-green alert(`busy==0` 恒真→WARNING 死码;真信号 `checkpointed<log`)、W5-3 TRUNCATE-vs-PASSIVE 张力(需判断/consult)、W5-8 fail-open rwc(`no such table` 源)。
