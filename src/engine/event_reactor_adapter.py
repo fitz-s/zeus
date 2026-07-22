@@ -12962,6 +12962,11 @@ def _current_global_actuation_prepared_family(
         for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
     ):
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
+    if isinstance(selected, DeterministicBinPayoffWitness):
+        _bind_current_deterministic_day0_witness(
+            current_day0_payload,
+            selected,
+        )
     return (
         dataclass_replace(current, probability_witness=selected),
         current_day0_payload,
@@ -29368,6 +29373,28 @@ def _bind_selected_deterministic_day0_probability_authority(
         }
     )
     payload["day0_probability_authority"] = block
+
+
+def _bind_current_deterministic_day0_witness(
+    payload: dict[str, object],
+    witness: object,
+) -> None:
+    """Carry the auction's current native tokens into its revalidated Day0 payload."""
+
+    bindings = tuple(getattr(witness, "bindings", ()) or ())
+    witness_identity = str(getattr(witness, "witness_identity", "") or "").strip()
+    if not bindings or not witness_identity:
+        raise ValueError("GLOBAL_DAY0_DETERMINISTIC_WITNESS_BINDING_MISSING")
+    payload["_edli_day0_deterministic_bindings"] = [
+        {
+            "bin_id": str(getattr(binding, "bin_id", "") or ""),
+            "condition_id": str(getattr(binding, "condition_id", "") or ""),
+            "yes_token_id": str(getattr(binding, "yes_token_id", "") or "") or None,
+            "no_token_id": str(getattr(binding, "no_token_id", "") or "") or None,
+        }
+        for binding in bindings
+    ]
+    payload["_edli_day0_deterministic_witness_identity"] = witness_identity
 
 
 _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (

@@ -348,6 +348,54 @@ def test_day0_deterministic_payoff_round_trips_calibration_authority():
     }
     city = runtime_cities_by_name()[_CITY]
 
+    current_bindings = (
+        OutcomeTokenBinding(
+            bin_id="bin-72f",
+            condition_id="condition-72f",
+            yes_token_id="current-yes-token-72f",
+            no_token_id="current-no-token-72f",
+        ),
+        OutcomeTokenBinding(
+            bin_id="bin-73f",
+            condition_id="condition-73f",
+            yes_token_id="current-yes-token-73f",
+            no_token_id="current-no-token-73f",
+        ),
+    )
+    current_witness_identity = deterministic_bin_payoff_witness_identity(
+        family_key=family_key,
+        bindings=current_bindings,
+        exact_yes_payoffs=exact_yes_payoffs,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=topology_identity,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=band_alpha,
+        band_basis=band_basis,
+        captured_at_utc=captured_at,
+    )
+    payload["token_id"] = "current-no-token-72f"
+    with pytest.raises(
+        ValueError,
+        match="DAY0_CALIBRATION_AUTHORITY_BLOCKED:deterministic_selected_token",
+    ):
+        _day0_calibration_authority_payload_and_clock(
+            city=city,
+            family=_family(),
+            payload=payload,
+            forecast_payload={"horizon_profile": "full"},
+            decision_time=DECISION_TIME,
+        )
+    adapter._bind_current_deterministic_day0_witness(
+        payload,
+        SimpleNamespace(
+            bindings=current_bindings,
+            witness_identity=current_witness_identity,
+        ),
+    )
+
     stale_block = adapter._global_day0_probability_authority_payload(payload)
     stale_block.update(
         {
