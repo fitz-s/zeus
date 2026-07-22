@@ -882,16 +882,24 @@ def _enqueue_single_family_belief_reseed_failsoft(
     }
 
 
+_HELD_BELIEF_PENDING_SEED_SCAN_LIMIT = 256
+
+
 def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
-    """Return (Path, payload) of the freshest on-disk materialization seed for the
-    family, or None. Reads ONLY already-written seed files (pending + processed) —
-    NO seed is written, NO network fetch, NO DB write. The seed carries the
-    Open-Meteo anchor payload + precision metadata paths the read-through needs.
+    """Return the freshest bounded pending seed for one held family, or None.
+
+    This runs synchronously on the held-position monitor worker. Processed
+    seed/request archive enumeration has no monitor-budget bound and can starve
+    every exit. Inspect only the live pending queue and cap directory entries.
+    A miss fails closed; the caller's asynchronous family reseed is the repair
+    lane.
 
     The seed name is ``{city}.{target_date}.{metric}.{stamp}.json``; we pick the
-    lexicographically-latest stamp (ISO-ordered) across the configured seed dirs.
+    lexicographically-latest stamp (ISO-ordered) from the bounded pending slice.
     """
     import json as _json
+    import os as _os
+    from itertools import islice
     from pathlib import Path
 
     try:
@@ -905,28 +913,32 @@ def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
     # Normalize the family file-name segments the seed builder uses (spaces -> '_').
     city_seg = str(city).replace(" ", "_")
     prefix = f"{city_seg}.{target_date}.{metric}."
-    candidate_dirs = [
-        cfg.get("seed_dir"),
-        cfg.get("seed_processed_dir"),
-        cfg.get("processed_dir"),
-    ]
+    seed_dir = cfg.get("seed_dir")
+    if not seed_dir:
+        return None
+    base = Path(str(seed_dir))
+    if not base.exists():
+        return None
     candidates: list[tuple[str, Path]] = []
-    for d in candidate_dirs:
-        if not d:
-            continue
-        base = Path(str(d))
-        if not base.exists():
-            continue
-        try:
-            for path in base.glob(f"{prefix}*.json"):
-                name = path.name
-                if name.endswith(".receipt.json"):
+    try:
+        with _os.scandir(base) as entries:
+            for entry in islice(
+                entries,
+                _HELD_BELIEF_PENDING_SEED_SCAN_LIMIT,
+            ):
+                name = entry.name
+                if (
+                    not name.startswith(prefix)
+                    or not name.endswith(".json")
+                    or name.endswith(".receipt.json")
+                    or not entry.is_file(follow_symlinks=False)
+                ):
                     continue
                 # Compare by the trailing stamp portion (ISO timestamps sort lexically).
                 stamp = name[len(prefix):]
-                candidates.append((stamp, path))
-        except OSError:
-            continue
+                candidates.append((stamp, base / name))
+    except OSError:
+        return None
     for _stamp, path in sorted(candidates, reverse=True):
         try:
             payload = _json.loads(path.read_text(encoding="utf-8"))

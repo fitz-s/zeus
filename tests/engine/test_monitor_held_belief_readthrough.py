@@ -304,3 +304,81 @@ def test_freshest_seed_skips_payload_without_target_local_day(tmp_path, monkeypa
     selected_path, selected_payload = selected
     assert selected_path.name.endswith("20260624T222503Z.json")
     assert selected_payload["openmeteo_payload_json"].endswith("2026-06-26_low.json")
+
+
+def test_freshest_seed_does_not_enumerate_processed_archives(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    import src.data.replacement_forecast_production as prod
+    import src.engine.monitor_refresh as mr
+
+    seed_dir = tmp_path / "seeds"
+    seed_processed_dir = tmp_path / "seeds_processed"
+    processed_dir = tmp_path / "processed"
+    for path in (seed_dir, seed_processed_dir, processed_dir):
+        path.mkdir()
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {
+            "seed_dir": str(seed_dir),
+            "seed_processed_dir": str(seed_processed_dir),
+            "processed_dir": str(processed_dir),
+        },
+    )
+    real_scandir = os.scandir
+
+    def guarded_scandir(path):
+        assert Path(path) == seed_dir
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", guarded_scandir)
+
+    assert mr._freshest_family_seed_on_disk(
+        city="Seoul",
+        target_date="2026-07-22",
+        metric="high",
+    ) is None
+
+
+def test_freshest_seed_caps_pending_queue_enumeration(tmp_path, monkeypatch):
+    import os
+
+    import src.data.replacement_forecast_production as prod
+    import src.engine.monitor_refresh as mr
+
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"seed_dir": str(seed_dir)},
+    )
+    monkeypatch.setattr(mr, "_HELD_BELIEF_PENDING_SEED_SCAN_LIMIT", 3)
+    seen = 0
+
+    class Entries:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal seen
+            seen += 1
+            return SimpleNamespace(name=f"unrelated-{seen}.json")
+
+    monkeypatch.setattr(os, "scandir", lambda _path: Entries())
+
+    assert mr._freshest_family_seed_on_disk(
+        city="Seoul",
+        target_date="2026-07-22",
+        metric="high",
+    ) is None
+    assert seen == 3
