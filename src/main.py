@@ -5411,40 +5411,75 @@ def _edli_mainstream_warm_cycle() -> None:
     )
 
 
+# WAL checkpoint starvation-alert threshold, in FRAMES (PRAGMA wal_checkpoint
+# reports frame counts, not bytes; SQLite's default page size is 4 KiB and Zeus
+# never overrides it — `grep -rn "PRAGMA page_size" src/` is 0 hits — so
+# bytes ≈ frames × 4096). W5-2/W5-3 fix (2026-07-21): the audit finding's live
+# evidence showed the trade WAL oscillating 95→230→373 MB as NORMAL PASSIVE
+# partial-drain behavior under transient reader pressure, while the
+# 2026-06-16 810 MB incident this backstop guards against is a reader that
+# never releases the floor at all. 512 MiB (536,870,912 bytes / 4096 =
+# 131,072 frames) sits above the observed healthy oscillation ceiling (no
+# false positive on a normal partial-drain peak) while leaving real
+# early-warning margin before the incident's 810 MB.
+_WAL_STARVATION_FRAME_THRESHOLD = 131_072  # 512 MiB / 4 KiB page
+
+
+def _wal_checkpoint_is_starved(log_frames: int, checkpointed_frames: int) -> bool:
+    """True when a PASSIVE WAL-checkpoint result signals real, growing starvation.
+
+    W5-2 fix (2026-07-21): PASSIVE checkpoints never return SQLITE_BUSY — the
+    triple's first field (``busy``) is a PASSIVE-mode constant 0, so branching
+    on it (the prior ``busy == 0`` gate) was always-true dead code that could
+    never alert. The real signal that a reader is pinning the WAL floor is the
+    checkpoint failing to drain the full log (``checkpointed_frames <
+    log_frames``); a lone partial drain is normal under transient reader
+    pressure (live oscillation 95-373 MB), so this only fires once the
+    undrained log has ALSO grown past the healthy oscillation band
+    (``_WAL_STARVATION_FRAME_THRESHOLD``) — i.e. non-drain that means real
+    unbounded growth, not a routine partial checkpoint.
+    """
+    return checkpointed_frames < log_frames and log_frames > _WAL_STARVATION_FRAME_THRESHOLD
+
+
 @_scheduler_job("world_wal_checkpoint")
 def _world_wal_checkpoint_cycle() -> None:
     """Periodic zeus-world.db WAL PASSIVE checkpoint backstop.
 
     Root (critic-proven, live): ``state/zeus-world.db-wal`` grew to GBs because
     long-lived READER connections held a WAL snapshot across cycles, pinning the
-    WAL floor so ``wal_checkpoint`` returned BUSY ``(1,-1,-1)`` and never
-    truncated → unbounded growth → eventual lock-starvation of opportunity_events
-    emission (30-min ZERO candidates). Part 1 releases each long-lived reader's
-    snapshot per cycle so the floor advances; THIS job is the periodic backstop
-    that checkpoints freed frames via ``PRAGMA wal_checkpoint(PASSIVE)``.
+    WAL floor so ``wal_checkpoint`` could not drain the full log
+    (``checkpointed_frames < log_frames``) and never truncated → unbounded
+    growth → eventual lock-starvation of opportunity_events emission (30-min
+    ZERO candidates). Part 1 releases each long-lived reader's snapshot per
+    cycle so the floor advances; THIS job is the periodic backstop that
+    checkpoints freed frames via ``PRAGMA wal_checkpoint(PASSIVE)``.
 
-    Observability: the ``(busy, log_frames, checkpointed_frames)`` triple is
-    ALWAYS logged. ``busy == 0`` = safe frames copied; a CHRONIC ``busy == 1`` is a loud
-    signal that a reader is still pinning the floor (a part-1 regression) — it is
-    NOT silenced. Not a table writer; ``checkpoint_world_wal`` uses a dedicated
-    short-lived connection and does NOT take the world write mutex. PASSIVE mode
-    must not wait behind live writers, so it cannot block held-position monitor
-    redecision. Fail-soft via the decorator.
+    Observability (W5-2 fix, 2026-07-21): the ``(busy, log_frames,
+    checkpointed_frames)`` triple is ALWAYS logged, but ``busy`` is a
+    PASSIVE-mode constant 0 (SQLite never invokes the busy handler or returns
+    SQLITE_BUSY for PASSIVE) so it is no longer branched on — see
+    ``_wal_checkpoint_is_starved`` for the real starvation signal, which now
+    drives the WARNING. Not a table writer; ``checkpoint_world_wal`` uses a
+    dedicated short-lived connection and does NOT take the world write mutex.
+    PASSIVE mode must not wait behind live writers, so it cannot block
+    held-position monitor redecision. Fail-soft via the decorator.
     """
     from src.state.db import checkpoint_world_wal
 
     busy, log_frames, ckpt_frames = checkpoint_world_wal()
-    if busy == 0:
-        logger.info(
-            "world WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
-            busy, log_frames, ckpt_frames,
-        )
-    else:
-        # BUSY = a reader still pins the WAL floor.
+    if _wal_checkpoint_is_starved(log_frames, ckpt_frames):
+        # Not draining AND past the healthy oscillation band.
         # Loud (warning) so chronic starvation is visible, not silent.
         logger.warning(
-            "world WAL checkpoint(PASSIVE): BUSY busy=%d log_frames=%d checkpointed=%d "
-            "— a reader is pinning the WAL floor (part-1 per-cycle release regression?)",
+            "world WAL checkpoint(PASSIVE): STARVED busy=%d log_frames=%d "
+            "checkpointed=%d (threshold=%d) — a reader is pinning the WAL floor "
+            "(part-1 per-cycle release regression?)",
+            busy, log_frames, ckpt_frames, _WAL_STARVATION_FRAME_THRESHOLD,
+        )
+    else:
+        logger.info(
+            "world WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
             busy, log_frames, ckpt_frames,
         )
 
@@ -5454,28 +5489,62 @@ def _trades_wal_checkpoint_cycle() -> None:
     """Periodic zeus_trades.db WAL PASSIVE checkpoint backstop — trade-DB twin.
 
     The 810 MB ``state/zeus_trades.db-wal`` incident (2026-06-16, live): a long-lived
-    reader pinned the WAL floor, the -wal never truncated, ``executable_market_
+    reader pinned the WAL floor, so ``wal_checkpoint`` could not drain the full log
+    (``checkpointed_frames < log_frames``) and never truncated, ``executable_market_
     snapshots`` writes failed ``database is locked`` (auto-checkpoint contention on
     every write) → ``fresh_executable_city_count=0`` → the q-kernel spine could not
     price fresh families → no crosses. zeus-world.db had this backstop; the trade DB
-    did not. Same discipline/observability as ``_world_wal_checkpoint_cycle``: a
-    dedicated short-lived connection, no write mutex, the (busy, log, checkpointed)
-    triple ALWAYS logged; a chronic ``busy == 1`` is the loud signal that a reader is
-    not releasing the trade-DB floor. PASSIVE mode must not wait behind the live
-    monitor writer. Fail-soft via the decorator.
+    did not. Same discipline/observability as ``_world_wal_checkpoint_cycle`` (see
+    its docstring for the W5-2 fix): a dedicated short-lived connection, no write
+    mutex; ``_wal_checkpoint_is_starved`` drives the WARNING, not ``busy`` (always 0
+    for PASSIVE). PASSIVE mode must not wait behind the live monitor writer.
+    Fail-soft via the decorator.
     """
     from src.state.db import checkpoint_trades_wal
 
     busy, log_frames, ckpt_frames = checkpoint_trades_wal()
-    if busy == 0:
+    if _wal_checkpoint_is_starved(log_frames, ckpt_frames):
+        logger.warning(
+            "trades WAL checkpoint(PASSIVE): STARVED busy=%d log_frames=%d "
+            "checkpointed=%d (threshold=%d) — a reader is pinning the trade-DB "
+            "WAL floor (long-lived reader not releasing)",
+            busy, log_frames, ckpt_frames, _WAL_STARVATION_FRAME_THRESHOLD,
+        )
+    else:
         logger.info(
             "trades WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
             busy, log_frames, ckpt_frames,
         )
-    else:
+
+
+@_scheduler_job("forecasts_wal_checkpoint")
+def _forecasts_wal_checkpoint_cycle() -> None:
+    """Periodic zeus-forecasts.db WAL PASSIVE checkpoint backstop — forecasts twin.
+
+    W5-4 (2026-07-21 audit finding): forecasts had NO checkpoint backstop at
+    all — only the default ``wal_autocheckpoint`` (1000 pages ≈ 4 MB) —
+    structurally unguarded against the same reader-pinning-the-floor
+    starvation world/trades were patched for, masked so far only by the
+    forecasts WAL being the smallest of the three canonical DBs (observed
+    2.0-7.7 MB vs. trades' 95-373 MB). Same discipline/observability as
+    ``_world_wal_checkpoint_cycle``: ``checkpoint_forecasts_wal`` uses a
+    dedicated short-lived connection, no write mutex; ``_wal_checkpoint_is_starved``
+    drives the WARNING. PASSIVE mode must not wait behind live forecast
+    writers. Fail-soft via the decorator.
+    """
+    from src.state.db import checkpoint_forecasts_wal
+
+    busy, log_frames, ckpt_frames = checkpoint_forecasts_wal()
+    if _wal_checkpoint_is_starved(log_frames, ckpt_frames):
         logger.warning(
-            "trades WAL checkpoint(PASSIVE): BUSY busy=%d log_frames=%d checkpointed=%d "
-            "— a reader is pinning the trade-DB WAL floor (long-lived reader not releasing)",
+            "forecasts WAL checkpoint(PASSIVE): STARVED busy=%d log_frames=%d "
+            "checkpointed=%d (threshold=%d) — a reader is pinning the "
+            "forecasts-DB WAL floor (long-lived reader not releasing)",
+            busy, log_frames, ckpt_frames, _WAL_STARVATION_FRAME_THRESHOLD,
+        )
+    else:
+        logger.info(
+            "forecasts WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
             busy, log_frames, ckpt_frames,
         )
 
@@ -6932,27 +7001,52 @@ def main():
         coalesce=True,
         executor="observability",
     )
-    # WAL checkpoint-starvation backstop (2026-06-04, part 2): periodic
-    # PRAGMA wal_checkpoint(TRUNCATE) on zeus-world.db so the -wal file cannot
-    # grow unboundedly when a reader transiently pins the floor between part-1
-    # per-cycle releases. Mode-independent (the WAL bloat afflicts every mode),
-    # so registered unconditionally. ~90s cadence (> the 60s reactor interval so
-    # it does not fight an in-flight reactor read every tick; coalesce/max=1 so a
-    # slow checkpoint never stacks).
+    # WAL checkpoint-starvation backstop (2026-06-04, part 2; comment corrected
+    # 2026-07-21 per audit finding W5-3 — this previously said TRUNCATE, but the
+    # implementation has always run PASSIVE): periodic
+    # PRAGMA wal_checkpoint(PASSIVE) on zeus-world.db so frames behind the WAL
+    # floor get reclaimed as soon as a transient reader releases it (part-1
+    # per-cycle releases). PASSIVE is intentional, not a downgrade: unlike
+    # TRUNCATE/FULL/RESTART it never waits behind or blocks a live writer.
+    # Design tension (W5-3, unresolved): PASSIVE alone does not BOUND the file —
+    # it drains frames but never truncates — so the -wal can still float in a
+    # wide healthy range (observed 95-373 MB) instead of converging to ~0;
+    # truly bounding it would need a periodic TRUNCATE/FULL during a
+    # demonstrated low-traffic window. Flagged for operator/consult review
+    # rather than risking a blocking checkpoint on the live write path here.
+    # Mode-independent (the WAL bloat afflicts every mode), so registered
+    # unconditionally. ~90s cadence (> the 60s reactor interval so it does not
+    # fight an in-flight reactor read every tick; coalesce/max=1 so a slow
+    # checkpoint never stacks).
     scheduler.add_job(
         _world_wal_checkpoint_cycle, "interval", seconds=90,
         id="world_wal_checkpoint", next_run_time=_utc_run_time_after(120.0),
         max_instances=1, coalesce=True,
     )
-    # zeus_trades.db WAL TRUNCATE backstop (2026-06-16, the 810MB -wal incident).
-    # The trade DB had no checkpoint backstop (only zeus-world.db did), so a reader
-    # pinning the floor let zeus_trades.db-wal grow unbounded → snapshot-capture
-    # writes failed `database is locked` → fresh_executable_city_count=0 → the spine
-    # starved of priceable families. Same 90s cadence; offset start so it doesn't
-    # fire in lockstep with the world checkpoint.
+    # zeus_trades.db WAL PASSIVE checkpoint backstop (2026-06-16, the 810MB -wal
+    # incident; comment corrected 2026-07-21 — previously said TRUNCATE, the
+    # impl has always run PASSIVE; see the world job's comment above for the
+    # unresolved W5-3 bounding tension). The trade DB had no checkpoint backstop
+    # (only zeus-world.db did), so a reader pinning the floor let
+    # zeus_trades.db-wal grow unbounded → snapshot-capture writes failed
+    # `database is locked` → fresh_executable_city_count=0 → the spine starved
+    # of priceable families. Same 90s cadence; offset start so it doesn't fire
+    # in lockstep with the world checkpoint.
     scheduler.add_job(
         _trades_wal_checkpoint_cycle, "interval", seconds=90,
         id="trades_wal_checkpoint", next_run_time=_utc_run_time_after(135.0),
+        max_instances=1, coalesce=True,
+    )
+    # zeus-forecasts.db WAL PASSIVE checkpoint backstop (2026-07-21, audit
+    # finding W5-4). forecasts had NO checkpoint backstop — only the default
+    # wal_autocheckpoint (1000 pages ≈ 4 MB) — structurally unguarded against
+    # the same reader-pinning starvation world/trades were patched for, masked
+    # so far only by forecasts having the smallest WAL of the three canonical
+    # DBs (observed 2.0-7.7 MB vs. trades' 95-373 MB). Same 90s cadence; offset
+    # start so it doesn't fire in lockstep with world/trades.
+    scheduler.add_job(
+        _forecasts_wal_checkpoint_cycle, "interval", seconds=90,
+        id="forecasts_wal_checkpoint", next_run_time=_utc_run_time_after(150.0),
         max_instances=1, coalesce=True,
     )
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env

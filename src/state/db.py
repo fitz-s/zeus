@@ -716,19 +716,26 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
     Root (critic-proven, live): ``state/zeus-world.db-wal`` grows to GBs because
     long-lived READER connections hold a WAL snapshot (read-mark) across cycles.
     The checkpointer can only reclaim frames OLDER than the oldest active reader's
-    mark, so while a reader pins the floor ``wal_checkpoint`` returns BUSY
-    (``(1,-1,-1)``) and the -wal file never truncates → unbounded growth →
-    eventual lock-starvation of opportunity_events emission (30-min ZERO
-    candidates). Part 1 of the fix releases each long-lived reader's snapshot
-    per cycle (``conn.rollback()`` between polls) so the floor advances; THIS
-    function is the periodic backstop that actually reclaims the freed frames.
+    mark, so while a reader pins the floor ``wal_checkpoint`` copies fewer frames
+    than are in the log (``checkpointed_frames < log_frames``) and the -wal file
+    never truncates → unbounded growth → eventual lock-starvation of
+    opportunity_events emission (30-min ZERO candidates). Part 1 of the fix
+    releases each long-lived reader's snapshot per cycle (``conn.rollback()``
+    between polls) so the floor advances; THIS function is the periodic backstop
+    that actually reclaims the freed frames.
 
     Returns the ``(busy, log_frames, checkpointed_frames)`` triple from
     ``wal_checkpoint(PASSIVE)``. PASSIVE checkpoints copy all currently safe WAL
     frames without waiting for readers/writers or trying to truncate the file.
     That preserves live writer priority: a checkpoint must never sit in SQLite's
     busy handler while held-position monitor/redecision work is waiting to write.
-    A chronic non-zero ``busy`` result is still observable in caller logs.
+    W5-2 fix (2026-07-21): ``busy`` (row[0]) is a PASSIVE-mode constant 0 —
+    ``sqlite3_wal_checkpoint_v2`` never invokes the busy handler and never
+    returns SQLITE_BUSY for PASSIVE; that field is 1 only for a blocked
+    RESTART/FULL/TRUNCATE checkpoint, none of which this function runs. The
+    real reader-pinning-the-floor signal is ``checkpointed_frames < log_frames``
+    (row[2] < row[1]); callers (``main.py``'s ``_wal_checkpoint_is_starved``)
+    alert on that, not on ``busy``.
 
     Lock discipline: a checkpoint is NOT a write transaction. SQLite serializes
     checkpoints internally (the checkpoint lock), so this MUST NOT take the
@@ -756,10 +763,11 @@ def checkpoint_trades_wal() -> tuple[int, int, int]:
 
     Root (live-evidenced 2026-06-16): ``state/zeus_trades.db-wal`` grew to 810 MB
     because a long-lived READER connection in the live daemon held a WAL snapshot
-    (read-mark) across cycles, pinning the WAL floor so ``wal_checkpoint`` returned
-    BUSY and never truncated → unbounded growth → ``executable_market_snapshots``
-    writes failed ``database is locked`` (auto-checkpoint contention on every write)
-    → ``fresh_executable_city_count=0`` → the q-kernel spine could not price fresh
+    (read-mark) across cycles, pinning the WAL floor so ``wal_checkpoint`` could
+    not drain the full log (``checkpointed_frames < log_frames``) and never
+    truncated → unbounded growth → ``executable_market_snapshots`` writes failed
+    ``database is locked`` (auto-checkpoint contention on every write) →
+    ``fresh_executable_city_count=0`` → the q-kernel spine could not price fresh
     families → no crosses. zeus-world.db already had this backstop; the trade DB did
     not. Same lock discipline: a dedicated short-lived connection, NO process-global
     write mutex (a checkpoint is not a write txn; SQLite serializes checkpoints
@@ -767,9 +775,45 @@ def checkpoint_trades_wal() -> tuple[int, int, int]:
 
     Returns the ``(busy, log_frames, checkpointed_frames)`` triple. PASSIVE mode
     is intentional for live: reclaim safe frames without waiting behind active
-    monitor writers or blocking the next held-position redecision tick.
+    monitor writers or blocking the next held-position redecision tick. W5-2 fix
+    (2026-07-21): ``busy`` is always 0 for PASSIVE — see ``checkpoint_world_wal``'s
+    docstring for why; the real starvation signal is ``checkpointed_frames <
+    log_frames``.
     """
     conn = _connect(_zeus_trade_db_path(), write_class=None)
+    try:
+        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        busy = int(row[0]) if row is not None else 1
+        log_frames = int(row[1]) if row is not None else -1
+        ckpt_frames = int(row[2]) if row is not None else -1
+        return (busy, log_frames, ckpt_frames)
+    finally:
+        conn.close()
+
+
+def checkpoint_forecasts_wal() -> tuple[int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-forecasts.db; return its triple.
+
+    THE BACKSTOP (2026-07-21, audit finding W5-4) — the zeus-forecasts.db twin of
+    ``checkpoint_world_wal`` / ``checkpoint_trades_wal``. Forecasts previously had
+    no checkpoint backstop at all, relying solely on the default
+    ``wal_autocheckpoint`` (1000 pages ≈ 4 MB) — structurally unguarded against the
+    same reader-pinning-the-floor starvation world/trades were patched for, masked
+    so far only by the forecasts WAL being the smallest of the three canonical DBs
+    (observed 2.0-7.7 MB vs. trades' 95-373 MB). Same lock discipline: a dedicated
+    short-lived connection, NO process-global write mutex (a checkpoint is not a
+    write txn; SQLite serializes checkpoints internally), closed immediately so it
+    never itself becomes a floor-pinning reader.
+
+    Returns the ``(busy, log_frames, checkpointed_frames)`` triple. PASSIVE mode
+    is intentional for live, matching the world/trades twins: reclaim safe frames
+    without waiting behind active forecast writers. ``busy`` (row[0]) is always 0
+    for PASSIVE — see ``checkpoint_world_wal``'s docstring for why; the real
+    reader-pinning-the-floor signal is ``checkpointed_frames < log_frames``
+    (row[2] < row[1]), which callers (``main.py``'s ``_wal_checkpoint_is_starved``)
+    alert on.
+    """
+    conn = _connect(ZEUS_FORECASTS_DB_PATH, write_class=None)
     try:
         row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         busy = int(row[0]) if row is not None else 1
