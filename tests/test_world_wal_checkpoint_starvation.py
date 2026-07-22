@@ -231,6 +231,13 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     from src import main as main_module
     from src.state import db as db_module
 
+    # The world checkpoint cycle defers until the first held-position monitor cycle
+    # completes (operator guard); no monitor runs in this unit test, so bypass the
+    # deferral to exercise the checkpoint path.
+    monkeypatch.setattr(
+        main_module, "_defer_for_held_position_monitor", lambda _name: False, raising=True
+    )
+
     # Patch the helper at the source module so the job's local import resolves it.
     calls = {"n": 0}
 
@@ -267,3 +274,21 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     assert "BACKLOG" in warn_text and "busy=0" in warn_text, (
         f"a floor-pinned checkpoint must be logged at WARNING; got: {warn_text!r}"
     )
+
+    # busy=1 -> CONTENDED: a concurrent checkpointer holds the exclusive checkpoint
+    # lock, so even a frame count that WOULD exceed the backlog threshold is not
+    # evaluated as a backlog sample; log CONTENDED, backlog unknown (consult
+    # re-review 2026-07-22).
+    caplog.clear()
+
+    def _fake_contended() -> tuple[int, int, int, int]:
+        return (1, starved_frames, 0, 4096)  # busy=1 but frames would trip BACKLOG
+
+    monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_contended, raising=True)
+    with caplog.at_level(logging.INFO):
+        main_module._world_wal_checkpoint_cycle()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "CONTENDED" in text and "busy=1" in text, (
+        f"a busy=1 concurrent checkpointer must log CONTENDED; got: {text!r}"
+    )
+    assert "BACKLOG" not in text, "busy=1 must NOT be evaluated as a backlog sample"

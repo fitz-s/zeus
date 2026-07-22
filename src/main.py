@@ -677,6 +677,19 @@ def _validate_boot(settings_path=None) -> int:
 
     from src.config import Settings as _Settings
 
+    # SQLite integrity gate (consult re-review 2026-07-22): mirror the daemon's
+    # boot-time WAL-safe version floor here so --validate-boot proves the interpreter
+    # is >=3.51.3 before a restart, not only at real boot.
+    try:
+        import sqlite3 as _sqlite3
+
+        from src.state.db import assert_sqlite_version_safe as _assert_sqlite
+        _assert_sqlite()
+        print(f"PASS sqlite_version: {_sqlite3.sqlite_version}")
+    except Exception as exc:
+        print(f"FAIL sqlite_version: {exc}")
+        return 1
+
     # Load settings — use override path when supplied (test / operator use)
     try:
         path = _Path(settings_path) if settings_path else None
@@ -5494,12 +5507,14 @@ def _world_wal_checkpoint_cycle() -> None:
     cycle so the floor advances; THIS job is the periodic backstop that
     checkpoints freed frames via ``PRAGMA wal_checkpoint(PASSIVE)``.
 
-    Observability (W5-2 fix, 2026-07-21): the ``(busy, log_frames,
-    checkpointed_frames)`` triple is ALWAYS logged, but ``busy`` is a
-    PASSIVE-mode constant 0 (SQLite never invokes the busy handler or returns
-    SQLITE_BUSY for PASSIVE) so it is no longer branched on — see
-    ``_wal_checkpoint_is_starved`` for the real starvation signal, which now
-    drives the WARNING. Not a table writer; ``checkpoint_world_wal`` uses a
+    Observability (W5-2, 2026-07-21; busy corrected per consult re-review
+    2026-07-22): the ``(busy, log_frames, checkpointed_frames, page_size)`` tuple
+    is ALWAYS logged. ``busy`` is 0 for the ordinary no-contention PASSIVE result,
+    but SQLite still needs the exclusive checkpoint lock and returns SQLITE_BUSY
+    (busy=1) when a concurrent checkpointer (a second daemon/operator process or an
+    overlapping job) holds it — logged as CONTENDED with the backlog left unknown
+    for that sample. Otherwise ``_wal_checkpoint_is_starved`` (outstanding bytes vs
+    512 MiB) drives the WARNING. Not a table writer; ``checkpoint_world_wal`` uses a
     dedicated short-lived connection and does NOT take the world write mutex.
     PASSIVE mode must not wait behind live writers, so it cannot block
     held-position monitor redecision. Fail-soft via the decorator.
@@ -5510,7 +5525,19 @@ def _world_wal_checkpoint_cycle() -> None:
     from src.state.db import checkpoint_world_wal
 
     busy, log_frames, ckpt_frames, page_size = checkpoint_world_wal()
-    if _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
+    if busy != 0:
+        # Concurrent checkpointer holds the exclusive checkpoint lock (a second
+        # daemon/operator process or an overlapping job): SQLite returns busy=1
+        # even in PASSIVE mode, and (log,checkpointed) is not a reliable backlog
+        # sample. Log CONTENDED and leave backlog unknown this tick (fail-soft;
+        # the next cycle re-measures).
+        logger.info(
+            "world WAL checkpoint(PASSIVE): CONTENDED busy=%d log_frames=%d "
+            "checkpointed=%d page_size=%d — concurrent checkpointer holds the lock; "
+            "backlog unknown this sample",
+            busy, log_frames, ckpt_frames, page_size,
+        )
+    elif _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
         outstanding_mib = max(0, log_frames - ckpt_frames) * page_size / (1024 * 1024)
         # Un-checkpointed backlog past the alert line — loud so a floor-pinning
         # reader is visible, not silent.
@@ -5540,8 +5567,9 @@ def _trades_wal_checkpoint_cycle() -> None:
     price fresh families → no crosses. zeus-world.db had this backstop; the trade DB
     did not. Same discipline/observability as ``_world_wal_checkpoint_cycle`` (see
     its docstring for the W5-2 fix): a dedicated short-lived connection, no write
-    mutex; ``_wal_checkpoint_is_starved`` drives the WARNING, not ``busy`` (always 0
-    for PASSIVE). PASSIVE mode must not wait behind the live monitor writer.
+    mutex; ``_wal_checkpoint_is_starved`` drives the WARNING, while a busy=1
+    concurrent-checkpointer result is logged as CONTENDED (backlog unknown that
+    sample). PASSIVE mode must not wait behind the live monitor writer.
     Fail-soft via the decorator.
     """
     if _defer_for_held_position_monitor("trades_wal_checkpoint"):
@@ -5550,7 +5578,19 @@ def _trades_wal_checkpoint_cycle() -> None:
     from src.state.db import checkpoint_trades_wal
 
     busy, log_frames, ckpt_frames, page_size = checkpoint_trades_wal()
-    if _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
+    if busy != 0:
+        # Concurrent checkpointer holds the exclusive checkpoint lock (a second
+        # daemon/operator process or an overlapping job): SQLite returns busy=1
+        # even in PASSIVE mode, and (log,checkpointed) is not a reliable backlog
+        # sample. Log CONTENDED and leave backlog unknown this tick (fail-soft;
+        # the next cycle re-measures).
+        logger.info(
+            "trades WAL checkpoint(PASSIVE): CONTENDED busy=%d log_frames=%d "
+            "checkpointed=%d page_size=%d — concurrent checkpointer holds the lock; "
+            "backlog unknown this sample",
+            busy, log_frames, ckpt_frames, page_size,
+        )
+    elif _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
         outstanding_mib = max(0, log_frames - ckpt_frames) * page_size / (1024 * 1024)
         logger.warning(
             "trades WAL checkpoint(PASSIVE): BACKLOG busy=%d log_frames=%d "
@@ -5584,7 +5624,19 @@ def _forecasts_wal_checkpoint_cycle() -> None:
     from src.state.db import checkpoint_forecasts_wal
 
     busy, log_frames, ckpt_frames, page_size = checkpoint_forecasts_wal()
-    if _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
+    if busy != 0:
+        # Concurrent checkpointer holds the exclusive checkpoint lock (a second
+        # daemon/operator process or an overlapping job): SQLite returns busy=1
+        # even in PASSIVE mode, and (log,checkpointed) is not a reliable backlog
+        # sample. Log CONTENDED and leave backlog unknown this tick (fail-soft;
+        # the next cycle re-measures).
+        logger.info(
+            "forecasts WAL checkpoint(PASSIVE): CONTENDED busy=%d log_frames=%d "
+            "checkpointed=%d page_size=%d — concurrent checkpointer holds the lock; "
+            "backlog unknown this sample",
+            busy, log_frames, ckpt_frames, page_size,
+        )
+    elif _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
         outstanding_mib = max(0, log_frames - ckpt_frames) * page_size / (1024 * 1024)
         logger.warning(
             "forecasts WAL checkpoint(PASSIVE): BACKLOG busy=%d log_frames=%d "
@@ -6627,6 +6679,16 @@ def main():
 
     logger.info("Zeus starting in %s mode", mode)
 
+    # SQLite integrity gate (PR review HIGH; ordering hardened per consult re-review
+    # 2026-07-22): the daemon runs recurring WAL checkpoints on the money DBs, so a
+    # linked SQLite with the <=3.51.2 WAL-reset corruption bug is a live data-integrity
+    # risk. Enforce the fix (>=3.51.3) as the FIRST boot action after logging — before
+    # the venue-heartbeat thread, any canonical DB open, init_schema_trade_only's schema
+    # mutation, the F109 consolidator, or the checkpoint scheduler — so an unsafe SQLite
+    # can never touch a canonical WAL DB before the gate aborts. Fail closed per INV-05.
+    from src.state.db import assert_sqlite_version_safe
+    assert_sqlite_version_safe()
+
     # Capture immutable process identity early. Git is preferred; a source
     # fingerprint keeps identity observable when repository metadata is absent.
     _boot = _capture_boot_state()
@@ -6687,15 +6749,6 @@ def main():
 
     # Startup health check: warn about deferred data actions
     _startup_data_health_check(conn)
-
-    # SQLite integrity gate (2026-07-22, PR review HIGH): the daemon runs
-    # recurring WAL checkpoints on the money DBs, so a linked SQLite carrying the
-    # <=3.51.2 WAL-reset corruption bug is a live data-integrity risk. Machine-
-    # enforce the fix (>=3.51.3) at boot — not a prose deployment note — before
-    # the checkpoint scheduler can run. Fail closed per INV-05, unconditional
-    # (a correctness floor, not a registry-drift window).
-    from src.state.db import assert_sqlite_version_safe
-    assert_sqlite_version_safe()
 
     # v1.F1 (2026-05-18): assert_db_matches_registry boot wiring.
     # Fail-closed per INV-05: RegistryAssertionError propagates and aborts daemon start.
