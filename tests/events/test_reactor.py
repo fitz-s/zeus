@@ -84,6 +84,19 @@ def test_selected_family_forecast_authority_loss_is_transient(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
+def test_maker_taker_forbidden_certificate_race_is_refreshable():
+    from src.events.reactor import _is_executable_snapshot_refresh_reason
+
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_REJECTED:"
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+    )
+
+    assert _is_transient_money_path_reason(reason) is True
+    assert _is_executable_snapshot_refresh_reason(reason) is True
+
+
 def test_day0_catchup_emitter_returns_exact_event_ids(monkeypatch):
     from src.events import reactor as reactor_module
 
@@ -1852,6 +1865,90 @@ def test_global_target_keeps_same_causal_fact_across_economic_epochs():
         "SELECT 1 FROM opportunity_events WHERE event_id = ?",
         (second.event_id,),
     ).fetchone() is None
+
+
+@pytest.mark.parametrize("venue_attempted", (False, True))
+def test_global_target_recovers_processed_refreshable_no_submit_carrier(
+    venue_attempted,
+):
+    """A mode-race carrier may re-run only when no venue attempt exists."""
+
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    source = _forecast_event("processed-mode-race", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="stable-mode-race-economics",
+        payload=json.loads(source.payload_json),
+    )
+    store.insert_or_ignore(target)
+    assert store.claim(target.event_id, claimed_at=_DT_VENUE_OPEN.isoformat())
+    store.mark_processed(target.event_id, processed_at=_DT_VENUE_OPEN.isoformat())
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_REJECTED:"
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+    )
+    conn.execute(
+        "INSERT INTO no_trade_regret_events ("
+        "regret_event_id,event_id,rejection_stage,rejection_reason,regret_bucket,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,1)",
+        (
+            "regret-processed-mode-race",
+            target.event_id,
+            "EXECUTOR_EXPRESSIBILITY",
+            reason,
+            "NO_SUBMIT",
+            _DT_VENUE_OPEN.isoformat(),
+        ),
+    )
+    if venue_attempted:
+        payload_json = json.dumps(
+            {"event_id": target.event_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        conn.execute(
+            "INSERT INTO edli_live_order_events ("
+            "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+            "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+            "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+            (
+                "attempted-processed-mode-race",
+                "aggregate-processed-mode-race",
+                1,
+                "VenueSubmitAttempted",
+                "event-hash",
+                payload_json,
+                "payload-hash",
+                "engine_adapter",
+                _DT_VENUE_OPEN.isoformat(),
+                _DT_VENUE_OPEN.isoformat(),
+            ),
+        )
+
+    assert store.prioritize_global_winner(target) is (not venue_attempted)
+    assert conn.execute(
+        "SELECT processing_status,claimed_at,processed_at,last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (target.event_id,),
+    ).fetchone() == (
+        (
+            "pending",
+            None,
+            None,
+            "GLOBAL_WINNER_TARGETED_CLAIM",
+        )
+        if not venue_attempted
+        else (
+            "processed",
+            _DT_VENUE_OPEN.isoformat(),
+            _DT_VENUE_OPEN.isoformat(),
+            None,
+        )
+    )
 
 
 def test_current_global_winner_recovers_old_causal_target_from_cross_family_starvation():

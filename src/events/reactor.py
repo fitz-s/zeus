@@ -4545,6 +4545,7 @@ def _certificate_build_failed_is_transient(reason: str) -> bool:
         or _certificate_build_failed_is_book_authority_gap(reason)
         or _certificate_build_failed_is_maker_book_witness_race(reason)
         or _certificate_build_failed_is_taker_reservation_race(reason)
+        or _certificate_build_failed_is_maker_taker_forbidden_refresh(reason)
         or "database is locked" in suffix_lower
         or "database table is locked" in suffix_lower
         or "database is busy" in suffix_lower
@@ -4571,6 +4572,18 @@ def _certificate_build_failed_is_taker_reservation_race(reason: str) -> bool:
         "taker_buy_touch_exceeds_reservation" in suffix_lower
         or "taker_sell_touch_below_reservation" in suffix_lower
     )
+
+
+def _certificate_build_failed_is_maker_taker_forbidden_refresh(
+    reason: str,
+) -> bool:
+    """A fresh-book mode veto requires re-ranking, not terminal consumption."""
+
+    segments = {segment.strip() for segment in str(reason).split(":")}
+    return {
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE",
+        "policy=MAKER_TAKER_FORBIDDEN",
+    }.issubset(segments)
 
 
 def _is_day0_hourly_refresh_reason(reason: str | None) -> bool:
@@ -4634,6 +4647,9 @@ def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
             or _certificate_build_failed_is_book_authority_gap(str(reason))
             or _certificate_build_failed_is_maker_book_witness_race(str(reason))
             or _certificate_build_failed_is_taker_reservation_race(str(reason))
+            or _certificate_build_failed_is_maker_taker_forbidden_refresh(
+                str(reason)
+            )
         )
     return False
 

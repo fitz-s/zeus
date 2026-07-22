@@ -2799,6 +2799,20 @@ class EventStore:
             return prioritized
 
         self.insert_or_ignore(event)
+        if self._processed_global_target_is_refreshable_no_submit(event.event_id):
+            self.conn.execute(
+                "UPDATE opportunity_event_processing "
+                "SET processing_status = 'pending', claimed_at = NULL, "
+                "processed_at = NULL, last_error = ?, updated_at = ? "
+                "WHERE consumer_name = ? AND event_id = ? "
+                "AND processing_status = 'processed'",
+                (
+                    GLOBAL_WINNER_TARGETED_CLAIM,
+                    now,
+                    self.consumer_name,
+                    event.event_id,
+                ),
+            )
         cur = self.conn.execute(
             "UPDATE opportunity_event_processing "
             "SET claimed_at = NULL, last_error = ?, updated_at = ? "
@@ -2817,6 +2831,45 @@ class EventStore:
         if prioritized:
             self._remember_winner(event.event_id, event.received_at)
         return prioritized
+
+    def _processed_global_target_is_refreshable_no_submit(
+        self,
+        event_id: str,
+    ) -> bool:
+        """Recognize a terminalized fresh-book mode race with no venue call."""
+
+        status = self.conn.execute(
+            "SELECT processing_status FROM opportunity_event_processing "
+            "WHERE consumer_name = ? AND event_id = ?",
+            (self.consumer_name, event_id),
+        ).fetchone()
+        if status is None or str(status[0] or "") != "processed":
+            return False
+        if not _table_exists(self.conn, "no_trade_regret_events"):
+            return False
+        reason_row = self.conn.execute(
+            "SELECT rejection_reason FROM no_trade_regret_events "
+            "WHERE event_id = ? ORDER BY created_at DESC LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        segments = {
+            segment.strip()
+            for segment in str(reason_row[0] if reason_row else "").split(":")
+        }
+        if not {
+            "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE",
+            "policy=MAKER_TAKER_FORBIDDEN",
+        }.issubset(segments):
+            return False
+        if not _table_exists(self.conn, "edli_live_order_events"):
+            return True
+        attempted = self.conn.execute(
+            "SELECT 1 FROM edli_live_order_events "
+            "WHERE event_type = 'VenueSubmitAttempted' "
+            "AND json_extract(payload_json, '$.event_id') = ? LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        return attempted is None
 
     def requeue_misclassified_local_pre_submit_rejections(self, *, batch_limit: int = 100) -> int:
         """Recover processed events poisoned by old local pre-submit reject receipts.
