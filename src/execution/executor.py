@@ -163,6 +163,19 @@ def _risk_allocator_order_type_allows_intent(
     return False
 
 
+def _resolve_entry_order_type(
+    conn: sqlite3.Connection,
+    snapshot_id: str,
+    submit_order_type: str | None,
+) -> str:
+    """Preserve a certified entry TIF; select only for legacy unbound intents."""
+
+    intended = str(submit_order_type or "").strip().upper()
+    if intended:
+        return intended
+    return _select_risk_allocator_order_type(conn, snapshot_id)
+
+
 def _exit_order_type(selected_order_type: str) -> str:
     """Role-scoped exit order-type: an exit is IOC, never all-or-nothing.
 
@@ -6926,26 +6939,23 @@ def _live_order(
                 order_role="entry",
                 idempotency_key=idem.value,
             )
-        order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         raw_submit_order_type = getattr(intent, "submit_order_type", None)
         submit_order_type = raw_submit_order_type if isinstance(raw_submit_order_type, str) else None
-        if submit_order_type is not None and not _risk_allocator_order_type_allows_intent(
-            selected_order_type=order_type,
-            intent_order_type=submit_order_type,
-        ):
-            return OrderResult(
-                trade_id=trade_id,
-                status="rejected",
-                reason=(
-                    "final_order_type_mismatch: "
-                    f"intent={submit_order_type} selected={order_type}"
-                ),
-                submitted_price=intent.limit_price,
-                shares=shares,
-                order_role="entry",
-                idempotency_key=idem.value,
-            )
-        effective_order_type = submit_order_type or order_type
+        # A FinalExecutionIntent freezes the mode selected from the current
+        # spread, fee, depth, fill-probability, and rest-then-cross evidence.
+        # Re-running only A2's shallow-depth heuristic here created a second,
+        # weaker authority: a wide/shallow book was certified as passive GTC
+        # (crossing forbidden), then rewritten to FOK precisely where crossing
+        # the spread is least efficient.  Current allocation/kill state is
+        # already rechecked above, and the exact frozen TIF is checked against
+        # current heartbeat lease health below.  Only legacy intents without a
+        # certified TIF require executor-side selection.
+        selected_order_type = _resolve_entry_order_type(
+            conn,
+            intent.executable_snapshot_id,
+            submit_order_type,
+        )
+        effective_order_type = selected_order_type
         submit_post_only = bool(getattr(intent, "post_only", False))
         if submit_post_only and effective_order_type not in {"GTC", "GTD"}:
             return OrderResult(
@@ -7566,7 +7576,7 @@ def _live_order(
                             _capability_component(
                                 "order_type_selection",
                                 order_type=effective_order_type,
-                                selected_order_type=order_type,
+                                selected_order_type=selected_order_type,
                                 intent_order_type=submit_order_type,
                                 post_only=submit_post_only,
                             ),

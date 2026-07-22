@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-18; last_reused=2026-07-18
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-22; last_reused=2026-07-22
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-07-22
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
@@ -1245,24 +1245,26 @@ class TestExecutor:
             == 1
         )
 
-    def test_execute_final_intent_rejects_resting_intent_when_a2_requires_taker(self, monkeypatch):
-        final_intent = _final_execution_intent(
-            final_limit_price=Decimal("0.33"),
-            expected_fill_price_before_fee=Decimal("0.33"),
-            size_value=Decimal("3.30"),
-            snapshot_top_ask=Decimal("0.34"),
-            order_policy="post_only_passive_limit",
-            order_type="GTC",
-            post_only=True,
+    def test_execute_final_intent_preserves_certified_resting_mode_on_shallow_book(
+        self,
+        monkeypatch,
+    ):
+        from src.execution.executor import _resolve_entry_order_type
+
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda conn, snapshot_id: (_ for _ in ()).throw(
+                AssertionError("certified entry mode must not be re-selected")
+            ),
         )
 
-        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
-        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
+        assert _resolve_entry_order_type(_TEST_CONN, "shallow-snapshot", "GTC") == "GTC"
 
-        result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-final")
-
-        assert result.status == "rejected"
-        assert result.reason == "final_order_type_mismatch: intent=GTC selected=FOK"
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda conn, snapshot_id: "FOK",
+        )
+        assert _resolve_entry_order_type(_TEST_CONN, "legacy-snapshot", None) == "FOK"
 
     def test_execute_final_intent_rejects_submit_connection_snapshot_hash_drift(
         self,
