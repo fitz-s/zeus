@@ -436,7 +436,7 @@ test_trust_policy:
 
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-29"}
     tests/test_executor.py: {created: "2026-04-27", last_used: "2026-07-22", note: "Executor live-order safety, including INV-43 inclusive 0.05/0.95 boundaries and reduce-only exit rejection outside the absolute band before command persistence."}
-    tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-07-11"}
+    tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-07-22"}
     tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}
     tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-29"}

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-22
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-22
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -2302,6 +2302,11 @@ class TestLiveOrderCommandSplit:
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
         monkeypatch.setattr(
             executor_module,
+            "_entry_replacement_family_from_snapshot",
+            lambda *args, **kwargs: ("Test City", "2026-07-22", "HIGH"),
+        )
+        monkeypatch.setattr(
+            executor_module,
             "_assert_ws_gap_allows_submit",
             lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
         )
@@ -2356,6 +2361,7 @@ class TestLiveOrderCommandSplit:
 
         ack = [e for e in list_events(mem_conn, command["command_id"]) if e["event_type"] == "SUBMIT_ACKED"][0]
         payload = json.loads(ack["payload_json"])
+        assert payload["order_type"] == "GTC"
         assert payload["final_submission_envelope_id"] == final_rows[0]["envelope_id"]
         assert payload["final_submission_envelope_stage"] == "post_submit_result"
 

@@ -8412,7 +8412,7 @@ def _live_order(
                     payload={
                         "venue_order_id": order_id,
                         "venue_status": str(result.get("status") or ""),
-                        "order_type": order_type,
+                        "order_type": effective_order_type,
                         **final_envelope_payload,
                     },
                 )
