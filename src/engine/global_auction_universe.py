@@ -2806,7 +2806,20 @@ def current_portfolio_wealth_witness(
                 or basis_shares <= 0
             ):
                 raise ValueError("CURRENT_WEALTH_POSITION_COST_INVALID")
-            represented_cost = cost * min(shares / basis_shares, Decimal("1"))
+            # A venue-confirmed fill owns capital immediately, even while the
+            # slower chain-balance projection still reports the pre-fill share
+            # count. Prorating its verified open cost by that stale balance
+            # re-minted the same family Fractional-Kelly budget after every
+            # fast FAK fill. Keep sellable inventory on the chain-observed
+            # share count, but charge the full verified open cost to BUY
+            # allocation until chain reconciliation catches up.
+            if has_verified_trade_fill(position):
+                represented_cost = cost
+            else:
+                represented_cost = cost * min(
+                    shares / basis_shares,
+                    Decimal("1"),
+                )
             cost_micro = int(
                 (represented_cost * Decimal("1000000")).to_integral_value(
                     rounding=ROUND_CEILING

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-07-21
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -50,6 +50,7 @@ from src.decision_kernel.canonicalization import (
 from src.decision_kernel.certificate import build_certificate
 from src.engine.global_single_order_auction import (
     _candidate_portfolio_endowment,
+    _family_portfolio_endowment,
     GlobalHoldingAuctionCoverage,
     GlobalSingleOrderActuation,
     global_single_order_actuation_identity,
@@ -12913,6 +12914,88 @@ def test_global_selection_endowment_uses_same_chain_balance_as_wealth_witness():
     assert wealth.native_holdings_micro == (("no-a", 49_500_000),)
     assert holding.token_id == "no-a"
     assert holding.shares == Decimal("49.5")
+
+
+def test_verified_fill_cost_consumes_family_budget_before_chain_balance_catches_up():
+    """A fast confirmed fill cannot re-mint Kelly budget during chain lag."""
+
+    @dataclass(frozen=True)
+    class Prepared:
+        probability_witness: object
+        holdings_snapshot: object | None = None
+
+    bindings = (
+        SimpleNamespace(
+            bin_id="bin-a",
+            condition_id="condition-a",
+            yes_token_id="yes-a",
+            no_token_id="no-a",
+        ),
+        SimpleNamespace(
+            bin_id="bin-b",
+            condition_id="condition-b",
+            yes_token_id="yes-b",
+            no_token_id="no-b",
+        ),
+    )
+    prepared = Prepared(
+        probability_witness=SimpleNamespace(
+            family_key="family",
+            bin_ids=("bin-a", "bin-b"),
+            bindings=bindings,
+        )
+    )
+    position = SimpleNamespace(
+        trade_id="position-a",
+        position_id="position-a",
+        condition_id="condition-a",
+        direction="buy_no",
+        token_id="yes-a",
+        no_token_id="no-a",
+        shares=Decimal("39.1"),
+        effective_shares=Decimal("39.1"),
+        chain_shares=Decimal("31.6"),
+        cost_basis_usd=Decimal("21.896"),
+        size_usd=Decimal("21.896"),
+        effective_cost_basis_usd=Decimal("21.896"),
+        chain_cost_basis_usd=Decimal("17.696"),
+        entry_price=Decimal("0.56"),
+        chain_state="synced",
+        chain_verified_at="2026-07-17T05:43:00+00:00",
+        fill_authority="venue_confirmed_full",
+        state="entered",
+    )
+    at = _dt.datetime(2026, 7, 17, 5, 44, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=at)
+    portfolio = PortfolioState(
+        positions=[position],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    wealth = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=at,
+        max_age=_dt.timedelta(seconds=10),
+        portfolio_state=portfolio,
+    )
+    snapshot = global_batch_runtime._bind_selection_holdings(
+        {"event-a": prepared},
+        portfolio_state=portfolio,
+        wealth_witness=wealth,
+    )["event-a"].holdings_snapshot
+    family = _family_portfolio_endowment(
+        probability_witness=prepared.probability_witness,
+        holdings_snapshot=snapshot,
+        wealth_witness=wealth,
+    )
+
+    # SELL inventory remains at the slower chain-observed 31.6 shares, but
+    # BUY allocation charges the complete 39.1-share verified fill cost.
+    assert wealth.native_holdings_micro == (("no-a", 31_600_000),)
+    assert snapshot.holdings[0].shares == Decimal("31.6")
+    assert wealth.native_commitments_micro == (("no-a", 21_896_000),)
+    assert family.committed_capital_usd == Decimal("21.896")
 
 
 def test_global_selection_counts_open_entry_without_granting_sell_inventory():

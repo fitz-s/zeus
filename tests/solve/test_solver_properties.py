@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-21
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and complete auction receipts
 """W3 SOLVE math-core acceptance — the property anchors (design packet §4, consult REV-2).
 
