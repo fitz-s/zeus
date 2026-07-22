@@ -76,8 +76,26 @@ write on the same connection = SAVEPOINT. A SECOND connection to a DB with an ac
 REJECTED (advisory re-entry would let the 2nd connection bypass the guard while SQLite still sees
 two connections + one writer lock → self-contention). Adding a DB after the outer token = REJECTED.
 Keep `check_same_thread=True` (thread-local depth alone is insufficient if it's ever disabled).
-[The `lease-reentrancy` agent's thread-local per-DB depth is the depth-tracking CORE of this
-token; the registry keying + connection tracking + SAVEPOINT/second-connection rules extend it.]
+
+*Phase-1 re-entrancy implementation reference* (distilled from a dropped prototype,
+`lease-reentrancy`, that built the depth core as instance thread-local — superseded here by the
+process-global registry, but its mechanics port directly):
+- **Depth bookkeeping = token.depth**: first acquire of a DB sets depth=1 and takes the real
+  lock; a same-owner re-enter does depth+=1 as a NO-OP marker (no lock, no fd); release is LIFO —
+  decrement first, drop the real OS lock only at depth 0. Add the token's owner/generation/DB-set/
+  class/active-connection fields and the `(st_dev,st_ino)` key on top (the prototype keyed by
+  resolved Path — insufficient; physical identity is required).
+- **Exception-safety = lockstep**: mutate the token/depth and the acquired-descriptor list in
+  lockstep (the only post-acquire steps, neither of which can raise), so a partial acquire unwinds
+  both real and re-entrant entries with depths restored and leaves no orphan token; extend the same
+  lockstep to the connection-registry insert.
+- **The subset guard** (`NestedLeaseWouldInvertLockOrder`: a nested lease's DB set must be a
+  SUBSET of already-held DBs, else raise) is the lock-order-inversion slice of this design's
+  rejection rules — reuse it as ONE rejection condition alongside "second connection to a DB with
+  an active write txn → REJECTED" and "nested same-connection write → SAVEPOINT".
+- **Portable fixtures**: nested-no-self-block, release-only-at-outermost-exit, multi-DB subset
+  no-op, not-held-DB rejection, exception-in-nested-body unwind all port to token-registry tests;
+  the thread-local-isolation fixture does NOT (the registry is process-global by design).
 
 **BULK-yields-to-LIVE on one gate (the P/G turnstile):**
 - LIVE: E-shared → P-shared (registers intent) → G-exclusive → BEGIN IMMEDIATE…COMMIT → release G,P,E. Many LIVE hold P-shared while queued at G.
