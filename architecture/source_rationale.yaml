@@ -1980,7 +1980,7 @@ files:
   src/execution/command_recovery.py:
     zone: K2_runtime
     authority_role: venue_command_recovery
-    why: Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Cancel-failed maker races aggregate all canonical confirmed trade legs for one order, while authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; the scheduled live tick resolves those capital-blocking races before broad maintenance can consume its DB budget.
+    why: Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Maker cancel races aggregate all canonical confirmed trade legs for one order, while authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; the scheduled live tick prioritizes both already-canceled and cancel-unknown capital locks before broad maintenance can consume its DB budget.
     downstream:
     - src/engine/cycle_runner.py
     - src/state/venue_command_repo.py

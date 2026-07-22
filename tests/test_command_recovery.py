@@ -9845,11 +9845,26 @@ class TestRecoveryResolutionTable:
             "order_id": "ord-prior-fill",
         }
 
-    def test_live_tick_prioritizes_already_canceled_review_before_general_budget(
+    @pytest.mark.parametrize(
+        ("event_type", "reason"),
+        (
+            (
+                "CANCEL_FAILED",
+                "order can't be found - already canceled or matched",
+            ),
+            (
+                "CANCEL_REPLACE_BLOCKED",
+                "post_cancel_unknown_possible_side_effect",
+            ),
+        ),
+    )
+    def test_live_tick_prioritizes_cancel_review_before_general_budget(
         self,
         tmp_path,
         monkeypatch,
         mock_client,
+        event_type,
+        reason,
     ):
         """Capital-blocking cancel proof runs even when broad DB budget is zero."""
         from src.execution import command_recovery, venue_sync_contract
@@ -9875,11 +9890,17 @@ class TestRecoveryResolutionTable:
         append_event(
             seed,
             command_id="cmd-001",
-            event_type="CANCEL_FAILED",
+            event_type=event_type,
             occurred_at="2026-04-26T00:08:00Z",
             payload={
                 "venue_order_id": "ord-priority-unfilled",
-                "reason": "order can't be found - already canceled or matched",
+                "reason": reason,
+                "semantic_cancel_status": (
+                    "CANCEL_UNKNOWN"
+                    if event_type == "CANCEL_REPLACE_BLOCKED"
+                    else None
+                ),
+                "requires_m5_reconcile": event_type == "CANCEL_REPLACE_BLOCKED",
                 "cancel_outcome": {
                     "orderID": "ord-priority-unfilled",
                     "status": "NOT_CANCELED",

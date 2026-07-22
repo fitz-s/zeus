@@ -18817,8 +18817,8 @@ def _restart_preflight_unresolved_commands(conn: sqlite3.Connection) -> list[dic
     return rows
 
 
-def _already_canceled_review_commands(conn: sqlite3.Connection) -> list[dict]:
-    """Return unresolved commands whose cancel race has a bound venue order."""
+def _capital_blocking_cancel_review_commands(conn: sqlite3.Connection) -> list[dict]:
+    """Return terminal-uncertain cancel races with a bound venue order."""
 
     if not (
         _table_exists(conn, "venue_commands")
@@ -18833,9 +18833,11 @@ def _already_canceled_review_commands(conn: sqlite3.Connection) -> list[dict]:
         venue_order_id = str(row.get("venue_order_id") or "")
         if not command_id or not venue_order_id:
             continue
-        if _cancel_failed_already_canceled_payload(
-            _command_events(conn, command_id)
-        ) is None:
+        events = _command_events(conn, command_id)
+        if (
+            _cancel_failed_already_canceled_payload(events) is None
+            and _latest_cancel_unknown_payload(events) is None
+        ):
             continue
         rows.append(row)
     return rows
@@ -19332,7 +19334,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             read_conn_factory,
             label="recovery.already_canceled_review_fast:snapshot",
         ) as conn:
-            candidates = _already_canceled_review_commands(conn)
+            candidates = _capital_blocking_cancel_review_commands(conn)
         if not candidates:
             return None
         command_ids = {str(row.get("command_id") or "") for row in candidates}
@@ -19359,7 +19361,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
             current = {
                 str(row.get("command_id") or ""): row
-                for row in _already_canceled_review_commands(conn)
+                for row in _capital_blocking_cancel_review_commands(conn)
             }
             for command_id in sorted(command_ids):
                 row = current.get(command_id)
