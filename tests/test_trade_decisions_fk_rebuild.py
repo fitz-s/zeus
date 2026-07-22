@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-07-20; last_reviewed=2026-07-22; last_reused=never
+# Purpose: green-gate the W0-a trade_decisions dangling-FK rebuild migration (fixture DB, 6-kill-point crash-atomicity).
+# Reuse: run before/after scripts/migrations/202607_trade_decisions_drop_dangling_fk.py.
 """Antibody suite for W0-a: trade_decisions dangling-FK removal rebuild.
 
 Green-gate for `scripts/migrations/202607_trade_decisions_drop_dangling_fk.py`
