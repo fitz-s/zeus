@@ -6768,16 +6768,21 @@ def run_edli_event_reactor_cycle(
         )
     finally:
         try:
-            trade_conn.close()
-        except NameError:
-            pass
-        try:
-            forecasts_conn.close()
-        except NameError:
-            pass
-        conn.close()
-        active_lock.release()
-        _start_venue_background_maintenance_after_reactor_if_required()
+            try:
+                trade_conn.close()
+            except NameError:
+                pass
+            try:
+                forecasts_conn.close()
+            except NameError:
+                pass
+            conn.close()
+        finally:
+            # Connection teardown is cleanup, not reactor ownership. A close
+            # fault must never strand the dispatcher lock and permanently turn
+            # every later cycle into "previous cycle is still running".
+            active_lock.release()
+            _start_venue_background_maintenance_after_reactor_if_required()
     return True
 
 def _edli_positive_int_or_unbounded(

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-07-22
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -481,6 +481,58 @@ def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
         urgent_day0_pending=lambda: True,
     ) is False
     assert lock.acquired is False
+
+
+def test_cycle_releases_dispatcher_lock_when_connection_close_fails(monkeypatch):
+    import src.main as main
+    import src.state.db as db
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    class _Rows:
+        def fetchall(self):
+            return [(0, "main", "")]
+
+    class _Conn:
+        def execute(self, *_args, **_kwargs):
+            return _Rows()
+
+        def close(self):
+            raise RuntimeError("connection close failed")
+
+    class _ExplodingMutex:
+        def acquire(self, **_kwargs):
+            raise RuntimeError("cycle setup failed")
+
+    lock = threading.Lock()
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {
+            "enabled": True,
+            "event_writer_enabled": True,
+            "forecast_snapshot_trigger_enabled": False,
+            "day0_extreme_trigger_enabled": False,
+        },
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(
+        main,
+        "_start_venue_background_maintenance_after_reactor_if_required",
+        lambda: None,
+    )
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: None)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(db, "get_world_connection", _Conn)
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", _Conn)
+    monkeypatch.setattr(db, "world_write_mutex", lambda: _ExplodingMutex())
+
+    with pytest.raises(RuntimeError, match="connection close failed"):
+        run_edli_event_reactor_cycle(active_lock=lock)
+
+    assert lock.locked() is False
 
 
 def test_targeted_forecast_wake_ignores_disjoint_family_revision(monkeypatch):
