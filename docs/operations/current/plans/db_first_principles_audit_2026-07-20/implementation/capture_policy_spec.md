@@ -70,6 +70,28 @@ A row goes to `executable_market_snapshots` (current schema, unchanged) when **a
 
 Everything else (EDLI-warm outcomes not priority, not near-threshold, not keyframe) → compact table (§3).
 
+> **SHIPPED INCREMENT (2026-07-22, after GPT-5.6 PR review REQ-20260722-005247).**
+> The first landed increment is deliberately narrower than §3–§4 below, which
+> remain the design of record for later operator-fenced increments:
+> - **Only** the nullable `capture_trigger TEXT` column on the existing
+>   `executable_market_snapshots` + write-site stamping ships now, and the column
+>   is **UNCONSTRAINED (no CHECK)**: a CHECK-constrained `ADD COLUMN` makes SQLite
+>   (≥3.37) full-scan every existing row (measured ~0.9s / 3M rows; O(rows) with
+>   heavy cold I/O on the ~43 GB live trade table at boot), whereas a plain
+>   nullable `ADD COLUMN` is O(1) metadata-only. The §2 taxonomy is enforced by
+>   the application at write, not by a boot-time full-table scan.
+> - The **compact table (§3) is NOT created yet.** Creating it now — unused (no
+>   writer routes to it, no reader queries it) and absent from
+>   `architecture/db_table_ownership.yaml` — aborts the daemon at boot via the
+>   fail-closed registry assertion (`assert_db_matches_registry`, extra_on_disk).
+>   It ships in the later increment that adds real routing, registered in the
+>   same commit.
+> - The **Track-A hydration assertion (§4) is NOT on the hot path.** As written it
+>   warned on every hydrated `DISCOVERY_SWEEP` row — a value the scanner
+>   intentionally writes — i.e. log amplification on money-path reads. The same
+>   taxonomy proof is obtained off the hot path by an audit query:
+>   `SELECT capture_trigger, COUNT(*) FROM executable_market_snapshots GROUP BY 1`.
+
 ## 3. Compact-form schema
 
 ```sql
@@ -101,7 +123,7 @@ Deferred (not first cut): true delta-vs-keyframe encoding — top-K-in-full alre
 
 ## 4. Replay-sufficiency validation plan
 
-**Track A — regression safety for what exists today (the one that matters for shipping):** every ~13 read site only ever touches a row triggers 1-4 would capture full — provable by construction: add a cheap runtime assertion in the hydration path asserting the fetched row's (condition_id, token_id) was in the cycle's priority set OR its capture_trigger is a full value; ship **log-only (never raising)** for one full week of live before any capture is routed away from full. If it never fires false, the taxonomy is empirically proven before the behavior change ships (mirrors REDESIGN_v2 E5's "先证后切"). Extend `tests/test_money_path_lifecycle_replay.py` to assert command_recovery exact-snapshot_id lookups still succeed post-change.
+**Track A — regression safety for what exists today (the one that matters for shipping):** _(SHIPPED increment: the hot-path assertion below is REPLACED by an off-hot-path audit query — see the SHIPPED note before §3. It fired on expected `DISCOVERY_SWEEP` rows on every money-path read.)_ every ~13 read site only ever touches a row triggers 1-4 would capture full — provable by construction: add a cheap runtime assertion in the hydration path asserting the fetched row's (condition_id, token_id) was in the cycle's priority set OR its capture_trigger is a full value; ship **log-only (never raising)** for one full week of live before any capture is routed away from full. If it never fires false, the taxonomy is empirically proven before the behavior change ships (mirrors REDESIGN_v2 E5's "先证后切"). Extend `tests/test_money_path_lifecycle_replay.py` to assert command_recovery exact-snapshot_id lookups still succeed post-change.
 
 **Track B — the counterfactual goal (honest: no harness exists):** since there's no current bulk replay reader, the literal "replay reduced vs full, assert identical" can't run. Buildable from today's data: mine every historical certificate's cited `executable_snapshot_id` + decision-time edge, walk backward through preceding cycles' captured economics for that token (on disk today), check whether the §2 near-threshold margin would have flagged it early enough — measures the trigger's **false-negative rate against real history**, calibrating margin + keyframe-interval from real edges, not guesses. W2 action: `SELECT DISTINCT` referenced snapshot ids across `decision_certificates` (trades 58K + world 1.35M) → sizes the historical must-be-full set (NOT ~4645; bounded by candidates evaluated, 23.2x larger = tens of thousands). Needs world-db → flagged for probe-A.
 
