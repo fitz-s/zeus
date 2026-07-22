@@ -29379,12 +29379,57 @@ def _bind_current_deterministic_day0_witness(
     payload: dict[str, object],
     witness: object,
 ) -> None:
-    """Carry the auction's current native tokens into its revalidated Day0 payload."""
+    """Serialize the auction's immutable Day0 witness into its revalidated payload."""
 
     bindings = tuple(getattr(witness, "bindings", ()) or ())
     witness_identity = str(getattr(witness, "witness_identity", "") or "").strip()
-    if not bindings or not witness_identity:
+    exact_yes_payoffs = tuple(getattr(witness, "exact_yes_payoffs", ()) or ())
+    captured_at = getattr(witness, "captured_at_utc", None)
+    fields = {
+        "_edli_day0_deterministic_q_version": getattr(witness, "q_version", None),
+        "_edli_day0_deterministic_resolution_identity": getattr(
+            witness, "resolution_identity", None
+        ),
+        "_edli_day0_deterministic_topology_identity": getattr(
+            witness, "topology_identity", None
+        ),
+        "_edli_day0_deterministic_posterior_identity_hash": getattr(
+            witness, "posterior_identity_hash", None
+        ),
+        "_edli_day0_deterministic_source_truth_identity": getattr(
+            witness, "source_truth_identity", None
+        ),
+        "_edli_day0_deterministic_authority_certificate_hash": getattr(
+            witness, "authority_certificate_hash", None
+        ),
+        "_edli_day0_deterministic_family_key": getattr(
+            witness, "family_key", None
+        ),
+        "_edli_day0_deterministic_band_alpha": getattr(
+            witness, "band_alpha", None
+        ),
+        "_edli_day0_deterministic_band_basis": getattr(
+            witness, "band_basis", None
+        ),
+        "_edli_day0_deterministic_captured_at_utc": (
+            captured_at.isoformat() if isinstance(captured_at, datetime) else None
+        ),
+    }
+    if (
+        not bindings
+        or not exact_yes_payoffs
+        or not witness_identity
+        or any(value in (None, "") for value in fields.values())
+    ):
         raise ValueError("GLOBAL_DAY0_DETERMINISTIC_WITNESS_BINDING_MISSING")
+    payload.update(fields)
+    payload["_edli_day0_exact_yes_payoffs"] = dict(exact_yes_payoffs)
+    payload["_edli_day0_condition_by_bin"] = {
+        str(getattr(binding, "bin_id", "") or ""): str(
+            getattr(binding, "condition_id", "") or ""
+        )
+        for binding in bindings
+    }
     payload["_edli_day0_deterministic_bindings"] = [
         {
             "bin_id": str(getattr(binding, "bin_id", "") or ""),
@@ -29394,6 +29439,9 @@ def _bind_current_deterministic_day0_witness(
         }
         for binding in bindings
     ]
+    payload["_edli_day0_deterministic_sample_identity"] = str(
+        getattr(witness, "sample_matrix_identity", "") or ""
+    )
     payload["_edli_day0_deterministic_witness_identity"] = witness_identity
 
 

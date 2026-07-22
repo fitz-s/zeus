@@ -392,7 +392,21 @@ def test_day0_deterministic_payoff_round_trips_calibration_authority():
         payload,
         SimpleNamespace(
             bindings=current_bindings,
+            exact_yes_payoffs=exact_yes_payoffs,
             witness_identity=current_witness_identity,
+            q_version=q_version,
+            resolution_identity=resolution_identity,
+            topology_identity=topology_identity,
+            posterior_identity_hash=posterior_identity_hash,
+            source_truth_identity=source_truth_identity,
+            authority_certificate_hash=authority_certificate_hash,
+            family_key=family_key,
+            band_alpha=band_alpha,
+            band_basis=band_basis,
+            captured_at_utc=captured_at,
+            sample_matrix_identity=deterministic_bin_payoff_sample_identity(
+                exact_yes_payoffs
+            ),
         ),
     )
 
