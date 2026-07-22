@@ -8883,6 +8883,11 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "FORECAST_AUTHORITY_MISSING:replacement_posterior",
             "BLOCKED",
         ),
+        (
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "DAY0_ORACLE_ANOMALY_PAUSED:Dallas:2026-07-22",
+            "BLOCKED",
+        ),
         ("EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day", "BLOCKED"),
         (
             "GLOBAL_FAMILY_INELIGIBLE:"
@@ -16911,6 +16916,10 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         (
             "LIVE_INFERENCE_INPUTS_MISSING:"
             "FORECAST_AUTHORITY_MISSING:replacement_posterior"
+        ),
+        (
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "DAY0_ORACLE_ANOMALY_PAUSED:Dallas:2026-07-22"
         ),
     ),
 )

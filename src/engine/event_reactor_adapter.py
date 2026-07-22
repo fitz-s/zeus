@@ -11478,6 +11478,7 @@ def _global_preflight_block_status(reason: str) -> str:
             "FILL_UP_NO_SUBMIT:",
             "SHIFT_BIN_NO_SUBMIT:",
             "LIVE_INFERENCE_INPUTS_MISSING:FORECAST_AUTHORITY_MISSING:",
+            "LIVE_INFERENCE_INPUTS_MISSING:DAY0_ORACLE_ANOMALY_PAUSED:",
             "EVENT_BOUND_MARKET_PHASE_CLOSED:",
             "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
             (
