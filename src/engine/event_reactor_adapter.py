@@ -20687,6 +20687,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "probability_authority": proof.probability_authority,
             }
         )
+        _bind_selected_deterministic_day0_probability_authority(payload)
     # Selected-leg authority only. Earlier code stamped a family-level replacement
     # credential before proof selection; that could license/block a sibling bin or side.
     # The proof carries the credential built for its exact (condition_id, direction).
@@ -29347,6 +29348,26 @@ def _global_day0_probability_authority_payload(
     if base_identity:
         payload["probability_base_identity"] = base_identity
     return payload
+
+
+def _bind_selected_deterministic_day0_probability_authority(
+    payload: dict[str, object],
+) -> None:
+    """Bind the deterministic Day0 authority block to the selected proof leg."""
+
+    payload.pop("day0_probability_authority", None)
+    block = _global_day0_probability_authority_payload(payload)
+    block.update(
+        {
+            "selected_condition_id": payload.get("condition_id"),
+            "selected_bin_id": payload.get("candidate_bin_id"),
+            "selected_token_id": payload.get("token_id"),
+            "selected_direction": payload.get("direction"),
+            "selected_q_live": payload.get("q_live"),
+            "selected_q_lcb": payload.get("q_lcb_5pct"),
+        }
+    )
+    payload["day0_probability_authority"] = block
 
 
 _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (

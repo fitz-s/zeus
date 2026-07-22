@@ -348,6 +348,32 @@ def test_day0_deterministic_payoff_round_trips_calibration_authority():
     }
     city = runtime_cities_by_name()[_CITY]
 
+    stale_block = adapter._global_day0_probability_authority_payload(payload)
+    stale_block.update(
+        {
+            "selected_condition_id": "condition-73f",
+            "selected_bin_id": "bin-73f",
+            "selected_token_id": "yes-token-73f",
+            "selected_direction": "buy_yes",
+            "selected_q_live": 1.0,
+            "selected_q_lcb": 1.0,
+        }
+    )
+    payload["day0_probability_authority"] = stale_block
+    with pytest.raises(
+        ValueError,
+        match="DAY0_CALIBRATION_AUTHORITY_BLOCKED:deterministic_selected_",
+    ):
+        _day0_calibration_authority_payload_and_clock(
+            city=city,
+            family=_family(),
+            payload=payload,
+            forecast_payload={"horizon_profile": "full"},
+            decision_time=DECISION_TIME,
+        )
+
+    adapter._bind_selected_deterministic_day0_probability_authority(payload)
+
     calibration, _clock = _day0_calibration_authority_payload_and_clock(
         city=city,
         family=_family(),
