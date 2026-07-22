@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-07-20; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove the manifest-rot gate flags droppable-labeled tables that are actually live.
+# Reuse: run when changing scripts/ops/audit_manifest_rot.py; note the writer scan is a heuristic, not a SQL parser.
 """Antibody for the W2 manifest-rot gate (scripts/ops/audit_manifest_rot.py).
 
 Fixture-only: a manifest labeling tables droppable + a fixture DB, proving the gate flags a

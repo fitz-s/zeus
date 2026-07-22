@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-07-21; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove the settlement-outcomes reconciliation monitor detects chain-settled positions missing their outcome row.
+# Reuse: run when changing scripts/ops/reconcile_settlement_outcomes.py or the settlement outbox contract.
 """Antibody for the settlement-outcomes reconciliation monitor
 (scripts/ops/reconcile_settlement_outcomes.py) — the check that would have caught the 16
 chain-settled positions silently missing their settlement_outcomes row.

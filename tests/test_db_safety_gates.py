@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-07-20; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove the combined DB safety-gate preflight flags dangling-FK / manifest-rot / stray-decoy hazards.
+# Reuse: run when changing scripts/ops/db_safety_gates.py or scripts/ops/db_integrity_checks.py.
 """Antibody for the combined DB safety-gate preflight (scripts/ops/db_safety_gates.py)."""
 from __future__ import annotations
 

@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-07-20; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove the regret_decompositions dead-FK drop migration removes the dangling FK without data loss.
+# Reuse: run before/after scripts/migrations/202607_regret_decompositions_drop_dead_fk.py.
 """Antibody for the regret_decompositions dead-FK drop (2nd dangling-FK-class instance)."""
 from __future__ import annotations
 

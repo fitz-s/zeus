@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-07-20; last_reviewed=2026-07-22; last_reused=never
+# Purpose: detect the dangling-foreign-key class (the defect that froze trade_decisions since 2026-07-02).
+# Reuse: run on any schema/migration change; promote to a boot gate once the three canonical DBs are clean.
 """Antibody for the dangling-foreign-key class (the defect that froze trade_decisions).
 
 A column-level FK whose parent table does not exist in the SAME schema makes every

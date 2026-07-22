@@ -1,4 +1,6 @@
-# Created: 2026-07-21
+# Lifecycle: created=2026-07-21; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove the WAL-checkpoint alert fires on real un-checkpointed backlog (bytes, actual page_size), not total-log size.
+# Reuse: run on any change to the checkpoint alert predicate or the checkpoint_*_wal helpers.
 # Authority basis: docs/operations/current/plans/db_first_principles_audit_2026-07-20/
 #   findings/connections_throughput.md — FINDING W5-2 (PASSIVE false-green),
 #   W5-3 (intended TRUNCATE shipped as PASSIVE), W5-4 (no forecasts backstop),

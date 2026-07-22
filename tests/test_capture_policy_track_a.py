@@ -1,4 +1,6 @@
-# Created: 2026-07-21
+# Lifecycle: created=2026-07-21; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove capture-policy Track A is additive (nullable capture_trigger column + stamping) — no compact table, no CHECK, registry-clean.
+# Reuse: run on any change to snapshot_repo capture_trigger plumbing or init_snapshot_schema.
 # Authority basis: docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/capture_policy_spec.md
 """capture_policy_spec.md Track A antibodies.
 

@@ -1,4 +1,6 @@
-# Created: 2026-07-22
+# Lifecycle: created=2026-07-22; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove the SQLite version boot gate blocks <3.51.3 (WAL-reset corruption bug) with an emergency override.
+# Reuse: run on any change to assert_sqlite_version_safe or its boot wiring.
 # Authority basis: PR review (GPT-5.6 consult REQ-20260722-005247) HIGH finding —
 #   the daemon runs recurring WAL checkpoints on the money DBs, so a linked
 #   SQLite carrying the <=3.51.2 WAL-reset corruption bug must be machine-blocked

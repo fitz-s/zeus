@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-07-20; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove the F15 migration drops exactly the 2 redundant trade indexes (less write amplification), nothing else.
+# Reuse: run before/after scripts/migrations/202607_drop_redundant_trade_indexes.py.
 """Antibody for F15 redundant-index drop (scripts/migrations/202607_drop_redundant_trade_indexes.py)."""
 from __future__ import annotations
 
