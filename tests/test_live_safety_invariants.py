@@ -304,8 +304,8 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
     assert portfolio.authority_scope == "runtime_exposure"
 
 
-def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monkeypatch):
-    """Held-position monitoring must preserve cadence instead of overrunning the scheduler."""
+def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress(monkeypatch):
+    """Persisted monitor progress turns a positive cycle budget into a hard deadline."""
     from src.engine import cycle_runtime
 
     first = _make_position(
@@ -313,7 +313,7 @@ def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monk
         city="Chicago",
         target_date="2026-07-04",
         direction="buy_yes",
-        state="holding",
+        state="day0_window",
         shares=10.0,
         chain_shares=10.0,
         chain_state="synced",
@@ -323,7 +323,7 @@ def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monk
         city="Chicago",
         target_date="2026-07-04",
         direction="buy_no",
-        state="holding",
+        state="day0_window",
         shares=10.0,
         chain_shares=10.0,
         chain_state="synced",
@@ -409,6 +409,7 @@ def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monk
     assert portfolio_dirty is True
     assert tracker_dirty is False
     assert summary["held_monitor_candidates"] == 2
+    assert summary["held_monitor_budget_guaranteed_positions"] == 2
     assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
     assert summary["held_monitor_positions_scanned"] == 1
     assert summary["held_monitor_positions_deferred"] == 1
