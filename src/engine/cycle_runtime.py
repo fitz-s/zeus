@@ -3366,6 +3366,23 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
     }
 )
 
+# These monitor verdicts are estimates of one leg's terminal value. They do not
+# carry the global auction's current depth curve, fees, portfolio endowment, or
+# robust delta-log-wealth objective, so they may propose a SELL but never actuate
+# one locally. RED and absorbing Day0 hard facts are deliberately absent: their
+# direct reduce-only authority comes from risk/settlement truth, not this
+# statistical comparison.
+_GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS = frozenset(
+    {
+        "CI_SEPARATED_REVERSAL",
+        "CI_OVERLAP_SELL_VALUE_DOMINATES",
+        "SETTLEMENT_IMMINENT",
+        "EDGE_REVERSAL",
+        "BUY_NO_EDGE_EXIT",
+        "BUY_NO_NEAR_EXIT",
+    }
+)
+
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_FRACTION = 0.0025
 
@@ -3755,6 +3772,14 @@ def _monitor_value_inputs(
 def _is_statistical_single_leg_exit(exit_decision, exit_reason: str) -> bool:
     trigger = str(getattr(exit_decision, "trigger", "") or exit_reason or "")
     return any(trigger.startswith(prefix) for prefix in _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS)
+
+
+def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bool:
+    trigger = str(getattr(exit_decision, "trigger", "") or exit_reason or "")
+    return any(
+        trigger.startswith(prefix)
+        for prefix in _GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS
+    )
 
 
 def _block_immature_day0_exit_authority(
@@ -6530,6 +6555,13 @@ def execute_monitoring_phase(
             # with exact terminal value zero, so it must not wait behind the
             # full-universe auction.
             local_exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
+            statistical_sell_requires_global = (
+                should_exit
+                and _global_auction_owns_statistical_sell(
+                    exit_decision,
+                    exit_reason,
+                )
+            )
             global_holding_coverage = None
             if (
                 should_exit
@@ -6613,6 +6645,27 @@ def execute_monitoring_phase(
                     "monitor_global_holding_coverage_receipt_ids",
                     [],
                 ).append(coverage_receipt_id)
+            elif statistical_sell_requires_global:
+                should_exit = False
+                exit_reason = (
+                    "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                )
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "local_statistical_sell_diagnostic_only",
+                            "global_statistical_sell_authority_unavailable",
+                        ]
+                    )
+                )
+                summary["monitor_statistical_sells_blocked_without_global_authority"] = (
+                    summary.get(
+                        "monitor_statistical_sells_blocked_without_global_authority",
+                        0,
+                    )
+                    + 1
+                )
 
             exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
             if should_exit:

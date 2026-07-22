@@ -1,9 +1,9 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-20; last_reused=2026-07-20
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-21; last_reused=2026-07-21
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-20
-# Authority basis: midstream verdict v2; finite-evidence single-q global SELL ownership
+# Last reused/audited: 2026-07-21
+# Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -4319,21 +4319,24 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
 
 
 @pytest.mark.parametrize(
-    ("trigger", "has_position_coverage", "delegated"),
+    ("trigger", "has_position_coverage", "outcome"),
     (
-        ("EDGE_REVERSAL", True, True),
-        ("EDGE_REVERSAL", False, False),
-        ("RED_FORCE_EXIT", True, False),
+        ("EDGE_REVERSAL", True, "delegated"),
+        ("EDGE_REVERSAL", False, "blocked"),
+        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, "blocked"),
+        ("SETTLEMENT_IMMINENT", False, "blocked"),
+        ("DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES", False, "direct"),
+        ("RED_FORCE_EXIT", True, "direct"),
     ),
 )
-def test_current_global_monitor_sell_has_one_normal_actuator_and_preserves_red(
+def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
     tmp_path,
     monkeypatch,
     trigger,
     has_position_coverage,
-    delegated,
+    outcome,
 ):
-    """A local SELL verdict cannot bypass the global BUY/SELL/HOLD/CASH winner."""
+    """Statistical SELL is global-only; missing authority holds while RED acts."""
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime, monitor_refresh
     from src.engine.lifecycle_events import build_entry_canonical_write
@@ -4502,7 +4505,7 @@ def test_current_global_monitor_sell_has_one_normal_actuator_and_preserves_red(
         run_exit_preflight=False,
     )
 
-    if delegated:
+    if outcome == "delegated":
         assert summary["monitor_sells_delegated_to_global_auction"] == 1
         assert summary["exits"] == 0
         assert results[0].should_exit is False
@@ -4512,13 +4515,30 @@ def test_current_global_monitor_sell_has_one_normal_actuator_and_preserves_red(
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 0
+    elif outcome == "blocked":
+        assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
+        assert (
+            summary["monitor_statistical_sells_blocked_without_global_authority"]
+            == 1
+        )
+        assert summary["exits"] == 0
+        assert results[0].should_exit is False
+        assert (
+            results[0].exit_reason
+            == "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+        )
+        assert "local_statistical_sell_diagnostic_only" in pos.applied_validations
+        assert execute_calls == []
     else:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
+        assert summary.get(
+            "monitor_statistical_sells_blocked_without_global_authority", 0
+        ) == 0
         assert summary["exits"] == 1
         assert results[0].should_exit is True
         assert results[0].exit_reason == trigger
         assert execute_calls == [pos]
-    assert invalidations == ([] if delegated else ["venue_side_effect"])
+    assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
 
 
