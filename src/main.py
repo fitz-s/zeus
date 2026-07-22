@@ -5618,8 +5618,9 @@ def _forecasts_wal_checkpoint_cycle() -> None:
     2.0-7.7 MB vs. trades' 95-373 MB). Same discipline/observability as
     ``_world_wal_checkpoint_cycle``: ``checkpoint_forecasts_wal`` uses a
     dedicated short-lived connection, no write mutex; ``_wal_checkpoint_is_starved``
-    drives the WARNING. PASSIVE mode must not wait behind live forecast
-    writers. Fail-soft via the decorator.
+    drives the WARNING, while a busy=1 concurrent-checkpointer result is logged as
+    CONTENDED (backlog unknown that sample). PASSIVE mode must not wait behind live
+    forecast writers. Fail-soft via the decorator.
     """
     from src.state.db import checkpoint_forecasts_wal
 
