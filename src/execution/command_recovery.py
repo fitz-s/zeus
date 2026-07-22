@@ -11422,10 +11422,15 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
             except Exception as exc:
                 from src.venue.response_contracts import VenueResponseShapeError
 
+                shape_error = (
+                    exc
+                    if isinstance(exc, VenueResponseShapeError)
+                    else exc.__cause__
+                )
                 if not (
-                    isinstance(exc, VenueResponseShapeError)
-                    and exc.endpoint == "get_order"
-                    and exc.raw == {}
+                    isinstance(shape_error, VenueResponseShapeError)
+                    and shape_error.endpoint == "get_order"
+                    and shape_error.raw == {}
                 ):
                     raise
                 point_order = {
