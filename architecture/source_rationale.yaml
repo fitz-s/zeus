@@ -1914,7 +1914,7 @@ files:
   src/events/reactor.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_runtime
-    why: Owns canonical EDLI opportunity discovery, bounded claim and processing, producer-wake preemption, durable event finalization, and fail-safe dispatcher-lock release across teardown faults while routing venue side effects through injected engine and executor contracts.
+    why: Owns canonical EDLI opportunity discovery, bounded claim and processing, producer-wake preemption, durable event finalization, and fail-safe dispatcher-lock release across setup and teardown faults while routing venue side effects through injected engine and executor contracts.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/engine/global_batch_runtime.py

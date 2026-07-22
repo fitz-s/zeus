@@ -535,6 +535,104 @@ def test_cycle_releases_dispatcher_lock_when_connection_close_fails(monkeypatch)
     assert lock.locked() is False
 
 
+@pytest.mark.parametrize("failing_step", ["urgent_wake", "monitor_handoff"])
+def test_cycle_releases_dispatcher_lock_when_pre_setup_check_fails(
+    monkeypatch,
+    failing_step,
+):
+    import src.main as main
+    import src.state.db as db
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    def _fail():
+        raise RuntimeError(f"{failing_step} failed")
+
+    monitor_calls = 0
+
+    def _monitor_handoff(_job):
+        nonlocal monitor_calls
+        monitor_calls += 1
+        if failing_step == "monitor_handoff" and monitor_calls == 2:
+            _fail()
+        return False
+
+    lock = threading.Lock()
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {
+            "enabled": True,
+            "event_writer_enabled": True,
+        },
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", _monitor_handoff)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: None)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("pre-setup failure must not open the world DB"),
+    )
+
+    urgent_check = _fail if failing_step == "urgent_wake" else lambda: False
+    with pytest.raises(RuntimeError, match=f"{failing_step} failed"):
+        run_edli_event_reactor_cycle(
+            active_lock=lock,
+            urgent_day0_pending=urgent_check,
+        )
+
+    assert lock.locked() is False
+
+
+def test_cycle_releases_dispatcher_lock_when_forecast_open_and_world_close_fail(
+    monkeypatch,
+):
+    import src.main as main
+    import src.state.db as db
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    class _Rows:
+        def fetchall(self):
+            return [(0, "main", "")]
+
+    class _Conn:
+        def execute(self, *_args, **_kwargs):
+            return _Rows()
+
+        def close(self):
+            raise RuntimeError("world close failed")
+
+    lock = threading.Lock()
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {
+            "enabled": True,
+            "event_writer_enabled": True,
+        },
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: None)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(db, "get_world_connection", _Conn)
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: (_ for _ in ()).throw(RuntimeError("forecast open failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="world close failed"):
+        run_edli_event_reactor_cycle(active_lock=lock)
+
+    assert lock.locked() is False
+
+
 def test_targeted_forecast_wake_ignores_disjoint_family_revision(monkeypatch):
     from src.events.reactor import _reactor_wake_cancellation_probe
     from src.runtime import reactor_wake

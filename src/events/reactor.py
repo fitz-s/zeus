@@ -6009,12 +6009,16 @@ def run_edli_event_reactor_cycle(
     if not active_lock.acquire(blocking=False):
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return False
-    if not producer_fast_path and _urgent_wake_pending():
+    try:
+        if not producer_fast_path and _urgent_wake_pending():
+            active_lock.release()
+            return False
+        if _defer_for_held_position_monitor("edli_event_reactor"):
+            active_lock.release()
+            return False
+    except BaseException:
         active_lock.release()
-        return False
-    if _defer_for_held_position_monitor("edli_event_reactor"):
-        active_lock.release()
-        return False
+        raise
     try:
         conn = get_world_connection()
     except Exception:
@@ -6034,8 +6038,10 @@ def run_edli_event_reactor_cycle(
     try:
         forecasts_conn = get_forecasts_connection_read_only()
     except Exception:
-        conn.close()
-        active_lock.release()
+        try:
+            conn.close()
+        finally:
+            active_lock.release()
         raise
     # Warm the in-process bankroll-of-record cache from the durable collateral
     # ledger snapshot so the per-event no-submit Kelly proof can read
