@@ -24,7 +24,7 @@ _DB_FILES = ("zeus_trades.db", "zeus-forecasts.db", "zeus-world.db")
 
 def _dangling_fks(state_dir: Path) -> list[tuple[str, str, str, str]]:
     """(db_file, child, column, missing_parent) across the three canonical DBs."""
-    from tests.test_no_dangling_foreign_keys import find_dangling_foreign_keys  # reuse the checker
+    from scripts.ops.db_integrity_checks import find_dangling_foreign_keys  # reuse the checker
     out = []
     for f in _DB_FILES:
         p = state_dir / f

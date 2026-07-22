@@ -6,9 +6,11 @@ INSERT/UPDATE on the child table fail at statement-compile time under foreign_ke
 this way from 2026-07-02 after the K1 split dropped its local ensemble_snapshots parent.
 
 `find_dangling_foreign_keys(conn)` scans every FK edge in a schema and returns the ones
-whose parent table is absent — the reusable check behind this antibody. It is cheap
-(sqlite_master + PRAGMA foreign_key_list only) and belongs as a boot/CI gate once the
-currently-known live instances (below) are cleared to zero.
+whose parent table is absent — the reusable check behind this antibody. Implementation lives
+in scripts/ops/db_integrity_checks.py (a production module, not tests/) so an operator
+deployment that omits tests/ does not lose the gate. It is cheap (sqlite_master + PRAGMA
+foreign_key_list only) and belongs as a boot/CI gate once the currently-known live instances
+(below) are cleared to zero.
 
 KNOWN LIVE INSTANCES at 2026-07-21 (found by a read-only scan of the three canonical DBs;
 this list must shrink to empty, never grow):
@@ -21,21 +23,7 @@ from __future__ import annotations
 
 import sqlite3
 
-
-def find_dangling_foreign_keys(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
-    """Return (child_table, child_column, missing_parent_table) for every FK edge whose
-    parent table is absent from the same schema. Empty list == healthy."""
-    present = {
-        r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-    }
-    dangling: list[tuple[str, str, str]] = []
-    for table in sorted(present):
-        for fk in conn.execute(f'PRAGMA foreign_key_list("{table}")').fetchall():
-            parent, child_col = fk[2], fk[3]
-            if parent not in present:
-                dangling.append((table, child_col, parent))
-    return dangling
+from scripts.ops.db_integrity_checks import find_dangling_foreign_keys
 
 
 def _fixture(create_sqls: list[str]) -> sqlite3.Connection:
