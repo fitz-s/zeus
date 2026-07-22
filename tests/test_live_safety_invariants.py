@@ -304,7 +304,23 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
     assert portfolio.authority_scope == "runtime_exposure"
 
 
-def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress(monkeypatch):
+@pytest.mark.parametrize(
+    ("monotonic_values", "expected_count", "expected_reason"),
+    (
+        ([0.0, 0.0, 1.0], 1, "cycle_budget_exhausted"),
+        (
+            [0.0, 0.0, 0.0, 0.0],
+            2,
+            "positive_budget_progress_limit",
+        ),
+    ),
+)
+def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress(
+    monkeypatch,
+    monotonic_values,
+    expected_count,
+    expected_reason,
+):
     """Persisted monitor progress turns a positive cycle budget into a hard deadline."""
     from src.engine import cycle_runtime
 
@@ -328,7 +344,17 @@ def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress
         chain_shares=10.0,
         chain_state="synced",
     )
-    portfolio = _make_portfolio(first, second)
+    third = _make_position(
+        trade_id="held-budget-third",
+        city="Chicago",
+        target_date="2026-07-04",
+        direction="buy_no",
+        state="day0_window",
+        shares=10.0,
+        chain_shares=10.0,
+        chain_state="synced",
+    )
+    portfolio = _make_portfolio(first, second, third)
     visited: list[str] = []
 
     def fake_refresh(conn, clob, position):
@@ -354,8 +380,6 @@ def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress
             selected_method=self.selected_method or self.entry_method,
             applied_validations=["replacement_posterior"],
         )
-
-    monotonic_values = [0.0, 0.0, 1.0]
 
     def fake_monotonic():
         if monotonic_values:
@@ -405,17 +429,18 @@ def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress
         held_position_monitor_budget_seconds=0.5,
     )
 
-    assert visited == ["held-budget-first"]
+    assert len(visited) == expected_count
+    assert visited[0] == "held-budget-first"
     assert portfolio_dirty is True
     assert tracker_dirty is False
-    assert summary["held_monitor_candidates"] == 2
+    assert summary["held_monitor_candidates"] == 3
     assert summary["held_monitor_budget_guaranteed_positions"] == 2
     assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
-    assert summary["held_monitor_positions_scanned"] == 1
-    assert summary["held_monitor_positions_deferred"] == 1
-    assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
-    assert summary["monitors"] == 1
-    assert len(monitor_results) == 1
+    assert summary["held_monitor_positions_scanned"] == expected_count
+    assert summary["held_monitor_positions_deferred"] == 3 - expected_count
+    assert summary["held_monitor_defer_reason"] == expected_reason
+    assert summary["monitors"] == expected_count
+    assert len(monitor_results) == expected_count
 
 
 @pytest.mark.parametrize(
@@ -703,7 +728,9 @@ def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
         defer_partial_orderbook_gaps=True,
     )
 
-    assert events == ["network_fetch", "refresh:local-active-before-hard-fact"]
+    assert events == ["network_fetch"]
+    assert summary["held_monitor_progress_limit_reached"] is True
+    assert summary["held_monitor_defer_reason"] == "positive_budget_progress_limit"
     assert summary["held_monitor_partial_orderbook_gaps_scheduled_after_local"] == 2
     assert summary["day0_hard_fact_direct_exit_decisions"] == 2
     assert summary["exits_suppressed_no_submit"] == 2

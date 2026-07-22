@@ -129,6 +129,7 @@ _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
+_HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_LIMIT = 2
 def _held_position_monitor_budget_seconds(override: float | None = None) -> float:
     raw = override
     if raw is None:
@@ -5785,22 +5786,38 @@ def execute_monitoring_phase(
             summary["held_monitor_defer_reason"] = "urgent_day0_wake"
             break
         monitor_deadline_expired = time.monotonic() >= monitor_deadline
-        monitor_progress_persisted = int(summary.get("monitors", 0) or 0) > 0
+        monitor_progress_count = int(summary.get("monitors", 0) or 0)
+        monitor_progress_persisted = monitor_progress_count > 0
+        monitor_progress_limit_reached = (
+            monitor_budget_seconds > 0.0
+            and monitor_progress_count
+            >= _HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_LIMIT
+        )
         if (
-            monitor_deadline_expired
-            and (
-                id(pos) not in budget_guaranteed_position_ids
-                or (monitor_budget_seconds > 0.0 and monitor_progress_persisted)
+            monitor_progress_limit_reached
+            or (
+                monitor_deadline_expired
+                and (
+                    id(pos) not in budget_guaranteed_position_ids
+                    or (monitor_budget_seconds > 0.0 and monitor_progress_persisted)
+                )
             )
         ):
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:
                 summary["held_monitor_positions_deferred"] = deferred_count
-                summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
-                summary["held_monitor_deadline_deferred_positions"] = deferred_count
-                summary["held_monitor_deadline_defer_reason"] = (
-                    "MONITOR_DEADLINE_EXPIRED"
+                summary["held_monitor_defer_reason"] = (
+                    "positive_budget_progress_limit"
+                    if monitor_progress_limit_reached
+                    else "cycle_budget_exhausted"
                 )
+                if monitor_progress_limit_reached:
+                    summary["held_monitor_progress_limit_reached"] = True
+                if monitor_deadline_expired:
+                    summary["held_monitor_deadline_deferred_positions"] = deferred_count
+                    summary["held_monitor_deadline_defer_reason"] = (
+                        "MONITOR_DEADLINE_EXPIRED"
+                    )
             break
         if monitor_deadline_expired:
             summary["held_monitor_budget_bypass_scanned"] = (

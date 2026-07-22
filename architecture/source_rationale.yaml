@@ -1772,7 +1772,7 @@ files:
   src/engine/cycle_runtime.py:
     zone: K2_runtime
     authority_role: runtime_helper
-    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation. Once a positive-budget held-position cycle persists monitor progress, its deadline is hard so guaranteed tail work cannot indefinitely block entry redecision; zero-budget fair-lane rotation remains intact.
+    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation. A positive-budget held-position cycle yields after two persisted monitors, or once its deadline expires after any progress, so one slow tail cannot indefinitely block entry redecision; zero-budget fair-lane rotation remains intact.
   src/engine/discovery_mode.py:
     zone: K2_runtime
     authority_role: mode_enum
