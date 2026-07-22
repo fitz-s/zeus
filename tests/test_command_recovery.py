@@ -3313,6 +3313,12 @@ class TestRecoveryResolutionTable:
         assert summary["scope"] == "restart_preflight"
         assert summary["restart_preflight_narrow"] is True
         assert summary["scanned"] == 1
+        assert summary["terminal_point_orders"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
         assert summary["restart_no_venue_exit_retry_projection"] == {
             "scanned": 1,
             "advanced": 1,
@@ -6077,6 +6083,33 @@ class TestRecoveryResolutionTable:
         assert payload["reason"] == "point_order_terminal_no_fill"
         assert payload["required_predicates"]["no_matching_open_orders"] is True
         assert payload["required_predicates"]["no_matching_trades"] is True
+
+    def test_restart_preflight_point_order_recovery_projects_its_terminal_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        """The deploy recovery must clear the exact point-order fact its gate detects."""
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="LIVE", matched_size="0", remaining_size="10")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-001",
+            "status": "CANCELED",
+            "matched_size": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import (
+            reconcile_restart_preflight_terminal_point_orders,
+        )
+
+        summary = reconcile_restart_preflight_terminal_point_orders(conn, mock_client)
+
+        assert summary["projection"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
 
     def test_live_tick_primes_acked_order_before_projection_creates_terminal_candidate(
         self,

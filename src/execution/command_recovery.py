@@ -8602,6 +8602,7 @@ def reconcile_terminal_order_facts(
     conn: sqlite3.Connection,
     *,
     collect_continuations: bool = False,
+    command_ids: frozenset[str] | None = None,
 ) -> dict:
     """Close entry commands whose latest venue fact proves no resting remainder."""
 
@@ -8609,8 +8610,10 @@ def reconcile_terminal_order_facts(
     continuations: list[dict] = []
     immediate_redecision_events = 0
     for row in _latest_terminal_order_fact_candidates(conn):
-        summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
+        if command_ids is not None and command_id not in command_ids:
+            continue
+        summary["scanned"] += 1
         command_order_id = str(row.get("venue_order_id") or "")
         order_id = str(row.get("order_fact_venue_order_id") or "")
         try:
@@ -11545,6 +11548,32 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
                 exc,
             )
             summary["errors"] += 1
+    return summary
+
+
+def reconcile_restart_preflight_terminal_point_orders(
+    conn: sqlite3.Connection,
+    client,
+) -> dict:
+    """Resolve only point-order facts selected by this restart recovery pass."""
+
+    command_ids = frozenset(
+        str(row.get("command_id") or "")
+        for row in _terminal_point_order_candidates(conn)
+        if str(row.get("command_id") or "")
+    )
+    summary = reconcile_terminal_point_orders(conn, client)
+    if not command_ids or int(summary.get("advanced", 0) or 0) <= 0:
+        return summary
+    projection = reconcile_terminal_order_facts(
+        conn,
+        collect_continuations=True,
+        command_ids=command_ids,
+    )
+    summary["projection"] = projection
+    summary["advanced"] += int(projection.get("advanced", 0) or 0)
+    summary["stayed"] += int(projection.get("stayed", 0) or 0)
+    summary["errors"] += int(projection.get("errors", 0) or 0)
     return summary
 
 
@@ -19860,6 +19889,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     )
 
     if scope == "restart_preflight":
+        _client_pass(
+            "terminal_point_orders",
+            reconcile_restart_preflight_terminal_point_orders,
+            "terminal_point_orders",
+        )
         _client_pass(
             "terminal_exit_partial_remainders",
             reconcile_partial_remainders,
