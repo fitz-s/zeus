@@ -1663,6 +1663,15 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         > evaluations[buy.candidate_id].robust_delta_log_wealth
         > 0
     )
+    assert decision.capital_lock_hours == pytest.approx(24)
+    assert decision.robust_log_growth_per_hour == pytest.approx(
+        decision.robust_delta_log_wealth / 24
+    )
+    assert (
+        evaluations[sell.candidate_id].robust_log_growth_per_hour
+        > evaluations[buy.candidate_id].robust_log_growth_per_hour
+        > 0
+    )
 
 
 def test_positive_sell_still_beats_a_discrete_repair_buy():
@@ -1727,7 +1736,7 @@ def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
     assert decision.robust_ev_usd > 0
 
 
-def test_global_single_order_positive_sell_precedes_new_risk_buy_and_cash():
+def test_global_single_order_ranks_buy_and_sell_by_one_capital_growth_rate():
     sell = _global_sell_candidate(
         candidate_id="sell-runner-up",
         family="sell-runner-family",
@@ -1745,14 +1754,24 @@ def test_global_single_order_positive_sell_precedes_new_risk_buy_and_cash():
     )
 
     decision = _global_select(
-        (sell, buy), floor="100", ceiling="110", cash="100", cap="5"
+        (sell, buy),
+        floor="100",
+        ceiling="110",
+        cash="100",
+        cap="5",
+        resolution_hours_by_family={
+            sell.family_key: 24,
+            buy.family_key: 6,
+        },
     )
 
-    assert decision.candidate is sell
-    assert decision.cash_proceeds_usd > 0
+    assert decision.candidate is buy
+    assert decision.cash_proceeds_usd == 0
     assert decision.robust_delta_log_wealth > 0
-    assert decision.capital_action_mode == "IMMEDIATE_REDUCE_ONLY_SELL"
-    assert decision.robust_log_growth_per_hour is None
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert decision.robust_log_growth_per_hour == pytest.approx(
+        decision.robust_delta_log_wealth / 6
+    )
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
@@ -1760,6 +1779,15 @@ def test_global_single_order_positive_sell_precedes_new_risk_buy_and_cash():
     assert (
         evaluations[buy.candidate_id].robust_delta_log_wealth
         > evaluations[sell.candidate_id].robust_delta_log_wealth
+        > 0
+    )
+    assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(24)
+    assert evaluations[sell.candidate_id].robust_log_growth_per_hour == pytest.approx(
+        evaluations[sell.candidate_id].robust_delta_log_wealth / 24
+    )
+    assert (
+        evaluations[buy.candidate_id].robust_log_growth_per_hour
+        > evaluations[sell.candidate_id].robust_log_growth_per_hour
         > 0
     )
 
@@ -3597,24 +3625,37 @@ def test_global_single_order_duration_is_universe_bound_not_candidate_authored()
     )
 
 
-def test_global_single_order_nonpositive_buy_horizon_invalidates_epoch():
-    candidate = _global_candidate(
+def test_global_single_order_nonpositive_capital_horizon_invalidates_epoch():
+    buy = _global_candidate(
         candidate_id="elapsed-horizon",
         family="elapsed",
         side="YES",
         q=0.75,
     )
+    sell = _global_sell_candidate(
+        candidate_id="elapsed-sell-horizon",
+        family="elapsed-sell",
+        side="YES",
+        held_q=0.15,
+        bids=(("0.40", "4"), ("0.30", "6")),
+        shares="10",
+    )
 
-    decision = _global_select(
-        (candidate,),
+    buy_decision = _global_select(
+        (buy,),
         resolution_hours_by_family={"elapsed": 0.0},
     )
-
-    assert decision.candidate is None
-    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
-    assert decision.rejection_reasons[candidate.candidate_id] == (
-        "CAPITAL_HORIZON_NON_POSITIVE"
+    sell_decision = _global_select(
+        (sell,),
+        resolution_hours_by_family={"elapsed-sell": 0.0},
     )
+
+    for candidate, decision in ((buy, buy_decision), (sell, sell_decision)):
+        assert decision.candidate is None
+        assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+        assert decision.rejection_reasons[candidate.candidate_id] == (
+            "CAPITAL_HORIZON_NON_POSITIVE"
+        )
 
 
 def test_global_single_order_rejects_probability_from_one_bin_welded_to_another_token():

@@ -229,6 +229,9 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             robust_ev_usd=-1.106,
             capital_efficiency=-0.004273504273504274,
             capital_action_mode="IMMEDIATE_REDUCE_ONLY_SELL",
+            resolution_at_utc=at + _dt.timedelta(days=2),
+            capital_lock_hours=48.0,
+            robust_log_growth_per_hour=-0.01 / 48.0,
             limit_price=Decimal("0.80"),
             expected_fill_price_before_fee=Decimal("0.81"),
             terminal_wealth=BinaryTerminalWealthCertificate(
@@ -775,9 +778,13 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert sell_evaluation["capital_action_mode"] == (
         "IMMEDIATE_REDUCE_ONLY_SELL"
     )
-    assert sell_evaluation["resolution_at_utc"] is None
-    assert sell_evaluation["capital_lock_hours"] is None
-    assert sell_evaluation["robust_log_growth_per_hour"] is None
+    assert sell_evaluation["resolution_at_utc"] == (
+        "2026-07-16 01:00:00+00:00"
+    )
+    assert sell_evaluation["capital_lock_hours"] == 48.0
+    assert sell_evaluation["robust_log_growth_per_hour"] == pytest.approx(
+        -0.01 / 48.0
+    )
     assert len(summary["receipt_hash"]) == 64
     with pytest.raises(ValueError, match="GLOBAL_AUCTION_RECEIPT_SCOPE_INCOMPLETE"):
         global_batch_runtime._store_global_auction_receipt(

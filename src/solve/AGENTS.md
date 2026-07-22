@@ -62,9 +62,8 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   A reduce-only SELL is scored against HOLD instead: its
   robust incremental log-growth and EV must both be positive for the full order and every possible
   FAK fill prefix, even when the favorable SELL branch itself is below one half.
-  A full-size and every-FAK-prefix positive reduce-only SELL is lexically prior to a new BUY:
-  it improves the current endowment, consumes no new capital, and releases cash immediately;
-  among such SELLs rank by coupling-robust lower-CVaR Δlog-wealth. Otherwise rank BUYs by
+  A full-size and every-FAK-prefix positive reduce-only SELL remains eligible, but direction does
+  not override the capital objective: rank all positive BUY and SELL alternatives by
   coupling-robust lower-CVaR Δlog-wealth per remaining family-resolution hour. The horizon is
   derived from the immutable family city and target local date plus the configured settlement
   timezone, and is bound into the current scope/universe witness identity — never authored by a
