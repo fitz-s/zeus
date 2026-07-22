@@ -749,7 +749,7 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     calls = []
 
     def _execution_fact_repair(_conn):
-        calls.append("filled_entry_execution_fact_repair")
+        calls.append("missing_filled_entry_execution_fact_repair")
         return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
 
     def _slow_db_pass(conn):
@@ -771,7 +771,7 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
     monkeypatch.setattr(
         command_recovery,
-        "reconcile_filled_entry_execution_fact_repairs",
+        "reconcile_missing_filled_entry_execution_fact_repairs",
         _execution_fact_repair,
     )
     monkeypatch.setattr(
@@ -788,10 +788,10 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     assert summary["deferred_full_sweep"] is True
     assert summary["boot_fast_budget_exhausted"] is True
     assert calls[:2] == [
-        "filled_entry_execution_fact_repair",
+        "missing_filled_entry_execution_fact_repair",
         "completed_partial_order_facts",
     ]
-    assert summary["filled_entry_execution_fact_repair"]["advanced"] == 1
+    assert summary["missing_filled_entry_execution_fact_repair"]["advanced"] == 1
     assert "completed_partial_order_facts" in summary["boot_fast_deferred_passes"]
     assert summary["boot_fast_defer_reasons"]["completed_partial_order_facts"] == (
         "budget_exhausted_during_pass"
@@ -997,7 +997,7 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
         return sqlite3.connect(":memory:")
 
     def _execution_fact_repair(_conn):
-        calls.append("filled_entry_execution_fact_repair")
+        calls.append("missing_filled_entry_execution_fact_repair")
         return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
 
     def _authenticated_fill(_conn):
@@ -1009,7 +1009,7 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
     monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(
         command_recovery,
-        "reconcile_filled_entry_execution_fact_repairs",
+        "reconcile_missing_filled_entry_execution_fact_repairs",
         _execution_fact_repair,
     )
     monkeypatch.setattr(
@@ -1026,10 +1026,10 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
     )
 
     assert calls == [
-        "filled_entry_execution_fact_repair",
+        "missing_filled_entry_execution_fact_repair",
         "authenticated_entry_trade_fact",
     ]
-    assert summary["filled_entry_execution_fact_repair"]["advanced"] == 1
+    assert summary["missing_filled_entry_execution_fact_repair"]["advanced"] == 1
     assert summary["db_budget_deferred"] is True
     assert summary["db_budget_deferred_at"] == "authenticated_entry_trade_fact"
 
@@ -1240,7 +1240,7 @@ def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
 
     assert apply_attempts == [{"blocking": False, "busy_timeout_ms": 0}]
     assert summary["db_lock_deferred"] is True
-    assert summary["db_lock_deferred_at"] == "filled_entry_execution_fact_repair"
+    assert summary["db_lock_deferred_at"] == "missing_filled_entry_execution_fact_repair"
     assert summary["db_lock_deferred_count"] == 1
     assert summary["deferred_full_sweep"] is True
     assert summary["scope"] == "live_tick"
@@ -13695,7 +13695,7 @@ class TestRecoveryResolutionTable:
         """A cancel-after-fill race must not hide confirmed partial exposure."""
 
         from src.execution.command_recovery import (
-            reconcile_filled_entry_execution_fact_repairs,
+            reconcile_missing_filled_entry_execution_fact_repairs,
         )
 
         _insert(conn, size=5.0, price=0.43)
@@ -13746,7 +13746,7 @@ class TestRecoveryResolutionTable:
                 "classification": "excluded_unaccounted",
             }
         ]
-        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+        assert reconcile_missing_filled_entry_execution_fact_repairs(conn) == {
             "scanned": 0,
             "advanced": 0,
             "stayed": 0,
@@ -13760,12 +13760,17 @@ class TestRecoveryResolutionTable:
             fill_price="0.43",
         )
 
-        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+        traced_sql = []
+        conn.set_trace_callback(traced_sql.append)
+        repair_summary = reconcile_missing_filled_entry_execution_fact_repairs(conn)
+        conn.set_trace_callback(None)
+        assert repair_summary == {
             "scanned": 1,
             "advanced": 1,
             "stayed": 0,
             "errors": 0,
         }
+        assert not any("venue_order_facts" in sql for sql in traced_sql)
         execution = conn.execute(
             """
             SELECT command_id, shares, fill_price, venue_status,
@@ -13795,7 +13800,7 @@ class TestRecoveryResolutionTable:
              WHERE intent_id = 'pos-001:entry'
             """
         )
-        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+        assert reconcile_missing_filled_entry_execution_fact_repairs(conn) == {
             "scanned": 0,
             "advanced": 0,
             "stayed": 0,
