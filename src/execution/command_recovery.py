@@ -19992,6 +19992,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     max(0.0, boot_deadline - time.monotonic()),
                 )
 
+        # RiskGuard requires fill-grade portfolio rows to name their durable
+        # execution_fact provenance.  Repair that narrow, already-confirmed
+        # truth before broader maintenance can consume the boot budget; without
+        # it one partial fill can keep all new entries DATA_DEGRADED after a
+        # restart even though venue and position facts are already canonical.
+        _boot_db_pass(
+            "filled_entry_execution_fact_repair",
+            reconcile_filled_entry_execution_fact_repairs,
+            "filled_entry_execution_fact_repair",
+        )
         _boot_db_pass(
             "completed_partial_order_facts",
             reconcile_completed_partial_order_facts,
@@ -20059,11 +20069,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "filled_entry_projection_repair",
             reconcile_filled_entry_projection_repairs,
             "filled_entry_projection_repair",
-        )
-        _boot_db_pass(
-            "filled_entry_execution_fact_repair",
-            reconcile_filled_entry_execution_fact_repairs,
-            "filled_entry_execution_fact_repair",
         )
         _boot_db_pass(
             "terminal_entry_exposure_obligations",
@@ -20143,6 +20148,20 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         summary["deferred_full_sweep"] = True
         return
 
+    if scope == "live_tick":
+        _already_canceled_review_fast_pass()
+
+    if scope == "live_tick":
+        # This pass closes the narrow provenance gap that otherwise blocks the
+        # entire entry reactor.  Keep it ahead of authenticated-fill and broad
+        # maintenance queries so cumulative lock/budget deferral cannot starve
+        # a repair whose source facts are already durable in zeus_trades.
+        _db_pass(
+            "filled_entry_execution_fact_repair",
+            reconcile_filled_entry_execution_fact_repairs,
+            "filled_entry_execution_fact_repair",
+        )
+
     _db_pass(
         "authenticated_entry_trade_fact",
         reconcile_authenticated_entry_trade_facts,
@@ -20155,9 +20174,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_terminal_order_facts,
             "terminal_order_facts",
         )
-
-    if scope == "live_tick":
-        _already_canceled_review_fast_pass()
 
     # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
     # narrowest capital truth: it resolves unknown exposure and can release the
@@ -20498,11 +20514,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 "filled_entry_projection_repair",
                 client_kw=True,
             )
-        _db_pass(
-            "filled_entry_execution_fact_repair",
-            reconcile_filled_entry_execution_fact_repairs,
-            "filled_entry_execution_fact_repair",
-        )
         _db_pass(
             "confirmed_chain_absence_projection_repair",
             repair_confirmed_chain_absence_positive_projections,
