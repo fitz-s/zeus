@@ -5148,6 +5148,9 @@ def _recapture_fresh_entry_snapshot_if_needed(
                 captured_at=captured_at,
                 scan_authority="VERIFIED",
                 execution_side="BUY",
+                # capture_policy_spec.md §2 trigger 2: synchronous pre-submit
+                # recapture, already structurally full.
+                capture_trigger="JIT_SUBMIT",
             )
         fresh_id = str(fields.get("executable_snapshot_id") or "")
         fresh = get_snapshot(conn, fresh_id) if fresh_id else None

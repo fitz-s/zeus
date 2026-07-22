@@ -3196,7 +3196,9 @@ def persist_presubmit_jit_snapshot(
             witness=witness,
             decision_time=decision_time,
         )
-        insert_snapshot(trade_conn, row)
+        # capture_policy_spec.md §2 trigger 2: presubmit JIT witness, already
+        # structurally full.
+        insert_snapshot(trade_conn, row, capture_trigger="JIT_SUBMIT")
         trade_conn.commit()
         return row.snapshot_id
     except Exception as exc:  # noqa: BLE001 - fail-soft: persistence must never block submit
@@ -10651,7 +10653,9 @@ def _persist_global_candidate_executable_snapshot(
             wide_spread_display_substitution=False,
             depth_at_best_ask=int(levels[0].size),
         )
-        insert_snapshot(trade_conn, snapshot)
+        # capture_policy_spec.md §2 trigger 2: global-auction JIT variant,
+        # already structurally full.
+        insert_snapshot(trade_conn, snapshot, capture_trigger="JIT_SUBMIT")
     # The next phase performs a direct venue JIT fetch.  Do not carry a trade-DB
     # write transaction across that network boundary; the immutable row must be
     # durable before the proof bundle cites it.

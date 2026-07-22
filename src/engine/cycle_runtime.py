@@ -930,6 +930,9 @@ def _ensure_fresh_executable_snapshot(
             captured_at=now,
             scan_authority="VERIFIED",
             execution_side="BUY",
+            # capture_policy_spec.md §2 trigger 2: synchronous pre-submit
+            # recapture (stale-cycle-snapshot path), already structurally full.
+            capture_trigger="JIT_SUBMIT",
         )
     except Exception as exc:  # noqa: BLE001 — any capture failure preserves the stale gate
         logger.warning("executable_snapshot_stale: recapture failed — %s", exc)

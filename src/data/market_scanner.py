@@ -3012,8 +3012,13 @@ def capture_executable_market_snapshot(
     tolerate_missing_book: bool = False,
     persist_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
     commit_after_persist: bool = False,
+    capture_trigger: str | None = None,
 ) -> dict[str, str | bool]:
     """Capture and persist an executable market snapshot.
+
+    ``capture_trigger`` (capture_policy_spec.md §2): why this capture happened,
+    e.g. ``'JIT_SUBMIT'``. Optional passthrough to ``insert_snapshot`` — omit
+    it and the row's capture_trigger column is NULL, unchanged from today.
 
     This is deliberately post-decision: the selected YES/NO token is known, so
     the stored orderbook hash and top-of-book facts describe the token that the
@@ -3311,7 +3316,7 @@ def capture_executable_market_snapshot(
     before_changes = int(conn.total_changes)
     with persist_context as write_lease:
         try:
-            insert_snapshot(conn, snapshot)
+            insert_snapshot(conn, snapshot, capture_trigger=capture_trigger)
             # PR 6 (2026-05-19): compute raw_orderbook_hash transition delta.
             _current_hash = snapshot.raw_orderbook_hash
             _now_ts = time.time()
@@ -5424,6 +5429,25 @@ def refresh_executable_market_substrate_snapshots(
                     ),
                 )
                 try:
+                    # capture_policy_spec.md §2 taxonomy, Track A subset: trigger 3
+                    # (near-threshold) and trigger 4 (keyframe) need mechanisms — a
+                    # configurable margin comparison and a cycle counter — that don't
+                    # exist yet (grep confirms zero hits for either env var), so this
+                    # increment classifies only the two signals already computed here:
+                    # priority-set membership (trigger 1, existing exact_priority_condition_ids/
+                    # priority_condition_ids/priority_token_ids plumbing) vs everything
+                    # else. The upstream priority set is flattened before it reaches this
+                    # function (substrate_observer.py:2902-2936 merges marker/open-rest/
+                    # held-position into one set), so the specific PRIORITY_* sub-reason
+                    # isn't resolvable here without threading three sets end-to-end;
+                    # PRIORITY_MARKER is used as the representative value pending that
+                    # follow-up. This does not affect the Track A hydration check (all
+                    # three PRIORITY_* values are equally FULL-eligible) or any routing
+                    # (nothing routes on this column yet).
+                    is_priority_capture = (
+                        str(condition_id or "").strip() in priority_conditions
+                        or str(selected_token or "").strip() in priority_tokens
+                    )
                     capture_executable_market_snapshot(
                         conn,
                         market=market,
@@ -5441,6 +5465,7 @@ def refresh_executable_market_substrate_snapshots(
                         tolerate_missing_book=True,
                         persist_context_factory=snapshot_write_context_factory,
                         commit_after_persist=snapshot_write_context_factory is not None,
+                        capture_trigger="PRIORITY_MARKER" if is_priority_capture else "DISCOVERY_SWEEP",
                     )
                     # EDLI live-canary WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
                     # capture_executable_market_snapshot does per-outcome venue HTTP
