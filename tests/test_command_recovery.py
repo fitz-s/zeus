@@ -6110,8 +6110,12 @@ class TestRecoveryResolutionTable:
         mock_client.get_trades.return_value = []
 
         from src.execution.command_recovery import (
+            _collect_recovery_priming_keys,
             reconcile_restart_preflight_terminal_point_orders,
         )
+
+        priming = _collect_recovery_priming_keys(conn, scope="restart_preflight")
+        assert "ord-001" in priming["order_ids"]
 
         summary = reconcile_restart_preflight_terminal_point_orders(conn, mock_client)
 

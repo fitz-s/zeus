@@ -18951,6 +18951,13 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
     if scope == "restart_preflight":
         try:
+            _harvest(_terminal_point_order_candidates(conn))
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "recovery: priming restart terminal point orders failed",
+                exc_info=True,
+            )
+        try:
             _harvest(
                 _partial_remainder_candidates(
                     conn,
