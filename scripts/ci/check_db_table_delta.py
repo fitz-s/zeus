@@ -84,6 +84,13 @@ _SQL_RESERVED = frozenset({
     "ddl", "sql",
 })
 
+# Known non-canonical sidecar/scratch tables created in a SEPARATE sidecar FILE
+# (not a canonical DB): _capsule_meta = W0-a rollback-capsule metadata;
+# _migrations_applied = the per-DB migration ledger. NARROWED (consult re-review
+# 2026-07-22) from a blanket leading-underscore skip so a future _-named table
+# created against a CANONICAL connection is NOT silently exempted.
+_KNOWN_SIDECAR_TABLES = frozenset({"_capsule_meta", "_migrations_applied"})
+
 
 def _changed_files_from_git(base: str, head: str) -> list[str]:
     try:
@@ -190,16 +197,14 @@ def detect_new_tables(
             # transaction. They are not boot-visible ownership surfaces.
             if name.endswith("_new"):
                 continue
-            # Leading-underscore names are internal/sidecar tables by convention
-            # (e.g. _migrations_applied, or the W0-a rollback capsule's
-            # _capsule_meta, created in a SEPARATE capsule FILE — not a canonical
-            # DB). They can never be a canonical ownership surface: the registry's
-            # own identifier rule (table_registry._IDENT_RE = ^[a-z]...) cannot
-            # even register a leading-underscore name, so detecting one here as an
-            # "unregistered canonical table" is definitionally a false positive.
-            # Canonical tables always start with a letter, so this skips no real
-            # ghost. Same non-canonical-transient class as *_new above.
-            if name.startswith("_"):
+            # Known non-canonical sidecar/scratch tables (created in a separate
+            # sidecar FILE, not a canonical DB) — same class as *_new above. A
+            # NARROW allowlist, not a blanket leading-underscore skip, so a future
+            # _-named table created against a CANONICAL connection still trips the
+            # gate rather than being silently exempted (consult re-review
+            # 2026-07-22). The registry's own _IDENT_RE (^[a-z]...) also cannot
+            # register these names.
+            if name in _KNOWN_SIDECAR_TABLES:
                 continue
             # Skip SQL reserved-word false positives (CREATE TABLE for / as ...)
             if name in _SQL_RESERVED:
