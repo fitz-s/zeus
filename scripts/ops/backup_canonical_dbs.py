@@ -55,6 +55,15 @@ def _state_dir(state_dir: Optional[str]) -> Path:
     return Path(state_dir) if state_dir else ROOT / "state"
 
 
+def _sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Stream SHA-256 of a file without loading it into memory (the trade DB alone is ~43 GB)."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _schema_hash(conn: sqlite3.Connection) -> str:
     rows = conn.execute(
         "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").fetchall()
@@ -118,7 +127,7 @@ def backup_one(src_path: Path, dest_path: Path) -> dict:
     elapsed = round(time.monotonic() - started, 1)
     # verify the copy immediately (integrity + schema identity)
     v = _verify_one(dest_path, expect_schema=src_schema, expect_seq=src_seq)
-    cap_sha = hashlib.sha256(dest_path.read_bytes()).hexdigest() if dest_path.stat().st_size < (2 << 30) else "skipped-large"
+    cap_sha = _sha256_file(dest_path)
     return {
         "db": src_path.name, "dest": str(dest_path), "elapsed_s": elapsed,
         "backup_restarts": restarts["n"], "schema_sha256": src_schema,
