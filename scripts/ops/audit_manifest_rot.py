@@ -87,14 +87,33 @@ def _has_rows(state_dir: Path, db_file: str, table: str) -> Optional[bool]:
         conn.close()
 
 
+def _writer_pattern(table: str) -> str:
+    """Regex text for an INSERT/REPLACE INTO <table> writer statement. Matches bare INSERT
+    INTO, INSERT OR REPLACE/IGNORE INTO, and REPLACE INTO; an optional schema qualifier
+    (main.<table>); double-quoted, backtick-, or bracket-quoted identifiers; and arbitrary
+    whitespace/newlines between tokens. Case-insensitivity is applied by the caller."""
+    t = re.escape(table)
+    name = rf'(?:"{t}"|`{t}`|\[{t}\]|\b{t}\b)'
+    qualifier_ident = r'(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)'
+    qualifier = rf'(?:{qualifier_ident}\s*\.\s*)?'
+    verb = r'(?:INSERT\s+OR\s+(?:REPLACE|IGNORE)\s+INTO|INSERT\s+INTO|REPLACE\s+INTO)'
+    return rf'{verb}\s+{qualifier}{name}'
+
+
 def _has_writer(table: str) -> bool:
-    """A live INSERT writer in src/ (the strongest 'this is live' signal)."""
+    """A live writer statement targeting `table` in src/ (the strongest 'this is live' signal).
+
+    HEURISTIC TEXT SCAN, NOT A SQL PARSER: it cannot see writes built from f-strings/string
+    concatenation, helper-generated SQL, or a repository/ORM abstraction that never spells the
+    table name next to INTO in source. A False result here is NOT proof no writer exists — the
+    operator must still reason about dynamic/indirect writers before trusting this gate."""
+    pattern = _writer_pattern(table)
     try:
-        r = subprocess.run(["rg", "-l", rf"INTO\s+{re.escape(table)}\b", str(ROOT / "src")],
+        r = subprocess.run(["rg", "-l", "-i", "--multiline", pattern, str(ROOT / "src")],
                            capture_output=True, text=True)
         return r.returncode == 0 and bool(r.stdout.strip())
     except FileNotFoundError:
-        r = subprocess.run(["grep", "-rl", f"INTO {table}", str(ROOT / "src")],
+        r = subprocess.run(["grep", "-rliE", pattern, str(ROOT / "src")],
                            capture_output=True, text=True)
         return bool(r.stdout.strip())
 
@@ -108,6 +127,11 @@ def audit(manifest: Path, state_dir: Path) -> list[dict]:
     name in any DB**. A legacy_archived copy WITH a canonical sibling is a legitimate ghost
     (correct dual-registration, pending drop) — NOT rot; flagging those over-reports. The
     money-data-loss case is a droppable label on a table whose only/authoritative home it is."""
+    print("WARN: live_writer uses a HEURISTIC text scan (INSERT/REPLACE INTO <table>), not a "
+          "SQL parser — it cannot see writes built from f-strings/string concatenation, "
+          "helper-generated SQL, or a repository/ORM abstraction. live_writer=False is NOT "
+          "proof no writer exists; the operator must still reason about dynamic writers.",
+          file=sys.stderr)
     entries = [e for e in _load_entries(manifest) if e.get("name") and e.get("db") in _DB_FILE]
     # names that have a canonical (owning-class) registration somewhere
     canonical_names = {
