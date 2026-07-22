@@ -18817,6 +18817,30 @@ def _restart_preflight_unresolved_commands(conn: sqlite3.Connection) -> list[dic
     return rows
 
 
+def _already_canceled_review_commands(conn: sqlite3.Connection) -> list[dict]:
+    """Return unresolved commands whose cancel race has a bound venue order."""
+
+    if not (
+        _table_exists(conn, "venue_commands")
+        and _table_exists(conn, "venue_command_events")
+    ):
+        return []
+    rows: list[dict] = []
+    for row in find_unresolved_commands(conn):
+        if str(row.get("state") or "") != CommandState.REVIEW_REQUIRED.value:
+            continue
+        command_id = str(row.get("command_id") or "")
+        venue_order_id = str(row.get("venue_order_id") or "")
+        if not command_id or not venue_order_id:
+            continue
+        if _cancel_failed_already_canceled_payload(
+            _command_events(conn, command_id)
+        ) is None:
+            continue
+        rows.append(row)
+    return rows
+
+
 def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "full") -> dict:
     """SNAPSHOT phase helper: gather every venue-read key the apply passes will need.
 
@@ -19294,6 +19318,92 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             ),
         )
 
+    def _already_canceled_review_fast_pass():
+        """Resolve capital-blocking cancel races before broad maintenance.
+
+        The general live-tick sweep has a deliberately tiny cumulative DB
+        budget.  A large maintenance query must not repeatedly consume that
+        budget before command-specific terminal facts can release collateral.
+        Venue reads remain bounded to the currently affected order ids and run
+        with no DB connection open.
+        """
+
+        with open_tracked(
+            read_conn_factory,
+            label="recovery.already_canceled_review_fast:snapshot",
+        ) as conn:
+            candidates = _already_canceled_review_commands(conn)
+        if not candidates:
+            return None
+        command_ids = {str(row.get("command_id") or "") for row in candidates}
+        order_ids = {
+            str(row.get("venue_order_id") or "")
+            for row in candidates
+            if str(row.get("venue_order_id") or "")
+        }
+        assert_no_open_connection("recovery.already_canceled_review_fast")
+        snapshot = capture_venue_read_snapshot(
+            client,
+            order_ids=order_ids,
+            idempotency_keys=set(),
+            condition_ids=set(),
+        )
+        fast_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+        fast_conn_factory = _recovery_apply_conn_factory(
+            conn_factory,
+            scope="live_tick",
+            deadline_monotonic=fast_deadline,
+        )
+
+        def _apply(conn, snap_client):
+            ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+            current = {
+                str(row.get("command_id") or ""): row
+                for row in _already_canceled_review_commands(conn)
+            }
+            for command_id in sorted(command_ids):
+                row = current.get(command_id)
+                if row is None:
+                    continue
+                ps["scanned"] += 1
+                try:
+                    outcome = _reconcile_row(
+                        conn,
+                        VenueCommand.from_row(row),
+                        snap_client,
+                    )
+                except Exception as exc:  # noqa: BLE001 - one command must not block peers.
+                    logger.error(
+                        "recovery: priority cancel-race command %s failed: %s",
+                        command_id,
+                        exc,
+                    )
+                    ps["errors"] += 1
+                    continue
+                if outcome == "advanced":
+                    ps["advanced"] += 1
+                elif outcome == "stayed":
+                    ps["stayed"] += 1
+                else:
+                    ps["errors"] += 1
+            _accumulate(summary, "already_canceled_review_fast", ps)
+            return ps
+
+        return _run_recovery_pass_with_lock_policy(
+            "already_canceled_review_fast",
+            lambda: run_three_phase(
+                lambda conn: None,
+                lambda _snap: snapshot,
+                _apply,
+                conn_factory=fast_conn_factory,
+                snapshot_conn_factory=read_conn_factory,
+                label="recovery.already_canceled_review_fast",
+            ),
+            scope="live_tick",
+            summary=summary,
+            deadline_monotonic=fast_deadline,
+        )
+
     if scope == "boot_fast":
         # Boot recovery must not perform account-wide or per-order venue reads.
         # Live evidence 2026-06-28 showed the pre-scheduler "boot_fast" path
@@ -19559,6 +19669,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_terminal_order_facts,
             "terminal_order_facts",
         )
+
+    if scope == "live_tick":
+        _already_canceled_review_fast_pass()
 
     if scope in {"restart_preflight", "live_tick"}:
         _db_pass(

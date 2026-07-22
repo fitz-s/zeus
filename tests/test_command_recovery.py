@@ -9845,6 +9845,88 @@ class TestRecoveryResolutionTable:
             "order_id": "ord-prior-fill",
         }
 
+    def test_live_tick_prioritizes_already_canceled_review_before_general_budget(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_client,
+    ):
+        """Capital-blocking cancel proof runs even when broad DB budget is zero."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import append_event
+
+        db_path = tmp_path / "priority-cancel-review.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_collateral_schema(seed)
+        _insert(seed, size=60.0, price=0.71)
+        _advance_to_acked(seed, venue_order_id="ord-priority-unfilled")
+        _seed_pending_entry_projection(seed, order_id="ord-priority-unfilled")
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-priority-unfilled"},
+        )
+        append_event(
+            seed,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-priority-unfilled",
+                "reason": "order can't be found - already canceled or matched",
+                "cancel_outcome": {
+                    "orderID": "ord-priority-unfilled",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "order can't be found - already canceled or matched",
+                },
+            },
+        )
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-priority-unfilled",
+            "status": "CANCELED",
+            "original_size": "60",
+            "size_matched": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=mock_client,
+            scope="live_tick",
+        )
+
+        assert summary["already_canceled_review_fast"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "EXPIRED"
+        finally:
+            verified.close()
+
     def test_filled_entry_repair_without_trade_case_stays_non_error(
         self,
         conn,
