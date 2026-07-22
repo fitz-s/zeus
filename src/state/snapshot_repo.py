@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
@@ -27,6 +28,8 @@ SNAPSHOT_TABLE = "executable_market_snapshots"
 SNAPSHOT_LATEST_TABLE = "executable_market_snapshot_latest"
 SNAPSHOT_INVALIDATIONS_TABLE = "executable_market_snapshot_invalidations"
 ABSENT_ORDERBOOK_SIDE = "ABSENT"
+
+logger = logging.getLogger(__name__)
 
 
 def _snapshot_table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -157,12 +160,47 @@ def init_snapshot_schema(
                 "PR2 migration: column already exists, skipping: %s",
                 _ddl.split("ADD COLUMN ")[1].split()[0],
             )
+    # capture_policy_spec.md §3 Track A: idempotent ALTER, same check-then-add
+    # idiom as PR2 above. Nullable, UNCONSTRAINED TEXT — deliberately NO CHECK.
+    # A CHECK-constrained ADD COLUMN forces SQLite (>=3.37) to scan and validate
+    # every existing row (measured ~0.9s / 3M rows; O(rows) with heavy cold I/O
+    # on the ~43GB live trade table), whereas a plain nullable ADD COLUMN is
+    # O(1) metadata-only (measured 0.001s). The application is the domain
+    # constraint: every writer stamps a fixed taxonomy constant (see the
+    # call sites), so the column's value set is enforced at write time, not by a
+    # boot-time full-table scan of the live money DB. Pre-migration rows stay
+    # NULL. The compact-form table + any capture-away-from-full routing are a
+    # later operator-fenced increment, not this additive one.
+    for _ddl in (
+        "ALTER TABLE executable_market_snapshots ADD COLUMN capture_trigger TEXT",
+    ):
+        try:
+            conn.execute(_ddl)
+        except Exception as _exc:
+            if "duplicate column" not in str(_exc).lower():
+                raise
+            _pr2_logger.info(
+                "capture_policy migration: column already exists, skipping: %s",
+                _ddl.split("ADD COLUMN ")[1].split()[0],
+            )
 
 
-def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot) -> None:
-    """Persist one immutable executable market snapshot."""
+def insert_snapshot(
+    conn: sqlite3.Connection,
+    snapshot: ExecutableMarketSnapshot,
+    *,
+    capture_trigger: str | None = None,
+) -> None:
+    """Persist one immutable executable market snapshot.
+
+    ``capture_trigger`` (capture_policy_spec.md §2/§3): records why this row
+    was captured full, e.g. ``'JIT_SUBMIT'`` or ``'PRIORITY_MARKER'``.
+    Optional — omitting it (any caller not yet updated) writes NULL, which is
+    a no-op for every existing reader (none of them select this column).
+    """
 
     row = _row_from_snapshot(snapshot)
+    row["capture_trigger"] = capture_trigger
     conn.execute(
         """
         INSERT INTO executable_market_snapshots (
@@ -176,7 +214,7 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot
           raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
           captured_at, freshness_deadline,
           wide_spread_display_substitution, depth_at_best_ask,
-          tradeability_status_json
+          tradeability_status_json, capture_trigger
         ) VALUES (
           :snapshot_id, :gamma_market_id, :event_id, :event_slug, :condition_id,
           :question_id, :yes_token_id, :no_token_id, :selected_outcome_token_id,
@@ -188,7 +226,7 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot
           :raw_clob_market_info_hash, :raw_orderbook_hash, :authority_tier,
           :captured_at, :freshness_deadline,
           :wide_spread_display_substitution, :depth_at_best_ask,
-          :tradeability_status_json
+          :tradeability_status_json, :capture_trigger
         )
         """,
         row,

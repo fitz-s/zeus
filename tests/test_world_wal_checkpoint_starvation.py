@@ -3,8 +3,11 @@
 # Authority basis: docs/operations/HANDOFF_2026-06-04_live_restart_arm.md
 #   + critic-proven root: zeus-world.db WAL bloat = checkpoint-starvation by
 #     long-lived reader connections pinning the WAL floor (NOT I/O under the
-#     world mutex). Live evidence: PRAGMA wal_checkpoint(PASSIVE) returns
-#     (1,-1,-1) = BUSY because a reader snapshot pins old frames.
+#     world mutex). Live evidence: while a reader pins the floor,
+#     PRAGMA wal_checkpoint(PASSIVE) copies fewer frames than the log holds
+#     (checkpointed_frames < log_frames) and never truncates. Correction
+#     2026-07-21 (audit finding W5-2): PASSIVE's busy field is ALWAYS 0 — it
+#     is 1 only for a blocked RESTART/FULL/TRUNCATE checkpoint, never PASSIVE.
 # Lifecycle: created=2026-06-04; last_reviewed=2026-06-04; last_reused=never
 # Purpose: RED→GREEN relationship test for the WAL checkpoint-starvation fix.
 #   Proves the MECHANISM (a reader that never ends its read transaction pins
@@ -30,8 +33,14 @@ The fix has two parts:
   2. A periodic scheduler job runs PRAGMA wal_checkpoint(TRUNCATE) as a backstop.
 
 This test reproduces the disease at the raw-SQLite level (no production import
-needed for the mechanism proof) and then asserts the db.py helper that the fix
-exposes (``checkpoint_world_wal``) actually truncates once readers release.
+needed for the mechanism proof) using literal TRUNCATE calls, since TRUNCATE is
+the mode where "BUSY while a reader pins the floor" / "shrinks once released"
+is easiest to observe directly. Probe 3 then asserts what the production
+helper (``checkpoint_world_wal``) actually runs — PASSIVE, not TRUNCATE (W5-3,
+2026-07-21: this file previously assumed TRUNCATE; the implementation has
+always run PASSIVE, for live-writer-priority reasons — see that function's
+docstring): it drains the log fully once no reader pins the floor, but unlike
+TRUNCATE it never shrinks the -wal file itself.
 """
 
 from __future__ import annotations
@@ -164,10 +173,12 @@ def test_released_reader_lets_checkpoint_truncate(tmp_path: Path) -> None:
 # Probe 3: the db.py production helper truncates the world WAL.
 # ---------------------------------------------------------------------------
 
-def test_checkpoint_world_wal_helper_truncates(tmp_path: Path, monkeypatch) -> None:
-    """``checkpoint_world_wal`` runs wal_checkpoint(TRUNCATE) on zeus-world.db
-    and returns the (busy, log_frames, checkpointed_frames) triple for
-    observability. With no competing reader it must truncate (busy=0)."""
+def test_checkpoint_world_wal_helper_drains_without_truncating(tmp_path: Path, monkeypatch) -> None:
+    """``checkpoint_world_wal`` runs wal_checkpoint(PASSIVE) on zeus-world.db and
+    returns the (busy, log_frames, checkpointed_frames) triple for observability.
+    With no competing reader, PASSIVE fully drains the log (checkpointed_frames
+    == log_frames) — but unlike TRUNCATE it never shrinks the -wal file itself;
+    that is intentional (live-writer priority), not a bug (W5-3)."""
     from src.state import db as db_module
 
     world_db = tmp_path / "zeus-world.db"
@@ -176,25 +187,30 @@ def test_checkpoint_world_wal_helper_truncates(tmp_path: Path, monkeypatch) -> N
     writer = _open_wal(world_db)
     _write_many_frames(writer, n=2000)
     # Keep `writer` OPEN: closing the last connection makes SQLite checkpoint &
-    # truncate the WAL on close, which would erase the bloat we want the helper
-    # to clear. `writer` is idle (autocommit, no open read txn) so it does not
-    # pin the floor — the helper's TRUNCATE can complete.
+    # truncate the WAL on close, which would confound the "PASSIVE alone does
+    # not shrink the file" assertion below. `writer` is idle (autocommit, no
+    # open read txn) so it does not pin the floor — the helper's PASSIVE
+    # checkpoint can drain the full log.
 
     wal_before = _wal_size_bytes(world_db)
     assert wal_before > 0
 
     result = db_module.checkpoint_world_wal()
 
-    assert isinstance(result, tuple) and len(result) == 3, (
-        f"checkpoint_world_wal must return a 3-tuple "
-        f"(busy, log_frames, checkpointed_frames), got {result!r}"
+    assert isinstance(result, tuple) and len(result) == 4, (
+        f"checkpoint_world_wal must return a 4-tuple "
+        f"(busy, log_frames, checkpointed_frames, page_size), got {result!r}"
     )
-    busy, log_frames, ckpt_frames = result
-    assert busy == 0, f"checkpoint should not be BUSY with no reader: {result!r}"
+    busy, log_frames, ckpt_frames, page_size = result
+    assert busy == 0, f"PASSIVE's busy field is always 0: {result!r}"
+    assert ckpt_frames == log_frames > 0, (
+        f"with no competing reader PASSIVE should drain the full log: {result!r}"
+    )
+    assert page_size > 0, f"page_size must be reported for byte-sizing: {result!r}"
 
     wal_after = _wal_size_bytes(world_db)
-    assert wal_after < wal_before * 0.1 or wal_after == 0, (
-        f"checkpoint_world_wal must truncate the WAL; "
+    assert wal_after == wal_before, (
+        f"PASSIVE must NOT truncate the -wal file (only TRUNCATE mode does); "
         f"before={wal_before} after={wal_after}"
     )
 
@@ -207,8 +223,9 @@ def test_checkpoint_world_wal_helper_truncates(tmp_path: Path, monkeypatch) -> N
 
 def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     """``_world_wal_checkpoint_cycle`` invokes ``checkpoint_world_wal`` and logs
-    the (busy, log_frames, checkpointed_frames) triple. A BUSY result is logged
-    at WARNING (loud, not silent); a successful TRUNCATE at INFO."""
+    the (busy, log_frames, checkpointed_frames) triple. A starved result (not
+    draining AND past the healthy oscillation band — W5-2 fix, 2026-07-21) is
+    logged at WARNING (loud, not silent); a healthy result at INFO."""
     import logging
 
     from src import main as main_module
@@ -217,9 +234,9 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     # Patch the helper at the source module so the job's local import resolves it.
     calls = {"n": 0}
 
-    def _fake_checkpoint() -> tuple[int, int, int]:
+    def _fake_checkpoint() -> tuple[int, int, int, int]:
         calls["n"] += 1
-        return (0, 5, 5)  # busy=0 → truncated
+        return (0, 5, 5, 4096)  # PASSIVE busy=0, fully drained -> healthy
 
     monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_checkpoint, raising=True)
 
@@ -233,16 +250,20 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
         f"job must log the observability triple; got: {log_text!r}"
     )
 
-    # BUSY path is logged at WARNING (loud chronic-starvation signal).
+    # Backlog path is logged at WARNING (loud): a large un-checkpointed remainder
+    # (all frames pinned, checkpointed=0) whose byte size clears the 512 MiB line.
+    # busy=0 because PASSIVE's busy is always 0 — this is what a real floor-pinned
+    # PASSIVE result looks like.
     caplog.clear()
+    starved_frames = main_module._WAL_STARVATION_BACKLOG_BYTES // 4096 + 1
 
-    def _fake_busy() -> tuple[int, int, int]:
-        return (1, -1, -1)
+    def _fake_starved() -> tuple[int, int, int, int]:
+        return (0, starved_frames, 0, 4096)
 
-    monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_busy, raising=True)
+    monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_starved, raising=True)
     with caplog.at_level(logging.WARNING):
         main_module._world_wal_checkpoint_cycle()
-    busy_text = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
-    assert "BUSY" in busy_text and "busy=1" in busy_text, (
-        f"a BUSY checkpoint must be logged at WARNING; got: {busy_text!r}"
+    warn_text = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "BACKLOG" in warn_text and "busy=0" in warn_text, (
+        f"a floor-pinned checkpoint must be logged at WARNING; got: {warn_text!r}"
     )

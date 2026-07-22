@@ -3934,6 +3934,7 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
         captured_at,
         scan_authority,
         execution_side,
+        **_kwargs,
     ):
         assert scan_authority == "VERIFIED"
         assert execution_side == "SELL"
@@ -4068,6 +4069,7 @@ def test_live_exit_uses_expired_snapshot_identity_when_static_topology_lacks_no_
         captured_at,
         scan_authority,
         execution_side,
+        **_kwargs,
     ):
         assert execution_side == "SELL"
         assert scan_authority == "VERIFIED"
@@ -4166,6 +4168,7 @@ def test_live_exit_static_topology_identity_seed_marks_clob_reconstructed_tradab
         captured_at,
         scan_authority,
         execution_side,
+        **_kwargs,
     ):
         seeded = market["outcomes"][0]
         assert seeded["no_token_id"] == NO_TOKEN
@@ -4272,6 +4275,7 @@ def test_live_exit_skips_fresh_snapshot_without_sell_bid_and_captures_new_one(
         captured_at,
         scan_authority,
         execution_side,
+        **_kwargs,
     ):
         assert execution_side == "SELL"
         return {

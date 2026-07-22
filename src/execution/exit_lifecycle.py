@@ -4729,6 +4729,9 @@ def _latest_or_capture_exit_snapshot_context(
             captured_at=captured_at,
             scan_authority=scan_authority,
             execution_side="SELL",
+            # capture_policy_spec.md §2 trigger 2: synchronous pre-submit
+            # recapture (exit SELL path), already structurally full.
+            capture_trigger="JIT_SUBMIT",
         )
         # The executor opens its own DB handle through place_sell_order(); make
         # the snapshot durable before any submit-side effect can observe it.

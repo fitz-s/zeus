@@ -28,6 +28,19 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    # DB first-principles audit (2026-07-20, PR #436) — authored + reviewed 2026-07-22.
+    tests/test_trade_decisions_fk_rebuild.py: {created: "2026-07-20", last_used: "2026-07-22", note: "W0-a trade_decisions dangling-FK rebuild green-gate: crash-atomic single-DB WAL rebuild, 6-kill-point matrix, sequence preservation, rollback capsule."}
+    tests/test_no_dangling_foreign_keys.py: {created: "2026-07-20", last_used: "2026-07-22", note: "Dangling-foreign-key class detector (the defect that froze trade_decisions since 2026-07-02)."}
+    tests/test_regret_decompositions_drop_dead_fk.py: {created: "2026-07-20", last_used: "2026-07-22", note: "regret_decompositions dead-FK drop migration removes the dangling FK without data loss."}
+    tests/test_drop_redundant_trade_indexes.py: {created: "2026-07-20", last_used: "2026-07-22", note: "F15 migration drops exactly the 2 redundant trade indexes, nothing else."}
+    tests/test_backup_canonical_dbs.py: {created: "2026-07-20", last_used: "2026-07-22", note: "Online SQLite-backup capability produces a WAL-consistent, digest-verified copy; version-gated >=3.51.3."}
+    tests/test_db_safety_gates.py: {created: "2026-07-20", last_used: "2026-07-22", note: "Combined DB safety-gate preflight flags dangling-FK / manifest-rot / stray-decoy hazards."}
+    tests/test_audit_manifest_rot.py: {created: "2026-07-20", last_used: "2026-07-22", note: "manifest-rot gate flags droppable-labeled tables that are actually live; writer scan is a fail-closed heuristic."}
+    tests/test_reconcile_settlement_outcomes.py: {created: "2026-07-21", last_used: "2026-07-22", note: "settlement-outcomes reconciliation monitor detects chain-settled positions missing their outcome row."}
+    tests/test_certificate_v1_golden_freeze.py: {created: "2026-07-21", last_used: "2026-07-22", note: "Golden-vector freeze on v1 decision-certificate + NO_SUBMIT receipt serialization."}
+    tests/test_capture_policy_track_a.py: {created: "2026-07-21", last_used: "2026-07-22", note: "capture-policy Track A additive (nullable capture_trigger + stamping); no compact table, no CHECK, registry-clean."}
+    tests/test_checkpoint_backstop_alert.py: {created: "2026-07-21", last_used: "2026-07-22", note: "WAL-checkpoint alert fires on un-checkpointed backlog (bytes, actual page_size), not total-log size."}
+    tests/test_sqlite_version_gate.py: {created: "2026-07-22", last_used: "2026-07-22", note: "SQLite version boot gate blocks <3.51.3 (WAL-reset bug) with an emergency override."}
     tests/state/test_chain_mirror_settlement_preserves_booked_close_economics.py: {created: "2026-07-19", last_used: "2026-07-19", note: "Chain-mirror settlement preserves real EXIT fill economics for already economically_closed positions and refuses to invent missing booked PnL or exit price."}
     tests/engine/test_day0_coverage_gate.py: {created: "2026-05-24", last_used: "2026-07-19", note: "Day0 executable coverage fails closed on incomplete start or a metric-attributed interior gap, including the WU HTTP fallback."}
     tests/engine/test_day0_monitor_gap_and_stale_margin.py: {created: "2026-07-18", last_used: "2026-07-19", note: "Day0 monitor gap attribution and stale one-sided extreme-bound uncertainty antibodies; incomplete evidence cannot become exit authority."}
