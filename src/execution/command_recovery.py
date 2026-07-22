@@ -6877,7 +6877,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
            AND cmd.state IN (
-               'FILLED', 'PARTIAL', 'EXPIRED', 'REVIEW_REQUIRED', 'CANCELLED'
+               'ACKED', 'FILLED', 'PARTIAL', 'EXPIRED', 'REVIEW_REQUIRED', 'CANCELLED'
            )
            AND (
                cmd.state != 'CANCELLED'
@@ -6930,6 +6930,11 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                ) <= 0.000001
                OR (
                    cmd.state = 'CANCELLED'
+                   AND entry_fill.has_confirmed_fill = 1
+               )
+               OR (
+                   cmd.state = 'ACKED'
+                   AND latest_order.state = 'LIVE'
                    AND entry_fill.has_confirmed_fill = 1
                )
            )

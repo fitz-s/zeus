@@ -12855,8 +12855,9 @@ def _query_entry_execution_fill_hints(
 
     `position_current` lacks durable fill-authority columns. This read-side
     enrichment is intentionally narrower than a schema migration: it consumes
-    only terminal filled entry execution facts with filled_at + positive price
-    and shares, then leaves legacy/projection rows explicitly non-fill-grade.
+    confirmed filled or partial entry execution facts with filled_at + positive
+    price and shares, then leaves legacy/projection rows explicitly non-fill-grade.
+    A live resting remainder does not erase the capital already exchanged.
     """
     if not trade_ids or not _table_exists(conn, "execution_fact"):
         return {}
@@ -12891,7 +12892,7 @@ def _query_entry_execution_fill_hints(
         FROM execution_fact
         WHERE position_id IN ({placeholders})
           AND order_role = 'entry'
-          AND lower(COALESCE(terminal_exec_status, '')) = 'filled'
+          AND lower(COALESCE(terminal_exec_status, '')) IN ('filled', 'partial')
           {strict_filter}
         ORDER BY position_id,
                  CASE
@@ -13016,7 +13017,7 @@ def query_entry_execution_fill_aggregate(
     *,
     strict: bool = False,
 ) -> dict | None:
-    """Return one command-deduped aggregate of terminal entry execution facts."""
+    """Return one command-deduped aggregate of confirmed entry execution facts."""
 
     position_id = str(position_id or "").strip()
     if not position_id:

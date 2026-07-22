@@ -13237,6 +13237,79 @@ class TestRecoveryResolutionTable:
             "fill_price": 0.2,
         }
 
+    def test_live_rest_entry_repairs_confirmed_partial_fill_past_ack_fact(
+        self,
+        conn,
+    ):
+        """Confirmed maker fills are exposure before the resting remainder terminates."""
+
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+        )
+        from src.riskguard.riskguard import _load_riskguard_portfolio_truth
+
+        _insert(conn, size=5.0, price=0.43)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 2.5,
+                   cost_basis_usd = 1.075,
+                   entry_price = 0.43,
+                   order_status = 'filled',
+                   fill_authority = 'venue_confirmed_full',
+                   chain_state = 'synced',
+                   chain_shares = 2.5,
+                   chain_avg_price = 0.43,
+                   chain_cost_basis_usd = 1.075,
+                   chain_seen_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _append_order_fact(
+            conn,
+            state="LIVE",
+            matched_size="0",
+            remaining_size="5",
+        )
+        _append_trade_fact(
+            conn,
+            trade_id="trade-live-rest-partial",
+            state="CONFIRMED",
+            filled_size="2.5",
+            fill_price="0.43",
+        )
+
+        _portfolio, before = _load_riskguard_portfolio_truth(conn)
+        assert before["consistency_lock"] == "degraded"
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status,
+                   terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 2.5,
+            "fill_price": 0.43,
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
+        portfolio, after = _load_riskguard_portfolio_truth(conn)
+        assert len(portfolio.positions) == 1
+        assert after["unloadable_count"] == 0
+        assert after["consistency_lock"] == "pass"
+
     def test_filled_entry_execution_fact_repair_skips_without_position_current(
         self,
     ):
