@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-07-20; last_reviewed=2026-07-22; last_reused=never
+# Purpose: prove the online SQLite-backup capability produces a WAL-consistent, digest-verified copy.
+# Reuse: run when changing scripts/ops/backup_canonical_dbs.py.
 """Antibody for the W1 online backup capability (scripts/ops/backup_canonical_dbs.py).
 
 Fixture-only (no live DB, no config): builds tiny WAL DBs, backs them up via the SQLite
@@ -41,7 +44,7 @@ def test_backup_is_consistent_including_wal(tmp_path):
     # sanity: the -wal exists (committed data lives partly there)
     dest = tmp_path / "backup" / "zeus_trades.db"
     # monkeypatch the source-id gate (fixture sqlite build differs)
-    bk.APPROVED_SOURCE_IDS = (sqlite3.connect(":memory:").execute("SELECT sqlite_source_id()").fetchone()[0],)
+    bk._MIN_SQLITE_VERSION = (3, 0, 0)  # bypass the WAL-corruption version gate; this fixture tests backup logic, not the gate (see test_sqlite_version_gate.py)
     entry = bk.backup_one(src, dest)
     assert entry["verify"]["ok"], entry
     # the backup has ALL 50 rows (a raw main-file copy could miss WAL-resident rows)
@@ -58,7 +61,7 @@ def test_refuses_existing_destination(tmp_path):
     src = tmp_path / "src" / "zeus_trades.db"; src.parent.mkdir()
     _wal_db_with_uncheckpointed_commit(src, rows=3)
     dest = tmp_path / "backup" / "zeus_trades.db"; dest.parent.mkdir(); dest.write_text("x")
-    bk.APPROVED_SOURCE_IDS = (sqlite3.connect(":memory:").execute("SELECT sqlite_source_id()").fetchone()[0],)
+    bk._MIN_SQLITE_VERSION = (3, 0, 0)  # bypass the WAL-corruption version gate; this fixture tests backup logic, not the gate (see test_sqlite_version_gate.py)
     try:
         bk.backup_one(src, dest)
         raised = False
@@ -71,7 +74,7 @@ def test_verify_only_restore_drill(tmp_path):
     src = tmp_path / "src" / "zeus-forecasts.db"; src.parent.mkdir()
     _wal_db_with_uncheckpointed_commit(src, rows=10)
     dest = tmp_path / "backup" / "zeus-forecasts.db"
-    bk.APPROVED_SOURCE_IDS = (sqlite3.connect(":memory:").execute("SELECT sqlite_source_id()").fetchone()[0],)
+    bk._MIN_SQLITE_VERSION = (3, 0, 0)  # bypass the WAL-corruption version gate; this fixture tests backup logic, not the gate (see test_sqlite_version_gate.py)
     bk.backup_one(src, dest)
     v = bk._verify_one(dest)
     assert v["ok"] and v["integrity_check"] == "ok" and v["fk_violations"] == 0

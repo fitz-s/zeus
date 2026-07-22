@@ -108,14 +108,29 @@ def _has_writer(table: str) -> bool:
     table name next to INTO in source. A False result here is NOT proof no writer exists — the
     operator must still reason about dynamic/indirect writers before trusting this gate."""
     pattern = _writer_pattern(table)
-    try:
-        r = subprocess.run(["rg", "-l", "-i", "--multiline", pattern, str(ROOT / "src")],
-                           capture_output=True, text=True)
-        return r.returncode == 0 and bool(r.stdout.strip())
-    except FileNotFoundError:
-        r = subprocess.run(["grep", "-rliE", pattern, str(ROOT / "src")],
-                           capture_output=True, text=True)
+    # Fail-CLOSED: a scan we cannot run must NOT read as "no writer" — that would
+    # green-light a drop. rg/grep return 0=match, 1=no-match, >=2=error. If a
+    # scanner errors, or neither rg nor grep is installed, raise so the operator
+    # resolves it rather than silently proceeding on a false negative.
+    for argv in (
+        ["rg", "-l", "-i", "--multiline", pattern, str(ROOT / "src")],
+        ["grep", "-rliE", pattern, str(ROOT / "src")],
+    ):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True)
+        except FileNotFoundError:
+            continue  # scanner not installed — try the fallback
+        if r.returncode >= 2:
+            raise RuntimeError(
+                f"_has_writer: {argv[0]} failed (rc={r.returncode}) scanning for "
+                f"{table!r}: {r.stderr.strip()[:200]}"
+            )
         return bool(r.stdout.strip())
+    raise RuntimeError(
+        "_has_writer: neither 'rg' nor 'grep' is available — cannot scan for live "
+        f"writers of {table!r}. Install one, or resolve writer-presence manually "
+        "(this gate must not fail open)."
+    )
 
 
 _OWNING_CLASSES = {"trade_class", "world_class", "forecast_class", "backtest_class"}

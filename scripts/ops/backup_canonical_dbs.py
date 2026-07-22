@@ -41,9 +41,11 @@ ROOT = Path(__file__).resolve().parents[2]
 CANONICAL = ("zeus_trades.db", "zeus-forecasts.db", "zeus-world.db")
 _PAGES_PER_STEP = 2000          # incremental step; releases the source lock between steps
 _SLEEP_BETWEEN_STEPS_S = 0.05   # yield to the live writer under load
-APPROVED_SOURCE_IDS = (
-    "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24",
-)
+# The backup uses the SQLite backup API over a live WAL DB; releases <=3.51.2
+# carry the WAL-reset corruption bug (fixed 3.51.3). Gate on the fix VERSION,
+# not an exact source_id allowlist (which would reject every safe newer build).
+# Mirrors src/state/db.assert_sqlite_version_safe.
+_MIN_SQLITE_VERSION = (3, 51, 3)
 
 
 def _now_iso() -> str:
@@ -90,10 +92,14 @@ def _source_conn(path: Path) -> sqlite3.Connection:
         raise SystemExit(f"REFUSED: source DB not found: {path}")
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30.0, isolation_level=None)
     conn.execute("PRAGMA query_only=ON")
-    src_id = conn.execute("SELECT sqlite_source_id()").fetchone()[0]
-    if src_id not in APPROVED_SOURCE_IDS:
+    if sqlite3.sqlite_version_info < _MIN_SQLITE_VERSION:
+        src_id = conn.execute("SELECT sqlite_source_id()").fetchone()[0]
         conn.close()
-        raise SystemExit(f"REFUSED: unapproved sqlite_source_id() {src_id!r} (need venv 3.53.2).")
+        _min = ".".join(str(p) for p in _MIN_SQLITE_VERSION)
+        raise SystemExit(
+            f"REFUSED: SQLite {sqlite3.sqlite_version} < {_min} (WAL-reset corruption "
+            f"bug, fixed 3.51.3); source_id={src_id!r}. Back up on a fixed build."
+        )
     return conn
 
 
