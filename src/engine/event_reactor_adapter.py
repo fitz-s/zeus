@@ -12357,6 +12357,20 @@ def _global_deterministic_actuation_proofs(
         c_cost_95pct=c_cost_95pct,
         p_fill_lcb=p_fill_lcb,
     )
+    mode_ev = _mode_consistent_ev_for_proof(
+        row=row,
+        direction=direction,
+        q_lcb=q_point,
+        execution_price=execution_price,
+        c_cost_95pct=c_cost_95pct,
+        p_fill_lcb=p_fill_lcb,
+    )
+    proof_mode = "MAKER" if mode_ev is not None else None
+    certified_p_fill_lcb = _certified_p_fill_lcb_for_proof(
+        mode_ev=mode_ev,
+        proof_execution_mode_intent=proof_mode,
+        taker_p_fill_lcb=p_fill_lcb,
+    )
     probability_identity = stable_hash(
         {
             "witness_identity": witness.witness_identity,
@@ -12378,7 +12392,7 @@ def _global_deterministic_actuation_proofs(
             q_lcb_5pct=q_point,
             q_lcb_calibration_source="day0_deterministic_bin_payoff",
             c_cost_95pct=c_cost_95pct,
-            p_fill_lcb=p_fill_lcb,
+            p_fill_lcb=certified_p_fill_lcb,
             trade_score=score,
             p_value=0.0 if q_point == 1.0 else 1.0,
             passed_prefilter=bool(
@@ -12391,6 +12405,36 @@ def _global_deterministic_actuation_proofs(
             q_source="day0_deterministic_bin_payoff",
             same_bin_yes_posterior=float(yes_payoff),
             probability_authority="day0_deterministic_bin_payoff_v1",
+            execution_mode_intent=proof_mode,
+            ev_taker=(mode_ev.ev_taker if mode_ev is not None else None),
+            ev_maker=(mode_ev.ev_maker if mode_ev is not None else None),
+            maker_limit_price=(
+                mode_ev.maker_limit_price if mode_ev is not None else None
+            ),
+            relative_spread_at_eval=(
+                mode_ev.relative_spread if mode_ev is not None else None
+            ),
+            taker_forbidden_reason=(
+                _DAY0_MAKER_ONLY_TAKER_FORBIDDEN_REASON
+                if mode_ev is not None
+                else None
+            ),
+            maker_fill_probability=(
+                mode_ev.maker_fill_probability if mode_ev is not None else None
+            ),
+            maker_fill_probability_source=(
+                mode_ev.maker_fill_probability_source
+                if mode_ev is not None
+                else None
+            ),
+            rest_then_cross_policy=(
+                _DAY0_MAKER_ONLY_REST_POLICY if mode_ev is not None else None
+            ),
+            rest_escalation_deadline_minutes=(
+                mode_ev.escalation_deadline_minutes
+                if mode_ev is not None
+                else None
+            ),
         ),
     )
 

@@ -2226,6 +2226,11 @@ def test_global_deterministic_actuation_builds_only_selected_exact_proof():
     assert proof.q_source == "day0_deterministic_bin_payoff"
     assert proof.execution_price is not None
     assert proof.trade_score > 0.0
+    assert proof.execution_mode_intent == "MAKER"
+    assert proof.maker_limit_price is not None
+    assert proof.rest_then_cross_policy == era._DAY0_MAKER_ONLY_REST_POLICY
+    assert proof.taker_forbidden_reason == era._DAY0_MAKER_ONLY_TAKER_FORBIDDEN_REASON
+    assert proof.p_fill_lcb == proof.maker_fill_probability
 
     unknown = family.candidates[1]
     unknown_actuation = SimpleNamespace(
