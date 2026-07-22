@@ -2519,6 +2519,7 @@ def _validate_review_confirmed_fill_payload(
         "command_recovery._reconcile_row",
         "command_recovery.reconcile_matched_cancel_review_required_entries",
         "command_recovery.reconcile_matched_order_facts",
+        "command_recovery.reconcile_authenticated_entry_trade_facts",
     }:
         raise ValueError("review confirmed-fill clearance source_function is not supported")
     if not str(source.get("source_commit") or "").strip():

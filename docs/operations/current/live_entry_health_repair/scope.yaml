@@ -23,6 +23,7 @@ in_scope:
 - src/execution/command_recovery.py
 - src/execution/venue_sync_contract.py
 - src/state/db.py
+- src/state/venue_command_repo.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py
 - tests/events/test_claim_lock_storm.py
@@ -53,7 +54,7 @@ allow_companions:
 out_of_scope:
 - state/**
 - src/execution/** except src/execution/exit_lifecycle.py, src/execution/executor.py, src/execution/command_recovery.py, and src/execution/venue_sync_contract.py
-- src/state/** except src/state/portfolio.py and src/state/db.py
+- src/state/** except src/state/portfolio.py, src/state/db.py, and src/state/venue_command_repo.py
 - scripts/**
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/kernel_manifest.yaml

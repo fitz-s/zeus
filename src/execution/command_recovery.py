@@ -17148,7 +17148,7 @@ def _authenticated_entry_trade_fact_candidates(
             ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
+           AND cmd.state IN ('ACKED', 'POST_ACKED', 'PARTIAL', 'CANCEL_PENDING')
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND pc.phase IN ('pending_entry', 'active', 'day0_window')
            AND EXISTS (
@@ -17288,6 +17288,9 @@ def _reconcile_authenticated_entry_trade_fact(
         requested,
         side=command.get("side"),
     )
+    cancel_pending = str(command.get("state") or "") == CommandState.CANCEL_PENDING.value
+    if cancel_pending and not complete:
+        return "stayed"
     event_type = (
         CommandEventType.FILL_CONFIRMED.value
         if complete
@@ -17323,12 +17326,41 @@ def _reconcile_authenticated_entry_trade_fact(
                 "command_recovery.reconcile_authenticated_entry_trade_facts"
             ),
             "source_reason": "durable_trade_fact_normal_path",
+            "source_commit": "runtime",
         },
     }
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
     sp_name = f"sp_authenticated_entry_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
+        if cancel_pending:
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=CommandEventType.REVIEW_REQUIRED.value,
+                occurred_at=observed_at,
+                payload={
+                    **payload,
+                    "reason": "cancel_pending_authenticated_full_fill",
+                    "prior_state": CommandState.CANCEL_PENDING.value,
+                },
+            )
+        fill_event_payload = payload
+        if cancel_pending:
+            fill_event_payload = {
+                **payload,
+                "reason": "review_cleared_confirmed_fill",
+                "proof_class": "authenticated_trade_fact_full_fill",
+                "trade_id": str(facts["trade_ids"][-1]),
+                "cleared_at": observed_at,
+                "required_predicates": {
+                    **payload["required_predicates"],
+                    "command_state_review_required": True,
+                    "latest_event_is_review_boundary": True,
+                    "trade_facts_cover_command_or_leave_only_dust": True,
+                    "source_fill_time_valid": True,
+                },
+            }
         append_order_fact(
             conn,
             venue_order_id=venue_order_id,
@@ -17347,7 +17379,7 @@ def _reconcile_authenticated_entry_trade_fact(
             command_id=command_id,
             event_type=event_type,
             occurred_at=observed_at,
-            payload=payload,
+            payload=fill_event_payload,
         )
         from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
 

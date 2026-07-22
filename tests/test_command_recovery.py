@@ -2915,6 +2915,91 @@ class TestAuthenticatedEntryTradeFactProjection:
         ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         assert _get_state(conn, command_id) == "ACKED"
 
+    @pytest.mark.parametrize(
+        ("filled_size", "expected_state", "advanced", "stayed"),
+        (("10", "FILLED", 1, 0), ("4", "CANCEL_PENDING", 0, 1)),
+    )
+    def test_cancel_pending_only_yields_to_authenticated_full_fill(
+        self, conn, filled_size, expected_state, advanced, stayed
+    ):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = f"cmd-authenticated-cancel-{filled_size}"
+        position_id = f"pos-authenticated-cancel-{filled_size}"
+        order_id = f"ord-authenticated-cancel-{filled_size}"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id=f"dec-authenticated-cancel-{filled_size}",
+            token_id=f"tok-authenticated-cancel-{filled_size}",
+            size=10.0,
+            price=0.50,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=f"tok-authenticated-cancel-{filled_size}",
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={"venue_order_id": order_id, "batch": True},
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id=f"trade-authenticated-cancel-{filled_size}",
+            filled_size=filled_size,
+            fill_price="0.40",
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn, command_id=command_id
+        )
+
+        assert summary == {
+            "scanned": 1,
+            "advanced": advanced,
+            "stayed": stayed,
+            "errors": 0,
+        }
+        assert _get_state(conn, command_id) == expected_state
+        events = [row["event_type"] for row in _get_events(conn, command_id)]
+        if expected_state == "FILLED":
+            assert events[-2:] == ["REVIEW_REQUIRED", "FILL_CONFIRMED"]
+            position = conn.execute(
+                "SELECT phase, shares, cost_basis_usd FROM position_current "
+                "WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+            assert dict(position) == {
+                "phase": "active",
+                "shares": 10.0,
+                "cost_basis_usd": 4.0,
+            }
+        else:
+            assert events[-1] == "CANCEL_REQUESTED"
+            position = conn.execute(
+                "SELECT phase, shares, cost_basis_usd FROM position_current "
+                "WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+            assert dict(position) == {
+                "phase": "pending_entry",
+                "shares": 0.0,
+                "cost_basis_usd": 0.0,
+            }
+
 
 def _insert_decision_log_trade_case_for_recovery(
     conn,
