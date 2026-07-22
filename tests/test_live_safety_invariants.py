@@ -1128,6 +1128,90 @@ def test_monitoring_phase_reserves_one_active_network_progress_slot(monkeypatch)
     assert all(summary["held_monitor_positions_deferred"] == 3 for summary in summaries)
 
 
+def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkeypatch):
+    """Urgent successes cannot cancel already-reserved active monitor work."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
+        {},
+    )
+    urgent = [
+        _make_position(
+            trade_id=f"cap-urgent-{index}",
+            city="Chicago",
+            target_date="2026-07-22",
+            token_id=f"cap-urgent-token-{index}",
+            direction="buy_yes",
+            state="day0_window",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    active = [
+        _make_position(
+            trade_id=f"cap-active-{index}",
+            token_id=f"cap-active-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(5)
+    ]
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    visited: list[str] = []
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: (
+            visited.append(position.trade_id)
+            or _monitor_test_edge_context(position)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(*urgent, *active),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_positive_cap_reserved_progress"),
+        run_exit_preflight=False,
+        exit_order_submit_enabled=False,
+        held_position_monitor_budget_seconds=10.0,
+        should_preempt_for_urgent_day0=lambda: False,
+    )
+
+    assert visited == [
+        "cap-urgent-0",
+        "cap-urgent-1",
+        "cap-active-0",
+        "cap-active-1",
+        "cap-active-2",
+        "cap-active-3",
+    ]
+    assert summary["held_monitor_budget_guaranteed_positions"] == 6
+    assert summary["held_monitor_progress_limit_reached"] is True
+    assert summary["held_monitor_defer_reason"] == "positive_budget_progress_limit"
+    assert summary["held_monitor_positions_deferred"] == 1
+
+
 def test_monitoring_phase_network_round_robin_survives_new_no_attr_clients(
     monkeypatch,
 ):

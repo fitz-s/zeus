@@ -5794,7 +5794,10 @@ def execute_monitoring_phase(
             >= _HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_LIMIT
         )
         if (
-            monitor_progress_limit_reached
+            (
+                monitor_progress_limit_reached
+                and id(pos) not in budget_guaranteed_position_ids
+            )
             or (
                 monitor_deadline_expired
                 and (

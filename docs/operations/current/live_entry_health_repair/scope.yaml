@@ -6,6 +6,7 @@ in_scope:
 - src/main.py
 - src/events/reactor.py
 - src/engine/event_reactor_adapter.py
+- src/engine/cycle_runtime.py
 - src/engine/global_batch_runtime.py
 - src/engine/global_auction_universe.py
 - src/signal/ensemble_signal.py
