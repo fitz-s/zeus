@@ -627,6 +627,53 @@ def test_deploy_live_dirty_runtime_files_ignores_readonly_audit_scripts(monkeypa
     assert dl.dirty_runtime_files() == [" M src/main.py"]
 
 
+def test_live_release_guard_accepts_only_attested_origin_live(monkeypatch, tmp_path):
+    guard = _load("live_release_guard_ready", "live_release_guard.py")
+    sha = "a" * 40
+    (tmp_path / ".zeus-release.json").write_text(json.dumps({
+        "release_sha": sha,
+        "upstream_live_sha": sha,
+        "landing_lane": "merged_pr",
+    }))
+
+    def _git(repo, *args):  # noqa: ANN001
+        if args == ("rev-parse", "HEAD"):
+            return guard.subprocess.CompletedProcess(["git"], 0, stdout=f"{sha}\n", stderr="")
+        assert args == ("ls-remote", "--exit-code", "origin", "refs/heads/live")
+        return guard.subprocess.CompletedProcess(["git"], 0, stdout=f"{sha}\trefs/heads/live\n", stderr="")
+
+    monkeypatch.setattr(guard, "_git", _git)
+    result = guard.inspect_release(tmp_path)
+    assert result.active is True
+    assert result.ready is True
+    assert result.lane == "merged_pr"
+
+
+def test_live_release_guard_rejects_non_landing_marker(monkeypatch, tmp_path):
+    guard = _load("live_release_guard_reject", "live_release_guard.py")
+    sha = "b" * 40
+    (tmp_path / ".zeus-release.json").write_text(json.dumps({
+        "release_sha": sha,
+        "upstream_live_sha": sha,
+        "landing_lane": "manual_edit",
+    }))
+    result = guard.inspect_release(tmp_path)
+    assert result.active is True
+    assert result.ready is False
+    assert result.detail == "invalid release marker fields"
+
+
+def test_deploy_live_guarded_release_does_not_allow_git_bypass(monkeypatch, tmp_path):
+    dl = _load("deploy_live_guarded_release", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    guarded = type("Guarded", (), {"active": True, "ready": False, "detail": "origin/live differs"})()
+    monkeypatch.setattr(dl, "inspect_release", lambda repo: guarded)
+    monkeypatch.setattr(dl, "current_branch", lambda: "live")
+    ok, blockers = dl._gate(allow_dirty=True, allow_unpushed=True)
+    assert ok is False
+    assert any("RELEASE_GUARD_FAILED" in blocker for blocker in blockers)
+
+
 def _write_yes_no_selection_event(
     conn: sqlite3.Connection,
     *,

@@ -72,6 +72,7 @@ from src.ops.edli_queue import (
 )
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 from src.control.runtime_code_plane import is_runtime_code_path
+from scripts.live_release_guard import inspect_release
 
 LIVE_TRADING_PLIST = (
     Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
@@ -204,6 +205,9 @@ def current_branch() -> str:
 
 def dirty_runtime_files() -> list[str]:
     """Lines from `git status --porcelain -- src/ config/` on the live repo."""
+    guarded = inspect_release(Path(_require_live_repo()))
+    if guarded.active:
+        return [] if guarded.ready else [f"RELEASE_GUARD_FAILED: {guarded.detail}"]
     res = _git("status", "--porcelain", "--", *RUNTIME_PATHSPECS)
     if res.returncode != 0:
         detail = (res.stderr or res.stdout).strip().splitlines()
@@ -232,6 +236,9 @@ def unpushed_state(branch: str) -> tuple[bool, str]:
     (external review 2026-06-12 — a stale origin/<branch> made the gate approve
     a checkout that was behind the actual remote). A failed fetch blocks.
     """
+    guarded = inspect_release(Path(_require_live_repo()))
+    if guarded.active:
+        return (not guarded.ready, guarded.detail)
     local = _git("rev-parse", "HEAD").stdout.strip()
     try:
         fetch_res = _git("fetch", "--quiet", "origin", branch)
@@ -869,6 +876,7 @@ def _gate(allow_dirty: bool, allow_unpushed: bool = False) -> tuple[bool, list[s
         _require_live_repo()
     except RuntimeError as exc:
         return False, [str(exc)]
+    guarded = inspect_release(Path(_require_live_repo()))
     branch = current_branch()
     blockers: list[str] = []
     dirty_blockers: list[str] = []
@@ -877,15 +885,20 @@ def _gate(allow_dirty: bool, allow_unpushed: bool = False) -> tuple[bool, list[s
     if dirty:
         if any(line.startswith("GIT_STATUS_FAILED:") for line in dirty):
             dirty_blockers.append("git status failed for runtime surface (fail-closed):")
+        elif any(line.startswith("RELEASE_GUARD_FAILED:") for line in dirty):
+            dirty_blockers.append("immutable release guard failed (fail-closed):")
         else:
             dirty_blockers.append(f"{len(dirty)} uncommitted runtime file(s) in src/ config/ scripts/ deploy/launchd/:")
         dirty_blockers.extend(f"   {ln}" for ln in dirty)
     unpushed, push_detail = unpushed_state(branch)
     if unpushed:
         unpushed_blockers.append(f"unpushed: {push_detail}")
-    if dirty_blockers and not allow_dirty:
+    if guarded.active and (dirty_blockers or unpushed_blockers):
         blockers.extend(dirty_blockers)
-    if unpushed_blockers and not (allow_dirty or allow_unpushed):
+        blockers.extend(unpushed_blockers)
+    elif dirty_blockers and not allow_dirty:
+        blockers.extend(dirty_blockers)
+    if not guarded.active and unpushed_blockers and not (allow_dirty or allow_unpushed):
         blockers.extend(unpushed_blockers)
     if blockers:
         return False, blockers

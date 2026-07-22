@@ -763,6 +763,26 @@ scripts:
     required_helpers: [src.state.no_trade_events.assert_no_trade_events_schema_current_for_live]
     required_tests: [tests/test_live_release_gate.py]
     reason: "P0 release gate for the May 21 live-proof packet. It makes discovery fallback, stale schemas, unknown command states, blocking redeem rows, stale business-plane JSON, and overclaimed paper proof fail closed before live entry."
+  live_release_guard.py:
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: immutable_live_release_attestation
+    canonical_command: "python3 scripts/live_release_guard.py status --repo <live-release-checkout> --json"
+    read_targets: [repo/.zeus-release.json, repo/.git, origin/live]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: [origin/live]
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: "Before every guarded-live restart and after a pick or merged-PR synchronization; verifies the root-owned release marker, local HEAD, and origin/live without fetching or modifying .git."
+    do_not_use_when: "As a substitute for the privileged release installer, GitHub ruleset, required CI, or runtime preflight. A missing marker means legacy mode only; it does not claim the tree is protected."
+    promotion_barrier: "A guarded release is READY only when the marker has a valid release_sha, upstream_live_sha, and landing_lane of pick or merged_pr, and both local HEAD and origin/live equal that SHA. Any malformed or stale marker blocks restart fail-closed."
+    required_helpers: [scripts.deploy_live]
+    required_tests: [tests/test_ops_scripts_smoke.py]
+    reason: "Prevents deploy_live from refreshing mutable Git metadata inside a root-owned release while preserving a fail-closed proof that the running tree reached live through exactly pick or merged PR."
   check_edli_live_canary_gate.py:
     # Created: 2026-05-26
     # Last reused or audited: 2026-05-26
