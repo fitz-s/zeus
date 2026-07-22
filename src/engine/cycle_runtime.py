@@ -4175,6 +4175,7 @@ def _canonical_monitor_position_rows(
     if not required.issubset(columns):
         return None
     monitor_event_payload = "NULL AS last_monitor_event_payload_json"
+    monitor_event_occurred_at = "NULL AS last_monitor_event_occurred_at"
     if _table_exists_in_schema(conn, "main", "position_events"):
         event_columns = _table_columns_in_schema(conn, "main", "position_events")
         if {
@@ -4193,6 +4194,17 @@ def _canonical_monitor_position_rows(
                      LIMIT 1
                 ) AS last_monitor_event_payload_json
             """
+            if "occurred_at" in event_columns:
+                monitor_event_occurred_at = """
+                    (
+                        SELECT pe.occurred_at
+                          FROM position_events AS pe
+                         WHERE pe.position_id = position_current.position_id
+                           AND pe.event_type = 'MONITOR_REFRESHED'
+                         ORDER BY pe.sequence_no DESC
+                         LIMIT 1
+                    ) AS last_monitor_event_occurred_at
+                """
     select_sql = ", ".join(
         [
             "position_id",
@@ -4214,6 +4226,7 @@ def _canonical_monitor_position_rows(
                 "0",
             ),
             monitor_event_payload,
+            monitor_event_occurred_at,
         ]
     )
     where_sql = ""
@@ -4308,6 +4321,9 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
         pos.exit_reason = exit_reason
     pos.neg_edge_count = 0
     monitor_payload = _row_get(row, "last_monitor_event_payload_json")
+    pos._canonical_monitor_refreshed_at = str(
+        _row_get(row, "last_monitor_event_occurred_at", "") or ""
+    )
     if monitor_payload:
         try:
             monitor_event = json.loads(str(monitor_payload))
@@ -4628,6 +4644,15 @@ def _reserve_held_monitor_positions(
 
     if limit <= 0 or not positions:
         return []
+    if all(hasattr(pos, "_canonical_monitor_refreshed_at") for pos in positions):
+        return sorted(
+            positions,
+            key=lambda pos: (
+                bool(getattr(pos, "_canonical_monitor_refreshed_at", "")),
+                str(getattr(pos, "_canonical_monitor_refreshed_at", "") or ""),
+                _held_monitor_stable_position_key(pos),
+            ),
+        )[: min(limit, len(positions))]
     ordered = sorted(positions, key=_held_monitor_stable_position_key)
     keyed = [(_held_monitor_stable_position_key(pos), pos) for pos in ordered]
     keys = [key for key, _pos in keyed]

@@ -1212,6 +1212,42 @@ def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkey
     assert summary["held_monitor_positions_deferred"] == 1
 
 
+def test_monitor_reservation_advances_only_after_persisted_refresh(monkeypatch):
+    """Canonical fairness follows durable monitor evidence, not attempts."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
+        {},
+    )
+    oldest = _make_position(trade_id="persisted-oldest")
+    newer = _make_position(trade_id="persisted-newer")
+    oldest._canonical_monitor_refreshed_at = ""
+    newer._canonical_monitor_refreshed_at = "2026-07-22T12:00:00+00:00"
+
+    first = cycle_runtime._reserve_held_monitor_positions(
+        "canonical-test",
+        [newer, oldest],
+        limit=1,
+    )
+    attempted_again = cycle_runtime._reserve_held_monitor_positions(
+        "canonical-test",
+        [newer, oldest],
+        limit=1,
+    )
+    oldest._canonical_monitor_refreshed_at = "2026-07-22T13:00:00+00:00"
+    after_persist = cycle_runtime._reserve_held_monitor_positions(
+        "canonical-test",
+        [newer, oldest],
+        limit=1,
+    )
+
+    assert first == [oldest]
+    assert attempted_again == [oldest]
+    assert after_persist == [newer]
+
+
 def test_monitoring_phase_network_round_robin_survives_new_no_attr_clients(
     monkeypatch,
 ):
