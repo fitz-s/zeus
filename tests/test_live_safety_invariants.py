@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-21; last_reused=2026-07-21
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-22; last_reused=2026-07-22
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-21
+# Last reused/audited: 2026-07-22
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -451,6 +451,140 @@ def test_monitor_progress_limit_covers_large_held_book_within_three_cycles():
     assert cycle_runtime._held_position_monitor_positive_progress_limit(3) == 2
     assert cycle_runtime._held_position_monitor_positive_progress_limit(9) == 3
     assert cycle_runtime._held_position_monitor_positive_progress_limit(23) == 8
+
+
+def test_monitor_progress_limit_delivers_unique_three_cycle_coverage(monkeypatch):
+    """The throughput limit must rotate the whole book, not repeat its prefix."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    positions = [
+        _make_position(
+            trade_id=f"coverage-{index}",
+            token_id=f"coverage-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(9)
+    ]
+    for position in positions:
+        position._canonical_monitor_refreshed_at = ""
+    portfolio = _make_portfolio(*positions)
+    visited: list[str] = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: (
+            visited.append(position.trade_id)
+            or _monitor_test_edge_context(position)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    per_cycle: list[list[str]] = []
+    for cycle in range(3):
+        cycle_start = len(visited)
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            object(),
+            portfolio,
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=_monitor_test_deps(f"test_monitor_coverage_{cycle}"),
+            run_exit_preflight=False,
+            exit_order_submit_enabled=False,
+            held_position_monitor_budget_seconds=10.0,
+            should_preempt_for_urgent_day0=lambda: False,
+        )
+        per_cycle.append(visited[cycle_start:])
+
+    assert all(len(batch) >= 3 for batch in per_cycle)
+    assert len(set(visited)) == 9
+
+
+def test_monitor_progress_limit_covers_mixed_canonical_and_fallback_book(monkeypatch):
+    """One local-fill fallback cannot disable bounded coverage for the held book."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    positions = [
+        _make_position(
+            trade_id=f"mixed-{index}",
+            token_id=f"mixed-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(9)
+    ]
+    for position in positions[:8]:
+        position._canonical_monitor_refreshed_at = ""
+    portfolio = _make_portfolio(*positions)
+    visited: list[str] = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: (
+            visited.append(position.trade_id)
+            or _monitor_test_edge_context(position)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    coverage_batches: list[list[str]] = []
+    for cycle in range(3):
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            object(),
+            portfolio,
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=_monitor_test_deps(f"test_monitor_mixed_coverage_{cycle}"),
+            run_exit_preflight=False,
+            exit_order_submit_enabled=False,
+            held_position_monitor_budget_seconds=10.0,
+            should_preempt_for_urgent_day0=lambda: False,
+        )
+        coverage_batches.append(summary["held_monitor_budget_coverage_positions"])
+
+    assert all(len(batch) == 3 for batch in coverage_batches)
+    assert len({trade_id for batch in coverage_batches for trade_id in batch}) == 9
+    assert len(set(visited)) == 9
 
 
 @pytest.mark.parametrize(
@@ -1208,14 +1342,13 @@ def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkey
         should_preempt_for_urgent_day0=lambda: False,
     )
 
-    assert visited == [
-        "cap-urgent-0",
-        "cap-urgent-1",
+    assert visited[:2] == ["cap-urgent-0", "cap-urgent-1"]
+    assert set(visited[2:]) == {
         "cap-active-0",
         "cap-active-1",
         "cap-active-2",
         "cap-active-3",
-    ]
+    }
     assert summary["held_monitor_budget_guaranteed_positions"] == 6
     assert summary["held_monitor_progress_limit_reached"] is True
     assert summary["held_monitor_defer_reason"] == "positive_budget_progress_limit"
@@ -1231,32 +1364,48 @@ def test_monitor_reservation_attempt_fairness_prevents_sticky_oldest(monkeypatch
         "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
         {},
     )
-    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
-    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE",
+        {},
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE",
+        {},
+    )
     oldest = _make_position(trade_id="persisted-oldest")
+    middle = _make_position(trade_id="persisted-middle")
     newer = _make_position(trade_id="persisted-newer")
     oldest._canonical_monitor_refreshed_at = ""
-    newer._canonical_monitor_refreshed_at = "2026-07-22T12:00:00+00:00"
+    middle._canonical_monitor_refreshed_at = "2026-07-22T12:00:00+00:00"
+    newer._canonical_monitor_refreshed_at = "2026-07-22T13:00:00+00:00"
 
     first = cycle_runtime._reserve_held_monitor_positions(
         "canonical-test",
-        [newer, oldest],
+        [newer, oldest, middle],
         limit=1,
     )
     after_failed_oldest = cycle_runtime._reserve_held_monitor_positions(
         "canonical-test",
-        [newer, oldest],
+        [newer, oldest, middle],
         limit=1,
     )
-    newer._canonical_monitor_refreshed_at = "2026-07-22T13:00:00+00:00"
+    middle._canonical_monitor_refreshed_at = "2026-07-22T14:00:00+00:00"
+    unattempted_newer = cycle_runtime._reserve_held_monitor_positions(
+        "canonical-test",
+        [newer, oldest, middle],
+        limit=1,
+    )
     failed_oldest_retry = cycle_runtime._reserve_held_monitor_positions(
         "canonical-test",
-        [newer, oldest],
+        [newer, oldest, middle],
         limit=1,
     )
 
     assert first == [oldest]
-    assert after_failed_oldest == [newer]
+    assert after_failed_oldest == [middle]
+    assert unattempted_newer == [newer]
     assert failed_oldest_retry == [oldest]
 
 
@@ -1277,6 +1426,53 @@ def test_monitor_reservation_attempts_full_batch_before_retry(monkeypatch):
     assert [pos.trade_id for pos in first] == ["held-0", "held-1"]
     assert [pos.trade_id for pos in second] == ["held-2", "held-3"]
     assert [pos.trade_id for pos in third] == ["held-4", "held-0"]
+
+
+def test_monitor_reservation_durable_progress_moves_attempt_to_tail(monkeypatch):
+    """A delayed canonical success outranks its older process-local attempt."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    first = _make_position(trade_id="durable-progress-first")
+    second = _make_position(trade_id="durable-progress-second")
+    first._canonical_monitor_refreshed_at = "2026-07-22T11:00:00+00:00"
+    second._canonical_monitor_refreshed_at = "2026-07-22T12:00:00+00:00"
+
+    assert cycle_runtime._reserve_held_monitor_positions(
+        "durable-progress-test", [first, second], limit=1
+    ) == [first]
+    assert cycle_runtime._reserve_held_monitor_positions(
+        "durable-progress-test", [first, second], limit=1
+    ) == [second]
+
+    first._canonical_monitor_refreshed_at = "2026-07-22T13:00:00+00:00"
+
+    assert cycle_runtime._reserve_held_monitor_positions(
+        "durable-progress-test", [first, second], limit=1
+    ) == [second]
+
+
+def test_monitor_reservation_prunes_empty_lane_state(monkeypatch):
+    """Closed position sets cannot leave process-lifetime monitor state behind."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    held = _make_position(trade_id="lane-closes")
+    held._canonical_monitor_refreshed_at = ""
+
+    assert cycle_runtime._reserve_held_monitor_positions(
+        "closed-lane-test", [held], limit=1
+    ) == [held]
+    assert "closed-lane-test" in cycle_runtime._HELD_MONITOR_ATTEMPT_STATE_BY_LANE
+
+    assert cycle_runtime._reserve_held_monitor_positions(
+        "closed-lane-test", [], limit=1
+    ) == []
+    assert "closed-lane-test" not in cycle_runtime._HELD_MONITOR_ATTEMPT_STATE_BY_LANE
+    assert "closed-lane-test" not in cycle_runtime._HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE
 
 
 def test_monitoring_phase_network_round_robin_survives_new_no_attr_clients(

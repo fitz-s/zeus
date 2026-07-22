@@ -4601,6 +4601,7 @@ def _held_monitor_schedule_key(
     *,
     dead_bin_position_ids: frozenset[int],
     selected_urgent_position_ids: frozenset[int],
+    selected_coverage_position_ids: frozenset[int],
     has_selected_urgent: bool,
     reserved_local_position_ids: frozenset[int],
     reserved_network_position_id: int | None,
@@ -4616,10 +4617,12 @@ def _held_monitor_schedule_key(
     if position_id in selected_urgent_position_ids:
         return (-3 if position_id in dead_bin_position_ids else -2), urgency
     if has_selected_urgent:
+        if position_id in selected_coverage_position_ids:
+            return -1, urgency if urgency < 2 else 2 + int(network_dependent)
         if position_id in reserved_local_position_ids:
-            return -1, 0
+            return -1, 2
         if position_id == reserved_network_position_id:
-            return -1, 1
+            return -1, 3
         if position_id in dead_bin_position_ids or urgency < 2:
             return 0, urgency
         return 1, int(network_dependent)
@@ -4627,6 +4630,8 @@ def _held_monitor_schedule_key(
         return 0, 0
     if position_id == reserved_network_position_id:
         return 0, 1
+    if position_id in selected_coverage_position_ids:
+        return 0, 1 if network_dependent else 0
     return 1, 1 if network_dependent else 0
 
 
@@ -4653,12 +4658,22 @@ def _reserve_held_monitor_positions(
     positions,
     *,
     limit: int,
+    priority_key: Callable[[object], object] | None = None,
+    fair_by_attempt: bool = False,
 ) -> list:
     """Select a thread-safe fair slice, seeded by durable monitor progress."""
 
-    if limit <= 0 or not positions:
+    if not positions:
+        with _HELD_MONITOR_CURSOR_LOCK:
+            _HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE.pop(lane, None)
+            _HELD_MONITOR_ATTEMPT_STATE_BY_LANE.pop(lane, None)
+            _HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE.pop(lane, None)
         return []
-    if all(hasattr(pos, "_canonical_monitor_refreshed_at") for pos in positions):
+    if limit <= 0:
+        return []
+    if fair_by_attempt or all(
+        hasattr(pos, "_canonical_monitor_refreshed_at") for pos in positions
+    ):
         keyed = [
             (
                 _held_monitor_stable_position_key(pos),
@@ -4683,6 +4698,7 @@ def _reserve_held_monitor_positions(
                 keyed,
                 key=lambda item: (
                     attempts.get(item[0], (0, ""))[0],
+                    priority_key(item[2]) if priority_key is not None else 0,
                     bool(item[1]),
                     item[1],
                     item[0],
@@ -5643,6 +5659,9 @@ def execute_monitoring_phase(
     monitor_budget_seconds = _held_position_monitor_budget_seconds(
         held_position_monitor_budget_seconds
     )
+    monitor_progress_limit = _held_position_monitor_positive_progress_limit(
+        len(monitor_positions)
+    )
     monitor_deadline = time.monotonic() + monitor_budget_seconds
     summary["held_monitor_candidates"] = len(monitor_positions)
     summary["held_monitor_budget_seconds"] = monitor_budget_seconds
@@ -5692,6 +5711,24 @@ def execute_monitoring_phase(
         for pos in monitor_positions
         if getattr(durable_hard_facts.get(id(pos)), "action", None)
         == "EXIT_DEAD_BIN"
+    )
+    selected_coverage_positions = (
+        _reserve_held_monitor_positions(
+            "bounded_coverage",
+            monitor_positions,
+            limit=monitor_progress_limit,
+            priority_key=lambda pos: (
+                -1
+                if id(pos) in dead_bin_position_ids
+                else _held_monitor_urgency_rank(pos)
+            ),
+            fair_by_attempt=True,
+        )
+        if monitor_budget_seconds > 0.0
+        else []
+    )
+    selected_coverage_position_ids = frozenset(
+        id(pos) for pos in selected_coverage_positions
     )
     quote_positions = [
         pos for pos in monitor_positions if id(pos) not in structural_win_position_ids
@@ -5799,6 +5836,10 @@ def execute_monitoring_phase(
         str(getattr(pos, "trade_id", "") or "")
         for pos in selected_urgent_positions
     ]
+    summary["held_monitor_budget_coverage_positions"] = [
+        str(getattr(pos, "trade_id", "") or "")
+        for pos in selected_coverage_positions
+    ]
 
     # Canonical lifecycle urgency is the first ordering key.  Within the
     # pending-exit and Day0 tranches, start the network batch before consuming
@@ -5811,6 +5852,7 @@ def execute_monitoring_phase(
             pos,
             dead_bin_position_ids=dead_bin_position_ids,
             selected_urgent_position_ids=selected_urgent_position_ids,
+            selected_coverage_position_ids=selected_coverage_position_ids,
             has_selected_urgent=has_selected_urgent,
             reserved_local_position_ids=reserved_local_position_ids,
             reserved_network_position_id=reserved_network_position_id,
@@ -5821,6 +5863,7 @@ def execute_monitoring_phase(
     budget_guaranteed_position_ids = frozenset(
         {
             *selected_urgent_position_ids,
+            *selected_coverage_position_ids,
             *reserved_local_position_ids,
             *(
                 position_id
@@ -5843,9 +5886,6 @@ def execute_monitoring_phase(
     )
     network_prefetch_started = False
     network_prefetch_unavailable = False
-    monitor_progress_limit = _held_position_monitor_positive_progress_limit(
-        len(monitor_positions)
-    )
     summary["held_monitor_positive_progress_limit"] = monitor_progress_limit
 
     for position_index, pos in enumerate(monitor_positions):
