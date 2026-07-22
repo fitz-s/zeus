@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-22
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -264,8 +264,9 @@ def _deterministic_day0_observation_payload() -> dict[str, object]:
         "target_date": "2026-07-20",
         "metric": "high",
         "station_id": "HKO",
-        "settlement_source": "hko",
+        "settlement_source": "wu",
         "settlement_unit": "C",
+        "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
         "observation_time": "2026-07-19T08:00:00+00:00",
         "observation_available_at": "2026-07-19T08:02:00+00:00",
         "observed_extreme_native": 30.0,
@@ -281,10 +282,12 @@ def _deterministic_day0_observation_payload() -> dict[str, object]:
         "station_id": binding["station_id"],
         "settlement_source": binding["settlement_source"],
         "settlement_unit": binding["settlement_unit"],
+        "evidence_finality": binding["evidence_finality"],
         "observation_time": binding["observation_time"],
         "observation_available_at": binding["observation_available_at"],
         "raw_value": binding["observed_extreme_native"],
         "rounded_value": binding["rounded_value"],
+        "high_so_far": binding["observed_extreme_native"],
         "sample_count": binding["sample_count"],
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",
@@ -369,7 +372,10 @@ def _deterministic_day0_global_qkernel_cert() -> dict[str, object]:
     return cert
 
 
-def _deterministic_day0_actionable_payload() -> dict[str, object]:
+def _deterministic_day0_actionable_payload(
+    *,
+    stale_event_observation: bool = False,
+) -> dict[str, object]:
     observation = _deterministic_day0_observation_payload()
     authority = era._global_day0_probability_authority_payload(observation)
     authority.update(
@@ -402,10 +408,23 @@ def _deterministic_day0_actionable_payload() -> dict[str, object]:
         qkernel_execution_economics=_deterministic_day0_global_qkernel_cert(),
         day0_probability_authority=authority,
     )
+    event_observation = dict(observation)
+    if stale_event_observation:
+        event_observation.update(
+            {
+                "observation_time": "2026-07-19T07:00:00+00:00",
+                "observation_available_at": "2026-07-19T07:02:00+00:00",
+                "raw_value": 29.0,
+                "rounded_value": 29,
+                "high_so_far": 29.0,
+                "source_match_status": "STALE",
+                "live_authority_status": "blocked",
+            }
+        )
     event = SimpleNamespace(
         event_type="DAY0_EXTREME_UPDATED",
-        payload=observation,
-        payload_json=json.dumps(observation),
+        payload=event_observation,
+        payload_json=json.dumps(event_observation),
     )
     live_cap = SimpleNamespace(
         payload={"usage_id": "usage-day0-1", "reserved_notional_usd": 16.8}
@@ -3180,7 +3199,7 @@ def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
         )
 
 
-def test_live_entry_qkernel_authority_accepts_low_price_with_current_state_economics():
+def test_live_entry_qkernel_authority_rejects_out_of_band_price_despite_positive_economics():
     cert = _current_qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:b34@proof",
@@ -3208,7 +3227,8 @@ def test_live_entry_qkernel_authority_accepts_low_price_with_current_state_econo
         "qkernel_execution_economics": cert,
     }
 
-    _assert_live_entry_submit_authority(payload)
+    with pytest.raises(ValueError, match="LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS"):
+        _assert_live_entry_submit_authority(payload)
 
 
 @pytest.mark.parametrize("price", (0.0, 1.0, float("nan")))
@@ -3351,7 +3371,22 @@ def test_global_deterministic_day0_receipt_projects_and_admits_exact_selected_no
         "global_current_observation_payload"
     ]
     assert observation["station_id"] == "HKO"
-    assert observation["settlement_source"] == "hko"
+    assert observation["settlement_source"] == "wu"
+    _assert_live_entry_submit_authority(payload)
+
+
+def test_global_deterministic_day0_actionable_prefers_current_observation_to_event():
+    payload = _deterministic_day0_actionable_payload(
+        stale_event_observation=True,
+    )
+
+    assert payload["observation_time"] == "2026-07-19T08:00:00+00:00"
+    assert payload["observation_available_at"] == "2026-07-19T08:02:00+00:00"
+    assert payload["raw_value"] == 30.0
+    assert payload["rounded_value"] == 30
+    assert payload["high_so_far"] == 30.0
+    assert payload["source_match_status"] == "MATCH"
+    assert payload["live_authority_status"] == "live"
     _assert_live_entry_submit_authority(payload)
 
 

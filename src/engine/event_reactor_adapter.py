@@ -18452,7 +18452,21 @@ def _actionable_payload_from_receipt(
             value = day0_probability_authority.get(key)
             if value not in (None, ""):
                 return value
+            value = _day0_observation_value(key)
+            if value not in (None, ""):
+                return value
         return None
+
+    def _day0_observation_value(key: str) -> object | None:
+        if not isinstance(day0_probability_authority, dict):
+            return None
+        observation = day0_probability_authority.get(
+            "global_current_observation_payload"
+        )
+        if not isinstance(observation, Mapping):
+            return None
+        value = observation.get(key)
+        return None if value in (None, "") else value
 
     def _present(value: object | None) -> object | None:
         return None if value in (None, "") else value
@@ -18590,31 +18604,62 @@ def _actionable_payload_from_receipt(
         "target_date": target_date,
         "metric": metric,
         "temperature_metric": metric,
-        "source_match_status": _event_identity_value(event, "source_match_status"),
-        "local_date_status": _event_identity_value(event, "local_date_status"),
-        "station_match_status": _event_identity_value(event, "station_match_status"),
-        "dst_status": _event_identity_value(event, "dst_status"),
-        "metric_match_status": _event_identity_value(event, "metric_match_status"),
-        "rounding_status": _event_identity_value(event, "rounding_status"),
-        "source_authorized_status": _event_identity_value(event, "source_authorized_status"),
-        "live_authority_status": _event_identity_value(event, "live_authority_status"),
+        "source_match_status": _first_present(
+            _day0_observation_value("source_match_status"),
+            _event_identity_value(event, "source_match_status"),
+        ),
+        "local_date_status": _first_present(
+            _day0_observation_value("local_date_status"),
+            _event_identity_value(event, "local_date_status"),
+        ),
+        "station_match_status": _first_present(
+            _day0_observation_value("station_match_status"),
+            _event_identity_value(event, "station_match_status"),
+        ),
+        "dst_status": _first_present(
+            _day0_observation_value("dst_status"),
+            _event_identity_value(event, "dst_status"),
+        ),
+        "metric_match_status": _first_present(
+            _day0_observation_value("metric_match_status"),
+            _event_identity_value(event, "metric_match_status"),
+        ),
+        "rounding_status": _first_present(
+            _day0_observation_value("rounding_status"),
+            _event_identity_value(event, "rounding_status"),
+        ),
+        "source_authorized_status": _first_present(
+            _day0_observation_value("source_authorized_status"),
+            _event_identity_value(event, "source_authorized_status"),
+        ),
+        "live_authority_status": _first_present(
+            _day0_observation_value("live_authority_status"),
+            _event_identity_value(event, "live_authority_status"),
+        ),
         "raw_value": _first_present(
+            _day0_observation_value("raw_value"),
+            _day0_observation_value("observed_extreme_native"),
             _event_identity_value(event, "raw_value"),
-            _day0_probability_value("observed_extreme_native"),
         ),
         "rounded_value": _first_present(
+            _day0_observation_value("rounded_value"),
             _event_identity_value(event, "rounded_value"),
-            _day0_probability_value("rounded_value"),
         ),
-        "high_so_far": _event_identity_value(event, "high_so_far"),
-        "low_so_far": _event_identity_value(event, "low_so_far"),
+        "high_so_far": _first_present(
+            _day0_observation_value("high_so_far"),
+            _event_identity_value(event, "high_so_far"),
+        ),
+        "low_so_far": _first_present(
+            _day0_observation_value("low_so_far"),
+            _event_identity_value(event, "low_so_far"),
+        ),
         "observation_time": _first_present(
+            _day0_observation_value("observation_time"),
             _event_identity_value(event, "observation_time"),
-            _day0_probability_value("observation_time"),
         ),
         "observation_available_at": _first_present(
+            _day0_observation_value("observation_available_at"),
             _event_identity_value(event, "observation_available_at"),
-            _day0_probability_value("observation_available_at"),
         ),
         "bin_label": receipt.bin_label,
         "outcome_label": receipt.outcome_label,
