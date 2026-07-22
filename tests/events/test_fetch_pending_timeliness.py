@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
+import src.events.event_store as event_store_module
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.state.db import init_schema
@@ -194,6 +193,284 @@ def test_committed_wake_targeted_only_does_not_fill_from_queue_debt():
     )
 
     assert [event.event_id for event in returned] == [committed.event_id]
+
+
+def test_committed_wake_targeted_only_drains_durable_global_winner_first():
+    conn = _world_conn()
+    store = EventStore(conn)
+    ordinary = _event(
+        "2026-06-07",
+        "snap-ordinary-with-winner",
+        available_at="2026-06-05T11:00:00+00:00",
+        received_at="2026-06-05T11:01:00+00:00",
+    )
+    committed = _event(
+        "2026-06-07",
+        "snap-committed-with-winner",
+        available_at="2026-06-05T11:30:00+00:00",
+        received_at="2026-06-05T11:31:00+00:00",
+    )
+    older_winner = _event(
+        "2026-06-06",
+        "snap-older-durable-global-winner",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:01:00+00:00",
+        source="global_auction_winner_target:older-source-event:economics",
+    )
+    newer_winner = _event(
+        "2026-06-06",
+        "snap-newer-durable-global-winner",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:02:00+00:00",
+        source="global_auction_winner_target:newer-source-event:economics",
+    )
+    for event in (ordinary, committed, older_winner, newer_winner):
+        store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET last_error = 'GLOBAL_WINNER_TARGETED_CLAIM',
+               updated_at = CASE event_id
+               WHEN ? THEN '2026-06-05T12:59:00+00:00'
+               ELSE '2026-06-05T12:00:00+00:00'
+           END
+         WHERE event_id IN (?, ?)
+        """,
+        (older_winner.event_id, older_winner.event_id, newer_winner.event_id),
+    )
+
+    returned = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+
+    assert [event.event_id for event in returned] == [newer_winner.event_id]
+
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        returned = store.fetch_pending(
+            decision_time=_DECISION_TIME,
+            limit=1,
+            targeted_event_ids=frozenset({committed.event_id}),
+            targeted_only=True,
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    queue_reads = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("SELECT")
+        and "FROM opportunity_event_processing" in statement
+    ]
+    assert [event.event_id for event in returned] == [newer_winner.event_id]
+    assert len(queue_reads) == 1
+    assert "ORDER BY e.received_at" not in queue_reads[0]
+
+
+def test_targeted_only_recovers_winner_after_processing_lease_stales(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(event_store_module, "_monotonic", lambda: clock[0])
+    conn = _world_conn()
+    store = EventStore(conn, processing_lease_seconds=10)
+    committed = _event(
+        "2026-06-06",
+        "snap-processing-lease-committed",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:01:00+00:00",
+    )
+    winner = _event(
+        "2026-06-06",
+        "snap-processing-lease-winner",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:02:00+00:00",
+        source="global_auction_winner_target:lease-source:economics",
+    )
+    for event in (committed, winner):
+        store.insert_or_ignore(event)
+    conn.execute(
+        "UPDATE opportunity_event_processing SET last_error = ? WHERE event_id = ?",
+        ("GLOBAL_WINNER_TARGETED_CLAIM", winner.event_id),
+    )
+
+    first = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in first] == [winner.event_id]
+    assert store.claim(winner.event_id, claimed_at=_DECISION_TIME)
+
+    clock[0] = 0.5
+    active = store.fetch_pending(
+        decision_time="2026-06-05T12:00:05+00:00",
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in active] == [committed.event_id]
+
+    clock[0] = 2.0
+    stale = store.fetch_pending(
+        decision_time="2026-06-05T12:00:11+00:00",
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in stale] == [winner.event_id]
+
+
+def test_targeted_only_negative_hint_expires_for_independent_writer(
+    monkeypatch,
+    tmp_path,
+):
+    clock = [0.0]
+    monkeypatch.setattr(event_store_module, "_monotonic", lambda: clock[0])
+    db_path = tmp_path / "world.db"
+    reader = sqlite3.connect(db_path)
+    reader.row_factory = sqlite3.Row
+    init_schema(reader)
+    reader.commit()
+    writer = sqlite3.connect(db_path)
+    writer.row_factory = sqlite3.Row
+    store = EventStore(reader, processing_lease_seconds=10)
+    committed = _event(
+        "2026-06-06",
+        "snap-negative-cache-committed",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:01:00+00:00",
+    )
+    store.insert_or_ignore(committed)
+    reader.commit()
+
+    initial = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in initial] == [committed.event_id]
+
+    winner = _event(
+        "2026-06-06",
+        "snap-independent-writer-winner",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:02:00+00:00",
+        source="global_auction_winner_target:external-source:economics",
+    )
+    writer_store = EventStore(writer, processing_lease_seconds=10)
+    writer_store.insert_or_ignore(winner)
+    writer.execute(
+        "UPDATE opportunity_event_processing SET last_error = ? WHERE event_id = ?",
+        ("GLOBAL_WINNER_TARGETED_CLAIM", winner.event_id),
+    )
+    writer.commit()
+
+    clock[0] = 0.5
+    cached = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in cached] == [committed.event_id]
+
+    clock[0] = 2.0
+    refreshed = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in refreshed] == [winner.event_id]
+    writer.close()
+    reader.close()
+
+
+def test_targeted_only_forgets_processed_positive_hint_for_independent_writer(
+    monkeypatch,
+    tmp_path,
+):
+    clock = [0.0]
+    monkeypatch.setattr(event_store_module, "_monotonic", lambda: clock[0])
+    db_path = tmp_path / "world-positive.db"
+    reader = sqlite3.connect(db_path)
+    reader.row_factory = sqlite3.Row
+    init_schema(reader)
+    reader.commit()
+    writer = sqlite3.connect(db_path)
+    writer.row_factory = sqlite3.Row
+    store = EventStore(reader, processing_lease_seconds=10)
+    committed = _event(
+        "2026-06-06",
+        "snap-positive-cache-committed",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:01:00+00:00",
+    )
+    old_winner = _event(
+        "2026-06-06",
+        "snap-positive-cache-old-winner",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:02:00+00:00",
+        source="global_auction_winner_target:old-source:economics",
+    )
+    for event in (committed, old_winner):
+        store.insert_or_ignore(event)
+    reader.execute(
+        "UPDATE opportunity_event_processing SET last_error = ? WHERE event_id = ?",
+        ("GLOBAL_WINNER_TARGETED_CLAIM", old_winner.event_id),
+    )
+    reader.commit()
+    initial = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in initial] == [old_winner.event_id]
+
+    new_winner = _event(
+        "2026-06-06",
+        "snap-positive-cache-new-winner",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:03:00+00:00",
+        source="global_auction_winner_target:new-source:economics",
+    )
+    writer.execute(
+        "UPDATE opportunity_event_processing "
+        "SET processing_status='processed', processed_at=?, updated_at=? "
+        "WHERE event_id=?",
+        (_DECISION_TIME, _DECISION_TIME, old_winner.event_id),
+    )
+    writer_store = EventStore(writer, processing_lease_seconds=10)
+    writer_store.insert_or_ignore(new_winner)
+    writer.execute(
+        "UPDATE opportunity_event_processing SET last_error = ? WHERE event_id = ?",
+        ("GLOBAL_WINNER_TARGETED_CLAIM", new_winner.event_id),
+    )
+    writer.commit()
+
+    clock[0] = 0.5
+    stale_hint_miss = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in stale_hint_miss] == [committed.event_id]
+    refreshed = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+    assert [event.event_id for event in refreshed] == [new_winner.event_id]
+    writer.close()
+    reader.close()
 
 
 def test_committed_wake_targeted_only_uses_one_joined_queue_read():

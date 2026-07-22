@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
+import time
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
@@ -21,6 +23,13 @@ from src.events.opportunity_event import OpportunityEvent
 
 GLOBAL_WINNER_TARGETED_CLAIM = "GLOBAL_WINNER_TARGETED_CLAIM"
 _GLOBAL_WINNER_TARGET_SOURCE_PREFIX = "global_auction_winner_target:"
+_WINNER_HINT_MISSING = object()
+_winner_hint_lock = threading.Lock()
+_winner_hints: dict[
+    tuple[str, str],
+    tuple[tuple[str, str] | None, float],
+] = {}
+_monotonic = time.monotonic
 
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane. EDLI_REDECISION_PENDING
 # carries the same FSR-shaped city/target payload and gets the same timeliness floor. Literal here
@@ -157,6 +166,110 @@ class EventStore:
         self.consumer_name = consumer_name
         self.processing_lease_seconds = processing_lease_seconds
         self._world_event_tables_ready = False
+        db_rows = conn.execute("PRAGMA database_list").fetchall()
+        main_path = next(
+            (str(row[2] or "") for row in db_rows if str(row[1] or "") == "main"),
+            "",
+        )
+        self._winner_hint_key = (
+            main_path or f":memory:{id(conn)}",
+            consumer_name,
+        )
+        self._winner_hint_ttl_seconds = max(
+            1.0,
+            float(processing_lease_seconds) / 10.0,
+        )
+
+    def _winner_hint(self) -> tuple[str, str] | None | object:
+        with _winner_hint_lock:
+            entry = _winner_hints.get(self._winner_hint_key)
+            if entry is None:
+                return _WINNER_HINT_MISSING
+            hint, expires_at = entry
+            if _monotonic() >= expires_at:
+                _winner_hints.pop(self._winner_hint_key, None)
+                return _WINNER_HINT_MISSING
+            return hint
+
+    def _cache_winner(self, hint: tuple[str, str] | None) -> None:
+        with _winner_hint_lock:
+            _winner_hints[self._winner_hint_key] = (
+                hint,
+                _monotonic() + self._winner_hint_ttl_seconds,
+            )
+
+    def _forget_winner(self, event_id: str) -> None:
+        with _winner_hint_lock:
+            entry = _winner_hints.get(self._winner_hint_key)
+            if entry is not None and entry[0] is not None and entry[0][0] == event_id:
+                _winner_hints.pop(self._winner_hint_key, None)
+
+    def _remember_winner(self, event_id: str, received_at: str) -> None:
+        candidate = (str(event_id or ""), str(received_at or ""))
+        if not all(candidate):
+            return
+        with _winner_hint_lock:
+            entry = _winner_hints.get(self._winner_hint_key)
+            current = entry[0] if entry is not None else None
+            if current is None or (candidate[1], candidate[0]) >= (current[1], current[0]):
+                _winner_hints[self._winner_hint_key] = (
+                    candidate,
+                    _monotonic() + self._winner_hint_ttl_seconds,
+                )
+
+    def _discover_winner(self, decision_time: datetime) -> tuple[str, str] | None:
+        event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
+        stale_processing_before = (
+            decision_time - timedelta(seconds=self.processing_lease_seconds)
+        ).isoformat()
+        rows = self.conn.execute(
+            f"""
+            SELECT {event_cols}
+              FROM opportunity_event_processing p
+                   INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.last_error = ?
+               AND (
+                    (
+                        p.processing_status = 'pending'
+                        AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
+                    )
+                    OR (
+                        p.processing_status = 'processing'
+                        AND p.claimed_at IS NOT NULL
+                        AND p.claimed_at <= ?
+                    )
+               )
+               AND e.available_at <= ?
+               AND e.received_at <= ?
+               AND (e.expires_at IS NULL OR e.expires_at > ?)
+             ORDER BY e.received_at DESC, e.event_id DESC
+            """,
+            (
+                self.consumer_name,
+                GLOBAL_WINNER_TARGETED_CLAIM,
+                decision_time.isoformat(),
+                stale_processing_before,
+                decision_time.isoformat(),
+                decision_time.isoformat(),
+                decision_time.isoformat(),
+            ),
+        ).fetchall()
+        winner = next(
+            (
+                event
+                for row in rows
+                if self._is_timely(
+                    event := _event_from_row(row),
+                    decision_time,
+                )
+            ),
+            None,
+        )
+        hint = (winner.event_id, winner.received_at) if winner is not None else None
+        self._cache_winner(hint)
+        return hint
 
     def insert_or_ignore(self, event: OpportunityEvent) -> bool:
         """Insert immutable event row and initialize mutable processing state."""
@@ -645,10 +758,12 @@ class EventStore:
         scope); only events that expose a city+target_date are subject to the
         timeliness floor.
 
-        ``targeted_only`` is the producer-wake fast path. It admits only the
-        explicitly committed event IDs instead of filling the remaining page
-        with unrelated queue debt. The global auction may still select an
-        unpaged winner from its complete current universe.
+        ``targeted_only`` is the producer-wake fast path. It admits the
+        explicitly committed event IDs plus at most one already-durable global
+        winner claim; unrelated queue debt stays excluded. The global auction
+        may select an unpaged winner from its complete current universe, so its
+        persisted claim must remain reachable even while producer wakes are
+        continuous.
         """
 
         self._require_world_event_tables()
@@ -709,9 +824,17 @@ class EventStore:
         attempt_by_event: dict[str, int] = {}
         last_error_by_event: dict[str, str] = {}
         stale_reclaim_by_event: dict[str, int] = {}
+        hinted_winner_id = ""
         event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
         if targeted_only:
-            placeholders = ",".join("?" for _ in clean_targeted_event_ids)
+            winner_hint = self._winner_hint()
+            if winner_hint is _WINNER_HINT_MISSING:
+                winner_hint = self._discover_winner(parsed_decision_time)
+            hinted_winner_id = winner_hint[0] if winner_hint is not None else ""
+            lookup_event_ids = tuple(
+                dict.fromkeys((*clean_targeted_event_ids, hinted_winner_id))
+            )
+            placeholders = ",".join("?" for _ in lookup_event_ids)
             event_col_count = len(_EVENT_ROW_KEYS)
             targeted_rows = self.conn.execute(
                 f"""
@@ -748,7 +871,7 @@ class EventStore:
                 """,
                 (
                     self.consumer_name,
-                    *clean_targeted_event_ids,
+                    *lookup_event_ids,
                     parsed_decision_time.isoformat(),
                     stale_processing_before,
                     parsed_decision_time.isoformat(),
@@ -756,6 +879,10 @@ class EventStore:
                     parsed_decision_time.isoformat(),
                 ),
             ).fetchall()
+            if hinted_winner_id and all(
+                str(row[0] or "") != hinted_winner_id for row in targeted_rows
+            ):
+                self._forget_winner(hinted_winner_id)
             for row in targeted_rows:
                 event_tuple = tuple(row[:event_col_count])
                 event_id = str(event_tuple[0] or "")
@@ -977,6 +1104,7 @@ class EventStore:
             if (
                 last_error_by_event.get(event.event_id)
                 == GLOBAL_WINNER_TARGETED_CLAIM
+                and self._is_timely(event, parsed_decision_time)
             ):
                 targeted_generations[event.event_id] = event.received_at
             payload = _event_payload_dict(event)
@@ -1022,6 +1150,14 @@ class EventStore:
             if targeted_generations
             else ()
         )
+        if winner_targeted_event_ids:
+            winner_event_id = next(iter(winner_targeted_event_ids))
+            self._remember_winner(
+                winner_event_id,
+                targeted_generations[winner_event_id],
+            )
+        elif not targeted_only and self._winner_hint() is _WINNER_HINT_MISSING:
+            self._cache_winner(None)
         targeted_event_ids = (
             frozenset(clean_targeted_event_ids) | winner_targeted_event_ids
         )
@@ -1029,6 +1165,7 @@ class EventStore:
             rank_rows,
             day0_is_tradeable=day0_is_tradeable,
             targeted_event_ids=targeted_event_ids,
+            global_winner_targeted_event_ids=winner_targeted_event_ids,
         )
         events = [event for event, _attempt_count in ranked]
         timely = [event for event in events if self._is_timely(event, parsed_decision_time)]
@@ -2436,6 +2573,13 @@ class EventStore:
             "WHERE consumer_name = ? AND event_id = ?",
             (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
+        if last_error == GLOBAL_WINNER_TARGETED_CLAIM:
+            row = self.conn.execute(
+                "SELECT received_at FROM opportunity_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is not None:
+                self._remember_winner(event_id, str(row[0] or ""))
 
     def requeue_processing_before_boot(self, *, boot_at: str) -> int:
         """Recover claims whose process owner predates this runtime generation."""
@@ -2644,7 +2788,15 @@ class EventStore:
                     GLOBAL_WINNER_TARGETED_CLAIM,
                 ),
             )
-            return cur.rowcount == 1
+            prioritized = cur.rowcount == 1
+            if prioritized:
+                retained_received_at = next(
+                    str(row[2] or "")
+                    for row in same_source_targets
+                    if str(row[0] or "") == retained_target_id
+                )
+                self._remember_winner(retained_target_id, retained_received_at)
+            return prioritized
 
         self.insert_or_ignore(event)
         cur = self.conn.execute(
@@ -2661,7 +2813,10 @@ class EventStore:
                 GLOBAL_WINNER_TARGETED_CLAIM,
             ),
         )
-        return cur.rowcount == 1
+        prioritized = cur.rowcount == 1
+        if prioritized:
+            self._remember_winner(event.event_id, event.received_at)
+        return prioritized
 
     def requeue_misclassified_local_pre_submit_rejections(self, *, batch_limit: int = 100) -> int:
         """Recover processed events poisoned by old local pre-submit reject receipts.
@@ -3270,6 +3425,7 @@ def _rank_pending_rows_python(
     *,
     day0_is_tradeable: bool,
     targeted_event_ids: frozenset[str] = frozenset(),
+    global_winner_targeted_event_ids: frozenset[str] = frozenset(),
 ) -> list[tuple[OpportunityEvent, int]]:
     records: list[dict] = []
     for row in rows:
@@ -3297,8 +3453,12 @@ def _rank_pending_rows_python(
                 "stale_processing_reclaim_lane": (
                     0 if stale_processing_reclaim else 1
                 ),
-                "global_winner_target_lane": (
-                    0 if event.event_id in targeted_event_ids else 1
+                "target_lane": (
+                    0
+                    if event.event_id in global_winner_targeted_event_ids
+                    else 1
+                    if event.event_id in targeted_event_ids
+                    else 2
                 ),
                 "live_redecision_retry_lane": _live_redecision_retry_lane(
                     event, attempt_count
@@ -3329,7 +3489,7 @@ def _rank_pending_rows_python(
         records,
         key=lambda item: (
             item["stale_processing_reclaim_lane"],
-            item["global_winner_target_lane"],
+            item["target_lane"],
             item["tier"],
             item["live_redecision_retry_lane"],
             item["recapture_edge_backoff"],
@@ -3374,7 +3534,7 @@ def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
         item
         for item in records
         if item["stale_processing_reclaim_lane"] == 0
-        or item["global_winner_target_lane"] == 0
+        or item["target_lane"] < 2
     ]
     fixed_ids = {item["event"].event_id for item in fixed}
     records = [item for item in records if item["event"].event_id not in fixed_ids]
