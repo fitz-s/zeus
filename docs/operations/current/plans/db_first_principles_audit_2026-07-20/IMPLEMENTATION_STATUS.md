@@ -1,6 +1,18 @@
 # DB 重构实现状态 — 操作员行动图
 
-2026-07-21 · worktree `db-impl-2026-07-21` · **live checkout 零接触**。全部代码编译过、fixture 测试绿(30+ antibody);活库运行是操作员门。
+2026-07-21 · worktree `db-impl-2026-07-21` · **live checkout 零接触**。全部代码编译过、fixture 测试绿(40+ antibody);活库运行是操作员门。
+
+## 2026-07-21 续跑进度(39 commit 领先 origin/live)
+
+**本续跑新交(worktree 已提交,live 零接触)**
+- `scripts/ops/reconcile_settlement_outcomes.py` + 抗体(4 测试绿,commit 63ce61a1)— 只读跨库对账门(§3.5 anti-join)。**活库只读实测确证**:settled-无-outcome gap 从审计时 16 增至 **27**,27/27 全 `VENUE_RESOLVED`(系统性路径分歧、非 partial-commit;根治=W4 durable outbox 操作员门)。修了 brief 的 schema 误设(`settlement_authority` 非 position_current 列、在 position_events.payload_json)。
+
+**在途(本 session 并行)**
+- Agent `capture-track-a`:capture-policy Track-A 首个可落地增量(additive-only:`capture_trigger` 幂等 ALTER + compact 表 DDL + 单写点分支打标 + Track-A log-only hydration 断言 + 抗体)。设计 `implementation/capture_policy_spec.md`。
+- Agent `cert-v1-freeze`:证书 v1 golden-vector 冻结抗体(护结算身份 preimage 字节)。设计 `implementation/certificate_v1_freeze.md`。
+- Consult `REQ-20260721-204133-420956`:4 锁+336 零锁写者统一 cutover 对撞(bridge-lock 增量 vs fenced big-bang;connection-factory pushdown;BULK-yield 保 K3;world 进程内锁跨进程折叠)。答案落 `/tmp/cgc/answer_REQ-20260721-204133-420956.txt`。
+
+**连接层已确认(consult 落地即可实现)**:`world_write_mutex`(scheme 4)= 进程内 threading.Lock、只跨线程、**不跨进程**;`world_write_lock` 对已开事务幂等(re-entrancy 模式);checkpoint 助手与写锁子系统正交(W5-2/3 独立)。待批:W5-2 false-green alert(`busy==0` 恒真→WARNING 死码;真信号 `checkpointed<log`)、W5-3 TRUNCATE-vs-PASSIVE 张力(需判断/consult)、W5-8 fail-open rwc(`no such table` 源)。
 
 ## 已授权 + 已测试(operator-gated 运行)
 
