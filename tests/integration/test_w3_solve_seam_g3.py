@@ -9114,6 +9114,91 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
     assert stable is receipt
 
 
+def test_global_preflight_mode_flip_falls_through_before_curve_reauction(
+    monkeypatch,
+):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    curve = ExecutableCostCurve(
+        token_id="token-a",
+        side="NO",
+        snapshot_id="selected-book",
+        book_hash="selected-hash",
+        levels=(BookLevel(price=Decimal("0.52"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    candidate = GlobalSingleOrderCandidate(
+        candidate_id="candidate-a",
+        family_key="family-a",
+        bin_id="bin-a",
+        condition_id="condition-a",
+        side="NO",
+        token_id="token-a",
+        probability_witness_identity="probability-a",
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=at,
+        execution_curve_identity=executable_curve_identity(curve),
+        ledger_snapshot_id="ledger-a",
+        executable_cost_curve=curve,
+        resolution_identity="resolution-a",
+    )
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        direction="buy_no",
+        q_lcb_5pct=0.76,
+        c_fee_adjusted=0.52,
+        execution_mode_intent="TAKER",
+        proof_accepted=True,
+        decision_proof_bundle=SimpleNamespace(
+            executable_snapshot=SimpleNamespace(
+                payload={"market_end_at": "2026-07-15T00:00:00+00:00"}
+            )
+        ),
+    )
+    actuation = SimpleNamespace(
+        winner_event_id=event.event_id,
+        decision=SimpleNamespace(
+            candidate=candidate,
+            limit_price=Decimal("0.52"),
+            shares=Decimal("50"),
+        ),
+    )
+    observed = {}
+
+    def fresh_mode(**kwargs):
+        observed.update(kwargs)
+        return "MAKER"
+
+    monkeypatch.setattr(era, "_fresh_rest_then_cross_mode", fresh_mode)
+    rejected = era._global_preflight_entry_jit_receipt(
+        event,
+        receipt,
+        global_actuation=actuation,
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "hash": "fresh-book",
+            "bids": [{"price": "0.46", "size": "100"}],
+            "asks": [{"price": "0.51", "size": "100"}],
+        },
+        checked_at_utc=at,
+    )
+
+    assert observed["fresh_best_bid"] == 0.46
+    assert observed["fresh_best_ask"] == 0.51
+    assert rejected.proof_accepted is False
+    assert rejected.side_effect_status == "NO_SUBMIT"
+    assert rejected.reason.startswith(
+        "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:"
+        "SUBMIT_ABORTED_MODE_FLIPPED:proof_mode=TAKER:fresh_mode=MAKER:"
+    )
+    assert era._global_preflight_block_status(rejected.reason) == "CANDIDATE_BLOCKED"
+
+
 def test_global_preflight_reuses_provider_observation_without_second_fetch():
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)

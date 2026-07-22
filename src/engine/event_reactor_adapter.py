@@ -11418,7 +11418,12 @@ def _global_probability_tightening_from_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
-    if reason.startswith("QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"):
+    if reason.startswith(
+        (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",
+            "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:",
+        )
+    ):
         return "CANDIDATE_BLOCKED"
     if reason == (
         "GLOBAL_ACTUATION_PREPARE_FAILED:"
@@ -11609,6 +11614,16 @@ def _global_preflight_entry_jit_receipt(
                 raw_book,
                 captured_at_utc=jit[3],
             )
+            mode_receipt = _global_preflight_candidate_mode_receipt(
+                event,
+                receipt,
+                current_candidate=current_candidate,
+                fresh_best_bid=jit[0],
+                fresh_best_ask=jit[1],
+                checked_at_utc=checked_at_utc or jit[3],
+            )
+            if mode_receipt is not receipt:
+                return mode_receipt
         drift = _global_selected_order_economics_drift(
             decision=decision,
             current_candidate=current_candidate,
@@ -11649,6 +11664,83 @@ def _global_preflight_entry_jit_receipt(
             submitted=False,
             side_effect_status="NO_SUBMIT",
             reason=f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{exc}",
+            proof_accepted=False,
+        )
+    return receipt
+
+
+def _global_preflight_candidate_mode_receipt(
+    event: OpportunityEvent,
+    receipt: EventSubmissionReceipt,
+    *,
+    current_candidate: object,
+    fresh_best_bid: float | None,
+    fresh_best_ask: float | None,
+    checked_at_utc: datetime,
+) -> EventSubmissionReceipt:
+    """Reject a stale taker winner while the complete auction can fall through."""
+
+    proof_mode = str(receipt.execution_mode_intent or "").strip().upper()
+    if proof_mode != "TAKER":
+        return receipt
+    proof_bundle = receipt.decision_proof_bundle
+    executable_snapshot = getattr(proof_bundle, "executable_snapshot", None)
+    snapshot_payload = getattr(executable_snapshot, "payload", None)
+    if not isinstance(snapshot_payload, Mapping):
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=(
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "GLOBAL_PREFLIGHT_MODE_EXECUTABLE_SNAPSHOT_REQUIRED"
+            ),
+            proof_accepted=False,
+        )
+    curve = getattr(current_candidate, "executable_cost_curve", None)
+    if curve is None:
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=(
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "GLOBAL_PREFLIGHT_MODE_EXECUTABLE_CURVE_REQUIRED"
+            ),
+            proof_accepted=False,
+        )
+    actionable_payload = {
+        "event_type": event.event_type,
+        "probability_authority": receipt.probability_authority,
+        "q_source": receipt.q_source,
+        "_edli_q_source": receipt.q_source,
+        "q_lcb_5pct": receipt.q_lcb_5pct,
+        "c_fee_adjusted": receipt.c_fee_adjusted,
+        "direction": receipt.direction,
+        "rest_then_cross_policy": receipt.rest_then_cross_policy,
+        "qkernel_execution_economics": receipt.qkernel_execution_economics,
+    }
+    try:
+        fresh_mode = _fresh_rest_then_cross_mode(
+            actionable_payload=actionable_payload,
+            executable_snapshot=executable_snapshot,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+            tick_size=float(curve.min_tick),
+            decision_time=checked_at_utc,
+        )
+        _validate_final_order_mode_or_abort(
+            proof_mode=proof_mode,
+            fresh_mode=fresh_mode,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+        )
+    except _SubmitAbortedModeFlipped as exc:
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=f"GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:{exc}",
             proof_accepted=False,
         )
     return receipt
