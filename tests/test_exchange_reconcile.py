@@ -2732,6 +2732,63 @@ def test_entry_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(c
     ) == (Decimal("2.5"), Decimal("0.40"), Decimal("1.000"))
 
 
+@pytest.mark.parametrize(
+    "order_fact_source",
+    ["REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"],
+)
+def test_entry_trade_fill_does_not_claim_chain_position_authority(
+    conn,
+    order_fact_source,
+):
+    from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
+    from src.state.db import query_portfolio_loader_view
+
+    seed_command(conn, size=10, price=0.50)
+    seed_position_baseline(conn)
+    append_trade_fact(conn, size="10", fill_price="0.50")
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = 'cmd-m5'"
+        ).fetchone()
+    )
+
+    _ensure_entry_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id="ord-m5",
+        filled_size="10",
+        fill_price="0.50",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+        order_fact_source=order_fact_source,
+    )
+
+    projection = conn.execute(
+        """
+        SELECT chain_state, chain_shares, chain_avg_price, chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
+    ).fetchone()
+    assert projection["chain_state"] == "unknown"
+    assert projection["chain_shares"] is None
+    assert projection["chain_avg_price"] is None
+    assert projection["chain_cost_basis_usd"] is None
+
+    # The fixture predates the durable fill-authority column.  Supply the
+    # authority already present on the live recovery path so this assertion
+    # isolates whether missing chain economics can poison global sizing.
+    conn.execute(
+        "UPDATE position_current SET fill_authority = 'venue_confirmed_full' "
+        "WHERE position_id = 'pos-m5'"
+    )
+    runtime = query_portfolio_loader_view(conn, runtime_exposure_only=True)
+    assert runtime["status"] == "ok"
+    assert len(runtime["positions"]) == 1
+    assert runtime["positions"][0]["chain_state"] == "unknown"
+    assert runtime["positions"][0]["entry_economics_source"] == "execution_fact"
+
+
 def test_entry_reobservation_repairs_edli_alias_double_projection(conn):
     from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
     from src.state.venue_command_repo import append_trade_fact as append
