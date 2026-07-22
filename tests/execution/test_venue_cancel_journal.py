@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-22
 # Authority basis: W4.2 relocation of the persisted-cancel journal engine out of the retired
 #   src/execution/maker_rest_escalation.py into src/execution/venue_cancel_journal.py (still used
 #   by main._edli_boot_invalid_pending_entry_authority_cancel_once,
@@ -331,10 +331,19 @@ class TestPersistedRestCancel:
         assert events.count("CANCEL_REQUESTED") == 1
         assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_ACKED"]
 
-    def test_persisted_cancel_immediately_voids_zero_fill_pending_entry_projection(self):
+    def test_persisted_cancel_immediately_voids_zero_fill_pending_entry_projection(
+        self, monkeypatch
+    ):
+        import src.execution.command_recovery as command_recovery
+        import src.execution.venue_cancel_journal as cancel_journal
+
         from src.execution.command_recovery import reconcile_unresolved_commands
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.db import init_schema
+        from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+        from src.state.schema.entry_exposure_obligations_schema import (
+            ensure_table as ensure_entry_exposure_obligations_table,
+        )
         from tests.test_command_recovery import (
             _advance_to_acked,
             _append_order_fact,
@@ -346,11 +355,20 @@ class TestPersistedRestCancel:
         conn.row_factory = sqlite3.Row
         init_schema(conn)
         init_collateral_schema(conn)
+        ensure_entry_exposure_obligations_table(conn)
         _insert(conn, size=13.45, price=0.68)
         _advance_to_acked(conn, venue_order_id="ord-live")
         _append_order_fact(
             conn, order_id="ord-live", state="LIVE",
             matched_size="0", remaining_size="13.45", source="REST",
+        )
+        open_entry_exposure_obligation(
+            conn,
+            command_id="cmd-001",
+            owner_domain="trade",
+            token_id="tok-001",
+            shares=13.45,
+            cost_basis_usd=9.146,
         )
         _insert_decision_log_trade_case_for_recovery(conn)
 
@@ -364,6 +382,18 @@ class TestPersistedRestCancel:
         assert conn.execute(
             "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()[0] == "pending_entry"
+
+        real_terminal_reconcile = command_recovery.reconcile_terminal_order_facts
+        terminal_calls = {"count": 0}
+
+        def locked_once(*args, **kwargs):
+            terminal_calls["count"] += 1
+            if terminal_calls["count"] == 1:
+                return {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+            return real_terminal_reconcile(*args, **kwargs)
+
+        monkeypatch.setattr(command_recovery, "reconcile_terminal_order_facts", locked_once)
+        monkeypatch.setattr(cancel_journal.time, "sleep", lambda _seconds: None)
 
         clob = _FakeClob()
         stats = run_persisted_cancels_for_expired_rests(
@@ -388,6 +418,7 @@ class TestPersistedRestCancel:
         assert stats == {
             "scanned": 1, "cancelled": 1, "cancel_failed": 0, "cancel_journal_failed": 0,
         }
+        assert terminal_calls["count"] == 2
         current = conn.execute(
             "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
@@ -405,6 +436,12 @@ class TestPersistedRestCancel:
         assert [row["event_type"] for row in events] == [
             "POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED", "ENTRY_ORDER_VOIDED",
         ]
+        obligation = conn.execute(
+            "SELECT status, resolved_at FROM entry_exposure_obligations "
+            "WHERE command_id = 'cmd-001'"
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+        assert obligation["resolved_at"] is not None
 
 
 class TestDeadlineMinutesLogFallback:
