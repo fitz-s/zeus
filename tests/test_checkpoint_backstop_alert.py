@@ -1,26 +1,27 @@
 # Created: 2026-07-21
 # Authority basis: docs/operations/current/plans/db_first_principles_audit_2026-07-20/
 #   findings/connections_throughput.md — FINDING W5-2 (PASSIVE false-green),
-#   W5-3 (intended TRUNCATE shipped as PASSIVE), W5-4 (no forecasts backstop).
-# Purpose: antibody for the W5-2 false-green defect. PASSIVE checkpoints never
-#   return SQLITE_BUSY, so the old `busy == 0` alert gate was always-true dead
-#   code (see tests/test_world_wal_checkpoint_starvation.py for the sibling
-#   probes on checkpoint_world_wal/_world_wal_checkpoint_cycle themselves).
-#   This file tests the extracted pure decision function in isolation
-#   (`src.main._wal_checkpoint_is_starved`) plus the new W5-4 forecasts
-#   checkpoint backstop, without booting the scheduler.
+#   W5-3 (intended TRUNCATE shipped as PASSIVE), W5-4 (no forecasts backstop),
+#   W5-5 (PR review: alert measured TOTAL log, not the un-checkpointed backlog,
+#   and hardcoded a 4 KiB page).
+# Purpose: antibody for the checkpoint backstop alert decision. PASSIVE
+#   checkpoints never return SQLITE_BUSY, so the original `busy == 0` gate was
+#   always-true dead code; and the follow-up total-log threshold both false-
+#   alerted on a 1-frame shortfall of a large log and false-cleared a small log
+#   with a large pinned remainder. This file tests the corrected pure decision
+#   function in isolation (`src.main._wal_checkpoint_is_starved`) plus the W5-4
+#   forecasts backstop, without booting the scheduler.
 # Reuse: run on any PR touching the WAL checkpoint alert threshold/logic in
 #   src/main.py or the checkpoint_*_wal helpers in src/state/db.py.
 
 """WAL checkpoint backstop alert-decision + forecasts-backstop tests.
 
-``_wal_checkpoint_is_starved(log_frames, checkpointed_frames)`` is the real
-starvation signal for a PASSIVE checkpoint: the WAL is not draining
-(``checkpointed_frames < log_frames``) AND the undrained log has grown past
-the healthy oscillation band (``log_frames > _WAL_STARVATION_FRAME_THRESHOLD``,
-512 MiB / 4 KiB page = 131,072 frames — see the constant's docstring in
-src/main.py for the derivation from the finding's live evidence: healthy
-oscillation tops out at 373 MB, the 2026-06-16 incident reached 810 MB).
+``_wal_checkpoint_is_starved(log_frames, checkpointed_frames, page_size_bytes)``
+fires on the UN-checkpointed backlog — ``(log_frames - checkpointed_frames)``
+frames a PASSIVE checkpoint could not move back into the DB because a reader
+pins the WAL floor — converted to bytes with the DB's ACTUAL page_size, over a
+512 MiB line. It measures the outstanding remainder, not the total log size,
+and never assumes a 4 KiB page.
 """
 
 from __future__ import annotations
@@ -28,51 +29,76 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
+_PAGE = 4096  # live canonical DBs use a 4 KiB page (verified read-only)
+_THRESHOLD_FRAMES_AT_4K = (512 * 1024 * 1024) // _PAGE  # 131_072
 
 
 # ---------------------------------------------------------------------------
 # _wal_checkpoint_is_starved: pure decision function, no scheduler/DB needed.
 # ---------------------------------------------------------------------------
 
-def test_fires_when_not_draining_past_threshold() -> None:
-    """checkpointed < log AND log > threshold -> starved (the real signal)."""
-    from src.main import _WAL_STARVATION_FRAME_THRESHOLD, _wal_checkpoint_is_starved
+def test_fires_on_large_outstanding_backlog() -> None:
+    """A pinned remainder past 512 MiB -> starved (the real signal)."""
+    from src.main import _wal_checkpoint_is_starved
 
-    log_frames = _WAL_STARVATION_FRAME_THRESHOLD + 1
-    checkpointed_frames = log_frames - 1
-    assert _wal_checkpoint_is_starved(log_frames, checkpointed_frames) is True
+    log_frames = _THRESHOLD_FRAMES_AT_4K + 1  # 1 frame past the line, all pinned
+    assert _wal_checkpoint_is_starved(log_frames, 0, _PAGE) is True
 
 
-def test_quiet_on_full_drain() -> None:
-    """checkpointed == log -> quiet, even when the log is huge (fully drained,
-    not starved — a large WAL that IS draining is healthy)."""
-    from src.main import _WAL_STARVATION_FRAME_THRESHOLD, _wal_checkpoint_is_starved
+def test_quiet_on_full_drain_however_large_the_log() -> None:
+    """checkpointed == log -> quiet even for a multi-GB WAL: a large log that
+    fully drains is healthy, not starved."""
+    from src.main import _wal_checkpoint_is_starved
 
-    log_frames = _WAL_STARVATION_FRAME_THRESHOLD * 10
-    assert _wal_checkpoint_is_starved(log_frames, log_frames) is False
+    log_frames = _THRESHOLD_FRAMES_AT_4K * 20  # ~10 GiB WAL
+    assert _wal_checkpoint_is_starved(log_frames, log_frames, _PAGE) is False
+
+
+def test_quiet_on_tiny_shortfall_of_huge_log_regression() -> None:
+    """W5-5 regression: the prior predicate (checkpointed<log AND log>131072)
+    warned when a huge log missed full drain by a single frame. The outstanding
+    backlog is 1 frame (~4 KiB), nowhere near 512 MiB, so this must be QUIET."""
+    from src.main import _wal_checkpoint_is_starved
+
+    log_frames = _THRESHOLD_FRAMES_AT_4K * 20
+    checkpointed = log_frames - 1
+    assert _wal_checkpoint_is_starved(log_frames, checkpointed, _PAGE) is False
 
 
 def test_quiet_on_small_partial_drain() -> None:
-    """checkpointed < log but log stays under the threshold -> quiet (a lone
-    partial drain is normal under transient reader pressure; live oscillation
-    is 95-373 MB, well under the 512 MiB threshold)."""
-    from src.main import _WAL_STARVATION_FRAME_THRESHOLD, _wal_checkpoint_is_starved
+    """A modest pinned remainder (well under 512 MiB) is normal transient reader
+    pressure, not starvation."""
+    from src.main import _wal_checkpoint_is_starved
 
-    log_frames = _WAL_STARVATION_FRAME_THRESHOLD // 2
-    checkpointed_frames = log_frames // 2
-    assert checkpointed_frames < log_frames  # precondition: this IS a partial drain
-    assert _wal_checkpoint_is_starved(log_frames, checkpointed_frames) is False
+    # 1000 frames outstanding ~= 4 MiB at 4 KiB pages.
+    assert _wal_checkpoint_is_starved(50_000, 49_000, _PAGE) is False
 
 
 def test_quiet_exactly_at_threshold() -> None:
-    """log_frames == threshold is not YET past the healthy band (strict `>`),
-    so a partial drain sitting exactly at the boundary stays quiet."""
-    from src.main import _WAL_STARVATION_FRAME_THRESHOLD, _wal_checkpoint_is_starved
+    """Outstanding bytes exactly at 512 MiB is not YET past the line (strict >)."""
+    from src.main import _wal_checkpoint_is_starved
 
-    log_frames = _WAL_STARVATION_FRAME_THRESHOLD
-    checkpointed_frames = log_frames - 1
-    assert _wal_checkpoint_is_starved(log_frames, checkpointed_frames) is False
+    assert _wal_checkpoint_is_starved(_THRESHOLD_FRAMES_AT_4K, 0, _PAGE) is False
+
+
+def test_page_size_is_not_hardcoded() -> None:
+    """W5-5: the same FRAME backlog crosses the byte line at a larger page_size.
+    100k outstanding frames = 400 MiB at 4 KiB (quiet) but 800 MiB at 8 KiB
+    (starved) — proving the decision reads the actual page_size."""
+    from src.main import _wal_checkpoint_is_starved
+
+    assert _wal_checkpoint_is_starved(100_000, 0, 4096) is False
+    assert _wal_checkpoint_is_starved(100_000, 0, 8192) is True
+
+
+def test_quiet_on_failed_checkpoint_sentinel() -> None:
+    """The helpers return -1 frames / non-positive page_size when the checkpoint
+    could not report; the decision must not alert on that (the caller's own log
+    line covers a failed checkpoint)."""
+    from src.main import _wal_checkpoint_is_starved
+
+    assert _wal_checkpoint_is_starved(-1, -1, -1) is False
+    assert _wal_checkpoint_is_starved(1000, 0, 0) is False
 
 
 # ---------------------------------------------------------------------------
@@ -92,10 +118,10 @@ def _open_wal(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def test_checkpoint_forecasts_wal_returns_triple_against_tmp_db(tmp_path: Path, monkeypatch) -> None:
+def test_checkpoint_forecasts_wal_returns_quad_against_tmp_db(tmp_path: Path, monkeypatch) -> None:
     """``checkpoint_forecasts_wal`` runs against a tmp zeus-forecasts.db and
-    returns the (busy, log_frames, checkpointed_frames) 3-tuple, mirroring
-    checkpoint_world_wal / checkpoint_trades_wal exactly."""
+    returns the (busy, log_frames, checkpointed_frames, page_size) 4-tuple,
+    mirroring checkpoint_world_wal / checkpoint_trades_wal exactly."""
     from src.state import db as db_module
 
     forecasts_db = tmp_path / "zeus-forecasts.db"
@@ -117,15 +143,16 @@ def test_checkpoint_forecasts_wal_returns_triple_against_tmp_db(tmp_path: Path, 
 
     result = db_module.checkpoint_forecasts_wal()
 
-    assert isinstance(result, tuple) and len(result) == 3, (
-        f"checkpoint_forecasts_wal must return a 3-tuple "
-        f"(busy, log_frames, checkpointed_frames), got {result!r}"
+    assert isinstance(result, tuple) and len(result) == 4, (
+        f"checkpoint_forecasts_wal must return a 4-tuple "
+        f"(busy, log_frames, checkpointed_frames, page_size), got {result!r}"
     )
-    busy, log_frames, ckpt_frames = result
-    assert all(isinstance(v, int) for v in result), f"triple must be all ints: {result!r}"
+    busy, log_frames, ckpt_frames, page_size = result
+    assert all(isinstance(v, int) for v in result), f"quad must be all ints: {result!r}"
     assert busy == 0, f"PASSIVE's busy field is always 0: {result!r}"
     assert ckpt_frames == log_frames > 0, (
         f"with no competing reader PASSIVE should drain the full log: {result!r}"
     )
+    assert page_size > 0, f"page_size must be reported for byte-sizing: {result!r}"
 
     writer.close()

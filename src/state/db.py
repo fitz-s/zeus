@@ -708,8 +708,66 @@ def world_write_lock(
         _WORLD_DB_WRITE_MUTEX.release()
 
 
-def checkpoint_world_wal() -> tuple[int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-world.db; return its triple.
+# Minimum linked-SQLite version. 3.51.3 fixes an upstream WAL-reset corruption
+# bug present in <=3.51.2 (backported to 3.50.7 / 3.44.6). Zeus runs recurring
+# WAL checkpoints against the 40-94 GB money DBs, so booting on a vulnerable
+# SQLite risks silent WAL corruption of live money data. Fail closed at boot.
+_MIN_SQLITE_VERSION: tuple[int, int, int] = (3, 51, 3)
+
+
+def assert_sqlite_version_safe() -> None:
+    """Abort boot if the linked SQLite predates the WAL-reset corruption fix.
+
+    INV-05 fail-closed: a daemon that runs WAL checkpoints on the canonical
+    money DBs must not run on a SQLite carrying the <=3.51.2 WAL-reset defect.
+    The interpreter's linked ``sqlite3.sqlite_version`` — NOT a release note or
+    operator memory — is the authority; ``sqlite_source_id`` is logged so a
+    vendored/patched build is auditable.
+
+    Emergency override: ``ZEUS_ACCEPT_UNSAFE_SQLITE=1`` boots on a known-old
+    SQLite anyway (logged at ERROR). It exists ONLY so that a mandatory restart
+    is not hard-blocked when the interpreter upgrade is not yet in place; the
+    money DBs are at integrity risk under it, so it must be cleared the moment
+    SQLite is upgraded.
+    """
+    import sqlite3
+
+    if sqlite3.sqlite_version_info >= _MIN_SQLITE_VERSION:
+        _probe = sqlite3.connect(":memory:")
+        try:
+            source_id = _probe.execute("SELECT sqlite_source_id()").fetchone()[0]
+        finally:
+            _probe.close()
+        logger.info(
+            "sqlite version gate OK: version=%s source_id=%s (min=%s)",
+            sqlite3.sqlite_version,
+            source_id,
+            ".".join(str(p) for p in _MIN_SQLITE_VERSION),
+        )
+        return
+
+    _min = ".".join(str(p) for p in _MIN_SQLITE_VERSION)
+    if os.environ.get("ZEUS_ACCEPT_UNSAFE_SQLITE") == "1":
+        logger.error(
+            "SQLITE_VERSION_UNSAFE OVERRIDDEN: linked SQLite %s < %s (WAL-reset "
+            "corruption bug, fixed 3.51.3) but ZEUS_ACCEPT_UNSAFE_SQLITE=1 — "
+            "booting anyway. Live money DBs are at integrity risk under WAL "
+            "checkpointing; upgrade SQLite and clear this override ASAP.",
+            sqlite3.sqlite_version, _min,
+        )
+        return
+    raise RuntimeError(
+        f"SQLITE_VERSION_UNSAFE: linked SQLite {sqlite3.sqlite_version} < "
+        f"required {_min}. Releases <=3.51.2 carry a WAL-reset corruption bug "
+        "(fixed 3.51.3); Zeus runs recurring WAL checkpoints on the money DBs, "
+        "so booting on this build could silently corrupt live money data. "
+        "Upgrade the interpreter's linked SQLite, or set "
+        "ZEUS_ACCEPT_UNSAFE_SQLITE=1 to override for one boot (emergency only)."
+    )
+
+
+def checkpoint_world_wal() -> tuple[int, int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-world.db.
 
     THE BACKSTOP (2026-06-04 WAL checkpoint-starvation fix, part 2).
 
@@ -724,8 +782,10 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
     between polls) so the floor advances; THIS function is the periodic backstop
     that actually reclaims the freed frames.
 
-    Returns the ``(busy, log_frames, checkpointed_frames)`` triple from
-    ``wal_checkpoint(PASSIVE)``. PASSIVE checkpoints copy all currently safe WAL
+    Returns ``(busy, log_frames, checkpointed_frames, page_size)`` — the
+    ``wal_checkpoint(PASSIVE)`` triple plus the DB's page_size so the caller can
+    size the un-checkpointed backlog in bytes without assuming a 4 KiB page.
+    PASSIVE checkpoints copy all currently safe WAL
     frames without waiting for readers/writers or trying to truncate the file.
     That preserves live writer priority: a checkpoint must never sit in SQLite's
     busy handler while held-position monitor/redecision work is waiting to write.
@@ -751,13 +811,14 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
         busy = int(row[0]) if row is not None else 1
         log_frames = int(row[1]) if row is not None else -1
         ckpt_frames = int(row[2]) if row is not None else -1
-        return (busy, log_frames, ckpt_frames)
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        return (busy, log_frames, ckpt_frames, page_size)
     finally:
         conn.close()
 
 
-def checkpoint_trades_wal() -> tuple[int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus_trades.db; return its triple.
+def checkpoint_trades_wal() -> tuple[int, int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus_trades.db.
 
     THE BACKSTOP (2026-06-16) — the zeus_trades.db twin of ``checkpoint_world_wal``.
 
@@ -773,7 +834,7 @@ def checkpoint_trades_wal() -> tuple[int, int, int]:
     write mutex (a checkpoint is not a write txn; SQLite serializes checkpoints
     internally), closed immediately so it never itself becomes a floor-pinning reader.
 
-    Returns the ``(busy, log_frames, checkpointed_frames)`` triple. PASSIVE mode
+    Returns ``(busy, log_frames, checkpointed_frames, page_size)``. PASSIVE mode
     is intentional for live: reclaim safe frames without waiting behind active
     monitor writers or blocking the next held-position redecision tick. W5-2 fix
     (2026-07-21): ``busy`` is always 0 for PASSIVE — see ``checkpoint_world_wal``'s
@@ -786,13 +847,14 @@ def checkpoint_trades_wal() -> tuple[int, int, int]:
         busy = int(row[0]) if row is not None else 1
         log_frames = int(row[1]) if row is not None else -1
         ckpt_frames = int(row[2]) if row is not None else -1
-        return (busy, log_frames, ckpt_frames)
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        return (busy, log_frames, ckpt_frames, page_size)
     finally:
         conn.close()
 
 
-def checkpoint_forecasts_wal() -> tuple[int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-forecasts.db; return its triple.
+def checkpoint_forecasts_wal() -> tuple[int, int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-forecasts.db.
 
     THE BACKSTOP (2026-07-21, audit finding W5-4) — the zeus-forecasts.db twin of
     ``checkpoint_world_wal`` / ``checkpoint_trades_wal``. Forecasts previously had
@@ -805,7 +867,7 @@ def checkpoint_forecasts_wal() -> tuple[int, int, int]:
     write txn; SQLite serializes checkpoints internally), closed immediately so it
     never itself becomes a floor-pinning reader.
 
-    Returns the ``(busy, log_frames, checkpointed_frames)`` triple. PASSIVE mode
+    Returns ``(busy, log_frames, checkpointed_frames, page_size)``. PASSIVE mode
     is intentional for live, matching the world/trades twins: reclaim safe frames
     without waiting behind active forecast writers. ``busy`` (row[0]) is always 0
     for PASSIVE — see ``checkpoint_world_wal``'s docstring for why; the real
@@ -819,7 +881,8 @@ def checkpoint_forecasts_wal() -> tuple[int, int, int]:
         busy = int(row[0]) if row is not None else 1
         log_frames = int(row[1]) if row is not None else -1
         ckpt_frames = int(row[2]) if row is not None else -1
-        return (busy, log_frames, ckpt_frames)
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        return (busy, log_frames, ckpt_frames, page_size)
     finally:
         conn.close()
 

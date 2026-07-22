@@ -197,15 +197,16 @@ def test_checkpoint_world_wal_helper_drains_without_truncating(tmp_path: Path, m
 
     result = db_module.checkpoint_world_wal()
 
-    assert isinstance(result, tuple) and len(result) == 3, (
-        f"checkpoint_world_wal must return a 3-tuple "
-        f"(busy, log_frames, checkpointed_frames), got {result!r}"
+    assert isinstance(result, tuple) and len(result) == 4, (
+        f"checkpoint_world_wal must return a 4-tuple "
+        f"(busy, log_frames, checkpointed_frames, page_size), got {result!r}"
     )
-    busy, log_frames, ckpt_frames = result
+    busy, log_frames, ckpt_frames, page_size = result
     assert busy == 0, f"PASSIVE's busy field is always 0: {result!r}"
     assert ckpt_frames == log_frames > 0, (
         f"with no competing reader PASSIVE should drain the full log: {result!r}"
     )
+    assert page_size > 0, f"page_size must be reported for byte-sizing: {result!r}"
 
     wal_after = _wal_size_bytes(world_db)
     assert wal_after == wal_before, (
@@ -233,9 +234,9 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     # Patch the helper at the source module so the job's local import resolves it.
     calls = {"n": 0}
 
-    def _fake_checkpoint() -> tuple[int, int, int]:
+    def _fake_checkpoint() -> tuple[int, int, int, int]:
         calls["n"] += 1
-        return (0, 5, 5)  # PASSIVE busy=0, fully drained -> healthy
+        return (0, 5, 5, 4096)  # PASSIVE busy=0, fully drained -> healthy
 
     monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_checkpoint, raising=True)
 
@@ -249,19 +250,20 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
         f"job must log the observability triple; got: {log_text!r}"
     )
 
-    # Starved path is logged at WARNING (loud chronic-starvation signal): not
-    # draining (checkpointed < log) AND past the healthy oscillation band
-    # (log_frames > _WAL_STARVATION_FRAME_THRESHOLD). busy=0 because PASSIVE's
-    # busy is always 0 — this is what a real starved PASSIVE result looks like.
+    # Backlog path is logged at WARNING (loud): a large un-checkpointed remainder
+    # (all frames pinned, checkpointed=0) whose byte size clears the 512 MiB line.
+    # busy=0 because PASSIVE's busy is always 0 — this is what a real floor-pinned
+    # PASSIVE result looks like.
     caplog.clear()
+    starved_frames = main_module._WAL_STARVATION_BACKLOG_BYTES // 4096 + 1
 
-    def _fake_starved() -> tuple[int, int, int]:
-        return (0, main_module._WAL_STARVATION_FRAME_THRESHOLD + 1, 0)
+    def _fake_starved() -> tuple[int, int, int, int]:
+        return (0, starved_frames, 0, 4096)
 
     monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_starved, raising=True)
     with caplog.at_level(logging.WARNING):
         main_module._world_wal_checkpoint_cycle()
     warn_text = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
-    assert "STARVED" in warn_text and "busy=0" in warn_text, (
-        f"a starved checkpoint must be logged at WARNING; got: {warn_text!r}"
+    assert "BACKLOG" in warn_text and "busy=0" in warn_text, (
+        f"a floor-pinned checkpoint must be logged at WARNING; got: {warn_text!r}"
     )

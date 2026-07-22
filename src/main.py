@@ -5411,35 +5411,44 @@ def _edli_mainstream_warm_cycle() -> None:
     )
 
 
-# WAL checkpoint starvation-alert threshold, in FRAMES (PRAGMA wal_checkpoint
-# reports frame counts, not bytes; SQLite's default page size is 4 KiB and Zeus
-# never overrides it — `grep -rn "PRAGMA page_size" src/` is 0 hits — so
-# bytes ≈ frames × 4096). W5-2/W5-3 fix (2026-07-21): the audit finding's live
-# evidence showed the trade WAL oscillating 95→230→373 MB as NORMAL PASSIVE
-# partial-drain behavior under transient reader pressure, while the
-# 2026-06-16 810 MB incident this backstop guards against is a reader that
-# never releases the floor at all. 512 MiB (536,870,912 bytes / 4096 =
-# 131,072 frames) sits above the observed healthy oscillation ceiling (no
-# false positive on a normal partial-drain peak) while leaving real
-# early-warning margin before the incident's 810 MB.
-_WAL_STARVATION_FRAME_THRESHOLD = 131_072  # 512 MiB / 4 KiB page
+# WAL checkpoint BACKLOG-alert threshold, in BYTES. PRAGMA wal_checkpoint reports
+# FRAME counts; the actionable quantity is the UN-checkpointed remainder
+# (log_frames - checkpointed_frames) — the frames a PASSIVE checkpoint could not
+# move back into the DB because a long-lived reader is pinning the WAL floor —
+# converted to bytes with the DB's ACTUAL page_size (live DBs are 4 KiB, but the
+# helper now reports page_size so this never assumes it). W5-2/3/5 fix: the prior
+# predicate (checkpointed<log AND total log>131072 frames) alerted on the TOTAL
+# log size — so a fully-drained multi-GB WAL was silent while a 1-frame shortfall
+# just past 512 MiB total warned — and hardcoded a 4 KiB page. The 2026-06-16
+# 810 MB incident this backstop guards is a reader pinning the floor so the
+# un-checkpointed remainder grows without bound; 512 MiB of un-drained WAL is the
+# early-warning line, comfortably above the healthy 95-373 MB partial-drain band.
+_WAL_STARVATION_BACKLOG_BYTES = 512 * 1024 * 1024  # 512 MiB of un-checkpointed WAL
 
 
-def _wal_checkpoint_is_starved(log_frames: int, checkpointed_frames: int) -> bool:
-    """True when a PASSIVE WAL-checkpoint result signals real, growing starvation.
+def _wal_checkpoint_is_starved(
+    log_frames: int, checkpointed_frames: int, page_size_bytes: int
+) -> bool:
+    """True when the un-checkpointed WAL backlog exceeds the alert threshold.
 
-    W5-2 fix (2026-07-21): PASSIVE checkpoints never return SQLITE_BUSY — the
-    triple's first field (``busy``) is a PASSIVE-mode constant 0, so branching
-    on it (the prior ``busy == 0`` gate) was always-true dead code that could
-    never alert. The real signal that a reader is pinning the WAL floor is the
-    checkpoint failing to drain the full log (``checkpointed_frames <
-    log_frames``); a lone partial drain is normal under transient reader
-    pressure (live oscillation 95-373 MB), so this only fires once the
-    undrained log has ALSO grown past the healthy oscillation band
-    (``_WAL_STARVATION_FRAME_THRESHOLD``) — i.e. non-drain that means real
-    unbounded growth, not a routine partial checkpoint.
+    The backlog is ``(log_frames - checkpointed_frames)`` frames — those still in
+    the WAL that a PASSIVE checkpoint could NOT move back into the DB because a
+    long-lived reader is pinning the floor — converted to bytes with the DB's
+    actual ``page_size``. Measuring the OUTSTANDING remainder (not the total log)
+    means a fully/near-fully drained WAL never alerts however large the log, and
+    a small WAL with a large pinned remainder still can. Single-sample by design:
+    a >512 MiB un-drained backlog is actionable on its own, so no cross-call trend
+    state is kept (this is a fail-soft backstop, not a metrics pipeline).
+
+    ``busy`` is not consulted: PASSIVE never returns SQLITE_BUSY for floor
+    starvation (the prior ``busy == 0`` gate was always-true dead code). A busy=1
+    would instead mean a *concurrent checkpointer* — a distinct, transient
+    condition the caller logs but does not alert on here.
     """
-    return checkpointed_frames < log_frames and log_frames > _WAL_STARVATION_FRAME_THRESHOLD
+    if log_frames < 0 or checkpointed_frames < 0 or page_size_bytes <= 0:
+        return False  # checkpoint failed to report; the caller's log line covers it
+    outstanding_frames = log_frames - checkpointed_frames
+    return outstanding_frames * page_size_bytes > _WAL_STARVATION_BACKLOG_BYTES
 
 
 @_scheduler_job("world_wal_checkpoint")
@@ -5467,20 +5476,22 @@ def _world_wal_checkpoint_cycle() -> None:
     """
     from src.state.db import checkpoint_world_wal
 
-    busy, log_frames, ckpt_frames = checkpoint_world_wal()
-    if _wal_checkpoint_is_starved(log_frames, ckpt_frames):
-        # Not draining AND past the healthy oscillation band.
-        # Loud (warning) so chronic starvation is visible, not silent.
+    busy, log_frames, ckpt_frames, page_size = checkpoint_world_wal()
+    if _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
+        outstanding_mib = max(0, log_frames - ckpt_frames) * page_size / (1024 * 1024)
+        # Un-checkpointed backlog past the alert line — loud so a floor-pinning
+        # reader is visible, not silent.
         logger.warning(
-            "world WAL checkpoint(PASSIVE): STARVED busy=%d log_frames=%d "
-            "checkpointed=%d (threshold=%d) — a reader is pinning the WAL floor "
-            "(part-1 per-cycle release regression?)",
-            busy, log_frames, ckpt_frames, _WAL_STARVATION_FRAME_THRESHOLD,
+            "world WAL checkpoint(PASSIVE): BACKLOG busy=%d log_frames=%d "
+            "checkpointed=%d outstanding=%.0fMiB page_size=%d (threshold=%dMiB) — "
+            "a reader is pinning the WAL floor (part-1 per-cycle release regression?)",
+            busy, log_frames, ckpt_frames, outstanding_mib, page_size,
+            _WAL_STARVATION_BACKLOG_BYTES // (1024 * 1024),
         )
     else:
         logger.info(
-            "world WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
-            busy, log_frames, ckpt_frames,
+            "world WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d page_size=%d",
+            busy, log_frames, ckpt_frames, page_size,
         )
 
 
@@ -5502,18 +5513,20 @@ def _trades_wal_checkpoint_cycle() -> None:
     """
     from src.state.db import checkpoint_trades_wal
 
-    busy, log_frames, ckpt_frames = checkpoint_trades_wal()
-    if _wal_checkpoint_is_starved(log_frames, ckpt_frames):
+    busy, log_frames, ckpt_frames, page_size = checkpoint_trades_wal()
+    if _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
+        outstanding_mib = max(0, log_frames - ckpt_frames) * page_size / (1024 * 1024)
         logger.warning(
-            "trades WAL checkpoint(PASSIVE): STARVED busy=%d log_frames=%d "
-            "checkpointed=%d (threshold=%d) — a reader is pinning the trade-DB "
-            "WAL floor (long-lived reader not releasing)",
-            busy, log_frames, ckpt_frames, _WAL_STARVATION_FRAME_THRESHOLD,
+            "trades WAL checkpoint(PASSIVE): BACKLOG busy=%d log_frames=%d "
+            "checkpointed=%d outstanding=%.0fMiB page_size=%d (threshold=%dMiB) — "
+            "a reader is pinning the trade-DB WAL floor (long-lived reader not releasing)",
+            busy, log_frames, ckpt_frames, outstanding_mib, page_size,
+            _WAL_STARVATION_BACKLOG_BYTES // (1024 * 1024),
         )
     else:
         logger.info(
-            "trades WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
-            busy, log_frames, ckpt_frames,
+            "trades WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d page_size=%d",
+            busy, log_frames, ckpt_frames, page_size,
         )
 
 
@@ -5534,18 +5547,20 @@ def _forecasts_wal_checkpoint_cycle() -> None:
     """
     from src.state.db import checkpoint_forecasts_wal
 
-    busy, log_frames, ckpt_frames = checkpoint_forecasts_wal()
-    if _wal_checkpoint_is_starved(log_frames, ckpt_frames):
+    busy, log_frames, ckpt_frames, page_size = checkpoint_forecasts_wal()
+    if _wal_checkpoint_is_starved(log_frames, ckpt_frames, page_size):
+        outstanding_mib = max(0, log_frames - ckpt_frames) * page_size / (1024 * 1024)
         logger.warning(
-            "forecasts WAL checkpoint(PASSIVE): STARVED busy=%d log_frames=%d "
-            "checkpointed=%d (threshold=%d) — a reader is pinning the "
-            "forecasts-DB WAL floor (long-lived reader not releasing)",
-            busy, log_frames, ckpt_frames, _WAL_STARVATION_FRAME_THRESHOLD,
+            "forecasts WAL checkpoint(PASSIVE): BACKLOG busy=%d log_frames=%d "
+            "checkpointed=%d outstanding=%.0fMiB page_size=%d (threshold=%dMiB) — "
+            "a reader is pinning the forecasts-DB WAL floor (long-lived reader not releasing)",
+            busy, log_frames, ckpt_frames, outstanding_mib, page_size,
+            _WAL_STARVATION_BACKLOG_BYTES // (1024 * 1024),
         )
     else:
         logger.info(
-            "forecasts WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
-            busy, log_frames, ckpt_frames,
+            "forecasts WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d page_size=%d",
+            busy, log_frames, ckpt_frames, page_size,
         )
 
 
@@ -6634,6 +6649,15 @@ def main():
 
     # Startup health check: warn about deferred data actions
     _startup_data_health_check(conn)
+
+    # SQLite integrity gate (2026-07-22, PR review HIGH): the daemon runs
+    # recurring WAL checkpoints on the money DBs, so a linked SQLite carrying the
+    # <=3.51.2 WAL-reset corruption bug is a live data-integrity risk. Machine-
+    # enforce the fix (>=3.51.3) at boot — not a prose deployment note — before
+    # the checkpoint scheduler can run. Fail closed per INV-05, unconditional
+    # (a correctness floor, not a registry-drift window).
+    from src.state.db import assert_sqlite_version_safe
+    assert_sqlite_version_safe()
 
     # v1.F1 (2026-05-18): assert_db_matches_registry boot wiring.
     # Fail-closed per INV-05: RegistryAssertionError propagates and aborts daemon start.
