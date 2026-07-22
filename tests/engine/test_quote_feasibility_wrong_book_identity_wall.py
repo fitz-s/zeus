@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused/audited: 2026-07-22
 # Authority basis: WRONG-BOOK / IDENTITY WALL #5 live incident 2026-06-12
 #   (Busan 27C 06-14 BUY NO POST_ONLY 386sh @0.02 vs real NO book 0.63/0.65).
 #   Root cause: src/engine/event_reactor_adapter.py — selected_snapshot_row passed
@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,11 +42,14 @@ from src.decision_kernel import claims
 from src.decision_kernel.certificate import build_certificate
 from src.engine.event_reactor_adapter import (
     _CandidateProof,
+    PreSubmitAuthorityWitness,
     _assert_maker_book_agrees_with_fresh_witness,
     _assert_quote_book_identity_matches_candidate,
     _native_token_id_for_snapshot_row,
+    _passive_maker_context_and_book,
     _passive_maker_context_from_authorities,
     _selected_proof_snapshot_row_or_raise,
+    _would_cross_post_only_book,
 )
 
 NOW = datetime(2026, 6, 12, 13, 4, 46, tzinfo=timezone.utc)
@@ -62,6 +67,33 @@ REAL_NO_ASK = 0.65
 # The WRONG 30C-YES book the live cert carried.
 GHOST_BID = 0.018
 GHOST_ASK = 0.035
+
+
+def _fresh_witness(*, best_bid: float = 0.10, best_ask: float = 0.93):
+    return PreSubmitAuthorityWitness(
+        quote_seen_at=NOW.isoformat(),
+        book_hash="fresh-book-hash",
+        current_best_bid=best_bid,
+        current_best_ask=best_ask,
+        tick_size=0.01,
+        min_order_size=5.0,
+        neg_risk=False,
+        heartbeat_status="OK",
+        user_ws_status="OK",
+        venue_connectivity_status="OK",
+        balance_allowance_status="OK",
+        book_authority_id="clob_jit_book",
+        book_captured_at=NOW.isoformat(),
+        heartbeat_authority_id="heartbeat-1",
+        heartbeat_checked_at=NOW.isoformat(),
+        user_ws_authority_id="user-ws-1",
+        user_ws_checked_at=NOW.isoformat(),
+        venue_connectivity_authority_id="venue-1",
+        venue_connectivity_checked_at=NOW.isoformat(),
+        balance_allowance_authority_id="balance-1",
+        balance_allowance_checked_at=NOW.isoformat(),
+        checked_at=NOW.isoformat(),
+    )
 
 
 def _quote_cert(*, payload: dict):
@@ -256,6 +288,294 @@ def test_maker_limit_on_matching_book_is_bid_plus_tick_not_002():
     assert limit is not None
     assert limit == pytest.approx(0.64)
     assert limit > 0.5  # categorically not the 0.02 ghost-book intent
+
+
+def test_taker_to_maker_redecision_prices_from_fresh_touch_not_same_midpoint_quote():
+    """The final passive price and context share the fresh JIT book authority."""
+
+    from src.decision_kernel.certificates.execution import _branch_limit_price
+
+    payload = _native_book_payload(
+        condition_id=NO_27C_CONDITION,
+        token_id=NO_27C_TOKEN,
+        best_bid=0.51,
+        best_ask=0.52,
+    )
+    witness = _fresh_witness()
+
+    context, maker_bid, maker_ask = _passive_maker_context_and_book(
+        actionable=_actionable_cert(),
+        quote_feasibility_cert=_quote_cert(payload=payload),
+        executable_snapshot_cert=_executable_snapshot_cert(),
+        authority_witness=witness,
+        proof_order_mode="TAKER",
+        order_mode="MAKER",
+        decision_time=NOW,
+    )
+    assert context is not None
+    limit = _branch_limit_price(
+        side="BUY",
+        order_mode="MAKER",
+        reservation=0.80,
+        best_bid=maker_bid,
+        best_ask=maker_ask,
+        tick_size=0.01,
+        passive_maker_context=context,
+    )
+
+    assert context["best_bid"] == pytest.approx(0.10)
+    assert context["best_ask"] == pytest.approx(0.93)
+    assert limit == pytest.approx(0.11)
+    assert limit != pytest.approx(0.52)
+    assert not _would_cross_post_only_book(
+        side="BUY",
+        limit_price=limit,
+        current_best_bid=witness.current_best_bid,
+        current_best_ask=witness.current_best_ask,
+    )
+
+
+def test_taker_to_maker_fresh_price_survives_command_verifier_and_executor_recapture(
+    monkeypatch,
+):
+    """One relationship proof spans builder, PRE_SUBMIT verifier, and executor."""
+
+    import src.contracts.executable_market_snapshot as snap_contract
+    import src.data.market_scanner as scanner
+    import src.data.polymarket_client as pmc
+    import src.engine.cycle_runtime as cycle_runtime
+    import src.state.snapshot_repo as snapshot_repo
+    from src.decision_kernel.certificate import build_certificate
+    from src.decision_kernel.certificates.execution import (
+        build_execution_command_certificate_from_final_intent,
+        build_executor_expressibility_certificate,
+        build_final_intent_certificate_from_actionable,
+    )
+    from src.decision_kernel.verifier import (
+        verify_execution_command,
+        verify_executor_expressibility,
+        verify_final_intent,
+    )
+    from src.engine.event_bound_final_intent import (
+        _final_execution_intent_from_payload,
+        validate_final_intent_cert_for_existing_executor,
+    )
+    from src.engine.event_reactor_adapter import (
+        _pre_submit_revalidation_payload_from_final_intent,
+    )
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+    from tests.decision_kernel.test_execution_command_certificate import (
+        _live_cap_payload,
+    )
+    from tests.decision_kernel.test_taker_execution_law import _taker_chain
+    from tests.execution.test_recapture_maker_economics import _LegacyIntent
+
+    old_payload = _native_book_payload(
+        condition_id=NO_27C_CONDITION,
+        token_id=NO_27C_TOKEN,
+        best_bid=0.51,
+        best_ask=0.52,
+    )
+    witness = _fresh_witness()
+    context, maker_bid, maker_ask = _passive_maker_context_and_book(
+        actionable=_actionable_cert(),
+        quote_feasibility_cert=_quote_cert(payload=old_payload),
+        executable_snapshot_cert=_executable_snapshot_cert(),
+        authority_witness=witness,
+        proof_order_mode="TAKER",
+        order_mode="MAKER",
+        decision_time=NOW,
+    )
+
+    actionable, executable, _, parents = _taker_chain(
+        order_mode="TAKER",
+        actionable_overrides={
+            "c_fee_adjusted": 0.80,
+            "min_expected_profit_usd": 0.0,
+            "min_submit_edge_density": 0.0,
+            "selection_authority_applied": "qkernel_spine",
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.7,
+                "payoff_q_lcb": 0.6,
+                "cost": 0.11,
+                "edge_lcb": 0.49,
+                "optimal_delta_u": 0.01,
+                "delta_u_at_min": 0.01,
+                "optimal_stake_usd": 0.88,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.6,
+            },
+        },
+        quote_overrides={"best_bid": 0.51, "best_ask": 0.52},
+        return_parents=True,
+    )
+    actionable, executable, quote, cost, forecast = parents
+    final_intent = build_final_intent_certificate_from_actionable(
+        actionable_cert=actionable,
+        executable_snapshot_cert=executable,
+        quote_feasibility_cert=quote,
+        cost_model_cert=cost,
+        forecast_authority_cert=forecast,
+        decision_source_context=forecast.payload,
+        passive_maker_context=context,
+        decision_time=NOW,
+        order_mode="MAKER",
+        tick_size=0.01,
+        min_order_size=5.0,
+        fee_rate=0.0,
+        best_bid=maker_bid,
+        best_ask=maker_ask,
+        exact_maker_shares="8.00",
+    )
+    assert final_intent.payload["post_only"] is True
+    assert final_intent.payload["limit_price"] == pytest.approx(0.11)
+    assert final_intent.payload["size"] == pytest.approx(8.0)
+    verify_final_intent(final_intent, parents)
+
+    live_cap = build_certificate(
+        certificate_type=claims.LIVE_CAP,
+        semantic_key="live-cap:cap-1",
+        claim_type=claims.LIVE_CAP,
+        mode="LIVE",
+        decision_time=NOW,
+        source_available_at=NOW,
+        agent_received_at=NOW,
+        persisted_at=NOW,
+        payload=_live_cap_payload(),
+        authority_id="test.live_cap",
+        authority_version="v1",
+        algorithm_id="test.live_cap",
+        algorithm_version="v1",
+    )
+    native_hash = validate_final_intent_cert_for_existing_executor(final_intent)
+    expressibility = build_executor_expressibility_certificate(
+        final_intent_cert=final_intent,
+        executable_snapshot_cert=executable,
+        live_cap_cert=live_cap,
+        decision_time=NOW,
+        executor_native_intent_hash=native_hash,
+    )
+    verify_executor_expressibility(
+        expressibility, (final_intent, executable, live_cap)
+    )
+
+    pre_payload = _pre_submit_revalidation_payload_from_final_intent(
+        final_intent=final_intent,
+        executable_snapshot=executable,
+        decision_time=NOW,
+        authority_witness=witness,
+    )
+    pre_payload.update(
+        {
+            "aggregate_id": "event-1:intent-1",
+            "aggregate_event_id": "pre-submit-event-1",
+            "aggregate_event_hash": "pre-submit-hash",
+            "aggregate_event_sequence": 1,
+            "aggregate_execution_command_event_hash": "command-hash",
+            "final_intent_certificate_hash": final_intent.certificate_hash,
+            "live_cap_usage_id": live_cap.payload["usage_id"],
+        }
+    )
+    pre_submit = build_certificate(
+        certificate_type=claims.PRE_SUBMIT_REVALIDATION,
+        semantic_key="pre-submit:event-1:intent-1",
+        claim_type=claims.PRE_SUBMIT_REVALIDATION,
+        mode="LIVE",
+        decision_time=NOW,
+        source_available_at=NOW,
+        agent_received_at=NOW,
+        persisted_at=NOW,
+        payload=pre_payload,
+        authority_id="test.pre_submit",
+        authority_version="v1",
+        algorithm_id="test.pre_submit",
+        algorithm_version="v1",
+        parent_certificates=(final_intent, live_cap),
+    )
+    command = build_execution_command_certificate_from_final_intent(
+        actionable_cert=actionable,
+        final_intent_cert=final_intent,
+        executor_expressibility_cert=expressibility,
+        live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
+        decision_time=NOW,
+    )
+    verify_execution_command(
+        command, (actionable, final_intent, expressibility, live_cap, pre_submit)
+    )
+
+    old_snapshot = SimpleNamespace(
+        snapshot_id="snap-stale",
+        condition_id="condition-1",
+        yes_token_id="yes-1",
+        no_token_id="no-1",
+    )
+    fresh_snapshot = SimpleNamespace(
+        snapshot_id="snap-fresh",
+        executable_snapshot_hash="hash-fresh",
+        selected_outcome_token_id="yes-1",
+        min_tick_size=0.01,
+        min_order_size=5.0,
+        fee_details={"fee_rate_fraction": "0"},
+        neg_risk=False,
+        orderbook_top_ask=Decimal("0.93"),
+        yes_token_id="yes-1",
+        no_token_id="no-1",
+        condition_id="condition-1",
+        orderbook_depth_jsonb="{}",
+        tradeability_status=SimpleNamespace(provenance_source=None),
+    )
+
+    def get_snapshot(_conn, snapshot_id):
+        return old_snapshot if snapshot_id == "snap-stale" else fresh_snapshot
+
+    monkeypatch.delenv("ZEUS_REPRICE_RECAPTURE_DISABLED", raising=False)
+    monkeypatch.setattr(snapshot_repo, "get_snapshot", get_snapshot)
+    monkeypatch.setattr(
+        snapshot_repo, "latest_snapshot_for_market", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        snap_contract,
+        "is_fresh",
+        lambda snapshot, _now: snapshot.snapshot_id == "snap-fresh",
+    )
+    monkeypatch.setattr(
+        scanner,
+        "capture_executable_market_snapshot",
+        lambda *_args, **_kwargs: {"executable_snapshot_id": "snap-fresh"},
+    )
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(pmc, "PolymarketClient", FakeClient)
+    monkeypatch.setattr(cycle_runtime, "_market_dict_from_snapshot", lambda _s: {})
+
+    native_final = _final_execution_intent_from_payload(final_intent.payload)
+    refreshed = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(
+            executable_snapshot_id="snap-stale",
+            executable_snapshot_hash="hash-stale",
+            executable_snapshot_min_tick_size=0.01,
+            executable_snapshot_min_order_size=5.0,
+            limit_price=final_intent.payload["limit_price"],
+        ),
+        native_final,
+        conn=object(),
+        submitted_shares=8.0,
+    )
+    assert refreshed.executable_snapshot_id == "snap-fresh"
+    assert refreshed.limit_price == pytest.approx(0.11)
 
 
 # ---------------------------------------------------------------------------

@@ -9114,8 +9114,9 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
     assert stable is receipt
 
 
-def test_global_preflight_mode_flip_falls_through_before_curve_reauction(
-    monkeypatch,
+@pytest.mark.parametrize(("fresh_mode", "valid"), (("MAKER", True), ("", False)))
+def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unproven(
+    monkeypatch, fresh_mode, valid,
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
@@ -9170,12 +9171,12 @@ def test_global_preflight_mode_flip_falls_through_before_curve_reauction(
     )
     observed = {}
 
-    def fresh_mode(**kwargs):
+    def decide_fresh_mode(**kwargs):
         observed.update(kwargs)
-        return "MAKER"
+        return fresh_mode
 
-    monkeypatch.setattr(era, "_fresh_rest_then_cross_mode", fresh_mode)
-    rejected = era._global_preflight_entry_jit_receipt(
+    monkeypatch.setattr(era, "_fresh_rest_then_cross_mode", decide_fresh_mode)
+    revalidated = era._global_preflight_entry_jit_receipt(
         event,
         receipt,
         global_actuation=actuation,
@@ -9183,20 +9184,23 @@ def test_global_preflight_mode_flip_falls_through_before_curve_reauction(
             "asset_id": token_id,
             "hash": "fresh-book",
             "bids": [{"price": "0.46", "size": "100"}],
-            "asks": [{"price": "0.51", "size": "100"}],
+            "asks": [{"price": "0.52", "size": "100"}],
         },
         checked_at_utc=at,
     )
 
     assert observed["fresh_best_bid"] == 0.46
-    assert observed["fresh_best_ask"] == 0.51
-    assert rejected.proof_accepted is False
-    assert rejected.side_effect_status == "NO_SUBMIT"
-    assert rejected.reason.startswith(
+    assert observed["fresh_best_ask"] == 0.52
+    if valid:
+        assert revalidated is receipt
+        return
+    assert revalidated.proof_accepted is False
+    assert revalidated.side_effect_status == "NO_SUBMIT"
+    assert revalidated.reason.startswith(
         "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:"
-        "SUBMIT_ABORTED_MODE_FLIPPED:proof_mode=TAKER:fresh_mode=MAKER:"
+        "SUBMIT_ABORTED_MODE_FLIPPED:proof_mode=TAKER:fresh_mode=None:"
     )
-    assert era._global_preflight_block_status(rejected.reason) == "CANDIDATE_BLOCKED"
+    assert era._global_preflight_block_status(revalidated.reason) == "CANDIDATE_BLOCKED"
 
 
 def test_global_preflight_reuses_provider_observation_without_second_fetch():

@@ -1,7 +1,7 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
-# Authority basis: P0-A/P0-B antibodies for Milan 24C first-fill incident
-#   (operator review 2026-06-10); docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md §4.
+# Last reused/audited: 2026-07-22
+# Authority basis: P0-A/P0-B Milan first-fill safety plus B55 symmetric fresh-mode
+#   redecision through downstream mode-specific certificate walls.
 """Antibodies: P0-A mode-flip abort; P0-B recapture under proof-mode semantics.
 
 Categories killed:
@@ -257,7 +257,7 @@ class TestActionablePayloadThreadsProofMode:
 # ---------------------------------------------------------------------------
 
 class TestModeFlipGuard:
-    """Unsafe proof/fresh mode disagreements still abort."""
+    """Valid fresh modes are adopted; missing proof authority still aborts."""
 
     def _call_with_proof_mode(self, proof_mode: str, fresh_mode: str):
         """Call the real submit-boundary validator."""
@@ -278,55 +278,14 @@ class TestModeFlipGuard:
         mode = self._call_with_proof_mode("MAKER", "TAKER")
         assert mode == "TAKER"
 
-    def test_flip_taker_proof_maker_fresh_raises(self):
-        with pytest.raises(ValueError, match="SUBMIT_ABORTED_MODE_FLIPPED"):
-            self._call_with_proof_mode("TAKER", "MAKER")
+    def test_flip_taker_proof_maker_fresh_rebuilds_as_maker(self):
+        assert self._call_with_proof_mode("TAKER", "MAKER") == "MAKER"
 
     def test_no_proof_mode_no_flip_check(self):
         from src.engine.event_reactor_adapter import _SubmitAbortedModeFlipped
 
         with pytest.raises(_SubmitAbortedModeFlipped, match="MISSING_OR_UNKNOWN_PROOF_MODE"):
             self._call_with_proof_mode("", "TAKER")
-
-    def test_select_edli_order_mode_flip_logic(self):
-        """Direct unit test of the ValueError in _build_live_execution_command_certificates.
-
-        Simulate the check: actionable.payload has proof_execution_mode_intent=TAKER
-        but fresh spread is wide → order_mode = MAKER → flip → SUBMIT_ABORTED_MODE_FLIPPED.
-        """
-        import types
-        from src.engine.event_reactor_adapter import _select_edli_order_mode
-
-        actionable_payload = {
-            "direction": "buy_yes",
-            "q_live": 0.35,
-            "c_fee_adjusted": 0.33,
-            "proof_execution_mode_intent": "TAKER",  # proof said taker
-        }
-        # Wide spread (56%) → spread guard fires → order_mode = MAKER
-        mode = _select_edli_order_mode(
-            actionable_payload=actionable_payload,
-            quote_payload={},
-            best_bid=0.009,
-            best_ask=0.016,
-            executable_snapshot=types.SimpleNamespace(payload={}),
-            fresh_best_bid=0.009,
-            fresh_best_ask=0.016,
-        )
-        assert mode == "MAKER"
-        # The flip check (post-select_edli_order_mode):
-        _proof_mode = str(actionable_payload.get("proof_execution_mode_intent") or "").strip().upper() or None
-        assert _proof_mode == "TAKER"
-        assert mode == "MAKER"
-        # Would raise:
-        with pytest.raises(ValueError, match="SUBMIT_ABORTED_MODE_FLIPPED"):
-            if _proof_mode is not None and _proof_mode != str(mode).strip().upper():
-                raise ValueError(
-                    f"SUBMIT_ABORTED_MODE_FLIPPED:"
-                    f"proof_mode={_proof_mode}:fresh_mode={mode}:"
-                    f"fresh_bid=0.009:fresh_ask=0.016"
-                )
-
 
 import pytest  # noqa: E402 (needed by above)
 

@@ -23,8 +23,8 @@
 #   the FINAL command builder keeps proof mode as the authority for stale/economically
 #   unsafe flips, but a proven MAKER candidate may cross as TAKER when the fresh
 #   rest-then-cross policy, taker quality proof, and final submit certificates all clear
-#   on the same live book. TAKER->MAKER, missing/unknown proof mode, and legacy stale
-#   mode changes still fail closed as SUBMIT_ABORTED_MODE_FLIPPED.
+#   on the same live book. A valid TAKER->MAKER change rebuilds through the passive
+#   maker walls; missing/unknown modes and legacy stale changes still fail closed.
 #   Authority basis: live redecision repair for unfilled orders disappearing after cancel.
 # Last reused or audited: 2026-06-10 (S6 PRICE_MOVED maker/taker fix: the submit-
 #   recapture gate now threads order_rests_at_admitted_price into RecaptureInputs.
@@ -16373,11 +16373,10 @@ class _SubmitAbortedModeFlipped(ValueError):
     """Typed final-stage abort: the proven proof mode is no longer executable.
 
     The selected proof's maker/taker ``execution_mode_intent`` was proven through
-    submit recapture under that mode's economics. A MAKER proof may upgrade to a
-    TAKER submit only when the fresh rest-then-cross policy and downstream taker
-    certificates clear on the same live book. TAKER->MAKER, missing/unknown proof
-    mode, and legacy second-doctrine mode changes remain stale/unproven economics
-    and abort for a full re-rank.
+    submit recapture under that mode's economics. A fresh mode may replace it only
+    through the same rest-then-cross policy; downstream mode-specific certificate
+    walls then re-prove the exact executable intent. Missing/unknown proof or fresh
+    modes remain unproven and abort for a full re-rank.
 
     Subclasses ValueError so it propagates through the existing ``except Exception``
     submit boundary; the caller maps it to the first-class SUBMIT_ABORTED_MODE_FLIPPED
@@ -16563,19 +16562,19 @@ def _validate_final_order_mode_or_abort(
     fresh_best_bid: float | None,
     fresh_best_ask: float | None,
 ) -> str:
-    """Validate or upgrade the proven proof mode against the fresh submit book.
+    """Re-decide the proven mode against the fresh submit book.
 
     The fresh-book ``fresh_mode`` comes from the same rest-then-cross policy that selected
     the proof mode. It is therefore allowed to upgrade a resting maker proof into a taker
-    submit when the live book now clears the crossing economics. Other disagreements remain
-    fail-closed because they indicate stale or unproven submit economics.
+    submit when the live book now clears the crossing economics. A taker proof may
+    likewise become a passive maker intent when the fresh policy no longer licenses
+    a cross. The returned mode is not executable by itself: the caller rebuilds and
+    revalidates every mode-specific certificate against the fresh book before submit.
 
     * proof_mode present and EQUAL to fresh_mode  -> return proof_mode.
-    * proof_mode MAKER and fresh_mode TAKER       -> return TAKER; downstream taker
-      quality, pre-submit, and executor expressibility certificates must still pass.
-    * proof_mode TAKER and fresh_mode MAKER       -> raise _SubmitAbortedModeFlipped.
-    * proof_mode MISSING / unknown at this stage  -> FAIL CLOSED: raise (treat as unproven;
-      never default to a taker submit).
+    * either valid mode changes to the other      -> return fresh_mode; downstream
+      mode-specific quality, pre-submit, and executor certificates must still pass.
+    * either mode is MISSING / unknown            -> FAIL CLOSED: raise.
     """
     _proof = str(proof_mode or "").strip().upper() or None
     _fresh = str(fresh_mode or "").strip().upper() or None
@@ -16586,14 +16585,13 @@ def _validate_final_order_mode_or_abort(
             f"reason=MISSING_OR_UNKNOWN_PROOF_MODE:"
             f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
         )
-    if _proof != _fresh:
-        if _proof == "MAKER" and _fresh == "TAKER":
-            return "TAKER"
+    if _fresh not in {"MAKER", "TAKER"}:
         raise _SubmitAbortedModeFlipped(
             f"{_MODE_FLIPPED_ABORT_PREFIX}:proof_mode={_proof}:fresh_mode={_fresh}:"
+            f"reason=MISSING_OR_UNKNOWN_FRESH_MODE:"
             f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
         )
-    return _proof
+    return _fresh
 
 
 def _event_bound_q_exec_lcb(
@@ -17456,8 +17454,9 @@ def _build_live_execution_command_certificates(
         # a MAKER proof is only a resting plan. If the same rest-then-cross policy now
         # says the fresh book should be crossed, the builder may upgrade to TAKER and
         # must then pass taker quality, pre-submit revalidation, live-cap, and executor
-        # certificates on that same fresh book. TAKER->MAKER and missing/unknown proof
-        # modes still fail closed because those are stale/unproven submit economics.
+        # certificates on that same fresh book. If the policy now says MAKER, the
+        # builder rebuilds through passive-maker walls. Missing/unknown modes still
+        # fail closed because those are unproven submit economics.
         # SINGLE MODE AUTHORITY (twin-authority #9, 2026-06-11 live): the proof
         # mode comes from the K4.0 rest-then-cross policy; the validator's fresh
         # mode MUST come from the SAME policy evaluated on the FRESH book —
@@ -17475,8 +17474,12 @@ def _build_live_execution_command_certificates(
             tick_size=float(provisional_final_intent.payload["tick_size"]),
             decision_time=decision_time,
         )
+        proof_order_mode = (
+            str(actionable.payload.get("proof_execution_mode_intent") or "").strip().upper()
+            or None
+        )
         order_mode = _validate_final_order_mode_or_abort(
-            proof_mode=str(actionable.payload.get("proof_execution_mode_intent") or "") or None,
+            proof_mode=proof_order_mode,
             fresh_mode=_fresh_mode,
             fresh_best_bid=fresh_best_bid,
             fresh_best_ask=fresh_best_ask,
@@ -17505,28 +17508,27 @@ def _build_live_execution_command_certificates(
         # taker orders (Fitz #1: make the category impossible, not the instance). MAKER
         # still requires the maker context (and still raises if bid/ask are absent — the
         # correct fail-closed behavior, since a resting maker order genuinely needs a book).
-        passive_maker_context = (
-            _passive_maker_context_from_authorities(
+        passive_maker_context, maker_best_bid, maker_best_ask = (
+            _passive_maker_context_and_book(
                 actionable=actionable,
                 quote_feasibility_cert=quote_feasibility,
                 executable_snapshot_cert=executable_snapshot,
+                authority_witness=authority_witness,
+                proof_order_mode=proof_order_mode,
+                order_mode=order_mode,
                 decision_time=decision_time,
             )
-            if str(order_mode).strip().upper() == "MAKER"
-            else None
         )
-        # WALL #5 PRICE-SEAM DEFENSE (K=1, 2026-06-12). The maker limit is derived from the
-        # quote-cert book (best_bid/best_ask). The pre-submit JIT witness (fresh_best_bid/ask)
-        # is the SAME selected candidate's book re-fetched at submit time. If the two books'
-        # mids disagree by more than a small tolerance the quote-cert book is not the
-        # candidate's live book (wrong-bin book, or a stale ghost) — fail closed rather than
-        # rest a maker order at a price the fresh book proves cannot fill. The root fix already
-        # binds the cert to proof.row; this is the independent second wall at the price seam so
-        # the 0.02-on-a-0.64-book intent is structurally unreachable even if the cert regresses.
+        # WALL #5 PRICE-SEAM DEFENSE (K=1, 2026-06-12). A continuing maker plan is
+        # priced from its identity-bound quote cert and compared with the fresh JIT
+        # witness. A TAKER->MAKER redecision instead uses that fresh witness for both
+        # context and limit-price inputs because the old taker plan has no licensed
+        # passive price. The comparison below independently keeps either maker book
+        # aligned with submit-time truth before the final JIT check.
         if str(order_mode).strip().upper() == "MAKER":
             _assert_maker_book_agrees_with_fresh_witness(
-                quote_best_bid=best_bid,
-                quote_best_ask=best_ask,
+                quote_best_bid=maker_best_bid,
+                quote_best_ask=maker_best_ask,
                 fresh_best_bid=fresh_best_bid,
                 fresh_best_ask=fresh_best_ask,
                 tick_size=float(provisional_final_intent.payload["tick_size"]),
@@ -17844,8 +17846,16 @@ def _build_live_execution_command_certificates(
                 and str(order_mode).strip().upper() == "TAKER"
                 else 0.0
             ),
-            best_bid=fresh_best_bid if str(order_mode).strip().upper() == "TAKER" else best_bid,
-            best_ask=fresh_best_ask if str(order_mode).strip().upper() == "TAKER" else best_ask,
+            best_bid=(
+                fresh_best_bid
+                if str(order_mode).strip().upper() == "TAKER"
+                else maker_best_bid
+            ),
+            best_ask=(
+                fresh_best_ask
+                if str(order_mode).strip().upper() == "TAKER"
+                else maker_best_ask
+            ),
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
             exact_taker_shares=(
@@ -17934,8 +17944,8 @@ def _build_live_execution_command_certificates(
         # K4.0: this tripwire applies ONLY to LEGACY proofs (no rest_then_cross
         # policy on the payload). Under REST-THEN-CROSS, a policy proof is already
         # the selected mode for THIS submit attempt. If the fresh book now prefers a
-        # different mode, the validator aborts for a full re-rank; this block must
-        # not perform a second inline maker->taker rebuild.
+        # different mode, the validator returns it for the main builder to re-prove;
+        # this block must not perform a second inline maker->taker rebuild.
         _rtc_policy_present = bool(
             str(actionable.payload.get("rest_then_cross_policy") or "").strip()
         )
@@ -19796,7 +19806,10 @@ def _passive_maker_context_from_authorities(
     quote_feasibility_cert: DecisionCertificate,
     executable_snapshot_cert: DecisionCertificate,
     decision_time: datetime,
+    fresh_authority_witness: PreSubmitAuthorityWitness | None = None,
 ) -> dict[str, object]:
+    """Build one passive context, optionally from the fresh submit-time book."""
+
     quote_payload = quote_feasibility_cert.payload
     # WALL #5 TYPE-LEVEL IDENTITY ASSERT (2026-06-12). The quote cert carries the identity
     # of the row whose book it quoted (quote_book_condition_id / quote_book_token_id, stamped
@@ -19808,18 +19821,34 @@ def _passive_maker_context_from_authorities(
         quote_payload=quote_payload,
         actionable_payload=actionable.payload,
     )
-    best_bid = _optional_float(quote_payload.get("best_bid"))
-    best_ask = _optional_float(quote_payload.get("best_ask"))
+    if fresh_authority_witness is None:
+        best_bid = _optional_float(quote_payload.get("best_bid"))
+        best_ask = _optional_float(quote_payload.get("best_ask"))
+        quote_available_at = quote_feasibility_cert.header.source_available_at
+        snapshot_available_at = executable_snapshot_cert.header.source_available_at
+        queue_depth_ahead = _queue_depth_ahead_from_quote(quote_payload)
+    else:
+        best_bid = _optional_float(fresh_authority_witness.current_best_bid)
+        best_ask = _optional_float(fresh_authority_witness.current_best_ask)
+        quote_available_at = _parse_utc(fresh_authority_witness.quote_seen_at)
+        snapshot_available_at = _parse_utc(fresh_authority_witness.book_captured_at)
+        queue_depth_ahead = None
     if best_bid is None and best_ask is None:
         raise ValueError("QUOTE_FEASIBILITY_BID_ASK_REQUIRED")
     if best_bid is not None and best_ask is not None and best_bid > best_ask:
         raise ValueError("QUOTE_FEASIBILITY_CROSSED_BOOK")
-    quote_available_at = quote_feasibility_cert.header.source_available_at
-    snapshot_available_at = executable_snapshot_cert.header.source_available_at
     if quote_available_at is None:
-        raise ValueError("QUOTE_FEASIBILITY_SOURCE_AVAILABLE_AT_REQUIRED")
+        raise ValueError(
+            "PRE_SUBMIT_QUOTE_SEEN_AT_REQUIRED"
+            if fresh_authority_witness is not None
+            else "QUOTE_FEASIBILITY_SOURCE_AVAILABLE_AT_REQUIRED"
+        )
     if snapshot_available_at is None:
-        raise ValueError("EXECUTABLE_SNAPSHOT_SOURCE_AVAILABLE_AT_REQUIRED")
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_CAPTURED_AT_REQUIRED"
+            if fresh_authority_witness is not None
+            else "EXECUTABLE_SNAPSHOT_SOURCE_AVAILABLE_AT_REQUIRED"
+        )
     spread_usd = (
         max(0.0, float(best_ask) - float(best_bid))
         if best_bid is not None and best_ask is not None
@@ -19836,7 +19865,6 @@ def _passive_maker_context_from_authorities(
         actionable_payload=actionable.payload,
         spread_usd=spread_usd,
     )
-    queue_depth_ahead = _queue_depth_ahead_from_quote(quote_payload)
     return {
         "spread_usd": spread_usd,
         "quote_age_ms": int(max(0.0, (decision_time - quote_available_at).total_seconds() * 1000.0)),
@@ -19848,6 +19876,44 @@ def _passive_maker_context_from_authorities(
         "best_ask": best_ask,
         "spread_observed": best_bid is not None and best_ask is not None,
     }
+
+
+def _passive_maker_context_and_book(
+    *,
+    actionable: DecisionCertificate,
+    quote_feasibility_cert: DecisionCertificate,
+    executable_snapshot_cert: DecisionCertificate,
+    authority_witness: PreSubmitAuthorityWitness,
+    proof_order_mode: str | None,
+    order_mode: str,
+    decision_time: datetime,
+) -> tuple[dict[str, object] | None, float | None, float | None]:
+    """Return one authority for maker context and the price-building book.
+
+    A TAKER proof that becomes MAKER has no licensed passive price in its old
+    execution plan, so both the context and limit-price inputs come from the
+    fresh submit witness. Other maker plans retain their identity-bound quote
+    certificate and must still agree with that witness at the existing seam.
+    """
+
+    if str(order_mode).strip().upper() != "MAKER":
+        return None, None, None
+    context = _passive_maker_context_from_authorities(
+        actionable=actionable,
+        quote_feasibility_cert=quote_feasibility_cert,
+        executable_snapshot_cert=executable_snapshot_cert,
+        decision_time=decision_time,
+        fresh_authority_witness=(
+            authority_witness
+            if str(proof_order_mode or "").strip().upper() == "TAKER"
+            else None
+        ),
+    )
+    return (
+        context,
+        _optional_float(context.get("best_bid")),
+        _optional_float(context.get("best_ask")),
+    )
 
 
 def _maker_fill_probability_from_actionable(

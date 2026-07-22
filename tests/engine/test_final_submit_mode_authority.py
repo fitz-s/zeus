@@ -1,23 +1,22 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-30
-# Authority basis: live redecision repair — a resting MAKER proof may upgrade to TAKER
-#   only when the same fresh rest-then-cross policy clears; unsafe/stale flips still abort.
+# Last reused/audited: 2026-07-22
+# Authority basis: live redecision repair — either valid proof mode may be rebuilt
+#   under the same fresh rest-then-cross policy; missing/unknown modes still abort.
 """Relationship tests (P0 mode-authority, operator review 2026-06-10).
 
 The cross-module invariant under test spans the boundary
   recapture proof (execution_mode_intent) -> EventSubmissionReceipt
   -> actionable payload -> final command builder -> final intent certificate.
 
-The PROVEN proof maker/taker mode is the submit authority, with one live redecision
-exception: a resting MAKER proof may upgrade to TAKER when the same fresh
-rest-then-cross policy clears and downstream taker certificates pass. Properties
-asserted across the boundary:
+The PROVEN proof maker/taker mode is the selection-time plan. The same policy
+re-decides against the fresh submit book and downstream mode-specific certificates
+must pass. Properties asserted across the boundary:
 
   (a) proof execution_mode_intent=MAKER + fresh policy TAKER  ->  validated mode
       TAKER; the final command must then prove taker quality on the fresh book.
-      Reverse TAKER->MAKER still aborts; missing/unknown proof mode fails closed.
-  (b) proof mode survives unchanged when fresh policy agrees; otherwise the only
-      allowed mismatch is MAKER->TAKER.
+      TAKER->MAKER similarly rebuilds as passive; missing/unknown modes fail closed.
+  (b) proof mode survives unchanged when fresh policy agrees; either valid mismatch
+      adopts the fresh mode and must pass its downstream walls.
   (c) the receipt carries execution_mode_intent + maker_limit_price as FIRST-CLASS
       fields end-to-end (receipt field is the authority, overriding the opportunity
       -book back-channel), and they thread into the actionable payload.
@@ -78,8 +77,8 @@ class TestLifecycleStateRegistered:
 
 
 # ---------------------------------------------------------------------------
-# (a) proof MAKER + final-stage TAKER  ->  allowed live crossing upgrade.
-#     Reverse TAKER->MAKER aborts. Missing/unknown proof mode fails closed.
+# (a) Either valid proof/fresh disagreement adopts the fresh mode, then passes its
+#     downstream walls. Missing/unknown modes fail closed.
 # ---------------------------------------------------------------------------
 
 class TestModeRevalidation:
@@ -95,19 +94,16 @@ class TestModeRevalidation:
 
         assert order_mode == "TAKER"
 
-    def test_proof_taker_fresh_maker_aborts(self):
-        """The reverse direction (TAKER->MAKER) still aborts; no silent downgrade."""
-        from src.engine.event_reactor_adapter import (
-            _SubmitAbortedModeFlipped,
-            _validate_final_order_mode_or_abort,
-        )
-        with pytest.raises(_SubmitAbortedModeFlipped, match="SUBMIT_ABORTED_MODE_FLIPPED"):
-            _validate_final_order_mode_or_abort(
-                proof_mode="TAKER",
-                fresh_mode="MAKER",
-                fresh_best_bid=0.10,
-                fresh_best_ask=0.90,
-            )
+    def test_proof_taker_fresh_maker_rebuilds_as_maker(self):
+        """The safer reverse direction rebuilds through passive-maker walls."""
+        from src.engine.event_reactor_adapter import _validate_final_order_mode_or_abort
+
+        assert _validate_final_order_mode_or_abort(
+            proof_mode="TAKER",
+            fresh_mode="MAKER",
+            fresh_best_bid=0.10,
+            fresh_best_ask=0.90,
+        ) == "MAKER"
 
     def test_missing_proof_mode_fails_closed(self):
         """Fail-closed: a missing proven mode at the final stage aborts, never taker."""
