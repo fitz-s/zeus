@@ -1907,7 +1907,7 @@ files:
   src/events/event_store.py:
     zone: K2_runtime
     authority_role: edli_opportunity_event_processing_store
-    why: Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting so changing q/book/wealth epochs revalidate execution without replacing the pending claim.
+    why: Owns immutable opportunity-event persistence and mutable consumer claim state, including causal-fact-stable global winner targeting and atomic supersession of obsolete cross-family targets so changing q/book/wealth epochs revalidate execution without starving the current global winner.
     downstream:
     - src/events/reactor.py
     - src/engine/global_batch_runtime.py

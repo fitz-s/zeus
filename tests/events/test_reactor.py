@@ -1841,7 +1841,7 @@ def test_global_target_keeps_same_causal_fact_across_economic_epochs():
     )
 
     assert store.prioritize_global_winner(first)
-    assert store.prioritize_global_winner(second) is False
+    assert store.prioritize_global_winner(second)
 
     assert conn.execute(
         "SELECT processing_status, last_error "
@@ -1852,6 +1852,69 @@ def test_global_target_keeps_same_causal_fact_across_economic_epochs():
         "SELECT 1 FROM opportunity_events WHERE event_id = ?",
         (second.event_id,),
     ).fetchone() is None
+
+
+def test_current_global_winner_recovers_old_causal_target_from_cross_family_starvation():
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    old_source = _forecast_event("old-causal-target", target_date="2026-05-25")
+    old_target = _next_claim_carrier(
+        old_source,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="old-book-epoch",
+        payload=json.loads(old_source.payload_json),
+    )
+    other_source = _forecast_event("newer-other-family", target_date="2026-05-26")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    other_target = _next_claim_carrier(
+        other_source,
+        targeted_at=_DT_VENUE_OPEN + timedelta(seconds=5),
+        economic_identity="newer-other-book-epoch",
+        payload=other_payload,
+    )
+    current_target = _next_claim_carrier(
+        old_source,
+        targeted_at=_DT_VENUE_OPEN + timedelta(seconds=10),
+        economic_identity="current-book-epoch",
+        payload=json.loads(old_source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(old_target)
+    assert store.prioritize_global_winner(other_target)
+    # Recreate the legacy live shape: an older same-causal target survived next
+    # to a newer cross-family target and therefore lost the sole fetch lane.
+    conn.execute(
+        "UPDATE opportunity_event_processing "
+        "SET processing_status='pending', processed_at=NULL, "
+        "last_error='GLOBAL_WINNER_TARGETED_CLAIM' WHERE event_id=?",
+        (old_target.event_id,),
+    )
+
+    assert store.prioritize_global_winner(current_target)
+
+    states = {
+        event_id: (status, reason)
+        for event_id, status, reason in conn.execute(
+            "SELECT event_id, processing_status, last_error "
+            "FROM opportunity_event_processing WHERE event_id IN (?, ?, ?)",
+            (old_target.event_id, other_target.event_id, current_target.event_id),
+        )
+    }
+    assert states[old_target.event_id] == (
+        "pending",
+        "GLOBAL_WINNER_TARGETED_CLAIM",
+    )
+    assert states[other_target.event_id] == (
+        "expired",
+        "GLOBAL_WINNER_TARGET_SUPERSEDED",
+    )
+    assert current_target.event_id not in states
+    assert store.fetch_pending(
+        decision_time=(_DT_VENUE_OPEN + timedelta(seconds=11)).isoformat(),
+        limit=1,
+    )[0].event_id == old_target.event_id
 
 
 def test_global_target_processing_lease_blocks_new_target_materialization():

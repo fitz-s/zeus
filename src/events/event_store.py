@@ -2521,12 +2521,10 @@ class EventStore:
             if current_claims != allowed_claims:
                 return False
 
-        old_ids: set[str] = set()
         processing_claims: dict[str, str] = {}
         target_source_event_id = _global_winner_target_source_event_id(
             event.source
         )
-        same_source_target_pending = False
         for event_type, index_name in (
             ("FORECAST_SNAPSHOT_READY", "idx_opportunity_events_fsr_target_date"),
             ("EDLI_REDECISION_PENDING", "idx_opportunity_events_fsr_target_date"),
@@ -2539,7 +2537,7 @@ class EventStore:
             }[event_type]
             rows = self.conn.execute(
                 f"""
-                SELECT e.event_id, p.processing_status, p.claimed_at, e.source
+                SELECT e.event_id, p.processing_status, p.claimed_at
                   FROM opportunity_events e INDEXED BY {index_name}
                   JOIN opportunity_event_processing p
                     ON p.consumer_name = ? AND p.event_id = e.event_id
@@ -2547,35 +2545,18 @@ class EventStore:
                    AND json_extract(e.payload_json, '$.city') = ?
                    AND json_extract(e.payload_json, '$.target_date') = ?
                    AND json_extract(e.payload_json, '$.metric') = ?
-                   AND (
-                        p.processing_status = 'processing'
-                     OR (
-                            p.processing_status = 'pending'
-                        AND p.last_error = ?
-                     )
-                   )
+                   AND p.processing_status = 'processing'
                 """,
                 (
                     self.consumer_name,
                     *family,
-                    GLOBAL_WINNER_TARGETED_CLAIM,
                 ),
             ).fetchall()
             for row in rows:
                 event_id = str(row[0] or "")
                 if not event_id:
                     continue
-                if str(row[1] or "") == "processing":
-                    processing_claims[event_id] = str(row[2] or "")
-                elif event_id != event.event_id:
-                    if (
-                        target_source_event_id is not None
-                        and _global_winner_target_source_event_id(row[3])
-                        == target_source_event_id
-                    ):
-                        same_source_target_pending = True
-                    else:
-                        old_ids.add(event_id)
+                processing_claims[event_id] = str(row[2] or "")
 
         if any(
             allowed_claims.get(event_id) != claimed_at
@@ -2583,15 +2564,47 @@ class EventStore:
         ):
             return False
 
-        # The claim belongs to the immutable causal source fact, while q/book/
-        # wealth economics are revalidated at actuation.  A newer economic epoch
-        # for that same fact must not replace its pending claim before it can run.
-        if same_source_target_pending:
-            return False
-
-        self.insert_or_ignore(event)
-
         now = _utc_now()
+        pending_targets = self.conn.execute(
+            """
+            SELECT p.event_id, e.source, e.received_at
+              FROM opportunity_event_processing p
+                   INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status = 'pending'
+               AND p.last_error = ?
+            """,
+            (self.consumer_name, GLOBAL_WINNER_TARGETED_CLAIM),
+        ).fetchall()
+        same_source_targets = [
+            row
+            for row in pending_targets
+            if target_source_event_id is not None
+            and _global_winner_target_source_event_id(row[1])
+            == target_source_event_id
+        ]
+        retained_target_id = None
+        if same_source_targets:
+            retained_target_id = str(
+                max(
+                    same_source_targets,
+                    key=lambda row: (str(row[2] or ""), str(row[0] or "")),
+                )[0]
+            )
+
+        # One complete global auction has one winner. Preserve an already
+        # pending carrier for the same immutable causal source fact, but expire
+        # every other side-effect-free pending global target. Otherwise an old
+        # carrier can coexist with a newer cross-family target, lose the sole
+        # fetch priority lane, and then reject every re-target of the current
+        # winner forever.
+        old_ids = {
+            str(row[0])
+            for row in pending_targets
+            if str(row[0] or "")
+            and str(row[0]) != (retained_target_id or event.event_id)
+        }
         if old_ids:
             ordered_ids = sorted(old_ids)
             for start in range(0, len(ordered_ids), 250):
@@ -2617,6 +2630,23 @@ class EventStore:
                         *chunk,
                     ),
                 )
+        if retained_target_id is not None:
+            cur = self.conn.execute(
+                "UPDATE opportunity_event_processing "
+                "SET claimed_at = NULL, last_error = ?, updated_at = ? "
+                "WHERE consumer_name = ? AND event_id = ? "
+                "AND processing_status = 'pending' AND last_error = ?",
+                (
+                    GLOBAL_WINNER_TARGETED_CLAIM,
+                    now,
+                    self.consumer_name,
+                    retained_target_id,
+                    GLOBAL_WINNER_TARGETED_CLAIM,
+                ),
+            )
+            return cur.rowcount == 1
+
+        self.insert_or_ignore(event)
         cur = self.conn.execute(
             "UPDATE opportunity_event_processing "
             "SET claimed_at = NULL, last_error = ?, updated_at = ? "
