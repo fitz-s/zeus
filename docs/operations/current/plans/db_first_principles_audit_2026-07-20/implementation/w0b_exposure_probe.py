@@ -2,7 +2,10 @@
 """Read-only: split the NEW lot-repair candidates by whether they have a position_current
 row (primary exposure) and by phase — to decide whether missing position_lots is a live
 exposure undercount or a secondary-ledger gap."""
+import argparse
 import sqlite3
+import sys
+from pathlib import Path
 
 CTE = """canonical_trade_fact AS (
   SELECT ranked.* FROM (
@@ -32,9 +35,19 @@ WHERE cmd.intent_kind='ENTRY' AND cmd.side='BUY' AND cmd.state='FILLED'
        WHERE lf.command_id=fact.command_id AND lf.trade_id=fact.trade_id
          AND tl.state IN ('OPTIMISTIC_EXPOSURE','CONFIRMED_EXPOSURE'))"""
 
-con = sqlite3.connect("file:/Users/leofitz/zeus/state/zeus_trades.db?mode=ro&cache=private",
+ap = argparse.ArgumentParser(description="W0-b exposure probe (read-only).")
+ap.add_argument("db_path", help="Path to the trades DB, e.g. state/zeus_trades.db. No default — "
+                                 "this probe must never silently point at one operator's machine.")
+args = ap.parse_args()
+db_path = Path(args.db_path).resolve()
+if not db_path.exists():
+    sys.exit(f"REFUSED: DB not found: {db_path}")
+
+con = sqlite3.connect(f"file:{db_path}?mode=ro&cache=private",
                       uri=True, timeout=0.25, isolation_level=None)
 con.execute("PRAGMA query_only=ON"); con.execute("PRAGMA busy_timeout=250"); con.execute("PRAGMA mmap_size=0")
+print(f"DB: {db_path}")
+print(f"sqlite_source_id(): {con.execute('SELECT sqlite_source_id()').fetchone()[0]}")
 
 split = con.execute(
     "WITH " + CTE + " SELECT "
