@@ -190,6 +190,17 @@ def detect_new_tables(
             # transaction. They are not boot-visible ownership surfaces.
             if name.endswith("_new"):
                 continue
+            # Leading-underscore names are internal/sidecar tables by convention
+            # (e.g. _migrations_applied, or the W0-a rollback capsule's
+            # _capsule_meta, created in a SEPARATE capsule FILE — not a canonical
+            # DB). They can never be a canonical ownership surface: the registry's
+            # own identifier rule (table_registry._IDENT_RE = ^[a-z]...) cannot
+            # even register a leading-underscore name, so detecting one here as an
+            # "unregistered canonical table" is definitionally a false positive.
+            # Canonical tables always start with a letter, so this skips no real
+            # ghost. Same non-canonical-transient class as *_new above.
+            if name.startswith("_"):
+                continue
             # Skip SQL reserved-word false positives (CREATE TABLE for / as ...)
             if name in _SQL_RESERVED:
                 continue
