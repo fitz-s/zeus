@@ -1222,8 +1222,8 @@ def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkey
     assert summary["held_monitor_positions_deferred"] == 1
 
 
-def test_monitor_reservation_advances_only_after_persisted_refresh(monkeypatch):
-    """Canonical fairness follows durable monitor evidence, not attempts."""
+def test_monitor_reservation_attempt_fairness_prevents_sticky_oldest(monkeypatch):
+    """A failed oldest refresh cannot monopolize the bounded monitor lane."""
     from src.engine import cycle_runtime
 
     monkeypatch.setattr(
@@ -1231,6 +1231,8 @@ def test_monitor_reservation_advances_only_after_persisted_refresh(monkeypatch):
         "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE",
         {},
     )
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
     oldest = _make_position(trade_id="persisted-oldest")
     newer = _make_position(trade_id="persisted-newer")
     oldest._canonical_monitor_refreshed_at = ""
@@ -1241,21 +1243,40 @@ def test_monitor_reservation_advances_only_after_persisted_refresh(monkeypatch):
         [newer, oldest],
         limit=1,
     )
-    attempted_again = cycle_runtime._reserve_held_monitor_positions(
+    after_failed_oldest = cycle_runtime._reserve_held_monitor_positions(
         "canonical-test",
         [newer, oldest],
         limit=1,
     )
-    oldest._canonical_monitor_refreshed_at = "2026-07-22T13:00:00+00:00"
-    after_persist = cycle_runtime._reserve_held_monitor_positions(
+    newer._canonical_monitor_refreshed_at = "2026-07-22T13:00:00+00:00"
+    failed_oldest_retry = cycle_runtime._reserve_held_monitor_positions(
         "canonical-test",
         [newer, oldest],
         limit=1,
     )
 
     assert first == [oldest]
-    assert attempted_again == [oldest]
-    assert after_persist == [newer]
+    assert after_failed_oldest == [newer]
+    assert failed_oldest_retry == [oldest]
+
+
+def test_monitor_reservation_attempts_full_batch_before_retry(monkeypatch):
+    """A bounded batch covers every unattempted position before any retry."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    positions = [_make_position(trade_id=f"held-{index}") for index in range(5)]
+    for index, pos in enumerate(positions):
+        pos._canonical_monitor_refreshed_at = f"2026-07-22T12:0{index}:00+00:00"
+
+    first = cycle_runtime._reserve_held_monitor_positions("batch", positions, limit=2)
+    second = cycle_runtime._reserve_held_monitor_positions("batch", positions, limit=2)
+    third = cycle_runtime._reserve_held_monitor_positions("batch", positions, limit=2)
+
+    assert [pos.trade_id for pos in first] == ["held-0", "held-1"]
+    assert [pos.trade_id for pos in second] == ["held-2", "held-3"]
+    assert [pos.trade_id for pos in third] == ["held-4", "held-0"]
 
 
 def test_monitoring_phase_network_round_robin_survives_new_no_attr_clients(

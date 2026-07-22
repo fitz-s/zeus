@@ -4632,6 +4632,8 @@ def _held_monitor_schedule_key(
 
 _HELD_MONITOR_CURSOR_LOCK = threading.Lock()
 _HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE: dict[str, str] = {}
+_HELD_MONITOR_ATTEMPT_STATE_BY_LANE: dict[str, dict[str, tuple[int, str]]] = {}
+_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE: dict[str, int] = {}
 # Bound the non-Day0 tail without letting continuous urgent wakes starve it.
 _HELD_MONITOR_URGENT_ACTIVE_LOCAL_PROGRESS_LIMIT = 4
 
@@ -4652,19 +4654,46 @@ def _reserve_held_monitor_positions(
     *,
     limit: int,
 ) -> list:
-    """Select a process-owned, thread-safe round-robin slice by stable key."""
+    """Select a thread-safe fair slice, seeded by durable monitor progress."""
 
     if limit <= 0 or not positions:
         return []
     if all(hasattr(pos, "_canonical_monitor_refreshed_at") for pos in positions):
-        return sorted(
-            positions,
-            key=lambda pos: (
-                bool(getattr(pos, "_canonical_monitor_refreshed_at", "")),
-                str(getattr(pos, "_canonical_monitor_refreshed_at", "") or ""),
+        keyed = [
+            (
                 _held_monitor_stable_position_key(pos),
-            ),
-        )[: min(limit, len(positions))]
+                str(getattr(pos, "_canonical_monitor_refreshed_at", "") or ""),
+                pos,
+            )
+            for pos in positions
+        ]
+        current_keys = {key for key, _refreshed_at, _pos in keyed}
+        take = min(limit, len(keyed))
+        with _HELD_MONITOR_CURSOR_LOCK:
+            attempts = _HELD_MONITOR_ATTEMPT_STATE_BY_LANE.setdefault(lane, {})
+            for stale_key in attempts.keys() - current_keys:
+                del attempts[stale_key]
+            sequence = _HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE.get(lane, 0)
+            for key, refreshed_at, _pos in keyed:
+                prior = attempts.get(key)
+                if prior is not None and prior[1] != refreshed_at:
+                    sequence += 1
+                    attempts[key] = (sequence, refreshed_at)
+            ordered = sorted(
+                keyed,
+                key=lambda item: (
+                    attempts.get(item[0], (0, ""))[0],
+                    bool(item[1]),
+                    item[1],
+                    item[0],
+                ),
+            )
+            selected = ordered[:take]
+            for key, refreshed_at, _pos in selected:
+                sequence += 1
+                attempts[key] = (sequence, refreshed_at)
+            _HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE[lane] = sequence
+        return [pos for _key, _refreshed_at, pos in selected]
     ordered = sorted(positions, key=_held_monitor_stable_position_key)
     keyed = [(_held_monitor_stable_position_key(pos), pos) for pos in ordered]
     keys = [key for key, _pos in keyed]
