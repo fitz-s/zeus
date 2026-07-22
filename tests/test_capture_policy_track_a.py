@@ -2,15 +2,29 @@
 # Authority basis: docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/capture_policy_spec.md
 """capture_policy_spec.md Track A antibodies.
 
-Track A is additive-only / log-only: the capture_trigger column and the
-compact table exist but nothing routes to compact yet, and the hydration
-check only ever logs. These tests are fixture-only (in-memory sqlite) and
-never touch a live DB.
+Track A is additive-only: ``init_snapshot_schema`` adds a single nullable,
+UNCONSTRAINED ``capture_trigger`` column to ``executable_market_snapshots`` and
+every writer stamps a fixed taxonomy constant. This increment has NO compact
+table and NO hot-path hydration check (both were removed after the PR review):
+
+* the compact table was unregistered in ``db_table_ownership.yaml`` — a fresh
+  init created it, and the boot-time ``assert_db_matches_registry`` would then
+  abort the daemon with ``extra_on_disk=executable_market_snapshot_compact``;
+* a CHECK-constrained ``ADD COLUMN`` forces SQLite (>=3.37) to full-scan every
+  existing row (~0.9s / 3M rows measured; O(rows) with cold I/O on the ~43GB
+  live trade table), whereas a plain nullable ``ADD COLUMN`` is O(1);
+* the log-only hydration check warned on ``DISCOVERY_SWEEP`` rows — a value the
+  scanner intentionally writes — on every money-path read (log amplification).
+
+The taxonomy is an application invariant enforced at write; its distribution is
+measured off the hot path by an audit query
+(``SELECT capture_trigger, COUNT(*) FROM executable_market_snapshots GROUP BY 1``).
+These tests are fixture-only (in-memory sqlite) and never touch a live DB.
 """
 
 from __future__ import annotations
 
-import logging
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -20,11 +34,11 @@ import pytest
 from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.state.db import init_schema, init_schema_trade_only
 from src.state.snapshot_repo import (
-    _track_a_capture_trigger_check,
     get_snapshot,
     init_snapshot_schema,
     insert_snapshot,
 )
+from src.state.table_registry import DBIdentity, assert_db_matches_registry
 
 NOW = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 HASH_A = "a" * 64
@@ -82,19 +96,7 @@ def _snapshot(snapshot_id: str = "snap-cp1", **overrides) -> ExecutableMarketSna
     return ExecutableMarketSnapshot(**payload)
 
 
-def _insert_compact_row(conn, compact_id: str = "emc2-test", trigger: str = "DISCOVERY_SWEEP") -> None:
-    conn.execute(
-        """
-        INSERT INTO executable_market_snapshot_compact (
-          compact_id, condition_id, selected_outcome_token_id, captured_at,
-          raw_orderbook_hash, capture_trigger, schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (compact_id, "condition-1", "yes-token", NOW.isoformat(), HASH_C, trigger, 1),
-    )
-
-
-# --- (a) idempotent ALTER is safe to run twice ------------------------------
+# --- (a) idempotent, O(1) additive ALTER ------------------------------------
 
 
 def test_capture_trigger_migration_idempotent(conn):
@@ -115,7 +117,33 @@ def test_capture_trigger_migration_idempotent(conn):
     assert row["capture_trigger"] == "KEYFRAME"
 
 
-# --- (b) each trigger class stamps the correct capture_trigger -------------
+def test_capture_trigger_column_is_unconstrained_no_db_check(conn):
+    """The ADD COLUMN is deliberately unconstrained TEXT (no CHECK): a CHECK on
+    ADD COLUMN forces SQLite to full-scan every existing row of the ~43GB live
+    trade table at boot. The taxonomy is enforced by the application at write,
+    so the DB accepts any TEXT and the ALTER stays O(1) metadata-only."""
+    # A value outside the taxonomy inserts without a DB-level IntegrityError.
+    insert_snapshot(
+        conn,
+        _snapshot(snapshot_id="snap-arbitrary"),
+        capture_trigger="NOT_IN_TAXONOMY",
+    )
+    row = conn.execute(
+        "SELECT capture_trigger FROM executable_market_snapshots WHERE snapshot_id = ?",
+        ("snap-arbitrary",),
+    ).fetchone()
+    assert row["capture_trigger"] == "NOT_IN_TAXONOMY"
+
+    # The table DDL (sqlite_master.sql is rewritten by ADD COLUMN) carries the
+    # column but NO CHECK clause naming it.
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='executable_market_snapshots'"
+    ).fetchone()[0]
+    assert "capture_trigger" in ddl
+    assert not re.search(r"CHECK\s*\([^)]*capture_trigger", ddl, re.IGNORECASE)
+
+
+# --- (b) each trigger class stamps the correct capture_trigger --------------
 
 
 @pytest.mark.parametrize(
@@ -149,123 +177,52 @@ def test_insert_snapshot_capture_trigger_defaults_null(conn):
     assert row["capture_trigger"] is None
 
 
-def test_insert_snapshot_rejects_unrecognized_capture_trigger(conn):
-    with pytest.raises(sqlite3.IntegrityError):
-        insert_snapshot(
-            conn,
-            _snapshot(snapshot_id="snap-bad-trigger"),
-            capture_trigger="NOT_A_REAL_TRIGGER",
-        )
-
-
-# --- (c) compact table created + append-only --------------------------------
-
-
-def test_compact_table_created_with_indexes(conn):
-    table = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'executable_market_snapshot_compact'"
-    ).fetchone()
-    assert table is not None
-    indexes = {
-        row[1]
-        for row in conn.execute("PRAGMA index_list(executable_market_snapshot_compact)").fetchall()
-    }
-    assert {
-        "idx_snapshot_compact_condition_captured",
-        "idx_snapshot_compact_selected_token_captured",
-    }.issubset(indexes)
-
-
-def test_compact_table_unused_by_default(conn):
-    """This increment routes zero rows to compact — table exists but is empty."""
-    count = conn.execute("SELECT COUNT(*) FROM executable_market_snapshot_compact").fetchone()[0]
-    assert count == 0
-
-
-def test_compact_table_rejects_update(conn):
-    _insert_compact_row(conn)
-    with pytest.raises(sqlite3.IntegrityError, match="APPEND-ONLY"):
-        conn.execute(
-            "UPDATE executable_market_snapshot_compact SET orderbook_top_bid = '0.50' WHERE compact_id = ?",
-            ("emc2-test",),
-        )
-
-
-def test_compact_table_rejects_delete(conn):
-    _insert_compact_row(conn)
-    with pytest.raises(sqlite3.IntegrityError, match="APPEND-ONLY"):
-        conn.execute(
-            "DELETE FROM executable_market_snapshot_compact WHERE compact_id = ?",
-            ("emc2-test",),
-        )
-
-
-def test_compact_table_capture_trigger_check_is_compact_specific(conn):
-    """Compact's CHECK is the §3 2-value set, distinct from the full table's
-    7-value set — a value valid on the full table must be rejected here."""
-    with pytest.raises(sqlite3.IntegrityError):
-        _insert_compact_row(conn, trigger="JIT_SUBMIT")
-
-
-# --- (d) hydration check logs but never raises ------------------------------
-
-
-def test_hydration_check_logs_on_compact_eligible_trigger(conn, caplog):
-    insert_snapshot(conn, _snapshot(snapshot_id="snap-sweep"), capture_trigger="DISCOVERY_SWEEP")
-    with caplog.at_level(logging.WARNING, logger="src.state.snapshot_repo"):
-        loaded = get_snapshot(conn, "snap-sweep")
-    assert loaded is not None  # log-only: never raises, never blocks the read
-    assert "capture_policy_track_a" in caplog.text
-    assert "condition-1" in caplog.text
-    assert "DISCOVERY_SWEEP" in caplog.text
-
-
-@pytest.mark.parametrize(
-    "trigger",
-    ["PRIORITY_HELD_POSITION", "PRIORITY_OPEN_ORDER", "PRIORITY_MARKER", "NEAR_THRESHOLD_MATCH", "KEYFRAME", "JIT_SUBMIT"],
-)
-def test_hydration_check_silent_on_full_eligible_trigger(conn, caplog, trigger):
-    insert_snapshot(conn, _snapshot(snapshot_id=f"snap-full-{trigger}"), capture_trigger=trigger)
-    with caplog.at_level(logging.WARNING, logger="src.state.snapshot_repo"):
-        loaded = get_snapshot(conn, f"snap-full-{trigger}")
+def test_get_snapshot_hydrates_row_with_capture_trigger(conn):
+    """The read/hydration path returns a snapshot unaffected by the column: no
+    hot-path check remains, so a stamped row hydrates like any other."""
+    insert_snapshot(conn, _snapshot(snapshot_id="snap-read"), capture_trigger="DISCOVERY_SWEEP")
+    loaded = get_snapshot(conn, "snap-read")
     assert loaded is not None
-    assert "capture_policy_track_a" not in caplog.text
+    assert loaded.snapshot_id == "snap-read"
 
 
-def test_hydration_check_silent_on_null_trigger(conn, caplog):
-    """Pre-migration rows / not-yet-updated callers: NULL trigger, nothing to
-    validate, no warning (would be 100% log noise across the entire existing
-    history, none of which is a taxonomy violation)."""
-    insert_snapshot(conn, _snapshot(snapshot_id="snap-legacy"))
-    with caplog.at_level(logging.WARNING, logger="src.state.snapshot_repo"):
-        loaded = get_snapshot(conn, "snap-legacy")
-    assert loaded is not None
-    assert "capture_policy_track_a" not in caplog.text
+# --- (c) BLOCKER-1 regression: no unregistered table; boot registry passes ---
 
 
-def test_hydration_check_never_raises_when_column_missing():
-    """Defensive: an unmigrated row shape (no capture_trigger column at all,
-    e.g. a DB read before this migration has run) must not raise."""
-    raw = sqlite3.connect(":memory:")
-    raw.row_factory = sqlite3.Row
+def test_fresh_world_init_matches_registry_no_compact_table():
+    """Track A must not create an ownership-unregistered table. A fresh WORLD
+    init followed by the boot-time registry assertion must PASS, and the
+    (removed) compact table must be absent. Before the PR-review fix this
+    aborted the daemon at boot (extra_on_disk=executable_market_snapshot_compact)."""
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
     try:
-        raw.execute("CREATE TABLE t (snapshot_id TEXT, condition_id TEXT)")
-        raw.execute("INSERT INTO t VALUES ('s1', 'c1')")
-        row = raw.execute("SELECT * FROM t").fetchone()
-        _track_a_capture_trigger_check(row)  # must not raise
+        init_schema(c)
+        assert (
+            c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='executable_market_snapshot_compact'"
+            ).fetchone()
+            is None
+        )
+        assert_db_matches_registry(c, DBIdentity.WORLD)  # must not raise
     finally:
-        raw.close()
+        c.close()
 
 
-def test_hydration_check_never_raises_on_unrecognized_value():
-    """Defensive: even a value outside every known enum (a future bug, a
-    manually-edited row) must log, not raise."""
-    raw = sqlite3.connect(":memory:")
-    raw.row_factory = sqlite3.Row
+def test_fresh_trade_init_matches_registry_no_compact_table():
+    """Same guard for the TRADE DB — the live snapshot table's real home."""
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
     try:
-        raw.execute("CREATE TABLE t (snapshot_id TEXT, condition_id TEXT, capture_trigger TEXT)")
-        raw.execute("INSERT INTO t VALUES ('s1', 'c1', 'SOMETHING_UNEXPECTED')")
-        row = raw.execute("SELECT * FROM t").fetchone()
-        _track_a_capture_trigger_check(row)  # must not raise
+        init_schema_trade_only(c)
+        assert (
+            c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='executable_market_snapshot_compact'"
+            ).fetchone()
+            is None
+        )
+        assert_db_matches_registry(c, DBIdentity.TRADE)  # must not raise
     finally:
-        raw.close()
+        c.close()

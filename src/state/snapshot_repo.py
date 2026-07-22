@@ -27,25 +27,9 @@ from src.contracts.executable_market_snapshot import (
 SNAPSHOT_TABLE = "executable_market_snapshots"
 SNAPSHOT_LATEST_TABLE = "executable_market_snapshot_latest"
 SNAPSHOT_INVALIDATIONS_TABLE = "executable_market_snapshot_invalidations"
-SNAPSHOT_COMPACT_TABLE = "executable_market_snapshot_compact"
 ABSENT_ORDERBOOK_SIDE = "ABSENT"
 
 logger = logging.getLogger(__name__)
-
-# capture_policy_spec.md (docs/operations/current/plans/db_first_principles_audit_2026-07-20)
-# §2 taxonomy: the full-capture trigger values a hydrated row's capture_trigger
-# must be one of to still be FULL-eligible. Used only by the Track A log-only
-# hydration check below — nothing routes on this set yet.
-_FULL_ELIGIBLE_CAPTURE_TRIGGERS = frozenset(
-    {
-        "PRIORITY_HELD_POSITION",
-        "PRIORITY_OPEN_ORDER",
-        "PRIORITY_MARKER",
-        "NEAR_THRESHOLD_MATCH",
-        "KEYFRAME",
-        "JIT_SUBMIT",
-    }
-)
 
 
 def _snapshot_table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -177,19 +161,18 @@ def init_snapshot_schema(
                 _ddl.split("ADD COLUMN ")[1].split()[0],
             )
     # capture_policy_spec.md §3 Track A: idempotent ALTER, same check-then-add
-    # idiom as PR2 above. Nullable, no default — pre-migration rows have no
-    # retroactive trigger classification (the CHECK allows NULL for exactly
-    # that reason, mirroring outcome_label's `... OR outcome_label IS NULL`
-    # pattern above). DISCOVERY_SWEEP is included in this table's allowed set
-    # (unlike §3's forward-looking list) because this increment does not yet
-    # route any capture away from full — a DISCOVERY_SWEEP-classified row is
-    # still written here, just tagged for future analysis.
+    # idiom as PR2 above. Nullable, UNCONSTRAINED TEXT — deliberately NO CHECK.
+    # A CHECK-constrained ADD COLUMN forces SQLite (>=3.37) to scan and validate
+    # every existing row (measured ~0.9s / 3M rows; O(rows) with heavy cold I/O
+    # on the ~43GB live trade table), whereas a plain nullable ADD COLUMN is
+    # O(1) metadata-only (measured 0.001s). The application is the domain
+    # constraint: every writer stamps a fixed taxonomy constant (see the
+    # call sites), so the column's value set is enforced at write time, not by a
+    # boot-time full-table scan of the live money DB. Pre-migration rows stay
+    # NULL. The compact-form table + any capture-away-from-full routing are a
+    # later operator-fenced increment, not this additive one.
     for _ddl in (
-        "ALTER TABLE executable_market_snapshots ADD COLUMN capture_trigger TEXT "
-        "CHECK (capture_trigger IN ("
-        "'PRIORITY_HELD_POSITION','PRIORITY_OPEN_ORDER','PRIORITY_MARKER',"
-        "'NEAR_THRESHOLD_MATCH','KEYFRAME','JIT_SUBMIT','DISCOVERY_SWEEP'"
-        ") OR capture_trigger IS NULL)",
+        "ALTER TABLE executable_market_snapshots ADD COLUMN capture_trigger TEXT",
     ):
         try:
             conn.execute(_ddl)
@@ -200,49 +183,6 @@ def init_snapshot_schema(
                 "capture_policy migration: column already exists, skipping: %s",
                 _ddl.split("ADD COLUMN ")[1].split()[0],
             )
-    init_snapshot_compact_schema(conn)
-
-
-def init_snapshot_compact_schema(conn: sqlite3.Connection) -> None:
-    """Create the compact-form snapshot table (capture_policy_spec.md §3).
-
-    UNUSED today: no writer routes a capture here and no reader queries it.
-    This Track A increment only creates the table, so a follow-up increment
-    that adds real routing needs no schema migration on the hot path. Same
-    NC-NEW-B append-only contract as executable_market_snapshots.
-    """
-
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS executable_market_snapshot_compact (
-          compact_id TEXT PRIMARY KEY,
-          condition_id TEXT NOT NULL,
-          selected_outcome_token_id TEXT NOT NULL,
-          captured_at TEXT NOT NULL,
-          raw_orderbook_hash TEXT NOT NULL,
-          orderbook_top_bid TEXT,
-          orderbook_top_ask TEXT,
-          depth_at_best_ask INTEGER NOT NULL DEFAULT 0,
-          spread_usd TEXT,
-          top_k_bids_json TEXT NOT NULL DEFAULT '[]',
-          top_k_asks_json TEXT NOT NULL DEFAULT '[]',
-          prev_hash TEXT,
-          hash_delta_ms INTEGER,
-          capture_trigger TEXT NOT NULL CHECK (capture_trigger IN ('DISCOVERY_SWEEP','NEAR_THRESHOLD_MISS_BELOW_FLOOR')),
-          schema_version INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_snapshot_compact_condition_captured
-          ON executable_market_snapshot_compact (condition_id, captured_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_snapshot_compact_selected_token_captured
-          ON executable_market_snapshot_compact (selected_outcome_token_id, captured_at DESC);
-        CREATE TRIGGER IF NOT EXISTS no_update_executable_market_snapshot_compact
-        BEFORE UPDATE ON executable_market_snapshot_compact
-        BEGIN SELECT RAISE(ABORT, 'executable_market_snapshot_compact is APPEND-ONLY (NC-NEW-B)'); END;
-        CREATE TRIGGER IF NOT EXISTS no_delete_executable_market_snapshot_compact
-        BEFORE DELETE ON executable_market_snapshot_compact
-        BEGIN SELECT RAISE(ABORT, 'executable_market_snapshot_compact is APPEND-ONLY (NC-NEW-B)'); END;
-        """
-    )
 
 
 def insert_snapshot(
@@ -716,40 +656,7 @@ def _row_from_snapshot(snapshot: ExecutableMarketSnapshot) -> dict[str, Any]:
     }
 
 
-def _track_a_capture_trigger_check(row: sqlite3.Row) -> None:
-    """capture_policy_spec.md §4 Track A: log-only proof that every row read
-    through this hydration path is a trigger the full-capture taxonomy (§2)
-    would still keep full. LOG-ONLY — must never raise or otherwise affect
-    control flow; a hit here is a signal to fix the taxonomy before any
-    capture is routed away from full, not something to fail closed on today
-    (nothing routes away from full yet, so this should never fire in
-    practice — that absence is the proof).
-
-    NULL is not evaluated: pre-migration rows and any caller not yet
-    threading capture_trigger predate the taxonomy and were unconditionally
-    full, so there is nothing to validate.
-    """
-
-    try:
-        if "capture_trigger" not in row.keys():
-            return
-        trigger = row["capture_trigger"]
-        if trigger is None or trigger in _FULL_ELIGIBLE_CAPTURE_TRIGGERS:
-            return
-        logger.warning(
-            "capture_policy_track_a: money-path read of compact-eligible row "
-            "condition_id=%s token=%s trigger=%s snapshot_id=%s",
-            row["condition_id"] if "condition_id" in row.keys() else None,
-            row["selected_outcome_token_id"] if "selected_outcome_token_id" in row.keys() else None,
-            trigger,
-            row["snapshot_id"] if "snapshot_id" in row.keys() else None,
-        )
-    except Exception:  # noqa: BLE001 - Track A is log-only; must never affect hydration
-        pass
-
-
 def _snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshot:
-    _track_a_capture_trigger_check(row)
     return ExecutableMarketSnapshot(
         snapshot_id=row["snapshot_id"],
         gamma_market_id=row["gamma_market_id"],
