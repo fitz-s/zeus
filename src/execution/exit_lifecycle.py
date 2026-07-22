@@ -41,6 +41,7 @@ from src.execution.executor import (
     _exit_execution_authority_deadline_error,
     _refresh_exit_collateral_snapshot_for_submit,
 )
+from src.contracts.venue_submission_envelope import LIVE_ORDER_MIN_UNIT_PRICE
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     enter_pending_exit_runtime_state,
@@ -278,6 +279,10 @@ DEFAULT_PENDING_EXIT_STATUS_BUDGET_SECONDS = 10.0
 CHANNEL_NOT_READY_COOLDOWN_SECONDS = 120
 EXIT_LOCKED_COOLDOWN_SECONDS = 60
 RUNTIME_SUBMIT_GATE_BLOCK_COOLDOWN_SECONDS = 15 * 60
+EXIT_LIQUIDITY_WAIT_COOLDOWN_SECONDS = 120
+_EXIT_LIQUIDITY_WAIT_ERRORS = frozenset(
+    {"exit_no_executable_bid", "exit_no_in_band_bid"}
+)
 _ACTIVE_EXIT_SELL_STATES = frozenset(
     {
         "INTENT_CREATED",
@@ -330,6 +335,23 @@ def _pending_exit_status_budget_seconds() -> float:
         return max(0.25, float(raw))
     except (TypeError, ValueError):
         return DEFAULT_PENDING_EXIT_STATUS_BUDGET_SECONDS
+
+
+def _is_sub_floor_exit_price_error(error: object) -> bool:
+    text = str(error or "")
+    if "absolute inclusive [0.05, 0.95]" not in text:
+        return False
+    match = re.search(r"price=([0-9]+(?:\.[0-9]+)?)", text)
+    if match is None:
+        return False
+    try:
+        return Decimal(match.group(1)) < LIVE_ORDER_MIN_UNIT_PRICE
+    except InvalidOperation:
+        return False
+
+
+def _is_exit_liquidity_wait_error(error: object) -> bool:
+    return str(error or "") in _EXIT_LIQUIDITY_WAIT_ERRORS or _is_sub_floor_exit_price_error(error)
 
 
 def _pending_exit_scan_candidate(position: Position) -> bool:
@@ -3361,7 +3383,7 @@ def _latest_snapshot_min_order_dust_error(
     return _below_snapshot_min_order_error(position, snapshot_context)
 
 
-def _exit_no_executable_bid_error(
+def _exit_sell_liquidity_error(
     exit_intent: ExitIntent,
     snapshot_context: dict[str, object],
 ) -> str:
@@ -3373,6 +3395,11 @@ def _exit_no_executable_bid_error(
     )
     if best_bid is None or snapshot_bid is None:
         return "exit_no_executable_bid"
+    if (
+        best_bid < LIVE_ORDER_MIN_UNIT_PRICE
+        or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE
+    ):
+        return "exit_no_in_band_bid"
     return ""
 
 
@@ -3689,6 +3716,9 @@ def _execute_live_exit(
         )
     )
     global_authorized = False
+    continuing_existing_exit = bool(
+        str(getattr(position, "last_exit_order_id", "") or "")
+    )
     if live_non_red and not hard_fact_authorized:
         if isinstance(global_sell_authority, GlobalSellExecutionAuthority):
             try:
@@ -3710,9 +3740,6 @@ def _execute_live_exit(
                 if str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
                 else "global_capital_optimal_sell_intent_required"
             )
-        continuing_existing_exit = bool(
-            str(getattr(position, "last_exit_order_id", "") or "")
-        )
         if preliminary_error is not None and not continuing_existing_exit:
             logger.warning(
                 "EXIT_SUBMIT_BLOCKED_CAPITAL_AUTHORITY trade_id=%s reason=%s",
@@ -3720,9 +3747,6 @@ def _execute_live_exit(
                 preliminary_error,
             )
             return f"exit_blocked: {preliminary_error}"
-    else:
-        continuing_existing_exit = False
-
     _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
     try:
@@ -3836,18 +3860,42 @@ def _execute_live_exit(
         return "exit_blocked: executable_snapshot_unavailable"
 
     liquidity_error = (
-        _exit_no_executable_bid_error(exit_intent, snapshot_context)
+        _exit_sell_liquidity_error(exit_intent, snapshot_context)
         if conn is not None
         else ""
     )
     if liquidity_error:
-        liquidity_reason = f"{exit_context.exit_reason} [NO_EXECUTABLE_BID]"
-        _mark_exit_retry(
-            position,
-            reason=liquidity_reason,
-            error=liquidity_error,
-            conn=conn,
+        liquidity_label = (
+            "NO_IN_BAND_BID"
+            if liquidity_error == "exit_no_in_band_bid"
+            else "NO_EXECUTABLE_BID"
         )
+        liquidity_reason = f"{exit_context.exit_reason} [{liquidity_label}]"
+        if continuing_existing_exit:
+            _mark_pending_exit(position)
+            position.last_exit_error = liquidity_error
+            position.exit_state = "sell_pending"
+            position.order_status = "sell_pending_confirmation"
+            position.next_exit_retry_at = ""
+            _dual_write_canonical_pending_exit_if_available(
+                conn,
+                position,
+                reason=liquidity_reason,
+                error=liquidity_error,
+                event_type="EXIT_ORDER_REJECTED",
+                extra_payload={
+                    "status": "resting_exit_liquidity_wait",
+                    "resting_exit_order_preserved": True,
+                    "retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
+                },
+            )
+        else:
+            _mark_exit_retry(
+                position,
+                reason=liquidity_reason,
+                error=liquidity_error,
+                conn=conn,
+            )
         if conn is not None:
             log_pending_exit_recovery_event(
                 conn,
@@ -3857,7 +3905,7 @@ def _execute_live_exit(
                 error=liquidity_error,
             )
             log_exit_retry_event(conn, position, reason=liquidity_reason, error=liquidity_error)
-        return "exit_blocked: no_executable_bid"
+        return f"exit_blocked: {liquidity_error.removeprefix('exit_')}"
 
     if conn is not None:
         try:
@@ -6257,10 +6305,7 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
 
     Returns True if position is ready for a new exit attempt.
     """
-    if position.exit_state == "backoff_exhausted":
-        return False  # Hold to settlement, stop retrying
-
-    if position.exit_state != "retry_pending":
+    if position.exit_state not in {"backoff_exhausted", "retry_pending"}:
         return False
 
     previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
@@ -6268,6 +6313,20 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     previous_error = str(getattr(position, "last_exit_error", "") or "")
     if not previous_error:
         previous_error = _latest_exit_reject_error(conn, position)
+
+    if position.exit_state == "backoff_exhausted":
+        if not _is_sub_floor_exit_price_error(previous_error):
+            return False
+        _mark_exit_retry(
+            position,
+            reason=(
+                f"{getattr(position, 'exit_reason', '') or 'EXIT'} "
+                "[NO_IN_BAND_BID_RECOVERED]"
+            ),
+            error="exit_no_in_band_bid",
+            conn=conn,
+        )
+        return False
 
     dust_error = _latest_snapshot_min_order_dust_error(position, conn=conn)
     if dust_error:
@@ -6314,18 +6373,16 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     if not runtime_gate_block and is_exit_cooldown_active(position):
         return False  # Still cooling down
 
-    if previous_error == "exit_no_executable_bid":
+    if _is_exit_liquidity_wait_error(previous_error):
         snapshot = _latest_exit_snapshot_context(
             conn,
             _asset_id_for_position(position),
             require_sell_bid=False,
         )
-        if (
-            _positive_decimal(
-                snapshot.get("executable_snapshot_orderbook_top_bid")
-            )
-            is None
-        ):
+        snapshot_bid = _positive_decimal(
+            snapshot.get("executable_snapshot_orderbook_top_bid")
+        )
+        if snapshot_bid is None or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE:
             return False
 
     # Cooldown expired — position is eligible for exit re-evaluation
@@ -6667,6 +6724,8 @@ def _pending_exit_reprice_reason(
 
     if not math.isfinite(resting_price) or resting_price <= 0.0:
         return ""
+    if best_bid is None or best_bid < float(LIVE_ORDER_MIN_UNIT_PRICE):
+        return ""
     min_move = max(float(min_tick) * PENDING_EXIT_REPRICE_MIN_TICKS, 0.001)
     if best_bid is not None and resting_price - float(best_bid) >= min_move:
         return "SELL_REPRICE_BID_MOVED_AWAY"
@@ -6865,6 +6924,37 @@ def _mark_exit_retry(
         logger.warning(
             "EXIT RUNTIME-SUBMIT-GATE-BLOCKED %s: %s "
             "(budget NOT consumed; recheck gate by %s)",
+            position.trade_id,
+            reason,
+            position.next_exit_retry_at,
+        )
+        return
+
+    if _is_exit_liquidity_wait_error(error):
+        normalized_error = (
+            "exit_no_in_band_bid" if _is_sub_floor_exit_price_error(error) else error
+        )
+        position.last_exit_error = normalized_error
+        position.exit_state = "retry_pending"
+        position.order_status = "retry_pending"
+        position.next_exit_retry_at = (
+            _utcnow() + timedelta(seconds=EXIT_LIQUIDITY_WAIT_COOLDOWN_SECONDS)
+        ).isoformat()
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=reason,
+            error=normalized_error,
+            event_type="EXIT_ORDER_REJECTED",
+            extra_payload={
+                "status": "liquidity_wait",
+                "original_error": error if error != normalized_error else "",
+                "retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
+                "next_retry_at": position.next_exit_retry_at,
+            },
+        )
+        logger.info(
+            "EXIT LIQUIDITY-WAIT %s: %s (budget NOT consumed; next recheck %s)",
             position.trade_id,
             reason,
             position.next_exit_retry_at,
