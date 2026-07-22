@@ -2,6 +2,7 @@ packet: current/live_entry_health_repair
 in_scope:
 - docs/operations/current/live_entry_health_repair/**
 - src/ingest/post_trade_capital_daemon.py
+- src/ingest/fill_synchronizer.py
 - src/control/live_health.py
 - src/main.py
 - src/events/reactor.py
@@ -40,6 +41,7 @@ in_scope:
 - tests/test_live_safety_invariants.py
 - tests/test_ensemble_signal.py
 - tests/test_command_recovery.py
+- tests/test_fill_synchronizer.py
 - tests/execution/test_venue_sync_contract.py
 - tests/test_db_writer_lock.py
 allow_companions:

@@ -17118,6 +17118,336 @@ def _review_required_matched_submit_trade_fact_recovery(
     return "advanced"
 
 
+def _authenticated_entry_trade_fact_candidates(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
+) -> list[dict]:
+    """Return live entry commands whose confirmed fills outrun command state."""
+
+    if not all(
+        _table_exists(conn, table)
+        for table in ("venue_commands", "venue_trade_facts", "position_current")
+    ):
+        return []
+    params: list[object] = []
+    command_clause = ""
+    if str(command_id or "").strip():
+        command_clause = " AND cmd.command_id = ?"
+        params.append(str(command_id).strip())
+    rows = conn.execute(
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + """
+        SELECT cmd.*,
+               pc.phase AS projected_phase,
+               pc.shares AS projected_shares,
+               pc.cost_basis_usd AS projected_cost_basis_usd
+          FROM venue_commands cmd
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND pc.phase IN ('pending_entry', 'active', 'day0_window')
+           AND EXISTS (
+                SELECT 1
+                  FROM canonical_trade_fact fact
+                 WHERE fact.command_id = cmd.command_id
+                   AND fact.venue_order_id = cmd.venue_order_id
+                   AND fact.state = 'CONFIRMED'
+                   AND fact.source IN ('REST', 'WS_USER')
+                   AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                   AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+           )
+        """
+        + command_clause
+        + " ORDER BY datetime(cmd.updated_at), cmd.command_id",
+        tuple(params),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _confirmed_entry_trade_fact_summary(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> dict:
+    rows = conn.execute(
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ", "
+        + _economic_trade_fact_cte()
+        + """
+        SELECT fact.trade_fact_id,
+               fact.trade_id,
+               fact.filled_size,
+               fact.fill_price,
+               fact.source,
+               fact.observed_at,
+               fact.venue_timestamp
+          FROM economic_trade_fact fact
+         WHERE fact.command_id = ?
+           AND fact.venue_order_id = ?
+           AND fact.state = 'CONFIRMED'
+           AND fact.source IN ('REST', 'WS_USER')
+         ORDER BY fact.trade_id
+        """,
+        (command_id, venue_order_id),
+    ).fetchall()
+    filled = Decimal("0")
+    cost = Decimal("0")
+    latest_at = ""
+    sources: set[str] = set()
+    trade_ids: list[str] = []
+    fact_ids: list[int] = []
+    for raw in rows:
+        fact = _dict_row(raw)
+        size = _positive_decimal_or_none(fact.get("filled_size"))
+        price = _positive_decimal_or_none(fact.get("fill_price"))
+        trade_id = str(fact.get("trade_id") or "").strip()
+        if size is None or price is None or not trade_id:
+            continue
+        filled += size
+        cost += size * price
+        trade_ids.append(trade_id)
+        fact_ids.append(int(fact["trade_fact_id"]))
+        sources.add(str(fact.get("source") or "").upper())
+        source_at = str(
+            fact.get("venue_timestamp") or fact.get("observed_at") or ""
+        )
+        if _parse_ts(source_at) is not None and source_at > latest_at:
+            latest_at = source_at
+    return {
+        "count": len(trade_ids),
+        "filled_size": _decimal_text(filled),
+        "fill_price": _decimal_text(cost / filled) if filled > 0 else "",
+        "observed_at": latest_at,
+        "source": "REST" if "REST" in sources else "WS_USER",
+        "trade_ids": trade_ids,
+        "trade_fact_ids": fact_ids,
+    }
+
+
+def _latest_order_fact_matched_size(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> Decimal:
+    row = conn.execute(
+        """
+        SELECT MAX(CAST(COALESCE(matched_size, '0') AS REAL)) AS matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+           AND venue_order_id = ?
+        """,
+        (command_id, venue_order_id),
+    ).fetchone()
+    return _decimal_or_none(_dict_row(row).get("matched_size") if row else None) or Decimal("0")
+
+
+def _reconcile_authenticated_entry_trade_fact(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> str:
+    """Atomically fold exact authenticated fill facts into command and position truth."""
+
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    facts = _confirmed_entry_trade_fact_summary(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    )
+    filled = _positive_decimal_or_none(facts.get("filled_size"))
+    fill_price = _positive_decimal_or_none(facts.get("fill_price"))
+    requested = _positive_decimal_or_none(command.get("size"))
+    if not facts["count"] or filled is None or fill_price is None or requested is None:
+        return "stayed"
+    if not _fill_price_respects_limit(
+        fill_price,
+        command.get("price"),
+        side=command.get("side"),
+    ):
+        raise ValueError("authenticated entry fill is worse than submitted limit")
+    tolerance = Decimal("0.01")
+    if filled - requested > tolerance:
+        raise ValueError("authenticated entry fill exceeds submitted size")
+    if _latest_order_fact_matched_size(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    ) >= filled - Decimal("0.000001"):
+        return "stayed"
+
+    complete = _fill_size_completes_limit_order(
+        filled,
+        requested,
+        side=command.get("side"),
+    )
+    event_type = (
+        CommandEventType.FILL_CONFIRMED.value
+        if complete
+        else CommandEventType.PARTIAL_FILL_OBSERVED.value
+    )
+    remaining = max(Decimal("0"), requested - filled)
+    observed_at = str(facts.get("observed_at") or _now_iso())
+    source = str(facts.get("source") or "REST")
+    payload = {
+        "schema_version": 1,
+        "reason": "authenticated_entry_trade_fact_committed",
+        "proof_class": "canonical_confirmed_trade_facts_exact_order",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": venue_order_id,
+        "trade_ids": list(facts["trade_ids"]),
+        "trade_fact_ids": list(facts["trade_fact_ids"]),
+        "filled_size": _decimal_text(filled),
+        "fill_price": _decimal_text(fill_price),
+        "requested_size": _decimal_text(requested),
+        "remaining_size": _decimal_text(remaining),
+        "source": source,
+        "required_predicates": {
+            "command_state_accepts_fill": True,
+            "entry_buy_identity": True,
+            "bound_venue_order_id_matches_trade": True,
+            "authenticated_confirmed_trade_facts": True,
+            "fill_price_respects_submitted_limit": True,
+            "cumulative_fill_does_not_exceed_requested_size": True,
+        },
+        "source_proof": {
+            "source_function": (
+                "command_recovery.reconcile_authenticated_entry_trade_facts"
+            ),
+            "source_reason": "durable_trade_fact_normal_path",
+        },
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+    sp_name = f"sp_authenticated_entry_fill_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        append_order_fact(
+            conn,
+            venue_order_id=venue_order_id,
+            command_id=command_id,
+            state="MATCHED" if complete else "PARTIALLY_MATCHED",
+            remaining_size=_decimal_text(remaining),
+            matched_size=_decimal_text(filled),
+            source=source,
+            observed_at=observed_at,
+            venue_timestamp=observed_at,
+            raw_payload_hash=_payload_hash(payload),
+            raw_payload_json=payload,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=event_type,
+            occurred_at=observed_at,
+            payload=payload,
+        )
+        from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
+
+        _ensure_entry_fill_position_event(
+            conn,
+            command=command,
+            venue_order_id=venue_order_id,
+            filled_size=_decimal_text(filled),
+            fill_price=_decimal_text(fill_price),
+            observed_at=_coerce_iso_datetime(observed_at),
+            command_event=event_type,
+            order_fact_source=source,
+        )
+        expected_state = (
+            CommandState.FILLED.value if complete else CommandState.PARTIAL.value
+        )
+        command_row = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        projection_event = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND lower(COALESCE(order_id, '')) = lower(?)
+             LIMIT 1
+            """,
+            (str(command.get("position_id") or ""), venue_order_id),
+        ).fetchone()
+        execution_fact = conn.execute(
+            """
+            SELECT 1
+              FROM execution_fact
+             WHERE position_id = ?
+               AND command_id = ?
+               AND order_role = 'entry'
+               AND filled_at IS NOT NULL
+               AND shares > 0
+             LIMIT 1
+            """,
+            (str(command.get("position_id") or ""), command_id),
+        ).fetchone()
+        if (
+            command_row is None
+            or str(command_row["state"] or "") != expected_state
+            or projection_event is None
+            or execution_fact is None
+        ):
+            raise RuntimeError(
+                "authenticated entry fill did not atomically project command and "
+                f"position: command_state={str(command_row['state'] or '') if command_row else '<missing>'} "
+                f"expected_state={expected_state} position_event={projection_event is not None} "
+                f"execution_fact={execution_fact is not None}"
+            )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    logger.warning(
+        "recovery: command %s %s authenticated trade facts -> %s "
+        "(venue_order_id=%s filled_size=%s fill_price=%s)",
+        command_id,
+        command.get("state"),
+        "FILLED" if complete else "PARTIAL",
+        venue_order_id,
+        _decimal_text(filled),
+        _decimal_text(fill_price),
+    )
+    return "advanced"
+
+
+def reconcile_authenticated_entry_trade_facts(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
+) -> dict:
+    """Project authenticated entry fills without waiting for venue polling."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for command in _authenticated_entry_trade_fact_candidates(
+        conn,
+        command_id=command_id,
+    ):
+        summary["scanned"] += 1
+        try:
+            outcome = _reconcile_authenticated_entry_trade_fact(conn, command)
+        except Exception:
+            logger.exception(
+                "recovery: authenticated entry fill repair failed for command %s",
+                command.get("command_id"),
+            )
+            summary["errors"] += 1
+            continue
+        summary[outcome] += 1
+    return summary
+
+
 def reconcile_review_required_matched_submit_trade_facts(
     conn: sqlite3.Connection,
 ) -> dict:
@@ -18417,6 +18747,14 @@ def _reconcile_passes_inline(
         summary["stayed"] += review_mutex_summary["stayed"]
         summary["errors"] += review_mutex_summary["errors"]
 
+        authenticated_entry_fill_summary = (
+            reconcile_authenticated_entry_trade_facts(conn)
+        )
+        summary["authenticated_entry_trade_fact"] = authenticated_entry_fill_summary
+        summary["advanced"] += authenticated_entry_fill_summary["advanced"]
+        summary["stayed"] += authenticated_entry_fill_summary["stayed"]
+        summary["errors"] += authenticated_entry_fill_summary["errors"]
+
         matched_submit_fact_summary = (
             reconcile_review_required_matched_submit_trade_facts(conn)
         )
@@ -19628,6 +19966,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "completed_partial_order_facts",
         )
         _boot_db_pass(
+            "authenticated_entry_trade_fact",
+            reconcile_authenticated_entry_trade_facts,
+            "authenticated_entry_trade_fact",
+        )
+        _boot_db_pass(
             "edli_confirmed_legacy_command_repair",
             reconcile_edli_confirmed_legacy_command_repairs,
             "edli_confirmed_legacy_command_repair",
@@ -19767,6 +20110,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         summary["venue_snapshot_deferred"] = True
         summary["deferred_full_sweep"] = True
         return
+
+    _db_pass(
+        "authenticated_entry_trade_fact",
+        reconcile_authenticated_entry_trade_facts,
+        "authenticated_entry_trade_fact",
+    )
 
     if scope == "restart_preflight":
         _db_pass(

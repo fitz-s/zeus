@@ -18,9 +18,9 @@ GROWS existing organs — does not build a parallel pipeline:
     join in its M5 sweep, ``refresh_unresolved_reconcile_findings`` /
     ``run_reconcile_sweep``);
   - writes via the EXISTING ``src.state.venue_command_repo.append_trade_fact``
-    (append-only observation log; this module never mutates its semantics or
-    the command state machine — command-state side effects (FILL_CONFIRMED
-    events, position projections, findings) remain exchange_reconcile's job).
+    (append-only observation log), then invokes command_recovery's canonical
+    reducer inside the same transaction. Ingest never duplicates command or
+    lifecycle grammar.
 
 WHY THIS MODULE EXISTS (vs. relying on the M5 sweep alone)
 ------------------------------------------------------------
@@ -391,6 +391,7 @@ def sync_fills(
     unattributable_count = 0
     observation_appended = 0
     observation_skipped_idempotent = 0
+    commands_with_new_facts: set[str] = set()
 
     try:
         # Explicit outer transaction: append_trade_fact's internal atomicity
@@ -498,6 +499,25 @@ def sync_fills(
             )
             appended += 1
             recorded_facts.add(fact_key)
+            commands_with_new_facts.add(command_id)
+
+        projected = 0
+        if commands_with_new_facts:
+            from src.execution.command_recovery import (
+                reconcile_authenticated_entry_trade_facts,
+            )
+
+            for command_id in sorted(commands_with_new_facts):
+                projection = reconcile_authenticated_entry_trade_facts(
+                    conn,
+                    command_id=command_id,
+                )
+                if int(projection.get("errors", 0) or 0) > 0:
+                    raise RuntimeError(
+                        "authenticated fill projection failed for "
+                        f"command {command_id}"
+                    )
+                projected += int(projection.get("advanced", 0) or 0)
 
         _advance_watermark(
             conn,
@@ -525,6 +545,7 @@ def sync_fills(
         "unattributable_count": unattributable_count,
         "observation_appended": observation_appended,
         "observation_skipped_idempotent": observation_skipped_idempotent,
+        "projected": projected,
         "watermark_ts": observed.isoformat(),
     }
 

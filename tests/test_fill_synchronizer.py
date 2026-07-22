@@ -390,6 +390,58 @@ class TestDurableCoverageWatermark:
             "transaction, it is not a separate commit"
         )
 
+    def test_authenticated_fill_projection_runs_inside_ingest_transaction(
+        self, conn, monkeypatch
+    ):
+        import src.execution.command_recovery as command_recovery
+
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        adapter = FakeSyncAdapter([_trade(trade_id="trade-1", order_id="ord-1")])
+        calls: list[tuple[str, bool]] = []
+
+        def _project(active_conn, *, command_id=None):
+            calls.append((str(command_id), active_conn.in_transaction))
+            return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+        monkeypatch.setattr(
+            command_recovery,
+            "reconcile_authenticated_entry_trade_facts",
+            _project,
+        )
+
+        result = sync_fills(conn, adapter, observed_at=NOW)
+
+        assert calls == [("cmd-1", True)]
+        assert result["projected"] == 1
+        assert len(_trade_rows(conn)) == 1
+        assert get_watermark(conn)["watermark_ts"] == NOW.isoformat()
+
+    def test_projection_failure_rolls_back_fill_observation_and_watermark(
+        self, conn, monkeypatch
+    ):
+        import src.execution.command_recovery as command_recovery
+
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        adapter = FakeSyncAdapter([_trade(trade_id="trade-1", order_id="ord-1")])
+
+        def _reject_projection(active_conn, *, command_id=None):
+            assert active_conn.in_transaction is True
+            assert command_id == "cmd-1"
+            return {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+
+        monkeypatch.setattr(
+            command_recovery,
+            "reconcile_authenticated_entry_trade_facts",
+            _reject_projection,
+        )
+
+        with pytest.raises(RuntimeError, match="authenticated fill projection failed"):
+            sync_fills(conn, adapter, observed_at=NOW)
+
+        assert _trade_rows(conn) == []
+        assert _observation_rows(conn) == []
+        assert get_watermark(conn) is None
+
 
 class TestWalletFillObservationsDbLevelInvariants:
     """packet I / wave-1.5: wallet_fill_observations is append-only and (save

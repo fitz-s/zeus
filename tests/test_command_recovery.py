@@ -1173,9 +1173,7 @@ def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
 
     assert apply_attempts == [{"blocking": False, "busy_timeout_ms": 0}]
     assert summary["db_lock_deferred"] is True
-    assert summary["db_lock_deferred_at"] == (
-        "review_required_matched_submit_trade_fact"
-    )
+    assert summary["db_lock_deferred_at"] == "authenticated_entry_trade_fact"
     assert summary["db_lock_deferred_count"] == 1
     assert summary["deferred_full_sweep"] is True
     assert summary["scope"] == "live_tick"
@@ -2593,6 +2591,7 @@ def _append_trade_fact(
     filled_size="1.25",
     fill_price="0.50",
     tx_hash: str | None = None,
+    source="REST",
 ):
     from src.state.venue_command_repo import append_trade_fact
 
@@ -2604,12 +2603,12 @@ def _append_trade_fact(
         state=state,
         filled_size=filled_size,
         fill_price=fill_price,
-        source="REST",
+        source=source,
         observed_at="2026-04-26T00:06:00Z",
         venue_timestamp="2026-04-26T00:06:00Z",
         tx_hash=tx_hash,
         raw_payload_hash=hashlib.sha256(
-            f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}:{tx_hash}".encode()
+            f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}:{tx_hash}:{source}".encode()
         ).hexdigest(),
         raw_payload_json={
             "id": trade_id,
@@ -2624,6 +2623,297 @@ def _append_trade_fact(
             ],
         },
     )
+
+
+class TestAuthenticatedEntryTradeFactProjection:
+    """A confirmed authenticated fill must become owned wealth immediately."""
+
+    def test_full_fill_atomically_advances_command_and_position(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = "cmd-authenticated-full"
+        position_id = "pos-authenticated-full"
+        order_id = "ord-authenticated-full"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-full",
+            token_id="tok-authenticated-full",
+            size=10.0,
+            price=0.50,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id="tok-authenticated-full",
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-full",
+            filled_size="10",
+            fill_price="0.40",
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn, command_id=command_id
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        position = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price,
+                   order_id, order_status, chain_state
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "shares": 10.0,
+            "cost_basis_usd": 4.0,
+            "entry_price": 0.4,
+            "order_id": order_id,
+            "order_status": "filled",
+            "chain_state": "synced",
+        }
+        event_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND order_id = ?
+            """,
+            (position_id, order_id),
+        ).fetchone()[0]
+        assert event_count == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE position_id = ? "
+            "AND command_id = ? AND order_role = 'entry' AND filled_at IS NOT NULL",
+            (position_id, command_id),
+        ).fetchone()[0] == 1
+        assert reconcile_authenticated_entry_trade_facts(
+            conn, command_id=command_id
+        ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND order_id = ?
+            """,
+            (position_id, order_id),
+        ).fetchone()[0] == 1
+
+    def test_partial_then_full_rebuilds_cumulative_fill_once(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = "cmd-authenticated-partial"
+        position_id = "pos-authenticated-partial"
+        order_id = "ord-authenticated-partial"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-partial",
+            token_id="tok-authenticated-partial",
+            size=10.0,
+            price=0.50,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id="tok-authenticated-partial",
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-partial-1",
+            filled_size="4",
+            fill_price="0.40",
+        )
+
+        first = reconcile_authenticated_entry_trade_facts(
+            conn, command_id=command_id
+        )
+        assert first == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "PARTIAL"
+        first_position = conn.execute(
+            "SELECT shares, cost_basis_usd, entry_price, order_status "
+            "FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(first_position) == {
+            "shares": 4.0,
+            "cost_basis_usd": 1.6,
+            "entry_price": 0.4,
+            "order_status": "partial",
+        }
+
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-partial-2",
+            filled_size="6",
+            fill_price="0.50",
+        )
+        second = reconcile_authenticated_entry_trade_facts(
+            conn, command_id=command_id
+        )
+
+        assert second == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        final_position = conn.execute(
+            "SELECT shares, cost_basis_usd, entry_price, order_status "
+            "FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(final_position) == {
+            "shares": 10.0,
+            "cost_basis_usd": 4.6,
+            "entry_price": 0.46,
+            "order_status": "filled",
+        }
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND order_id = ?
+            """,
+            (position_id, order_id),
+        ).fetchone()[0] == 1
+
+    @pytest.mark.parametrize(
+        ("filled_size", "fill_price"),
+        (("10", "0.51"), ("10.02", "0.40")),
+    )
+    def test_invalid_fill_economics_fail_closed(
+        self, conn, filled_size, fill_price
+    ):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = f"cmd-authenticated-invalid-{filled_size}-{fill_price}"
+        position_id = f"pos-authenticated-invalid-{filled_size}-{fill_price}"
+        order_id = f"ord-authenticated-invalid-{filled_size}-{fill_price}"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id=f"dec-authenticated-invalid-{filled_size}-{fill_price}",
+            token_id=f"tok-authenticated-invalid-{filled_size}-{fill_price}",
+            size=10.0,
+            price=0.50,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=f"tok-authenticated-invalid-{filled_size}-{fill_price}",
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id=f"trade-authenticated-invalid-{filled_size}-{fill_price}",
+            filled_size=filled_size,
+            fill_price=fill_price,
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn, command_id=command_id
+        )
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+        assert _get_state(conn, command_id) == "ACKED"
+        position = conn.execute(
+            "SELECT phase, shares, cost_basis_usd FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "pending_entry",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+            "AND order_id = ? AND event_type = 'ENTRY_ORDER_FILLED'",
+            (position_id, order_id),
+        ).fetchone()[0] == 0
+
+    @pytest.mark.parametrize(
+        ("fact_order_id", "source"),
+        (("ord-authenticated-other", "REST"), ("ord-authenticated-exact", "DATA_API")),
+    )
+    def test_non_exact_or_unauthenticated_fact_is_not_a_candidate(
+        self, conn, fact_order_id, source
+    ):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = f"cmd-authenticated-exclusion-{source}"
+        position_id = f"pos-authenticated-exclusion-{source}"
+        order_id = "ord-authenticated-exact"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id=f"dec-authenticated-exclusion-{source}",
+            token_id=f"tok-authenticated-exclusion-{source}",
+            size=10.0,
+            price=0.50,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=f"tok-authenticated-exclusion-{source}",
+        )
+        _append_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=fact_order_id,
+            trade_id=f"trade-authenticated-exclusion-{source}",
+            state="CONFIRMED",
+            filled_size="10",
+            fill_price="0.40",
+            source=source,
+        )
+
+        assert reconcile_authenticated_entry_trade_facts(
+            conn, command_id=command_id
+        ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "ACKED"
 
 
 def _insert_decision_log_trade_case_for_recovery(
