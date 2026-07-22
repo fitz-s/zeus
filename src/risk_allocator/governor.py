@@ -65,7 +65,7 @@ _PRE_SDK_REVIEW_REQUIRED_REASONS = {
 class CapPolicy:
     max_per_market_micro: int = 250_000_000
     max_per_event_micro: int = 500_000_000
-    max_per_resolution_window_micro: dict[str, int] = field(default_factory=lambda: {"default": 750_000_000})
+    max_per_resolution_window_micro: dict[str, int] = field(default_factory=dict)
     max_correlated_exposure_micro: int = 1_000_000_000
     unknown_side_effect_limit: int = 0
     reconcile_finding_limit: int = 0
@@ -251,14 +251,15 @@ class RiskAllocator:
         remaining_event = self._remaining_capacity(
             "event", event, self.cap_policy.max_per_event_micro
         )
-        window_cap = self.cap_policy.max_per_resolution_window_micro.get(
-            resolution,
-            self.cap_policy.max_per_resolution_window_micro.get(
-                "default", self.cap_policy.max_per_event_micro
-            ),
-        )
-        remaining_resolution = self._remaining_capacity(
-            "resolution", resolution, window_cap
+        window_cap = self.cap_policy.max_per_resolution_window_micro.get(resolution)
+        # An unconfigured/default label is not a shared economic horizon.  A
+        # single fallback bucket collapsed every city/date into one fixed-dollar
+        # rail before current cash, family payoff, and Fractional Kelly could be
+        # evaluated.  Only an explicitly configured window owns this constraint.
+        remaining_resolution = (
+            self._remaining_capacity("resolution", resolution, window_cap)
+            if window_cap is not None
+            else (1 << 63) - 1
         )
         remaining_correlated = self._remaining_capacity(
             "correlation", correlation, self.cap_policy.max_correlated_exposure_micro
