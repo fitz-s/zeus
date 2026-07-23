@@ -48,7 +48,7 @@ class CheckResult:
 
     ok=True: guard passed, tick may continue.
     ok=False: guard failed; reason names the RefusalReason, details holds
-    diagnostic context for logging.
+    telemetry context for logging.
 
     Shape inferred from SCAFFOLD §3 guard contract; not fully specified
     upstream (logged as deviation in P5.0a BATCH_DONE).

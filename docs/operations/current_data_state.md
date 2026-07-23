@@ -1,13 +1,13 @@
 # Current Data State
 
-Status: CURRENT — live belief center is the fusion posterior `openmeteo_ecmwf_ifs9_bayes_fusion_v1`. Supersedes the 2026-06-07 AIFS shadow/veto refresh (that product is dead — see below).
+Status: CURRENT — live belief center is the fusion posterior `openmeteo_ecmwf_ifs9_bayes_fusion_v1`. Supersedes the 2026-06-07 AIFS observation/veto refresh (that product is dead — see below).
 Last audited: 2026-07-21
 Max staleness: 14 days — re-query `state/zeus-forecasts.db` before trusting past that.
 Authority status: not authority law; audit-bound current fact only. Full source detail: `docs/operations/current/plans/coarse_feed_retirement_2026-07-20.md` and `architecture/data_sources_registry_2026_05_08.yaml`.
 
 ## Live forecast authority
 
-- **Live trade-authority product: `openmeteo_ecmwf_ifs9_bayes_fusion_v1`** — flag `openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled=true` (`config/settings.json:264`); 44,925 `forecast_posteriors` rows, latest `computed_at` 2026-07-21T01:27Z. This is the belief center, not a shadow/veto lane.
+- **Live trade-authority product: `openmeteo_ecmwf_ifs9_bayes_fusion_v1`** — current-only path; this stale dated snapshot must be re-audited before any runtime claim. It described the belief center, not an observation/veto lane.
 - Fed by the multi-model fusion basket in `raw_model_forecasts` (ecmwf_ifs, icon_*, ukmo, arome, ncep_nbm, jma_msm, plus `cwa_township` / `hko_fnd` official station forecasts re-homed onto `ingest_main`). Re-audit members/freshness from `SELECT model, MAX(captured_at) FROM raw_model_forecasts GROUP BY model`.
 
 ## Retired / dead — do NOT cite as live

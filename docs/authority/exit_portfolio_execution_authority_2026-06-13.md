@@ -1,25 +1,23 @@
 # Exit / Portfolio-Kelly / Dynamic-Execution / Constant-Elimination authority — 2026-06-13
 
+Status: ACTIVE
+
 ## ERRATUM (2026-07-02, operator decision)
 
-The delivery mechanism prescribed below — "All new capability lands flag-gated,
-default = current behavior, shadow-computed" (final section), "Replay-licensed
-feature flag only" (X3), "flag, replay-licensed" (priority item 5) — is
-**superseded** by the same-day operator law (2026-06-13): no standing shadow
-lane, live-direct, gate-mass is disease. Corrected delivery mechanism (P2
-precedent, followed by the order-engine rebuild plan
-`docs/rebuild/order_engine_implementation_architecture_2026-07-02.md`):
-**time-boxed promotion harness** — G3 byte-identical-OFF proof → settlement-graded
-evidence gate → ARM flip → flag deleted at promotion. No flag survives promotion;
-no permanently shadow-computed lane exists.
+The staged delivery language previously present in X3 and the priority list is
+superseded. Runtime has one live implementation: a change lands only after
+offline replay and executable tests prove the current policy, and missing proof
+fails closed at the ordinary admission boundary. No alternate implementation,
+mode switch, observation lane, activation ceremony, or parallel persistence is
+part of the live contract.
 
 Scope of the erratum is the runtime mechanism ONLY. The math is untouched: E/Q/X/K
 results stand, X1 (event-driven re-decision) is affirmed as core law, and K4's
-"paired replay / A-B shadow" **estimation** remains licensed — offline walk-forward
-replay as a design-time analysis tool is not a runtime shadow lane and was never
+"paired replay / paired A-B replay" **estimation** remains licensed — offline walk-forward
+replay as a design-time analysis tool is not a runtime parallel observe-only lane and was never
 banned.
 
-Status: AUTHORITY (clean-room consult-3, GPT Pro, no Zeus context). Raw archived at
+Ratification basis: clean-room consult-3, GPT Pro, no Zeus context. Raw archived at
 `consult3_exit_portfolio_execution_2026-06-13_raw.txt`. Confidence: HIGH for Q1
 fixed-position exit formulas, Q2 horse-race Kelly, the stop-loss-not-distinct proof;
 MEDIUM-HIGH for Q2 mean-variance/robust; MEDIUM for Q3 (microstructure, replay-gated).
@@ -121,7 +119,7 @@ scenario set Π (Sun & Boyd). This IS the posterior-uncertainty correction to fu
 Kelly — same family as the addendum A1 DR-Kelly, now joint.
 
 ### P4. Sequential bankroll reservation (boxed — replaces any hand-set cash reserve).
-Reserve = shadow price of liquidity, NOT a fixed fraction. HJB:
+Reserve = liquidity opportunity cost of liquidity, NOT a fixed fraction. HJB:
 `∂_t V + λ(t)·E_m[max_a{G(a;m) + V(t,w−a)} − V] = 0`, terminal V(T,w)=log w. A
 current bet must beat `Ψ_t(a;w)=V(t,w)−V(t,w−a)`. Fit opportunity arrival λ(t,city,
 type) (nonhomogeneous Poisson/Hawkes from opportunity timestamps incl. skipped)
@@ -144,7 +142,8 @@ Moallemi-Yuan). Chasing the touch throws away queue priority — hold vs chase h
 a formal crossover; do not naively chase.
 ### X3. Laddering across price levels is NOT generically optimal — valuable only
 when capacity / fill covariance / adverse-selection shape `A(δ_d)` supports it.
-Replay-licensed feature flag only.
+Admit it only after offline replay proves the current implementation; do not
+retain a dormant laddering implementation in live code.
 ### X4. Dynamic value ≥ one-shot (option value of re-quoting); the gap bounds when
 the simple one-shot maker/taker rule (addendum A8) is empirically adequate.
 
@@ -170,7 +169,7 @@ optimal `Δ* = √(2·C_p/(λ_j·r))`. Fit λ_j (edge/book jump intensity) from 
 License a decision/policy change iff `c_+·E[Δ_+] > c_−·E[(−Δ)_+] + c_impl`;
 normal approx `μ_Δ/σ_Δ > k*`, **k* SOLVED from the cost equation**
 (`c_+(φ(k)+k·Φ(k)) = c_−(φ(k)−k·Φ(−k)) + c_impl/σ`), never habit "2 sigma".
-Estimate Δ by paired replay / A-B shadow; σ_Δ by block-bootstrap by day/city/
+Estimate Δ by paired replay / paired A-B replay; σ_Δ by block-bootstrap by day/city/
 regime (preserve correlation); c_± from realized false-pos/false-neg loss; c_impl
 in log-growth units. → governs calibration maturity tiers (150/50/15), refit
 cadences, riskguard alert thresholds, min-fills licenses.
@@ -188,9 +187,8 @@ cadences, riskguard alert thresholds, min-fills licenses.
    Maps to kelly_multiplier / capital_efficiency gate (sweep ranks 1-3).
 3. **HIGH — constant elimination** (K1/K2/K3/K4): staleness, LCB α, cadences as
    fitted boundaries. Maps to the F kill list.
-4. **MEDIUM-HIGH — Q3 dynamic re-quoting** (after 1-2, replay-gated).
-5. **MEDIUM — laddering** (flag, replay-licensed).
+4. **MEDIUM-HIGH — Q3 dynamic re-quoting** (after 1-2, replay-proven).
+5. **MEDIUM — laddering** (offline evidence required before implementation).
 
-Delivery is live-direct via the time-boxed promotion harness (see the ERRATUM above:
-no standing shadow lane, no flag survives promotion). Every fitted constant keeps the K4
-licensing functional, never a bare count or habitual percentile.
+Delivery is live-direct as described by the ERRATUM above. Every fitted constant
+keeps the K4 licensing functional, never a bare count or habitual percentile.

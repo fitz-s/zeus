@@ -280,7 +280,7 @@ def _source_writer_frontier_status(now: datetime | None = None) -> dict[str, obj
         path = state_path("source_health.json")
         status["path"] = str(path)
         data = json.loads(path.read_text())
-    except Exception as exc:  # noqa: BLE001 - frontier diagnostics must not block trading.
+    except Exception as exc:  # noqa: BLE001 - frontier telemetry must not block trading.
         status["issue"] = f"SOURCE_HEALTH_READ_FAILED:{type(exc).__name__}"
         return status
     written_at_raw = data.get("written_at") if isinstance(data, dict) else None
@@ -1246,14 +1246,6 @@ def _reprice_decision_from_executable_snapshot(
     )
     # The first candidate is a passive maker limit. If the book supports an
     # immediate fill, the marketable branch below resizes with taker fees.
-    # Wave 6 / K1 (PR #348): per-edge unified-budget gate. The EKC haircut at
-    # this LIVE microstructure boundary is the duplicate that INV-40 drops once
-    # σ_market already entered edge_LCB at edge-scan. No-op at flag-OFF (the
-    # boundary ANDs with _unified_uncertainty_budget_enabled()). Single source
-    # of truth: the edge carries whether σ_market was applied.
-    _market_unc_in_lcb = bool(
-        getattr(decision.edge, "market_cost_uncertainty_applied", False)
-    )
     repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
         p_posterior=float(decision.edge.p_posterior),
         entry_price=float(snapshot_vwmp),
@@ -1261,7 +1253,6 @@ def _reprice_decision_from_executable_snapshot(
         sizing_bankroll=sizing_bankroll,
         kelly_multiplier=kelly_multiplier,
         effective_context=_maker_effective_context,  # W2
-        market_uncertainty_in_lcb=_market_unc_in_lcb,
     )
     if repriced_size_at_snapshot_vwmp <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
@@ -1304,7 +1295,6 @@ def _reprice_decision_from_executable_snapshot(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
             effective_context=_taker_effective_context,  # W3
-            market_uncertainty_in_lcb=_market_unc_in_lcb,
         )
         best_ask_fee_adjusted_edge = best_ask_edge - (
             taker_fee_rate * best_ask_float * (1.0 - best_ask_float)
@@ -1316,38 +1306,6 @@ def _reprice_decision_from_executable_snapshot(
     )
     allow_taker_upgrade = bool(final_intent_context.get("allow_taker_upgrade"))
     edge_aware_taker_enabled = allow_taker_upgrade
-    f34_crossing_evidence = None
-    # F34 cost-of-fill optimizer (OPT-IN, default OFF).
-    # ZEUS_TAKER_CROSSING_ENABLED=1 lets the math decide whether to cross the spread;
-    # default "0" preserves the existing passive-maker-only behavior exactly.
-    # Karachi safety: flag defaults OFF → zero impact on day0_window positions.
-    # Operator must validate via backtest before flipping.
-    if (
-        os.environ.get("ZEUS_TAKER_CROSSING_ENABLED", "0") == "1"
-        and allow_taker_upgrade
-        and not ask_only_entry_book
-    ):
-        from src.engine.evaluator import _crossing_decision as _f34_crossing_decision
-        _f34_order_size = best_ask_size_at_fee_adjusted_cost
-        _f34_expected_pnl = best_ask_fee_adjusted_edge * _f34_order_size
-        _f34_non_fill_prob = float(final_intent_context.get("f34_non_fill_probability", 0.5))
-        _f34_min_econ_size = float(final_intent_context.get("f34_min_economical_size", 5.0))
-        _f34_taker_fee_bps = taker_fee_rate * 10_000.0
-        should_cross, f34_evidence = _f34_crossing_decision(
-            best_ask_price=best_ask_float,
-            best_ask_size=_f34_order_size,
-            best_bid_price=best_bid_float,
-            p_posterior=float(decision.edge.p_posterior),
-            expected_pnl_if_filled=_f34_expected_pnl,
-            non_fill_probability=_f34_non_fill_prob,
-            taker_fee_bps=_f34_taker_fee_bps,
-            min_economical_size=_f34_min_econ_size,
-        )
-        f34_evidence["orderbook_best_ask_size"] = ask_size_float
-        f34_evidence["intended_order_size_usd"] = _f34_order_size
-        f34_crossing_evidence = dict(f34_evidence)
-        logger.info("F34_CROSSING_DECISION %s", f34_evidence)
-        edge_aware_taker_enabled = allow_taker_upgrade and bool(should_cross)
     edge_aware_taker_selected = False
     depth_sweep_limit_decimal = Decimal("0")
     marketable_buy_below_venue_min = False
@@ -1384,7 +1342,6 @@ def _reprice_decision_from_executable_snapshot(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
             effective_context=_taker_effective_context,  # W4
-            market_uncertainty_in_lcb=_market_unc_in_lcb,
         )
         if size_at_depth_limit <= 0.0:
             final_best_ask = None
@@ -1828,7 +1785,6 @@ def _reprice_decision_from_executable_snapshot(
         ),
         "marketable_buy_below_venue_min": bool(marketable_buy_below_venue_min),
         "best_ask_inside_edge_budget": bool(best_ask_inside_edge_budget),
-        "f34_crossing_evidence": f34_crossing_evidence,
         "best_ask_slippage_override_by_edge": bool(edge_aware_taker_selected),
         "best_ask_blocked_by_slippage": bool(
             best_ask_edge > 0.0
@@ -3846,7 +3802,7 @@ def _apply_family_monitor_overlay(
 
     This is live monitor logic over already-refreshed held-side probabilities and
     held-side bids. It does not read replay data and it never creates a
-    new entry. The point-value vector is diagnostic because it does not carry a
+    new entry. The point-value vector is telemetry because it does not carry a
     coherent current family probability distribution or the exit evaluator's
     fee/time/crowding costs. It therefore cannot veto EXIT or promote SELL.
     """
@@ -3864,7 +3820,7 @@ def _apply_family_monitor_overlay(
         "family_key": "|".join(key) if key else "",
         "position_count": len(family_positions),
         "mode": "live_family_hold_vs_direct_sell",
-        "value_authority": "point_estimate_diagnostic_only",
+        "value_authority": "point_estimate_non_authoritative_record",
         "can_veto_robust_exit": False,
         "can_promote_robust_hold": False,
     }
@@ -3875,7 +3831,7 @@ def _apply_family_monitor_overlay(
     for leg in family_positions:
         shares, held_prob, best_bid, held_ci, reason = _monitor_value_inputs(leg)
         # Only the position evaluated in this call is guaranteed to have a CI
-        # from this monitor cut. Sibling point values remain diagnostic; never
+        # from this monitor cut. Sibling point values remain telemetry; never
         # reuse a sibling's transient bound from an earlier loop iteration.
         if leg is not pos:
             held_ci = None
@@ -3951,7 +3907,7 @@ def _apply_family_monitor_overlay(
     payload["family_direct_sell_advantage_threshold_usd"] = sell_advantage_threshold
 
     if should_exit and _is_statistical_single_leg_exit(exit_decision, exit_reason):
-        payload["decision"] = "FAMILY_POINT_VALUE_DIAGNOSTIC_EXIT_PRESERVED"
+        payload["decision"] = "FAMILY_POINT_VALUE_NON_AUTHORITATIVE_EXIT_PRESERVED"
         payload["preserved_exit_reason"] = exit_reason
         setattr(pos, "_monitor_family_redecision", payload)
         validations = list(getattr(pos, "applied_validations", []) or [])
@@ -3987,9 +3943,9 @@ def _apply_family_monitor_overlay(
                 summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
             )
             return should_exit, exit_reason
-        payload["decision"] = "FAMILY_POINT_VALUE_DIAGNOSTIC_HOLD_PRESERVED"
+        payload["decision"] = "FAMILY_POINT_VALUE_NON_AUTHORITATIVE_HOLD_PRESERVED"
         payload["preserved_hold_reason"] = exit_reason
-        payload["diagnostic_suggested_action"] = "SELL"
+        payload["telemetry_suggested_action"] = "SELL"
         payload["belief_reversed_below_entry"] = True
         setattr(pos, "_monitor_family_redecision", payload)
         validations = list(getattr(pos, "applied_validations", []) or [])
@@ -5111,7 +5067,7 @@ def _build_exit_context(
             min(1.0, float(_cb_hi) + float(_held_price)),
         )
 
-    # Receipt-only evidence for the later family diagnostic. Always overwrite
+    # Receipt-only evidence for the later family telemetry. Always overwrite
     # so a missing current CI cannot reuse a prior monitor cycle's bound.
     setattr(pos, "_monitor_current_held_ci", _current_ci)
 
@@ -5293,19 +5249,19 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
 
     from src.strategy.market_fusion import vwmp
 
-    diagnostic_market_price = (
+    telemetry_market_price = (
         bid_f if _position_state_value(pos) == "day0_window" else float(vwmp(bid_f, ask_f, bid_size_f, ask_size_f))
     )
     source_timestamp = datetime.now(timezone.utc).isoformat()
     pos.last_monitor_best_bid = bid_f
     pos.last_monitor_best_ask = ask_f
-    pos.last_monitor_market_price = diagnostic_market_price
+    pos.last_monitor_market_price = telemetry_market_price
     pos.last_monitor_market_price_is_fresh = True
     pos.last_monitor_at = source_timestamp
     return (
         replace(
             exit_context,
-            current_market_price=diagnostic_market_price,
+            current_market_price=telemetry_market_price,
             current_market_price_is_fresh=True,
             best_bid=bid_f,
             best_ask=ask_f,
@@ -5599,7 +5555,6 @@ def execute_monitoring_phase(
     summary: dict,
     *,
     deps,
-    exit_order_submit_enabled: bool = True,
     run_exit_preflight: bool = True,
     held_position_monitor_budget_seconds: float | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
@@ -6245,27 +6200,12 @@ def execute_monitoring_phase(
                     city.timezone,
                     _now_utc,
                 )
-                # P4 site 1 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
-                # Flag ON (default post-A6 2026-05-04): respect the
-                # position's market-phase axis A — DAY0_WINDOW transition
-                # fires when the market is in MarketPhase.SETTLEMENT_DAY
-                # (city-local 00:00 of target_date through Polymarket
-                # endDate 12:00 UTC). The wider window matches operator
-                # framing "all 24 hours before midnight of the local
-                # market" and closes the legacy bug where west-of-UTC
-                # cities fired DAY0_WINDOW AFTER Polymarket trading
-                # already closed.
-                # Flag OFF (ZEUS_MARKET_PHASE_DISPATCH=0): byte-equal
-                # legacy ``hours_to_settlement <= 6.0`` anchored on
-                # city-local end-of-target_date — kept as escape hatch
-                # for legacy fixtures and rollback.
+                # DAY0_WINDOW follows the city-local target day.
                 from src.engine.dispatch import should_enter_day0_window
                 _enter_day0 = should_enter_day0_window(
                     target_date_str=pos.target_date,
                     city_timezone=city.timezone,
                     decision_time_utc=_now_utc,
-                    legacy_hours_to_settlement=hours_to_settlement,
-                    legacy_threshold_hours=6.0,
                 )
                 if (_enter_day0
                         and _position_state_value(pos) in {"active", "entered", "holding"}
@@ -6822,7 +6762,7 @@ def execute_monitoring_phase(
                     dict.fromkeys(
                         [
                             *(pos.applied_validations or []),
-                            "local_statistical_sell_diagnostic_only",
+                            "local_statistical_sell_non_authoritative_record",
                             "global_statistical_sell_authority_unavailable",
                         ]
                     )
@@ -6919,36 +6859,29 @@ def execute_monitoring_phase(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),
                 )
-                if not exit_order_submit_enabled:
-                    # Live submit-gate disabled: record the exit decision for
-                    # operator visibility but do not place a venue sell order.
-                    summary["exits_suppressed_no_submit"] = summary.get("exits_suppressed_no_submit", 0) + 1
-                    summary["exits"] += 1
-                    portfolio_dirty = True
-                else:
-                    from src.engine.global_batch_runtime import (
-                        _invalidate_global_holding_coverage,
-                    )
+                from src.engine.global_batch_runtime import (
+                    _invalidate_global_holding_coverage,
+                )
 
-                    _invalidate_global_holding_coverage()
-                    outcome = execute_exit(
-                        portfolio=portfolio,
-                        position=pos,
-                        exit_context=replace(exit_context, exit_reason=exit_reason),
-                        clob=clob,
-                        conn=conn,
-                        exit_intent=exit_intent,
-                        hard_fact_authority=(
-                            _hard_fact
-                            if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
-                            else None
-                        ),
-                    )
-                    if outcome.startswith("exit_filled:"):
-                        tracker.record_exit(pos)
-                        tracker_dirty = True
-                    summary["exits"] += 1
-                    portfolio_dirty = True
+                _invalidate_global_holding_coverage()
+                outcome = execute_exit(
+                    portfolio=portfolio,
+                    position=pos,
+                    exit_context=replace(exit_context, exit_reason=exit_reason),
+                    clob=clob,
+                    conn=conn,
+                    exit_intent=exit_intent,
+                    hard_fact_authority=(
+                        _hard_fact
+                        if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
+                        else None
+                    ),
+                )
+                if outcome.startswith("exit_filled:"):
+                    tracker.record_exit(pos)
+                    tracker_dirty = True
+                summary["exits"] += 1
+                portfolio_dirty = True
 
             # FIX 2b (2026-06-20): apply the DEFERRED static-time closed-market
             # stamp only now that the live exit lane has run. The terminal stamp

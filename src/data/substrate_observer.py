@@ -39,8 +39,7 @@ PENDING-FAMILY SCOPE IS DB-MEDIATED, NOT QUEUE-GATED (§4.1/§7 I1): the warmer 
   (``opportunity_event_processing WHERE processing_status='pending'`` via
   ``_pending_family_rows_for_refresh``) — a queryable TABLE, never an in-process queue
   handle. A reactor backlog changes WHICH families it prioritizes, never WHETHER it
-  fires. The same SELECT helper is reused (cross-process, by re-reading the same table)
-  by src.main's mainstream warmer, which STAYS in P1.
+  fires.
 
 INV-37: the producer WRITE is single-DB (trades.db only) via ``get_trade_connection`` —
   the cross-DB ATTACH+SAVEPOINT rule is not triggered (no cross-DB write). The only
@@ -414,7 +413,6 @@ def _claim_order_priority_families_for_refresh(
         events = EventStore(world_conn, consumer_name=consumer_name).fetch_pending(
             decision_time=now_utc.isoformat(),
             limit=event_limit,
-            day0_is_tradeable=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -2578,7 +2576,7 @@ def _market_discovery_cycle() -> None:
         _market_discovery_lock.release()
         logger.info("market_discovery deferred: executable substrate refresh already running")
         return
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
 
     process_lock_ctx = acquire_lock("market_substrate_refresh")
     try:
@@ -2717,7 +2715,7 @@ def _edli_market_substrate_warm_cycle() -> None:
         except Exception:  # noqa: BLE001
             pass
         return summary
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
 
     process_lock_ctx = acquire_lock("market_substrate_refresh")
     try:
@@ -2867,7 +2865,7 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
         except Exception:  # noqa: BLE001
             pass
         return summary
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
 
     process_lock_ctx = acquire_lock("market_substrate_refresh")
     try:
@@ -3145,7 +3143,7 @@ def refresh_money_path_substrate_now(
     world_conn = None
     forecasts_conn = None
     try:
-        from src.data.dual_run_lock import acquire_lock
+        from src.data.job_lock import acquire_lock
 
         while True:
             process_lock_ctx = acquire_lock("market_substrate_refresh")

@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS decision_certificates (
     canonicalization_version TEXT NOT NULL,
     semantic_key TEXT NOT NULL,
     claim_type TEXT NOT NULL,
-    mode TEXT NOT NULL CHECK (mode IN ('LIVE','NO_SUBMIT','REPLAY_COUNTERFACTUAL')),
+    mode TEXT NOT NULL CHECK (mode = 'LIVE'),
     decision_time TEXT NOT NULL,
     source_available_at TEXT,
     agent_received_at TEXT,

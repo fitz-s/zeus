@@ -42,15 +42,11 @@
 		<string>/Users/leofitz/zeus</string>
 		<key>PYTHONSAFEPATH</key>
 		<string>1</string>
-		<key>ZEUS_AUTONOMOUS_REDEEM_ENABLED</key>
-		<string>0</string>
 		<key>ZEUS_CLOB_FACT_CACHE_TTL_SECONDS</key>
 		<string>0</string>
 		<key>ZEUS_DB_BUSY_TIMEOUT_MS</key>
 		<string>30000</string>
 		<key>ZEUS_ENTRY_FORECAST_READINESS_WRITER</key>
-		<string>1</string>
-		<key>ZEUS_HARVESTER_LIVE_ENABLED</key>
 		<string>1</string>
 		<key>ZEUS_LIVE_DERIVED_WRITE_BUSY_TIMEOUT_MS</key>
 		<string>1000</string>
@@ -73,8 +69,6 @@
 		<key>ZEUS_TIGGE_INGEST_ENABLED</key>
 		<string>1</string>
 		<key>ZEUS_USER_CHANNEL_WS_AUTO_DERIVE</key>
-		<string>1</string>
-		<key>ZEUS_USER_CHANNEL_WS_ENABLED</key>
 		<string>1</string>
 		<key>ZEUS_VENUE_HEARTBEAT_MODE</key>
 		<string>external</string>

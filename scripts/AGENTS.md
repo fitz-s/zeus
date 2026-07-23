@@ -70,12 +70,11 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `watch_source_contract.py` | Polymarket settlement source-contract monitor, city source-block writer, and conversion-history reporter |
 | `build_oof_qlcb_reliability_table.py` | Config writer: build generated OOF q_lcb reliability artifact from read-only forecasts DB plus offline forecast JSON (created 2026-06-18) |
 | `source_contract_auto_convert.py` | Cron-safe source-contract transition controller, deterministic date-scope planner, apply/evidence runner, source-block release gate, receipt writer, and Discord reporter |
-| `arm_live_mode.sh` | Deprecated operator tool retained only for non-live execution cleanup checks; it must not be used to introduce runtime modes (created 2026-05-01) |
 | `install_hooks.sh` | Installs git pre-commit and related hook symlinks for fail-closed enforcement (ultrareview25 P0-2; created 2026-05-01) |
 | `check_dynamic_sql.py` | Enforcement scan for f-string SQL interpolations without whitelist; security review §10 antibody (created 2026-05-01) |
 | `check_identity_column_defaults.py` | Enforcement check for identity-column DEFAULT violations per INV-14 and SYNTHESIS K-D (created 2026-05-01) |
 | `check_invariant_test_citations.py` | Enforcement scan verifying all test files carry invariant citation headers per SYNTHESIS K-A two-ring rule (created 2026-05-01) |
-| `check_live_restart_preflight.py` | Read-only pre-restart diagnostic for process state, submit config, posterior freshness, pending-exit risk, and held-position belief coverage (created 2026-06-18) |
+| `check_live_restart_preflight.py` | Read-only pre-restart proof for process state, structural submit authority, posterior freshness, pending-exit risk, and held-position belief coverage (created 2026-06-18) |
 | `migrate_observations_k1.py` | Repair script: migrates live state/zeus-world.db::observations from legacy single-atom to K1 dual-atom shape (dry-run/apply; created 2026-05-01) |
 | `_rebuild_calibration_pairs_parallel.py` | Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs; imported lazily when --workers>1 (created 2026-05-11) |
 | `authority_inventory.py` | Authority inventory v2 per task_2026-05-15_p9_authority_inventory SCAFFOLD; diagnostic report writer (created 2026-05-15) |
@@ -85,7 +84,6 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `check_contract_source_fields.py` | Enforcement scan verifying source-contract fields on all contract entries (created 2026-05-01) |
 | `check_pr_identity_collisions.py` | Enforcement scan for PR identity collisions; diagnostic (created 2026-05-04) |
 | `check_schema_version.py` | Enforcement check: init_schema boot invariant per task_2026-05-11_init_schema_boot_invariant §5.6 (created 2026-05-11) |
-| `check_live_release_gate.py` | Read-only live-release gate for loaded SHA, current schema, clean command/redeem state, freshness, and paper money-path proof (created 2026-05-21) |
 | `check_table_registry_coherence.py` | Enforcement scan verifying table_registry coherence against live DB schema (created 2026-05-14) |
 | `check_writer_signature_typing.py` | Enforcement scan for writer signature typing conformance (created 2026-05-14) |
 | `ci/semantic_diff_classifier.py` | Money-path semantic diff classifier for CI selected-test routing (created 2026-05-21) |
@@ -95,7 +93,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `data_chain_monitor.sh` | Shell monitor for data chain health; runtime support (created 2026-05-11) |
 | `ddd_replay.py` | DDD v1→v2 replay diagnostic; replay correctness probe (created 2026-05-03) |
 | `drop_world_ghost_tables.py` | Repair: drop ghost tables from zeus-world.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P3 D2 (dry-run/apply; created 2026-05-14) |
-| `expire_auto_pause.sh` | Operator tool: expire auto-pause state; sister script of arm_live_mode.sh, runs only step 3 (created 2026-05-01) |
+| `expire_auto_pause.sh` | Operator tool: expire auto-pause state (created 2026-05-01) |
 | `live_health_monitor.sh` | Polls live_health_probe.py every 60s; emits one line per state change; runtime support (created 2026-05-11) |
 | `local_post_extract_chain.sh` | Local post-extract chain for TIGGE downloads; pairs with cloud_tigge_autochain.sh (created 2026-05-04) |
 | `maintenance_worker_install.py` | Installer for maintenance_worker daemon and rules; config_writer (created 2026-05-15) |

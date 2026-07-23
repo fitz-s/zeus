@@ -7,7 +7,6 @@ Background
 ----------
 Zeus has at least 5 independent ``_atomic_write_json`` private helpers
 (``src/state/portfolio.py``, ``src/control/cutover_guard.py``,
-``src/control/entry_forecast_promotion_evidence_io.py``,
 ``src/data/station_migration_probe.py``, ``scripts/source_contract_auto_convert.py``)
 plus several callsites with hardcoded ``Path(__file__).resolve().parent.parent.parent / "data"``
 pattern (e.g. ``src/strategy/oracle_penalty.py``,

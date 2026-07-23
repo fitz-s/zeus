@@ -549,7 +549,7 @@ def apply_guard(
          ``hits = round(hit_rate_g * N_g)``. If ``N_g >= N_MIN``, serve the continuous
          calibrated lower bound ``q_safe = min(band_q_lcb, L_g)``. The after-cost
          ``q_safe − price − cost > EDGE_FLOOR`` check is the caller's (it has the route
-         price + cost). The bucket floor is diagnostic provenance, not a second binary
+         price + cost). The bucket floor is telemetry provenance, not a second binary
          veto: a known cell may prove the served band overclaimed while still proving a
          positive, tradeable lower bound.
       5. ACTIVE sparse-cell path — exact cell missing/thin: coarsen only the q_lcb bucket

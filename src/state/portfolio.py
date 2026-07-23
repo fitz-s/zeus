@@ -31,7 +31,6 @@ from src.config import (
     exit_daily_hurdle_rate,
     exit_fee_rate,
     get_mode,
-    hold_value_exit_costs_enabled,
     settings,
     state_path,
 )
@@ -927,35 +926,28 @@ class Position:
             return None
         applied.append("ev_gate")
         executable_bid = float(best_bid)
-        if hold_value_exit_costs_enabled():
-            applied.append("hold_value_exit_costs_enabled")
-            if hours_to_settlement is None or hours_to_settlement < 0.0:
-                applied.append("hold_value_hours_unknown_time_cost_zero")
-            _crowding = _compute_exit_correlation_crowding(
-                this_cluster=self.cluster,
-                portfolio_positions=portfolio_positions,
-                bankroll=bankroll,
-                shares=shares,
-                best_bid=executable_bid,
-                crowding_rate=exit_correlation_crowding_rate(),
-            )
-            if _crowding > 0.0:
-                applied.append("hold_value_correlation_crowding_applied")
-            hold_value = HoldValue.compute_with_exit_costs(
-                shares=shares,
-                current_p_posterior=current_p_posterior,
-                best_bid=executable_bid,
-                hours_to_settlement=hours_to_settlement,
-                fee_rate=exit_fee_rate(),
-                daily_hurdle_rate=exit_daily_hurdle_rate(),
-                correlation_crowding=_crowding,
-            )
-        else:
-            hold_value = HoldValue.compute(
-                gross_value=shares * current_p_posterior,
-                fee_cost=0.0,
-                time_cost=0.0,
-            )
+        applied.append("hold_value_exit_costs")
+        if hours_to_settlement is None or hours_to_settlement < 0.0:
+            applied.append("hold_value_hours_unknown_time_cost_zero")
+        _crowding = _compute_exit_correlation_crowding(
+            this_cluster=self.cluster,
+            portfolio_positions=portfolio_positions,
+            bankroll=bankroll,
+            shares=shares,
+            best_bid=executable_bid,
+            crowding_rate=exit_correlation_crowding_rate(),
+        )
+        if _crowding > 0.0:
+            applied.append("hold_value_correlation_crowding_applied")
+        hold_value = HoldValue.compute_with_exit_costs(
+            shares=shares,
+            current_p_posterior=current_p_posterior,
+            best_bid=executable_bid,
+            hours_to_settlement=hours_to_settlement,
+            fee_rate=exit_fee_rate(),
+            daily_hurdle_rate=exit_daily_hurdle_rate(),
+            correlation_crowding=_crowding,
+        )
         # The fee belongs to the executable SELL, not to hold-to-settlement.
         # compute_with_exit_costs exposes that immediate fee as fee_cost; move
         # it across the comparison instead of making both sides optimistic in
@@ -1020,7 +1012,7 @@ class Position:
             self.neg_edge_count = 0
         decision_scoped_value_validations = {
             "ev_gate",
-            "hold_value_exit_costs_enabled",
+            "hold_value_exit_costs",
             "hold_value_hours_unknown_time_cost_zero",
             "hold_value_correlation_crowding_applied",
             "hold_value_probability_basis:current_q_ucb",
@@ -1686,11 +1678,8 @@ class Position:
     ) -> ExitDecision:
         """Standard 2-consecutive EDGE_REVERSAL with EV gate.
 
-        T6.4: when feature_flags.HOLD_VALUE_EXIT_COSTS is enabled, the EV
-        gate uses HoldValue.compute_with_exit_costs (fee + time opportunity
-        cost) instead of the legacy zero-cost HoldValue.compute. hours_to_
-        settlement feeds the time_cost component; when None, time_cost
-        collapses to 0.0 as a soft conservative default.
+        The EV gate uses HoldValue.compute_with_exit_costs. hours_to_settlement
+        feeds the time cost; when absent, the time term is zero.
 
         T6.4-phase2: portfolio_positions + bankroll thread the correlation-
         crowding substrate through to HoldValue.compute_with_exit_costs.
@@ -1778,11 +1767,9 @@ class Position:
     ) -> ExitDecision:
         """Layer 1: Buy-no has ~87.5% base win rate. Different exit math.
 
-        T6.4: routes the EV gate through HoldValue contract (previously
-        bypassed). When feature_flags.HOLD_VALUE_EXIT_COSTS is enabled,
-        exit decisions include fee + time opportunity cost. Buy-no sell value
-        uses held-token best_bid; current_market_price remains the probability
-        / forward-edge input and must not masquerade as executable proceeds.
+        The EV gate always includes fee and time opportunity cost. Buy-no sell
+        value uses held-token best_bid; current_market_price remains the
+        probability input and cannot masquerade as executable proceeds.
 
         T6.4-phase2: portfolio_positions + bankroll thread correlation-
         crowding substrate; defaults preserve pre-phase2 behavior (cost 0.0)

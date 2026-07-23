@@ -1,6 +1,6 @@
 # Zeus forbidden patterns
 
-This file is the human-readable map for machine checks.  
+This file is the human-readable map for machine checks.
 If a pattern is forbidden here, it should either already be machine-enforced or be scheduled for a gate stage.
 
 Canonical source: `architecture/negative_constraints.yaml` (NC-01 through NC-10)
@@ -8,25 +8,25 @@ Architecture-level definitions: `docs/authority/zeus_current_architecture.md` §
 
 ## Immediate forbidden patterns
 
-1. **FM-04** — `close_position(...)` or `void_position(...)` from engine/orchestration code  
-   Rationale: orchestration must emit lifecycle intent, not directly terminalize positions.  
+1. **FM-04** — `close_position(...)` or `void_position(...)` from engine/orchestration code
+   Rationale: orchestration must emit lifecycle intent, not directly terminalize positions.
    Enforcement: semgrep `zeus-no-direct-close-from-engine` (NC-04)
 
-2. **FM-06** — `_control_state[...]` reads/writes outside `src/control/control_plane.py`  
-   Rationale: memory state is not durable policy.  
+2. **FM-06** — `_control_state[...]` reads/writes outside `src/control/control_plane.py`
+   Rationale: memory state is not durable policy.
    Enforcement: semgrep `zeus-no-memory-only-control-state` (NC-06)
 
-3. **FM-03** — strategy fallback to `"opening_inertia"` or any default when attribution is missing  
-   Rationale: governance contamination masquerades as completeness. If attribution doesn't exist, fail — never guess.  
+3. **FM-03** — strategy fallback to `"opening_inertia"` or any default when attribution is missing
+   Rationale: governance contamination masquerades as completeness. If attribution doesn't exist, fail — never guess.
    Enforcement: semgrep `zeus-no-strategy-default-fallback` (NC-03)
 
-4. **FM-02** — new writes to `positions.json`, `status_summary.json`, or `strategy_tracker.json` outside designated export modules  
-   Rationale: derived exports must not become shadow authority.  
+4. **FM-02** — new writes to `positions.json`, `status_summary.json`, or `strategy_tracker.json` outside designated export modules
+   Rationale: derived exports must not become observation authority.
    Enforcement: semgrep `zeus-no-json-authority-write` (NC-02)
 
-5. **FM-08** — bare implicit unit assumptions (`F` default, `C` default) in semantic code paths  
-   Rationale: °F and °C cities have different settlement semantics (2°F range vs 1°C point bins). Hardcoded unit assumptions silently produce wrong probabilities for the wrong city set.  
-   Enforcement: semgrep `zeus-no-default-unit-fallback` (severity: WARNING — see follow-up below) + test `tests/test_cross_module_invariants.py::test_inv04_no_bare_temperature_threshold_comparisons_in_src` (NC-08).  
+5. **FM-08** — bare implicit unit assumptions (`F` default, `C` default) in semantic code paths
+   Rationale: °F and °C cities have different settlement semantics (2°F range vs 1°C point bins). Hardcoded unit assumptions silently produce wrong probabilities for the wrong city set.
+   Enforcement: semgrep `zeus-no-default-unit-fallback` (severity: WARNING — see follow-up below) + test `tests/test_cross_module_invariants.py::test_inv04_no_bare_temperature_threshold_comparisons_in_src` (NC-08).
    Severity follow-up: trading-system safety argues for ERROR (silent unit confusion → wrong settlement). Upgrade requires excluding the unit-identity definition sites in `src/contracts/calibration_bins.py` and `src/contracts/settlement_semantics.py` from the rule's `paths.include`, and refactoring `src/data/observation_client.py:~411` to derive `unit` from the city rather than hard-code `"F"` (ASOS-implicit). Tracked as ultrareview-25 F16 follow-up.
 
 6. **FM-NC-16** — `place_limit_order(...)` calls outside the gateway boundary
@@ -45,24 +45,24 @@ Architecture-level definitions: `docs/authority/zeus_current_architecture.md` §
 
 ## Strict patterns (always enforced)
 
-1. **FM-07** — raw `phase` / `state` string assignment outside lifecycle fold/manager/projection  
+1. **FM-07** — raw `phase` / `state` string assignment outside lifecycle fold/manager/projection
    Enforcement: semgrep `zeus-no-direct-phase-assignment` (NC-07)
 
-2. **FM-09** — `1 - p` complements in engine/state/execution code paths  
-   Rationale: ad hoc probability complements across architecture boundaries break when semantic contracts exist (e.g., `HeldSideProbability` vs `NativeSidePrice`). The ban targets PROBABILITY/BELIEF derivation (a NO win-prob/edge/q_lcb/fill assumption from a YES belief = phantom-liquidity fiction), NOT a non-crossing PRICE placement bound.  
-   Carve-out (NC-09, 2026-06-10): a complement value `1 - comp_best_bid - tick` MAY bound ORDER PLACEMENT against the Polymarket mint boundary (the venue mint-matches complementary BUY orders, so the complement is a real non-crossing boundary), but may NEVER price an entry/edge/q/fill. Admissible only as a `min()` cap that lowers the resting limit; edge stays `q_fill_adj - our_quote`. Pinned by `tests/engine/test_maker_quote_empty_no_ask.py::test_quote_edge_non_positive_still_rejects`.  
+2. **FM-09** — `1 - p` complements in engine/state/execution code paths
+   Rationale: ad hoc probability complements across architecture boundaries break when semantic contracts exist (e.g., `HeldSideProbability` vs `NativeSidePrice`). The ban targets PROBABILITY/BELIEF derivation (a NO win-prob/edge/q_lcb/fill assumption from a YES belief = phantom-liquidity fiction), NOT a non-crossing PRICE placement bound.
+   Carve-out (NC-09, 2026-06-10): a complement value `1 - comp_best_bid - tick` MAY bound ORDER PLACEMENT against the Polymarket mint boundary (the venue mint-matches complementary BUY orders, so the complement is a real non-crossing boundary), but may NEVER price an entry/edge/q/fill. Admissible only as a `min()` cap that lowers the resting limit; edge stays `q_fill_adj - our_quote`. Pinned by `tests/engine/test_maker_quote_empty_no_ask.py::test_quote_edge_non_positive_still_rejects`.
    Enforcement: semgrep `zeus-no-ad-hoc-probability-complement` (NC-09)
 
-3. **FM-05** — fallback from missing decision snapshot to latest snapshot  
-   Rationale: violates point-in-time truth (INV-06). Learning must preserve what was knowable at decision time.  
+3. **FM-05** — fallback from missing decision snapshot to latest snapshot
+   Rationale: violates point-in-time truth (INV-06). Learning must preserve what was knowable at decision time.
    Enforcement: test + forbidden_patterns check (NC-05)
 
-4. **FM-01** — broad edits spanning K0 and K3 in the same patch without explicit packet justification  
-   Rationale: zone boundary discipline. Math code (K3) must not redefine kernel truth (K0) in a single uncommitted patch.  
+4. **FM-01** — broad edits spanning K0 and K3 in the same patch without explicit packet justification
+   Rationale: zone boundary discipline. Math code (K3) must not redefine kernel truth (K0) in a single uncommitted patch.
    Enforcement: packet review (NC-01)
 
-5. **FM-10** — new shadow persistence surface without explicit deletion or demotion plan  
-   Rationale: every new file that stores state creates a potential parallel truth surface that drifts from DB authority.  
+5. **FM-10** — new observation persistence surface without explicit deletion or demotion plan
+   Rationale: every new file that stores state creates a potential parallel truth surface that drifts from DB authority.
    Enforcement: packet review (NC-10)
 
 ## Reviewer rule

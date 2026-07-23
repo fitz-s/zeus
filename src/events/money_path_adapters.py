@@ -35,7 +35,7 @@ class KellyProof:
     execution_price: ExecutionPrice
     size_usd: float
     passed: bool
-    # Optional diagnostic fields (all default None — existing constructors unaffected).
+    # Optional telemetry fields (all default None — existing constructors unaffected).
     # Populated by evaluate_kelly to pinpoint why size collapsed to 0.
     effective_multiplier: float | None = None
     sizing_bankroll: float | None = None
@@ -279,7 +279,7 @@ def evaluate_kelly(
         size_usd = single_cap_usd
         _capped_by_single_position = True
 
-    # ── Diagnostic: compute binding_constraint (purely observational) ────────
+    # ── Telemetry: compute binding_constraint (purely observational) ────────
     # Determines WHICH limit drove size to 0 (or which path produced the result).
     # Does NOT alter size_usd or passed.
     _binding: str | None = None
@@ -299,7 +299,7 @@ def evaluate_kelly(
     if sizing_context is not None and sizing_context.has_portfolio_context:
         _corr_committed_diag = float(sizing_context.corr_committed_usd)
         _raw_committed_diag = float(sizing_context.raw_committed_usd)
-        # These legacy diagnostic fields now report the bankroll actually used
+        # These legacy telemetry fields now report the bankroll actually used
         # for marginal sizing. The heat/correlation pressure is carried in
         # ``portfolio_heat`` and ``effective_multiplier`` instead of a hard
         # reduced-bankroll gate.

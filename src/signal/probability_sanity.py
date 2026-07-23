@@ -15,11 +15,6 @@ Gates:
   - market px<0.05 AND p_cal>0.35         → "EXTREME_MARKET_DISAGREEMENT_LOW_PRICE_HIGH_PROB:idx={},price={},p={}"
   - else                                  → (True, None)
 
-check_cumulative_tail_discrepancy (Gate 6 / LIVE-PROB-P0, TELEMETRY ONLY):
-  - tail bins = underpriced quoted bins where 0 < p_market < low_price_threshold
-  - computes family-level tail_cal/tail_mkt/entropy for audit columns; does NOT reject
-  - called at evaluator.py ~4637 as telemetry; rejection moved to per-edge site
-
 check_edge_bin_tail_discrepancy (Gate 6 / LIVE-PROB-P0, LEGACY REJECTION PREDICATE):
   - per-candidate-edge-bin check: edge_bin must be sub-floor, ratio >= K,
     and sit in a contiguous sub-floor run >= tail_min_bins on tail side of mode
@@ -213,126 +208,6 @@ def validate_high_distribution(
                 )
 
     return True, None
-
-
-def check_cumulative_tail_discrepancy(
-    *,
-    bins: Sequence,
-    p_cal: np.ndarray,
-    market_prices: np.ndarray | None,
-) -> tuple[bool, str | None, dict | None]:
-    """Gate 6 (LIVE-PROB-P0): symmetric cumulative tail-mass discrepancy check.
-
-    Detects phantom edges where the model assigns substantial cumulative probability
-    to a tail region that the market has uniformly underpriced. Unlike Gate 5
-    (which checks per-bin p_cal > 0.35), this gate accumulates evidence across all
-    underpriced bins on EITHER side of the mode — catching Amsterdam-style cases
-    (left-tail) and warm-bias cases (right-tail, natural for LOW-metric markets or
-    warm-biased ensembles) where no individual bin trips Gate 5 but the cumulative
-    model probability far exceeds the market's assessment.
-
-    Design intent (tail-bin definition):
-      Tail bins = underpriced QUOTED bins where 0 < market_price < low_price_threshold.
-      Unquoted bins (px == 0.0) are excluded per Gate 5 convention — unquoted means
-      "no quote exists", not "market says impossible".
-      Left tail = sub-floor bins at indices < mode_idx (argmax of p_cal).
-      Right tail = sub-floor bins at indices > mode_idx.
-      Sides are checked independently so a fair edge on one side cannot mask a
-      phantom on the other.
-
-    Rejection condition (checked PER SIDE, independently):
-      sum(p_cal[tail_side]) >= K * sum(p_market[tail_side])
-      AND sum(p_market[tail_side]) < tail_market_mass_floor
-
-    The second condition (market tail mass below floor) ensures the gate only fires
-    when the market genuinely discounts the tail. Without it, a well-spread
-    distribution where market and model agree (both ~10% in tail) would spuriously
-    reject.
-
-    Amsterdam case (LEFT-tail phantom):
-      left_tail bins = indices 0–4 (bins 19–23°C, all with 0 < p_market < 0.05)
-      sum(p_cal[0:5]) = 0.211, sum(p_market[0:5]) = 0.059
-      ratio = 3.58 >= K=3.0, AND 0.059 < tail_market_mass_floor=0.10 → REJECT
-
-    RIGHT-tail phantom (mirror case):
-      Warm-biased ensemble on a HIGH-metric market: mode at low-end bin, several
-      right-side bins at p_market < 0.05 while p_cal assigns substantial mass.
-      sum(p_cal[right_tail]) >= K × sum(p_market[right_tail]) → REJECT.
-
-    Thresholds K and tail_market_mass_floor are read from settings.json
-    ``probability_sanity`` block with defaults 3.0 and 0.10 respectively.
-    Returns:
-        (True, None, evidence_dict) if no tail discrepancy detected.
-        (False, reason, evidence_dict) where reason = "PROB_DISTRIBUTION_TAIL_DISCREPANCY:..."
-        evidence_dict always contains keys: tail_cal, tail_mkt, entropy
-          (combined both sides; non-None whenever market_prices is not None).
-
-    The predicate always returns the truthful (ok=False, reason) when a phantom is detected,
-    making it independently testable.
-    """
-    if market_prices is None:
-        return True, None, None
-
-    p_cal = np.asarray(p_cal, dtype=np.float64)
-    market_prices = np.asarray(market_prices, dtype=np.float64)
-    thresholds = _sanity_thresholds()
-    low_price_threshold = thresholds["low_price_threshold"]
-    K = thresholds["tail_discrepancy_k"]
-    mass_floor = thresholds["tail_market_mass_floor"]
-    tail_min_bins = thresholds["tail_min_bins"]
-    # Entropy over p_cal (nats): always computed for observability.
-    p_pos = p_cal[p_cal > 0.0]
-    entropy = float(-np.sum(p_pos * np.log(p_pos)))
-
-    mode_idx = int(np.argmax(p_cal))
-    sub_floor_mask = (market_prices > 0.0) & (market_prices < low_price_threshold)
-
-    # Left tail: sub-floor bins strictly LEFT of mode.
-    # Amsterdam: mode at bin 5 (24°C); left bins = 0..4 (19–23°C).
-    left_mask = sub_floor_mask.copy()
-    left_mask[mode_idx:] = False  # zero bin at mode_idx and right
-
-    # Right tail: sub-floor bins strictly RIGHT of mode.
-    # Mirror case: warm-bias ensemble; sub-floor high-end bins where p_cal >> p_market.
-    right_mask = sub_floor_mask.copy()
-    right_mask[: mode_idx + 1] = False  # zero bin at mode_idx and left
-
-    # Aggregate for evidence (combined both sides).
-    combined_cal = float(p_cal[sub_floor_mask].sum()) if sub_floor_mask.any() else 0.0
-    combined_mkt = float(market_prices[sub_floor_mask].sum()) if sub_floor_mask.any() else 0.0
-    evidence = {
-        "tail_cal": combined_cal,
-        "tail_mkt": combined_mkt,
-        "entropy": entropy,
-    }
-
-    # Check each side independently; collect rejecting sides.
-    reject_parts: list[str] = []
-    for side_label, mask in (("left", left_mask), ("right", right_mask)):
-        n = int(mask.sum())
-        if n == 0:
-            continue
-        # Require ≥ tail_min_bins sub-floor bins on this side before ratio check.
-        # Prevents single-bin dust-bin FPs (n=1, market_price ≈ 0.001). Replay
-        # showed 64 such FPs at n=1 with tail_min_bins=1. Default is 2.
-        if n < tail_min_bins:
-            continue
-        s_cal = float(p_cal[mask].sum())
-        s_mkt = float(market_prices[mask].sum())
-        if s_mkt <= 0.0:
-            continue
-        ratio = s_cal / s_mkt
-        if ratio >= K and s_mkt < mass_floor:
-            reject_parts.append(
-                f"{side_label}:tail_cal={s_cal:.4f},tail_mkt={s_mkt:.4f},"
-                f"ratio={ratio:.2f},n_tail_bins={n}"
-            )
-
-    if not reject_parts:
-        return True, None, evidence
-
-    reason = "PROB_DISTRIBUTION_TAIL_DISCREPANCY:" + "|".join(reject_parts)
-    return False, reason, evidence
 
 
 def check_edge_bin_tail_discrepancy(
@@ -558,7 +433,7 @@ def probability_edge_bin_sanity(
         p_market: per-bin market prices; None → always PASS.
         direction: "buy_yes" | "buy_no" | "" (for telemetry).
         metric: "high" | "low" | "" (telemetry/config provenance only).
-        strategy_key: strategy label (telemetry only).
+        strategy_key: strategy label recorded for provenance only.
         market_phase: opaque label (for telemetry).
         config: optional pre-loaded threshold dict (overrides settings.json; for testing).
 

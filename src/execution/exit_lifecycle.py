@@ -2547,9 +2547,11 @@ def _red_force_exit_authorized(position: Position, exit_context: ExitContext) ->
     ):
         return False
     from src.riskguard.risk_level import RiskLevel
-    from src.riskguard.riskguard import get_current_level, get_force_exit_review
+    from src.riskguard.riskguard import get_current_level
 
-    return bool(get_current_level() == RiskLevel.RED or get_force_exit_review())
+    return get_current_level() == RiskLevel.RED
+
+
 def is_exit_cooldown_active(position: Position) -> bool:
     """Check if position is in retry cooldown period."""
     if position.exit_state != "retry_pending":
@@ -7516,7 +7518,7 @@ def run_exit_monitor_cycle(
     The chain-truth READ phase was lifted to the P4 post-trade-capital daemon.
     This order-runtime job keeps only the live exit-SUBMIT lane: held-position
     monitoring, exit preflight, pending-exit state transitions, and gated sell
-    order submission when ``real_order_submit_enabled`` is true.
+    order submission.
 
     ``held_position_monitor_active``/``mark_held_position_monitor_complete``
     are injected from src.main for non-reentrant run/complete signalling. Reactor
@@ -7546,7 +7548,6 @@ def run_exit_monitor_cycle(
 
     _settings_source = settings._data if hasattr(settings, "_data") else settings
     edli_cfg = _settings_source.get("edli", {}) if isinstance(_settings_source, dict) else {}
-    real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
     if held_position_monitor_active.is_set() and not monitor_claimed:
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
@@ -7613,7 +7614,6 @@ def run_exit_monitor_cycle(
                     artifact,
                     tracker,
                     summary,
-                    exit_order_submit_enabled=real_order_submit_enabled,
                     run_exit_preflight=True,
                     should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
                     defer_partial_orderbook_gaps=target_families is None,
@@ -7630,12 +7630,9 @@ def run_exit_monitor_cycle(
             # 2026-06-10 fix 2 — finding 4 "standing free option"). Cancels OUR
             # open resting ENTRY orders whose day0 bin is hard-fact dead for the
             # order's side, or whose family is oracle-anomaly paused. Cancels
-            # only REDUCE standing risk; gated to live-submit mode because in
-            # submit-disabled posture no real resting orders of ours exist (and
-            # the venue cancel is a real API call). Fail-soft.
+            # only REDUCE standing risk. Fail-soft.
             if (
                 not summary.get("held_monitor_preempted")
-                and real_order_submit_enabled
                 and bool(
                     edli_cfg.get(
                         "day0_dead_bin_order_cancel_enabled",
@@ -7728,7 +7725,6 @@ def run_exit_monitor_cycle(
             failed=not succeeded,
             reason=summary.get("monitoring_error"),
             extra={
-                "exit_order_submit_enabled": real_order_submit_enabled,
                 "monitors": summary.get("monitors", 0),
                 "exits": summary.get("exits", 0),
             },

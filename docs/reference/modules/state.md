@@ -110,7 +110,7 @@ This is the strongest code truth surface after executable tests. Delivery law al
 - Projection files diverge from DB truth and silently become operator reality.
 - Decision/entry logs are mistaken for full lifecycle truth, recreating settlement-crisis blind spots.
 - Chain reconciliation collapses three-valued truth into binary synced/not-synced and causes false closure claims.
-- Shadow persistence lingers after migrations and forks the truth surface.
+- Parallel inactive-lane persistence can linger after migrations and fork the truth surface.
 
 ## 14. Historical failures and lessons
 - [Archive evidence] `docs/archives/audits/legacy_audit_truth_surfaces.md` found canonical, derived, stale, and dead truth surfaces coexisting; state docs must make the hierarchy explicit.

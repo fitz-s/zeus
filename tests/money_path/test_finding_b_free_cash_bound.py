@@ -46,7 +46,6 @@ def _isolate_edli_settings(monkeypatch):
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = False
-    feature_flags["qkernel_spine_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
     from src.engine import event_reactor_adapter as adapter
@@ -147,7 +146,6 @@ def _isolate_edli_settings(monkeypatch):
         ),
     )
     monkeypatch.setattr(adapter._shift_bin_wiring, "active_shift_lease_for_family", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(qkernel_spine_bridge, "qkernel_spine_enabled", lambda: True)
     def _decide_family_via_spine(**kwargs):
         proof = kwargs["proofs"][0]
         economics_payload = dict(proof.qkernel_execution_economics)

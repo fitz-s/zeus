@@ -22,6 +22,7 @@ from src.calibration.platt import (
     IDENTITY_CALIBRATION_METHOD,
 )
 from src.calibration.store import (
+    CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
     get_pairs_for_bucket,
     get_decision_group_count,
     load_platt_model,
@@ -33,8 +34,6 @@ from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
-from src.data.calibration_transfer_policy import CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
-
 _EXPECTED_GROUP_ROWS = {"F": F_CANONICAL_GRID.n_bins, "C": C_CANONICAL_GRID.n_bins}
 
 
@@ -447,48 +446,6 @@ def _low_live_min_decision_groups() -> int:
     """Minimum independent LOW groups allowed through the live read seam."""
     _, level2, _ = calibration_maturity_thresholds()
     return level2
-
-
-def _calibration_bin_source_fit_enabled() -> bool:
-    """Return True when the canonical_v2 bin_source fit flag is ON.
-
-    Canonical bin-source fit switch (2026-06-03): gates the correction that makes
-    get_decision_group_count and get_pairs_for_bucket query the SAME
-    population (canonical_v2) via CANONICAL_CALIBRATION_PAIR_BIN_SOURCE.
-
-    Flag-OFF  (default): bin_source_filter
-              is passed as None to both calls, which on the live corpus
-              (100% canonical_v2 rows) returns 0 pairs → cross-cluster
-              Platt borrow.  BYTE-IDENTICAL to pre-fix behavior.
-    Flag-ON:  both calls filter by CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
-              ("canonical_v2") so the ≤7 uncorrected cities get their own
-              read-time fit instead of a foreign-cluster borrow.
-
-    Default: False.  Operator promotes by setting
-    ``feature_flags.calibration_bin_source_v2_fit_enabled = true``
-    in config/settings.json after reviewing BEFORE_AFTER_canonical_bin_source.md.
-    # Created: 2026-06-03
-    # Last reused or audited: 2026-06-03
-    # Authority basis: FIX-1 canonical bin_source / wiring verdict 2026-06-03
-    """
-    try:
-        import json as _json
-        from pathlib import Path as _Path
-        cfg_path = _Path(__file__).resolve().parent.parent.parent / "config" / "settings.json"
-        if cfg_path.exists():
-            cfg = _json.loads(cfg_path.read_text())
-            return bool(
-                (cfg.get("feature_flags") or {}).get(
-                    "calibration_bin_source_v2_fit_enabled", False
-                )
-            )
-    except Exception as exc:  # noqa: BLE001 — fail-open to legacy behavior
-        logger.warning(
-            "calibration_bin_source_v2_fit_enabled flag read failed: %s; "
-            "defaulting OFF (legacy bin_source behavior)",
-            exc,
-        )
-    return False
 
 
 def _low_n_eff_live_block_reason(n_samples: int) -> tuple[str, ...]:
@@ -975,19 +932,10 @@ def get_calibrator(
     # paths directly. This avoids a metric-blind count whose result would be
     # discarded anyway (`_fit_from_pairs` short-circuits on non-HIGH at L267).
     #
-    # FIX-1 (2026-06-03): calibration_bin_source_v2_fit_enabled flag gates
-    # the correction that wires CANONICAL_CALIBRATION_PAIR_BIN_SOURCE into
-    # both the count gate and the fit call so they query ONE population.
-    # Flag-OFF: bin_source_filter=None → legacy behavior (0 pairs → cross-
-    #   cluster borrow). BYTE-IDENTICAL to pre-fix behavior.
-    # Flag-ON: bin_source_filter=CANONICAL_CALIBRATION_PAIR_BIN_SOURCE →
-    #   canonical_v2 pairs → own read-time fit for uncorrected cities.
-    # Both states maintain count/fit population agreement (no new mismatch).
+    # Count and fit one canonical population. A hidden fallback to an older
+    # bin source would silently borrow another cluster's transform.
     if temperature_metric == "high":
-        _bin_source_v2 = _calibration_bin_source_fit_enabled()
-        _fit_bin_source: str | None = (
-            CANONICAL_CALIBRATION_PAIR_BIN_SOURCE if _bin_source_v2 else None
-        )
+        _fit_bin_source = CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
         n = get_decision_group_count(
             conn, cluster, season, metric="high",
             bin_source_filter=_fit_bin_source,
@@ -1151,12 +1099,7 @@ def _fit_from_pairs(
     # passing it explicitly makes the implicit invariant visible at the
     # read seam and satisfies the store-side enforcement landed in slice A1.
     #
-    # FIX-1 (2026-06-03): bin_source_filter is threaded from get_calibrator
-    # via _calibration_bin_source_fit_enabled(). Flag-OFF: None (legacy,
-    # equivalent to old "canonical_v1" hardcode but now correctly returns 0
-    # on the all-v2 corpus). Flag-ON: CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
-    # ("canonical_v2"). Both states come from ONE constant so a future
-    # bin_source bump auto-propagates to both the count gate and the fit.
+    # The caller threads the same canonical bin source into count and fit.
     pairs = get_pairs_for_bucket(
         conn, cluster, season, bin_source_filter=bin_source_filter, metric="high",
     )

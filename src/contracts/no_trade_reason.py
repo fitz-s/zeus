@@ -7,7 +7,7 @@ NoTradeReason — canonical StrEnum covering every rejection_reasons=[...] calls
 in src/engine/evaluator.py.
 
 Two-tier model (§5.1): NoTradeReason is the CATEGORY (enum CHECK at DB write);
-reason_detail TEXT carries the per-rejection diagnostic string (no constraint).
+reason_detail TEXT carries the per-rejection evidence string (no constraint).
 
 65 members cover 69 callsites (4 shared: ENS_FETCH_INSUFFICIENT_MEMBERS×2,
 DAY0_NO_FORECAST_HOURS_REMAIN×2, CROSSCHECK_UNAVAILABLE×3, POLICY_GATED×2 —
@@ -38,7 +38,6 @@ class NoTradeReason(StrEnum):
     # ── Observation source / quality gates ────────────────────────────────────
     OBSERVATION_SOURCE_UNAUTHORIZED = auto()
     OBSERVATION_QUALITY_REJECTED = auto()
-    ENTRY_FORECAST_ROLLOUT_BLOCKED = auto()
 
     # ── Support / bin topology ─────────────────────────────────────────────────
     INVALID_SUPPORT_INDEX = auto()
@@ -84,7 +83,6 @@ class NoTradeReason(StrEnum):
     # Persisted value kept for existing SQLite CHECK compatibility. The source
     # symbol uses the current quote-evidence name; a schema migration can rename
     # the stored value separately if needed.
-    BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID = "native_multibin_buy_no_flag_invalid"
 
     # ── Market liquidity / crosscheck ─────────────────────────────────────────
     MARKET_EMPTY_ORDERBOOK = auto()

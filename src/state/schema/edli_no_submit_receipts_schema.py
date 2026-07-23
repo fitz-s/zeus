@@ -30,10 +30,6 @@ CREATE TABLE IF NOT EXISTS edli_no_submit_receipts (
     trade_score REAL,
     fdr_family_id TEXT,
     fdr_hypothesis_count INTEGER NOT NULL DEFAULT 0,
-    lfsr REAL,
-    edge_shrunk REAL,
-    edge_shrunk_posterior_sd REAL,
-    selection_authority TEXT,
     kelly_cost_basis_id TEXT,
     kelly_decision_id TEXT,
     risk_decision_id TEXT,
@@ -72,15 +68,6 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "risk_decision_id", "TEXT")
     _ensure_column(conn, "projection_hash", "TEXT")
     _backfill_projection_hash(conn)
-    # Mainstream-agreement gate columns (#135, 2026-06-03).
-    # Added via _ensure_column so existing DBs are migrated without data loss.
-    _ensure_column(conn, "mainstream_agreement_pass", "INTEGER")
-    _ensure_column(conn, "mainstream_agreement_fail_reason", "TEXT")
-    _ensure_column(conn, "mainstream_point", "REAL")
-    _ensure_column(conn, "mainstream_delta", "REAL")
-    _ensure_column(conn, "mainstream_bin_label", "TEXT")
-    _ensure_column(conn, "mainstream_source", "TEXT")
-    _ensure_column(conn, "mainstream_fetched_at_utc", "TEXT")
     # B2 (PR-4, 2026-06-03): edge-axis measurement column.
     # alpha_gap = q_live - c_fee_adjusted.  NULL when c_fee_adjusted is NULL.
     # Added via _ensure_column so existing live DBs are migrated on next boot.
@@ -101,36 +88,6 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     # receipt_hash stays byte-stable. Authority:
     # docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md.
     _ensure_column(conn, "envelope_json", "TEXT")
-    # C2 (task #60, 2026-06-13): selection-shrinkage telemetry columns. The
-    # vacuous {0,1}-p-value BH/FDR gate (event_reactor_adapter.py:9854/9876) is
-    # replaced by posterior lfsr + correlation-aware EB selection shrinkage +
-    # expected-log-utility license (authority statistical_calibration_addendum
-    # _2026-06-13 A2/D3). When the replacement flag is OFF these are telemetry-only
-    # (computed and stamped, BH behavior unchanged); when ON they drive the
-    # license. Nullable / no DEFAULT so existing-row receipt_hash stays
-    # byte-stable (omit-when-None in receipt_json, mirroring envelope_json /
-    # alpha_gap). fdr_* columns are KEPT for provenance. selection_authority is
-    # the typed name of the gate that decided ("BH_FDR" | "EB_SHRINKAGE").
-    _ensure_column(conn, "lfsr", "REAL")
-    _ensure_column(conn, "edge_shrunk", "REAL")
-    _ensure_column(conn, "edge_shrunk_posterior_sd", "REAL")
-    _ensure_column(conn, "selection_authority", "TEXT")
-    # F1 (2026-07-04): hierarchical settlement-coverage calibrator provenance
-    # (src/calibration/settlement_coverage_hierarchy.py). Nullable, no DEFAULT so
-    # existing-row receipt_hash stability is preserved (mirrors lfsr / envelope_json
-    # above). ``q_live``/``q_lcb_5pct`` become the EXECUTABLE pair when the flag
-    # (feature_flags.settlement_coverage_hierarchy_enabled) is ON; ``q_live_raw``/
-    # ``q_lcb_raw`` carry the frozen raw certificate unchanged (audit law). Also
-    # used as the per-claim RAW-q read for THIS calibrator's own observation
-    # stream (q_live_raw when present, else the legacy q_live column, which IS
-    # the raw claim on pre-migration / flag-OFF rows by construction).
-    _ensure_column(conn, "q_live_raw", "REAL")
-    _ensure_column(conn, "q_lcb_raw", "REAL")
-    _ensure_column(conn, "coverage_hierarchy_level", "TEXT")
-    _ensure_column(conn, "coverage_hierarchy_cohort_key", "TEXT")
-    _ensure_column(conn, "coverage_hierarchy_n", "INTEGER")
-    _ensure_column(conn, "coverage_hierarchy_wins", "INTEGER")
-    _ensure_column(conn, "coverage_hierarchy_estimator", "TEXT")
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
     conn.execute(CREATE_PROBABILITY_AUTHORITY_INDEX_SQL)

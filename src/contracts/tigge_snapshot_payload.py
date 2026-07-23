@@ -106,7 +106,7 @@ class TiggeSnapshotPayload:
         # LOW-track-specific fields (None for HIGH)
         temperature_metric: Optional[str] = None,
         members_unit: Optional[str] = None,
-        # LOW-track step range diagnostics
+        # LOW-track step range telemetry
         selected_step_ranges_inner: Optional[list] = None,
         selected_step_ranges_boundary: Optional[list] = None,
         # HIGH-track step range

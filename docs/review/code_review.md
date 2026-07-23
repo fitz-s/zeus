@@ -372,7 +372,7 @@ the risk is in a reader, daemon, executor, scheduler, or DB owner boundary.
 ### Failure modes to detect
 
 - **WRONG_LAYER_GUARD**: classifier/helper test passes, production reader or executor still fails.
-- **SHADOW_PATH_UNCOVERED**: tests cover helper A while runtime calls helper B.
+- **OBSERVATION_PATH_UNCOVERED**: tests cover helper A while runtime calls helper B.
 - **TEST_DOES_NOT_HIT_RUNTIME_PATH**: unit test proves local behavior, not module boundary.
 - **MANIFEST_DRIFT**: table/source/test/workflow manifest points to wrong owner or test.
 - **ADVISORY_ONLY_GUARD**: warning exists but live-money invariant still lacks a relationship test.

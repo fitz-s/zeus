@@ -100,34 +100,6 @@ def _install_unpaused_world_control_db(monkeypatch, tmp_path: Path) -> Path:
     return world_path
 
 
-def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
-    """Current live-canary contract after operator unshadow.
-
-    This used to assert the pre-unshadow shadow/no-submit state. The operator has
-    since authorized real live canary, so the load-bearing guard is now coherent
-    real-submit wiring: live mode, live canary, durable outbox, and taker path all
-    enabled together rather than a split shadow/live configuration.
-    """
-    edli = _edli_settings()
-
-    assert edli["real_order_submit_enabled"] is True
-    assert edli["live_execution_mode"] == "edli_live"
-    assert edli["reactor_mode"] == "live"
-    # Wave-1 2026-06-12: live_canary_enabled gate flag DELETED — live submit no longer
-    # requires a separate canary on/off flag (operator arm + real-submit flag are the gates).
-    assert "live_canary_enabled" not in edli
-    assert edli["durable_submit_outbox_enabled"] is True
-    assert edli["enabled"] is True
-    assert edli["event_writer_enabled"] is True
-    assert edli["forecast_snapshot_trigger_enabled"] is True
-    # Day0 live promotion 2026-06-12 (task #49): scope moved to
-    # forecast_plus_day0 once receipt-q persistence + obs fast lane landed.
-    assert edli["edli_live_scope"] == "forecast_plus_day0"
-    assert edli["day0_extreme_trigger_enabled"] is True
-    assert edli["day0_hard_fact_live_enabled"] is True
-    assert edli["market_channel_ingestor_enabled"] is True
-    # Wave-2 item 8: taker_fok_fak_live_enabled DELETED (taker law unconditional) — key absent.
-    assert "taker_fok_fak_live_enabled" not in edli
 
 
 def test_live_canary_groundwork_has_live_cap_schema_and_verifiers():
@@ -226,7 +198,6 @@ def test_live_adapter_builds_actionable_final_intent_command_and_submit_disabled
     submit = adapter.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=False,
     )
 
     receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -284,7 +255,6 @@ def test_live_adapter_does_not_call_executor_when_real_submit_disabled(monkeypat
     submit = adapter.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=False,
     )
     receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
@@ -539,7 +509,6 @@ def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
         conn,
         live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
     )
 
@@ -637,7 +606,6 @@ def test_live_adapter_persists_live_order_aggregate_only_in_live_cap_db(monkeypa
         trade_conn,
         live_cap_conn=world_conn,
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
     )
     assert not world_conn.execute(
@@ -1710,7 +1678,6 @@ def test_fixA_terminal_prior_order_does_not_block_redecision_same_price(monkeypa
         conn,
         live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
     )
 
@@ -1752,7 +1719,6 @@ def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch)
         conn,
         live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
     )
 
@@ -1790,12 +1756,9 @@ def test_live_certificate_build_failure_preserves_selected_leg_on_receipt(monkey
         conn,
         live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        durable_submit_outbox_enabled=True,
         executor_submit=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("executor must not be called after certificate build failure")
         ),
-        operator_arm=_operator_arm(),
         pre_submit_authority_provider=_pre_submit_authority_provider,
         entry_live_health_authority_provider=_healthy_entry_live_health_provider(decision_time),
     )
@@ -2892,43 +2855,6 @@ def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
     assert "SUM(notional_usd)" not in source
 
 
-def test_live_adapter_no_canary_gate_proceeds_past_deleted_canary_block(monkeypatch):
-    """Wave-1 2026-06-12 antibody: the LIVE_CANARY_DISABLED gate is DELETED.
-
-    With real_order_submit_enabled=True there is no longer any canary on/off flag that
-    can refuse the submit with reason 'LIVE_CANARY_DISABLED'. The adapter proceeds past
-    the (deleted) canary check to the NEXT real gate — here the durable-outbox requirement
-    (no outbox passed) — proving the canary block is gone, not merely flipped on."""
-    from src.engine import event_reactor_adapter as adapter
-    from src.events.reactor import EventSubmissionReceipt
-    from src.riskguard.risk_level import RiskLevel
-
-    event = _forecast_event()
-    monkeypatch.setattr(
-        adapter,
-        "build_event_bound_no_submit_receipt",
-        lambda *_args, **_kwargs: EventSubmissionReceipt(
-            submitted=False,
-            proof_accepted=True,
-            event_id=event.event_id,
-            causal_snapshot_id=event.causal_snapshot_id,
-            decision_proof_bundle=object(),
-        ),
-    )
-
-    submit = adapter.event_bound_live_adapter_from_trade_conn(
-        sqlite3.connect(":memory:"),
-        get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        # durable_submit_outbox_enabled intentionally NOT passed (defaults False).
-    )
-
-    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
-
-    # The deleted canary gate is unreachable: reason is the next honest gate, never the
-    # old LIVE_CANARY_DISABLED.
-    assert receipt.reason != "LIVE_CANARY_DISABLED"
-    assert receipt.reason == "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED"
 
 
 def test_live_adapter_does_not_gate_on_derived_live_health_surface(monkeypatch, tmp_path):
@@ -2976,9 +2902,6 @@ def test_live_adapter_does_not_gate_on_derived_live_health_surface(monkeypatch, 
         conn,
         live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        durable_submit_outbox_enabled=True,
-        operator_arm=_operator_arm(),
         executor_submit=_executor_should_not_run,
         entry_live_health_authority_provider=_missing_q_version_surface,
     )
@@ -3485,9 +3408,6 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
             conn,
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
-            real_order_submit_enabled=True,
-            durable_submit_outbox_enabled=True,
-            operator_arm=_operator_arm(),
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             entry_live_health_authority_provider=_healthy_entry_live_health_provider(
@@ -3547,9 +3467,6 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch, tmp_
             conn,
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
-            real_order_submit_enabled=True,
-            durable_submit_outbox_enabled=True,
-            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="SUBMITTED",
                 reason_code="OK",
@@ -3642,7 +3559,6 @@ def test_live_adapter_blocks_real_submit_without_durable_outbox(monkeypatch):
             conn,
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
-            real_order_submit_enabled=True,
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -3680,9 +3596,6 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch, tmp_path):
             conn,
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
-            real_order_submit_enabled=True,
-            durable_submit_outbox_enabled=True,
-            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="REJECTED",
                 reason_code="VENUE_REJECTED",
@@ -3765,9 +3678,6 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
             conn,
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
-            real_order_submit_enabled=True,
-            durable_submit_outbox_enabled=True,
-            operator_arm=_operator_arm(),
             executor_submit=_boundary_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             entry_live_health_authority_provider=_healthy_entry_live_health_provider(decision_time),
@@ -3847,9 +3757,6 @@ def test_post_command_executor_exception_terminalizes_aggregate(monkeypatch, tmp
             conn,
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
-            real_order_submit_enabled=True,
-            durable_submit_outbox_enabled=True,
-            operator_arm=_operator_arm(),
             executor_submit=_raising_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             entry_live_health_authority_provider=_healthy_entry_live_health_provider(decision_time),
@@ -3917,9 +3824,6 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch, tmp_
             conn,
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
-            real_order_submit_enabled=True,
-            durable_submit_outbox_enabled=True,
-            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="TIMEOUT_UNKNOWN",
                 reason_code="SUBMIT_TIMEOUT",
@@ -3985,9 +3889,6 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
             conn,
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
-            real_order_submit_enabled=True,
-            durable_submit_outbox_enabled=True,
-            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="POST_SUBMIT_UNKNOWN",
                 reason_code="SDK_EXCEPTION_AFTER_SEND",
@@ -5016,16 +4917,6 @@ def _cap_transition_status(receipt):
 
 def _cap_transition_projection_status(receipt):
     return _cap_transition_cert(receipt).payload["projection_status"]
-
-
-def _operator_arm():
-    # FIX-2b (PR_SPEC.md §2): the EDLI live submit adapter now requires the operator-
-    # arm capability token for ANY real submit. Tests that exercise the executor path
-    # mint the token exactly as main.py does (require_operator_arm with the operator
-    # flag True), so they continue to reach the executor seam under the new gate.
-    from src.events.reactor import require_operator_arm
-
-    return require_operator_arm({"edli_live_operator_authorized": True})
 
 
 def _healthy_entry_live_health_provider(decision_time: datetime):

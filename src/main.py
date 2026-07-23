@@ -12,7 +12,7 @@ startup_catch_up, source_health_probe, drift_detector, ingest_status_rollup,
 and harvester_truth_writer. Trading owns only discovery, harvester_pnl_resolver,
 venue heartbeat, wallet gate, freshness gate (consumer), schema validator (consumer).
 
-Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
+Advisory file lock infrastructure (src.data.job_lock) is retained in code
 — other daemons may be added in future. The K2 ticks that called it are removed.
 """
 
@@ -21,7 +21,6 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md;
 #   MAJOR #1 antibody (2026-06-05) — assert_kelly_multiplier_within_correlated_ceiling boot guard (over-size door / iron rule 5)
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
-#                  + 2026-06-04 mainstream made display-only/unconstructable-as-decision (arm direction-gate boot guard + submit enforce branch DELETED)
 
 import functools
 import hashlib
@@ -53,7 +52,7 @@ def _bind_canonical_main_module(module_name: str, module: object) -> None:
 
 _bind_canonical_main_module(__name__, sys.modules[__name__])
 
-# Live-hang diagnostics (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
+# Live-hang telemetry (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
 # (logs/zeus-live.err) so a frozen reactor cycle (indefinite _PyMutex/lock
 # deadlock — same class as the 5h market-channel hang) can be pinned WITHOUT
 # root-level py-spy. faulthandler.enable() also dumps on fatal signals. Additive.
@@ -101,7 +100,6 @@ _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "edli_event_reactor",
         "market_discovery",
-        "EDLI mainstream warm",
     }
 )
 _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = (
@@ -168,30 +166,6 @@ def _substrate_refresh_canonical_metric(metric: object) -> str:
     return text
 
 
-# Wave-2 item 5 (2026-06-12): "edli_live" is the only event-driven live mode.
-LIVE_EXECUTION_MODES = {
-    "legacy_cron",
-    "edli_live",
-    "disabled",
-}
-EDLI_EVENT_DRIVEN_MODES = {
-    "edli_live",
-}
-REACTOR_MODE_BY_LIVE_STAGE = {
-    "legacy_cron": "disabled",
-    "disabled": "disabled",
-    "edli_live": "live",
-}
-# Live production has one EDLI scope: forecast plus Day0. Historical staging
-# scopes stay out of the live daemon so the execution layer has one state.
-EDLI_LIVE_SCOPES = frozenset({"forecast_plus_day0"})
-EDLI_RUNTIME_FLAGS = (
-    "enabled",
-    "event_writer_enabled",
-    "forecast_snapshot_trigger_enabled",
-    "market_channel_ingestor_enabled",
-    "edli_user_channel_reconcile_enabled",
-)
 EDLI_STAGE_PASS = "PASS"
 EDLI_STAGE_WAITING = "WAITING_FOR_QUALIFYING_EVENT"
 EDLI_STAGE_FAIL = "FAIL"
@@ -208,12 +182,10 @@ _EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
-REQUIRED_STAGE_FILES_BY_MODE = {
-    "edli_live": (
-        "edli_stage_source_health_json",
-        "edli_stage_status_json",
-    ),
-}
+REQUIRED_EDLI_STAGE_FILES = (
+    "edli_stage_source_health_json",
+    "edli_stage_status_json",
+)
 
 # Immutable process identity populated in main() at boot for receipts and operators.
 # Tests monkeypatch this dict directly; the observer reads it each tick.
@@ -267,14 +239,7 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     return False
 
 
-def _live_execution_mode(edli_cfg: dict) -> str:
-    mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
-    if mode not in LIVE_EXECUTION_MODES:
-        raise ValueError(f"UNSUPPORTED_LIVE_EXECUTION_MODE:{mode}")
-    return mode
-
-
-def _harvester_should_register(live_execution_mode: str) -> bool:
+def _harvester_should_register() -> bool:
     """Whether the settlement P&L + redeem-intent resolver (_harvester_cycle) is
     scheduled for this live-execution mode.
 
@@ -286,16 +251,13 @@ def _harvester_should_register(live_execution_mode: str) -> bool:
 
     The resolver is settlement-read-only: ``resolve_pnl_for_settled_markets`` READS VERIFIED
     settlement_outcomes (read-only) and writes only trade-side close + a durable
-    REDEEM_INTENT_CREATED row. The actual on-chain redeem POST lives in the
-    SEPARATELY-gated _redeem_submitter_cycle (already scheduled in all modes), whose
-    adapter only broadcasts when autonomous redeem is enabled; scheduling the
-    resolver adds ZERO new on-chain surface. The resolver also has its own
-    ZEUS_HARVESTER_LIVE_ENABLED kill-switch (default OFF, no-op when unset).
+    REDEEM_INTENT_CREATED row. Redeem submission is external; scheduling the
+    resolver adds ZERO redeem-submission surface.
 
     The shared predicate keeps the registration gate and the boot-recovery call in
     lockstep, and is the single source the antibody test asserts against.
     """
-    return live_execution_mode in EDLI_EVENT_DRIVEN_MODES or live_execution_mode == "legacy_cron"
+    return True
 
 
 def _settings_section(name: str, default=None):
@@ -306,16 +268,6 @@ def _settings_section(name: str, default=None):
         return source[name]
     except KeyError:
         return default
-
-
-def _edli_runtime_requested(edli_cfg: dict) -> bool:
-    return any(bool(edli_cfg.get(flag, False)) for flag in EDLI_RUNTIME_FLAGS)
-
-
-def _require_edli_flags(edli_cfg: dict, mode: str, flags: tuple[str, ...]) -> None:
-    missing = [flag for flag in flags if not bool(edli_cfg.get(flag, False))]
-    if missing:
-        raise RuntimeError(f"{mode.upper()}_REQUIRES_{'_AND_'.join(missing).upper()}")
 
 
 # ---------------------------------------------------------------------------
@@ -415,15 +367,8 @@ def _replacement_qkernel_live_probability_authority_enabled(cfg: dict) -> bool:
     blocker; the replacement posterior freshness gates own live readiness.
     """
 
-    edli = cfg.get("edli") if isinstance(cfg.get("edli"), dict) else {}
-    flags = cfg.get("feature_flags") if isinstance(cfg.get("feature_flags"), dict) else {}
-    return (
-        bool(flags.get("qkernel_spine_enabled", False))
-        and str(edli.get("live_execution_mode") or "") == "edli_live"
-        and str(edli.get("reactor_mode") or "") == "live"
-        and bool(edli.get("replacement_0_1_bayes_precision_fusion_enabled", False))
-        and bool(edli.get("replacement_0_1_fused_q_shape_enabled", False))
-    )
+    del cfg
+    return True
 
 
 def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
@@ -719,40 +664,6 @@ def _validate_boot(settings_path=None) -> int:
     return 1 if any_fail else 0
 
 
-def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
-    # The operator ARM kill-switch for edli_live (edli_live_operator_authorized) is the
-    # ONLY honest gate here and is kept fail-closed.
-    if not bool(edli_cfg.get("edli_live_operator_authorized", False)):
-        raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED")
-    # Wave-1 2026-06-12: the promotion-artifact + canary-fill-count verification that used
-    # to run here is DELETED. It was promotion bureaucracy (an artifact file proving a
-    # min canary fill count) the operator had already disabled via
-    # edli_live_promotion_artifact_required=false. The operator arm above is the sole gate.
-    return
-
-
-def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
-    """Wave-1 2026-06-12: the full-live ARM-gate ARTIFACT requirement is DELETED.
-
-    This used to demand a state/edli_arm_gate_artifact.json proving a positive
-    settlement EV on the booted commit before edli_live. It was already de-bound by
-    the operator (edli_arm_gate_artifact_required=false), and the artifact-proof gate is
-    exactly the "circular promotion proof" bureaucracy the operator law forbids. The
-    honest gate is the operator arm (edli_live_operator_authorized, asserted in
-    _assert_edli_live_promotion_artifact) plus the runtime submit-chain proofs. This is
-    now an intentional no-op; the dead ``edli_arm_gate_artifact_required`` key is removed.
-    """
-    return
-
-
-# OPERATOR LAW (2026-06-04, Rule-4 antibody): the former
-# ``_assert_edli_arm_requires_direction_gate`` two-key arm boot guard is DELETED.
-# It coupled arming to the mainstream-enforcement flag — but mainstream is now
-# OBSERVATIONAL / DISPLAY-ONLY and is NEVER a decision/arm input. The submit-time
-# enforce branch it guarded was also deleted (event_reactor_adapter submit closure),
-# so there is no "direction gate" left to require. Mainstream cannot block boot/arm.
-
-
 def evaluate_edli_stage_readiness(
     *,
     stage: str,
@@ -760,12 +671,11 @@ def evaluate_edli_stage_readiness(
     trade_db_path: str | None = None,
     forecasts_db_path: str | None = None,
     loaded_sha_file: str | None = None,
-    promotion_artifact_path: str | None = None,
     source_health_json: str | None = None,
     status_json: str | None = None,
     max_age_seconds: int = 15 * 60,
 ) -> EdliStageReadiness:
-    del trade_db_path, forecasts_db_path, promotion_artifact_path
+    del trade_db_path, forecasts_db_path
     if stage in {"legacy_cron", "disabled"}:
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
 
@@ -827,88 +737,117 @@ def evaluate_edli_stage_readiness(
 
 
 def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
-    stage = _live_execution_mode(edli_cfg)
-    if stage in {"legacy_cron", "disabled"}:
-        return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
-    _require_stage_file_paths(edli_cfg, stage)
+    _require_stage_file_paths(edli_cfg)
     report = evaluate_edli_stage_readiness(
-        stage=stage,
+        stage="edli_live",
         world_db_path=str(_settings_section("state", {}).get("world_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         trade_db_path=str(_settings_section("state", {}).get("trade_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         forecasts_db_path=str(_settings_section("state", {}).get("forecasts_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         loaded_sha_file=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_loaded_sha_file")),
-        promotion_artifact_path=str(edli_cfg.get("edli_live_promotion_artifact_path") or ""),
         source_health_json=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_source_health_json")),
         status_json=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_status_json")),
         max_age_seconds=int(edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)),
     )
-    if stage == "edli_live":
-        # Wave-2 item 5: the canary boot-resilience logic (crash-loop antibody +
-        # status-summary deferral) is the live-mode readiness path now that canary
-        # is collapsed into edli_live. Scaleout is unconditionally permitted for the
-        # single live mode (the canary scaleout=False qualifying-lane semantics are
-        # dead — operator arm is the sole submit gate).
-        deferred = [
-            reason for reason in (report.reasons or ())
-            if reason.startswith(_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES)
-        ]
-        blocking = [
-            reason for reason in (report.reasons or ())
-            if not reason.startswith(_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES)
-        ]
-        risk_reasons = [reason for reason in blocking if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
-        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} and blocking:
-            # BOOT CRASH-LOOP ANTIBODY (2026-06-12, 3 incidents same day): when
-            # the ONLY blockers are stuck post-submit unknowns + their cap
-            # reservations, run the operator-ratified authenticated-absence
-            # resolution automatically (same contract as the manual script —
-            # refuses on any real venue exposure) and re-evaluate ONCE
-            # (re-entry marker forbids a second attempt). Any other blocker,
-            # a refusal, or a venue-read failure falls through to the
-            # original fail-closed raise.
-            if not edli_cfg.get("_boot_auto_resolution_reentry"):
-                from src.execution.edli_absence_resolver import (
-                    boot_auto_resolve_stuck_unknowns,
-                )
-
-                if boot_auto_resolve_stuck_unknowns(list(blocking)):
-                    return _assert_edli_stage_readiness(
-                        {**edli_cfg, "_boot_auto_resolution_reentry": True}
-                    )
-            raise RuntimeError("EDLI_LIVE_READINESS_FAIL:" + ",".join(blocking or (report.status,)))
-        if risk_reasons:
-            raise RuntimeError("EDLI_LIVE_READINESS_FAIL:" + ",".join(risk_reasons))
-        if deferred:
-            logger.warning(
-                "EDLI live boot: status_summary freshness is deferred "
-                "until the scheduler emits its first genuine cycle pulse: %s",
-                ", ".join(deferred),
+    # The boot-resilience logic (crash-loop antibody + status-summary deferral)
+    # is the one EDLI live readiness path. Operator arm remains its sole submit
+    # authority gate.
+    deferred = [
+        reason for reason in (report.reasons or ())
+        if reason.startswith(_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES)
+    ]
+    blocking = [
+        reason for reason in (report.reasons or ())
+        if not reason.startswith(_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES)
+    ]
+    risk_reasons = [reason for reason in blocking if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
+    if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} and blocking:
+        # BOOT CRASH-LOOP ANTIBODY (2026-06-12, 3 incidents same day): when
+        # the ONLY blockers are stuck post-submit unknowns + their cap
+        # reservations, run the operator-ratified authenticated-absence
+        # resolution automatically (same contract as the manual script —
+        # refuses on any real venue exposure) and re-evaluate ONCE
+        # (re-entry marker forbids a second attempt). Any other blocker,
+        # a refusal, or a venue-read failure falls through to the
+        # original fail-closed raise.
+        if not edli_cfg.get("_boot_auto_resolution_reentry"):
+            from src.execution.edli_absence_resolver import (
+                boot_auto_resolve_stuck_unknowns,
             )
-            if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING}:
-                return EdliStageReadiness(
-                    stage=stage,
-                    status=EDLI_STAGE_WAITING,
-                    live_entries_allowed=True,
-                    submit_allowed=True,
-                    scaleout_allowed=True,
-                    reasons=tuple(deferred),
+
+            if boot_auto_resolve_stuck_unknowns(list(blocking)):
+                return _assert_edli_stage_readiness(
+                    {**edli_cfg, "_boot_auto_resolution_reentry": True}
                 )
-        if report.submit_allowed is not True:
-            raise RuntimeError("EDLI_LIVE_SUBMIT_NOT_ALLOWED")
-        if report.status != EDLI_STAGE_PASS or report.scaleout_allowed is not True:
-            raise RuntimeError("EDLI_LIVE_SCALEOUT_READINESS_FAIL:" + ",".join(report.reasons or (report.status,)))
-        return report
+        raise RuntimeError("EDLI_LIVE_READINESS_FAIL:" + ",".join(blocking or (report.status,)))
+    if risk_reasons:
+        raise RuntimeError("EDLI_LIVE_READINESS_FAIL:" + ",".join(risk_reasons))
+    if deferred:
+        logger.warning(
+            "EDLI live boot: status_summary freshness is deferred "
+            "until the scheduler emits its first genuine cycle pulse: %s",
+            ", ".join(deferred),
+        )
+        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING}:
+            return EdliStageReadiness(
+                stage="edli_live",
+                status=EDLI_STAGE_WAITING,
+                live_entries_allowed=True,
+                submit_allowed=True,
+                scaleout_allowed=True,
+                reasons=tuple(deferred),
+            )
+    if report.submit_allowed is not True:
+        raise RuntimeError("EDLI_LIVE_SUBMIT_NOT_ALLOWED")
+    if report.status != EDLI_STAGE_PASS or report.scaleout_allowed is not True:
+        raise RuntimeError("EDLI_LIVE_SCALEOUT_READINESS_FAIL:" + ",".join(report.reasons or (report.status,)))
     return report
 
 
-def _require_stage_file_paths(edli_cfg: dict, stage: str) -> None:
+def _edli_live_entry_readiness_block(edli_cfg: dict) -> str | None:
+    """Return a cycle-local BUY block without stopping monitor/recovery/SELL."""
+
+    try:
+        _require_stage_file_paths(edli_cfg)
+        report = evaluate_edli_stage_readiness(
+            stage="edli_live",
+            world_db_path=str(_settings_section("state", {}).get("world_db", ""))
+            if isinstance(_settings_section("state", {}), dict)
+            else None,
+            trade_db_path=str(_settings_section("state", {}).get("trade_db", ""))
+            if isinstance(_settings_section("state", {}), dict)
+            else None,
+            forecasts_db_path=str(_settings_section("state", {}).get("forecasts_db", ""))
+            if isinstance(_settings_section("state", {}), dict)
+            else None,
+            loaded_sha_file=_resolve_edli_stage_runtime_path(
+                edli_cfg.get("edli_stage_loaded_sha_file")
+            ),
+            source_health_json=_resolve_edli_stage_runtime_path(
+                edli_cfg.get("edli_stage_source_health_json")
+            ),
+            status_json=_resolve_edli_stage_runtime_path(
+                edli_cfg.get("edli_stage_status_json")
+            ),
+            max_age_seconds=int(
+                edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - unreadable admission truth blocks BUY
+        return f"entry_readiness_error:{type(exc).__name__}:{exc}"
+    if report.status == EDLI_STAGE_PASS and report.live_entries_allowed:
+        return None
+    reasons = report.reasons or (report.status,)
+    return "entry_readiness:" + ",".join(str(reason) for reason in reasons)
+
+
+def _require_stage_file_paths(edli_cfg: dict) -> None:
     missing = [
         key
-        for key in REQUIRED_STAGE_FILES_BY_MODE.get(stage, ())
+        for key in REQUIRED_EDLI_STAGE_FILES
         if not str(edli_cfg.get(key) or "").strip()
     ]
     if missing:
-        raise RuntimeError(f"{stage.upper()}_REQUIRES_STAGE_EVIDENCE_FILES:{','.join(missing)}")
+        raise RuntimeError(f"EDLI_LIVE_REQUIRES_STAGE_EVIDENCE_FILES:{','.join(missing)}")
 
 
 def _resolve_edli_stage_runtime_path(raw_path: object) -> str:
@@ -1009,64 +948,6 @@ def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int
     if age > max_age_seconds:
         return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
     return []
-
-
-def _assert_edli_live_scope(edli_cfg: dict) -> None:
-    scope = str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-    if scope not in EDLI_LIVE_SCOPES:
-        raise RuntimeError(f"UNSUPPORTED_EDLI_LIVE_SCOPE:{scope}")
-
-
-
-
-def _assert_calibration_coverage_contract(edli_cfg: dict) -> None:  # noqa: ARG001
-    """Legacy bias/Platt calibration-coverage guard — now an unconditional no-op.
-
-    SINGLE TRUTH (bias-maze strip 2026-06-17): the live q runs on the raw precise
-    multi-model fused center (qkernel_spine / EMOS / honest-raw substrate); the legacy
-    per-city bias+Platt calibration path is never consumed by a live decision. The legacy
-    coverage contract is therefore permanently NOT APPLICABLE. It is deliberately a logged
-    no-op rather than a raise: forcing the old guard to run would have RAISED in armed mode
-    on missing VERIFIED bias rows (a spurious boot-block under the single-truth law).
-    """
-    logger.info(
-        "CALIBRATION_COVERAGE_NOT_APPLICABLE: legacy bias/Platt coverage guard removed "
-        "(single-truth raw multi-model center; no live bias/Platt consumer)"
-    )
-
-
-def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
-    mode = _live_execution_mode(edli_cfg)
-    _assert_edli_live_scope(edli_cfg)
-    expected_reactor_mode = REACTOR_MODE_BY_LIVE_STAGE[mode]
-    reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
-    if reactor_mode != expected_reactor_mode:
-        raise RuntimeError(f"{mode.upper()}_REQUIRES_REACTOR_MODE_{expected_reactor_mode.upper()}")
-    if mode == "legacy_cron" and _edli_runtime_requested(edli_cfg):
-        raise RuntimeError("EDLI_RUNTIME_CONFLICTS_WITH_LEGACY_CRON")
-    if mode == "disabled" and _edli_runtime_requested(edli_cfg):
-        raise RuntimeError("EDLI_RUNTIME_CONFLICTS_WITH_DISABLED_MODE")
-    if mode in EDLI_EVENT_DRIVEN_MODES:
-        _require_edli_flags(edli_cfg, mode, ("enabled", "event_writer_enabled", "forecast_snapshot_trigger_enabled"))
-    if mode == "edli_live":
-        _require_edli_flags(
-            edli_cfg,
-            mode,
-            (
-                "market_channel_ingestor_enabled",
-                "edli_user_channel_reconcile_enabled",
-                "real_order_submit_enabled",
-                "durable_submit_outbox_enabled",
-            ),
-        )
-    if mode == "edli_live":
-        _assert_edli_live_promotion_artifact(edli_cfg)
-    if mode == "edli_live":
-        _assert_edli_arm_gate_artifact(edli_cfg)
-        # OPERATOR LAW (2026-06-04): the former two-key arm direction-gate guard is
-        # DELETED — mainstream is observational/display-only and is NEVER a decision/arm
-        # input, so there is no mainstream-enforcement key to require at arm time.
-    return mode
 
 
 def _scheduler_job(job_name: str):
@@ -1199,9 +1080,6 @@ def _settlement_skill_attribution_tick() -> None:
 # harvester_pnl_resolver would sit forever (the F14 SEV-0 defect documented
 # in docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/).
 #
-# _redeem_submitter_cycle: polls REDEEM_INTENT_CREATED, calls submit_redeem
-#   (which transitions stub-deferred rows to REDEEM_OPERATOR_REQUIRED per
-#   SCAFFOLD §K.3; operator then completes via scripts/operator_record_redeem.py).
 # _redeem_reconciler_cycle: polls REDEEM_TX_HASHED, calls reconcile_pending_redeems
 #   (no-op until web3 is wired — operator-recorded tx_hash sits in TX_HASHED
 #   until PR-I.5 follow-up).
@@ -1234,7 +1112,7 @@ def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
     another worker is advancing. The CAS in _transition is the structural
     anti-reversion guard; this lock is the duplicate-submission guard.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.execution.wrap_unwrap_commands import wrap_proceeds_now
     from src.state.db import get_world_connection
 
@@ -1428,9 +1306,6 @@ def _defer_for_active_entry_reactor(job_name: str) -> bool:
 def _edli_reactor_pending_backlog_exists(*, conn_factory=None) -> bool:
     """Return True when EDLI has pending opportunity events that should drain first."""
 
-    edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
-        return False
     owns_connection = conn_factory is None
     conn = None
     try:
@@ -1856,12 +1731,6 @@ def _set_edli_redecision_boot_token(token: str) -> None:
     global _edli_redecision_boot_token
     assert "-" not in token, f"boot token must not contain hyphens, got {token!r}"
     _edli_redecision_boot_token = token
-
-
-USER_CHANNEL_REQUIRED_ENV_VARS = (
-    "ZEUS_USER_CHANNEL_WS_ENABLED",
-    "POLYMARKET_USER_WS_CONDITION_IDS",
-)
 
 
 def _truthy_env(name: str) -> bool:
@@ -3317,18 +3186,7 @@ def _startup_data_health_check(conn):
     The warnings persist until the actions are taken.
     """
     try:
-        forecast_city_count = conn.execute(
-            "SELECT COUNT(DISTINCT city) FROM forecast_skill"
-        ).fetchone()[0]
-        configured_city_count = len(cities_by_name)
-        if forecast_city_count < configured_city_count:
-            logger.warning(
-                "⚠ DATA QUALITY GAP: forecast_skill covers %d/%d configured cities.",
-                forecast_city_count,
-                configured_city_count,
-            )
-
-        # 2. Data freshness check
+        # Data freshness check
         stale_tables = []
         for table, col in [
             ("asos_wu_offsets", None),
@@ -3517,7 +3375,7 @@ def _edli_refresh_global_allocator_for_live_bridge(conn, *, portfolio_snapshot=N
     ``_GLOBAL_ALLOCATOR`` / ``_GLOBAL_GOVERNOR_STATE`` are None. The legacy discover
     cycle (``src/engine/cycle_runner.py``) populates them via
     ``refresh_global_allocator``; the EDLI event-reactor cycle does NOT run that
-    legacy cycle, so without this seam every canary order silently blocks.
+    legacy cycle, so without this seam every probe order silently blocks.
 
     Drawdown sourcing (this drives the governor's drawdown kill-switch — getting it
     wrong is a live-capital risk):
@@ -3529,9 +3387,9 @@ def _edli_refresh_global_allocator_for_live_bridge(conn, *, portfolio_snapshot=N
         > 0 else 0.0`` — i.e. it tolerates zero baseline by passing drawdown=0.0 and
         PROCEEDING to configure the allocator. The drawdown-from-baseline kill-switch
         is therefore inert system-wide; real safety layers are riskguard risk_level
-        (GREEN gate), trailing-loss reference, bankroll truth, $5 canary cap, and
+        (GREEN gate), trailing-loss reference, bankroll truth, $5 probe cap, and
         Kelly sizing. This seam MUST mirror that same tolerance — a stricter gate
-        here would permanently block the EDLI canary while the legacy cycle runs fine.
+        here would permanently block the EDLI probe while the legacy cycle runs fine.
       * current bankroll comes from the on-chain wallet truth via
         ``bankroll_provider.cached()`` (warmed once per cycle by the EDLI cycle's
         bankroll warm at the top of ``_edli_event_reactor_cycle``). The on-chain
@@ -3639,7 +3497,6 @@ from src.data.replacement_forecast_production import (  # noqa: E402
     _replacement_forecast_download_cycle,
     _replacement_forecast_live_materialization_queue_config,
     _replacement_forecast_live_materialize_cycle,
-    _replacement_forecast_runtime_flags_from_settings,
 )
 
 
@@ -3689,6 +3546,9 @@ def _edli_event_reactor_cycle(
     _start_edli_reactor_wake_listener()
     return run_edli_event_reactor_cycle(
         active_lock=_edli_reactor_active_lock,
+        live_entry_block_reason=_edli_live_entry_readiness_block(
+            _settings_section("edli", {})
+        ),
         producer_wake_reason=producer_wake_reason,
         producer_wake_ids=producer_wake_ids,
         producer_wake_published_at=producer_wake_published_at,
@@ -4649,8 +4509,6 @@ def _edli_command_recovery_cycle() -> None:
     ack-lost rows without an order id).
     """
     edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
     if get_mode() != "live":
         return
     if _defer_for_held_position_monitor("edli_command_recovery"):
@@ -4730,8 +4588,6 @@ def _edli_boot_command_recovery_once(*, boot_at: datetime | None = None) -> None
     """
 
     edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
     if get_mode() != "live":
         return
     from src.execution.command_recovery import reconcile_unresolved_commands
@@ -4771,9 +4627,6 @@ def _edli_boot_command_recovery_once(*, boot_at: datetime | None = None) -> None
 def _edli_boot_invalid_pending_entry_authority_cancel_once() -> None:
     """Cancel invalid zero-fill pending ENTRY rests before the first reactor tick."""
 
-    edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
     if get_mode() != "live":
         return
     from src.data.polymarket_client import PolymarketClient
@@ -4805,7 +4658,7 @@ def _edli_boot_invalid_pending_entry_authority_cancel_once() -> None:
         len(entries),
         stats,
     )
-    if cancelled_entries and edli_cfg.get("event_writer_enabled"):
+    if cancelled_entries:
         trade_post = get_trade_connection_read_only()
         forecasts_ro = get_forecasts_connection_read_only()
         try:
@@ -5090,8 +4943,7 @@ def _emit_command_recovery_redecision_continuations(
     *,
     log_context: str,
 ) -> None:
-    edli_cfg = _settings_section("edli", {})
-    if not (edli_cfg.get("event_writer_enabled") and isinstance(summary, dict)):
+    if not isinstance(summary, dict):
         return
     try:
         from datetime import datetime, timezone
@@ -5208,8 +5060,6 @@ def _c3_staleness_cancel_cycle() -> None:
     DURABLY confirmed.
     """
     edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
     if get_mode() != "live":
         return
     if _defer_for_held_position_monitor("c3_staleness_cancel"):
@@ -5331,7 +5181,7 @@ def _c3_staleness_cancel_cycle() -> None:
     # FAIL-CLOSED on the re-decision emit: any error here must NOT crash the cancel
     # job (the cancels already succeeded; the worst case without the re-decision is
     # the family waits for the round-robin).
-    if stats["confirmed_families"] and edli_cfg.get("event_writer_enabled"):
+    if stats["confirmed_families"]:
         try:
             emitted = _emit_live_redecision_events_for_families(
                 stats["confirmed_families"],
@@ -5378,80 +5228,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     run_edli_continuous_redecision_screen_cycle(screen_lock=_edli_redecision_screen_lock)
 
 
-
-
-@_scheduler_job("edli_mainstream_warm")
-def _edli_mainstream_warm_cycle() -> None:
-    """Dedicated EDLI mainstream-forecast point warmer, DECOUPLED from the reactor.
-
-    E2 (STEP 8 efficiency, consolidated timeliness fix). The mainstream
-    direction-agreement reference reads an Open-Meteo HTTP point whose client
-    applies a Retry-After ``time.sleep`` on 429s. The reactor proof path runs
-    UNDER the world_write_mutex, so a synchronous fetch there serialized every
-    world write behind a slow/blocked network call. This job fetches the point
-    on its OWN cadence and stores it in the process-global warm cache
-    (``mainstream_forecast_source._WARM_CACHE``); the reactor proof path reads
-    that cache ONLY (``read_mainstream_point_cached``) and fail-closes to None on
-    a miss — byte-identical to a stale/absent fetch today.
-
-    Mirrors ``_edli_market_substrate_warm_cycle`` (#45): same warm-cache pattern,
-    same fail-soft contract. Scoped to the SAME pending families the reactor will
-    decide (city/target_date/metric of pending opportunity_events), so the cache
-    is populated for exactly the candidates that need it.
-
-    Bounded by ``mainstream_warm_max_families_per_cycle`` and the same fresh-first
-    pending-family order as the substrate warmer. Open-Meteo can 429/sleep on
-    quota pressure; unbounded warming over the historical pending backlog turns a
-    display/reference cache into a scheduler liveness hazard. Not a DB writer (no
-    table owned); the @_scheduler_job decorator is the only wiring needed (B047).
-    Fail-soft: a transient Open-Meteo failure logs but never crashes this job
-    (consumers fail-closed in the interim).
-    """
-
-    edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
-    if _defer_for_held_position_monitor("EDLI mainstream warm"):
-        return
-    from src.data.mainstream_forecast_source import warm_mainstream_point
-    from src.state.db import get_world_connection
-
-    cap = _edli_bounded_positive_int(
-        edli_cfg, "mainstream_warm_max_families_per_cycle", default=8, maximum=50
-    )
-    conn = get_world_connection()
-    try:
-        pending_rows = _pending_family_rows_for_refresh(
-            conn, consumer_name="edli_reactor_v1"
-        )[:cap]
-    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
-        logger.error("EDLI mainstream warm: pending-event query failed (non-fatal): %r", exc)
-        return
-    finally:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
-
-    warmed = 0
-    for row in pending_rows:
-        city = str(row[0] or "").strip()
-        target_date = str(row[1] or "").strip()
-        metric = str(row[2] or "").strip().lower()
-        if not (city and target_date and metric in ("high", "low")):
-            continue
-        try:
-            if warm_mainstream_point(city, target_date, metric=metric) is not None:
-                warmed += 1
-        except Exception as exc:  # noqa: BLE001 — fail-soft per-family; never crash the job
-            logger.warning(
-                "EDLI mainstream warm: fetch failed for %s/%s/%s (non-fatal): %r",
-                city, target_date, metric, exc,
-            )
-    logger.info(
-        "EDLI mainstream warm: warmed=%d of %d pending families cap=%d",
-        warmed, len(pending_rows), cap,
-    )
 
 
 # WAL checkpoint BACKLOG-alert threshold, in BYTES. PRAGMA wal_checkpoint reports
@@ -6299,16 +6075,6 @@ def _resolve_edli_user_channel_aggregate_id(conn, message: dict) -> str:
 
 
 
-def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
-    if not edli_cfg.get("enabled"):
-        return False
-    if bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
-        return True
-    return False
-
-
-
-
 def _edli_boot_fill_bridge_recovery() -> None:
     """MF-1: heal orphaned EDLI confirmed fills AT BOOT, before any new trading.
 
@@ -6320,14 +6086,10 @@ def _edli_boot_fill_bridge_recovery() -> None:
     / redeem until the first reconcile cycle fires (and only if the cycle is even
     enabled). Bridging at boot guarantees recovery precedes the next entry wave.
 
-    Gate: same as the reconcile cycle — only in EDLI event-driven modes with the
-    user-channel/reconcile boundary enabled. Fully fail-open: any error is logged,
-    never fatal (boot must not be blocked by a recovery hiccup; the cycle retries).
+    Fully fail-open: any error is logged, never fatal (boot must not be blocked
+    by a recovery hiccup; the cycle retries).
     """
     try:
-        edli_cfg = _settings_section("edli", {})
-        if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
-            return
         now = datetime.now(timezone.utc)
         from src.state.db import get_trade_connection_with_world_required
 
@@ -6374,16 +6136,11 @@ def _edli_boot_settlement_redeem_recovery() -> None:
     settled-position recovery drains through the dedicated post-trade daemon.
     """
     try:
-        edli_cfg = _settings_section("edli", {})
-        live_execution_mode = _live_execution_mode(edli_cfg)
-        if not _harvester_should_register(live_execution_mode):
-            return
-        if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and not edli_cfg.get("enabled"):
+        if not _harvester_should_register():
             return
         logger.info(
             "boot settlement-redeem recovery delegated to post-trade-capital "
-            "daemon; order daemon will not run a boot harvester pass (mode=%s)",
-            live_execution_mode,
+            "daemon; order daemon will not run a boot harvester pass",
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(
@@ -6740,7 +6497,7 @@ def main():
     _check_s1_without_s2_sla()
 
     # §3.1 Data freshness gate — WARN-only at boot (Phase 2: warn; Phase 3: enforce).
-    # Runs BEFORE strategy gate so operator sees freshness diagnostics even when
+    # Runs BEFORE strategy gate so operator sees freshness telemetry even when
     # strategy gate refuses. GATE SPLIT (§3.7): data gate is operator-overridable
     # via state/control_plane.json::force_ignore_freshness: ["source_name"].
     # Wallet reachability (_startup_wallet_check below) is never overridden into
@@ -6849,15 +6606,12 @@ def main():
 
     # max_instances=1: prevent concurrent execution if previous cycle still running
     edli_cfg = _settings_section("edli", {})
-    live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
-    _assert_edli_stage_readiness(edli_cfg)
+    # Boot must preserve command recovery, monitoring, and reduce-only exits.
+    # Operator authorization and readiness are evaluated as cycle-local BUY
+    # admission below, not as daemon-fatal mode selectors.
     _edli_boot_command_recovery_once(boot_at=boot_at)
     _edli_boot_invalid_pending_entry_authority_cancel_once()
-    # SINGLE TRUTH (bias-maze strip 2026-06-17): the EMOS-CI license boot guard is REMOVED
-    # (the override it guarded is gone). The legacy bias/Platt calibration-coverage contract
-    # is now an unconditional logged no-op (not applicable under single-truth).
-    _assert_calibration_coverage_contract(edli_cfg)
-    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
+    def _register_edli_live_jobs() -> None:
         # The interval remains the durable recovery/backlog scan. Forecast materialization
         # also publishes a best-effort cross-process wake after its DB commit; the listener
         # above invokes this same canonical reactor immediately for that hint. A lost or
@@ -6940,8 +6694,7 @@ def main():
         # enqueues EDLI_REDECISION_PENDING for families whose edge fired, and pulls/​re-decides
         # abandoned maker rests (§4.5). ~90s cadence (well inside the executable-price freshness
         # window the substrate warmer maintains). Wave-1 2026-06-12: always REGISTERED; the job
-        # body self-gates on live-armed conditions (reactor_mode == live + event_writer_enabled),
-        # the redecision_screen_enabled flag deleted. Data + cancel only, fail-soft.
+        # body runs in the one live topology. Data + cancel only, fail-soft.
         # max_instances=1/coalesce so overlapping triggers skip.
         scheduler.add_job(
             _edli_continuous_redecision_screen_cycle,
@@ -6982,26 +6735,8 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        # MAINSTREAM WARM (E2 / operator directive 2026-06-04 #2): dedicated off-mutex
-        # warmer for the mainstream-forecast point cache (read_mainstream_point_cached),
-        # mirroring _edli_market_substrate_warm_cycle. The reactor proof path now ALWAYS
-        # annotates the mainstream/bias agreement value on every candidate (decoupled from
-        # mainstream_agreement_reference_enabled), reading the WARM CACHE only — so this job
-        # MUST run for the cache to populate, else every receipt carries
-        # mainstream_*=None (unknown). Gated only by edli.enabled (inside the job), NOT
-        # by the reference flag — warming the cache is just a read, off-mutex, safe. The
-        # fetch applies Retry-After backoff on 429s; on its own cadence it never serializes
-        # a world write. Data-only (no orders); fail-soft. Display-only: the value it warms
-        # is NEVER a decision input (the enforce/arm coupling is deleted).
-        scheduler.add_job(
-            _edli_mainstream_warm_cycle,
-            "interval",
-            seconds=90,
-            id="edli_mainstream_warm",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 70.0),
-            max_instances=1,
-            coalesce=True,
-        )
+
+    _register_edli_live_jobs()
     # Exit-lifecycle monitoring stays in the order daemon. Chain-sync READ,
     # market/user channel ingest, substrate capture, and post-trade capital
     # pollers are owned by their dedicated live daemons.
@@ -7132,8 +6867,7 @@ def main():
     # Producer commits are already durable before this process is ready.  Start
     # their low-latency consumer before APScheduler can launch periodic monitor
     # work; the interval reactor remains the recovery scan when a wake is lost.
-    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
-        _start_edli_reactor_wake_listener()
+    _start_edli_reactor_wake_listener()
 
     # Phase 3: K2 ingest jobs removed from this scheduler block.
     # All K2 ticks, etl_recalibrate, ecmwf_open_data, automation_analysis,

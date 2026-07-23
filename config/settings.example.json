@@ -42,7 +42,7 @@
     "unimodal_range_epsilon": 0.5,
     "conflict_kl_threshold": 0.15
   },
-  "_entry_forecast_note": "Entry forecast data contract — required by Settings.__init__ since 2026-05-03 (PR47). Source identity, calibration policy, and rollout mode must be set explicitly per operator deployment; mismatched values fail closed at boot. Defaults below mirror the live ECMWF Open Data lane.",
+  "_entry_forecast_note": "Entry forecast data contract — required by Settings.__init__ since 2026-05-03 (PR47). Source identity and calibration policy must be set explicitly per operator deployment; mismatched values fail closed at boot. Zeus has one live runtime path.",
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
     "source_transport": "ensemble_snapshots_db_reader",
@@ -52,28 +52,12 @@
     "target_horizon_days": 10,
     "warm_horizon_days": 10,
     "source_cycle_policy": "latest_complete_full_horizon",
-    "allow_short_horizon_06_18": false,
-    "rollout_mode": "live",
-    "calibration_policy_id": "ecmwf_open_data_uses_tigge_localday_cal_v1",
-    "require_active_market_future_coverage": true
+    "calibration_policy_id": "ecmwf_open_data_uses_tigge_localday_cal_v1"
   },
   "edli": {
-    "enabled": true,
-    "live_execution_mode": "edli_live",
-    "edli_live_scope": "forecast_plus_day0",
-    "reactor_mode": "live",
-    "event_writer_enabled": true,
     "_reactor_scan_interval_seconds_note": "W4.3: edli_event_reactor poll cadence (process_pending's ONLY caller). Default=60 is the current A2 latency-SLA detection floor; do not raise without re-measuring the SLA (see main.py's job registration comment).",
     "reactor_scan_interval_seconds": 60,
-    "forecast_snapshot_trigger_enabled": true,
-    "day0_extreme_trigger_enabled": true,
-    "day0_authority_catchup_scanner_enabled": true,
-    "day0_hard_fact_live_enabled": true,
-    "market_channel_ingestor_enabled": true,
-    "market_channel_quote_cache_enabled": true,
-    "edli_user_channel_reconcile_enabled": true,
     "_fill_synchronizer_note": "LX-T4 (docs/rebuild/local_ledger_excision_2026-07-12.md): continuous get_trades() poller into venue_trade_facts, independent of WS health/findings. src.ingest.fill_synchronizer.fill_synchronizer_cycle, 90s cadence.",
-    "fill_synchronizer_enabled": true,
     "edli_user_channel_message_queue_path": "",
     "edli_venue_reconcile_facts_path": "",
     "edli_user_channel_reconcile_max_messages": 50,
@@ -83,22 +67,12 @@
     "market_channel_refresh_max_actions_per_window": 5,
     "market_channel_refresh_window_seconds": 60,
     "pre_submit_max_quote_age_ms": 1000,
-    "pre_submit_balance_allowance_check_enabled": true,
-    "real_order_submit_enabled": true,
-    "durable_submit_outbox_enabled": true,
-    "edli_live_operator_authorized": true,
     "edli_stage_loaded_sha_file": "state/loaded_sha.json",
     "edli_stage_source_health_json": "state/source_health.json",
     "edli_stage_status_json": "state/status_summary.json",
     "edli_stage_readiness_max_age_seconds": 900,
-    "edli_source_run_dual_chain_enabled": true,
-    "edli_live_promotion_artifact_path": "state/edli_live_promotion_artifact.json",
     "edli_live_max_unresolved_unknowns": 0,
     "edli_live_min_realized_edge_bps": 0,
-    "mainstream_warm_max_families_per_cycle": 8,
-    "replacement_0_1_bayes_precision_fusion_capture_enabled": true,
-    "replacement_0_1_bayes_precision_fusion_enabled": true,
-    "replacement_0_1_fused_q_shape_enabled": true,
     "no_submit_visible_depth_fill_lcb": 0.05
   },
   "calibration": {
@@ -206,11 +180,6 @@
     "cancel_if_not_filled": true
   },
   "feature_flags": {
-    "CANONICAL_EXIT_PATH": false,
-    "HOLD_VALUE_EXIT_COSTS": false,
-    "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF.",
-    "settlement_coverage_hierarchy_enabled": false,
-    "_settlement_coverage_hierarchy_enabled_note": "F1: hierarchical settlement-coverage calibrator (src/calibration/settlement_coverage_hierarchy.py). Default OFF = byte-identical current behavior."
   },
   "ops": {
     "posterior_staleness_alert_hours": 12.0,

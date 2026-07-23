@@ -193,7 +193,7 @@ class SigmaComponents:
     uncertainty on top of an already-complete realized error — ARM replay 2026-06-15).
     ``realized_floor_native`` is ``max(rmse_native, mad_sigma_native)`` of the floor
     artifact (or the conservative fallback floor). ``raw_member_spread_native`` is the
-    raw ensemble spread retained for diagnostics (never the authority here).
+    raw ensemble spread retained for telemetry (never the authority here).
     """
 
     raw_member_spread_native: float
@@ -302,7 +302,7 @@ def _weighted_spread(members_native: np.ndarray) -> float:
     """Raw ensemble spread (sample std, ddof=1) in the settlement native unit.
 
     The under-dispersed quantity the live raw-served path used as σ. Retained as a
-    DIAGNOSTIC candidate only; it never reaches the served σ except through the RSS,
+    TELEMETRY candidate only; it never reaches the served σ except through the RSS,
     where the realized floor dominates it.
     """
     arr = np.asarray(members_native, dtype=float)

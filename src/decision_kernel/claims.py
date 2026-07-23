@@ -26,13 +26,12 @@ FILL_FEASIBILITY = "FillFeasibilityEvidenceCertificate"
 CANDIDATE_EVIDENCE = "CandidateEvidenceCertificate"
 TESTING_PROTOCOL = "TestingProtocolCertificate"
 FDR = "FdrCertificate"
-KELLY_DRY_RUN = "KellyDryRunCertificate"
+SIZING = "SizingCertificate"
 PORTFOLIO_STATE = "PortfolioStateCertificate"
 RISK_LEVEL = "RiskLevelCertificate"
 LIVE_CAP = "LiveCapCertificate"
 LIVE_CAP_TRANSITION = "LiveCapTransitionCertificate"
-NO_SUBMIT_MODE = "NoSubmitModeCertificate"
-NO_SUBMIT_DECISION = "NoSubmitDecisionCertificate"
+PRE_SUBMIT_DECISION = "PreSubmitDecisionCertificate"
 EXECUTION_POLICY = "ExecutionPolicyCertificate"
 BALANCE_ALLOWANCE = "BalanceAllowanceCertificate"
 VENUE_CONNECTIVITY = "VenueConnectivityCertificate"
@@ -52,18 +51,17 @@ SETTLEMENT = "SettlementCertificate"
 
 PUBLIC_MARKET_CHANNEL_SOURCE = "PUBLIC_MARKET_CHANNEL"
 
-NO_SUBMIT_REQUIRED_TYPES: frozenset[str] = frozenset({
+PRE_SUBMIT_REQUIRED_TYPES: frozenset[str] = frozenset({
     CLOCK_MODE,
     CAUSAL_EVENT,
     CANDIDATE_EVIDENCE,
     TESTING_PROTOCOL,
     FDR,
-    KELLY_DRY_RUN,
+    SIZING,
     RISK_LEVEL,
-    NO_SUBMIT_MODE,
 })
 
-NO_SUBMIT_FORECAST_REQUIRED_TYPES: frozenset[str] = frozenset({
+PRE_SUBMIT_FORECAST_REQUIRED_TYPES: frozenset[str] = frozenset({
     CLOCK_MODE,
     CAUSAL_EVENT,
     SOURCE_TRUTH,
@@ -80,12 +78,11 @@ NO_SUBMIT_FORECAST_REQUIRED_TYPES: frozenset[str] = frozenset({
     CANDIDATE_EVIDENCE,
     TESTING_PROTOCOL,
     FDR,
-    KELLY_DRY_RUN,
+    SIZING,
     RISK_LEVEL,
-    NO_SUBMIT_MODE,
 })
 
-NO_SUBMIT_FORBIDDEN_TYPES: frozenset[str] = frozenset({
+PRE_SUBMIT_FORBIDDEN_TYPES: frozenset[str] = frozenset({
     ACTIONABLE_TRADE,
     EXECUTION_COMMAND,
     VENUE_SUBMISSION,
@@ -106,7 +103,7 @@ ACTIONABLE_REQUIRED_TYPES: frozenset[str] = frozenset({
     CANDIDATE_EVIDENCE,
     TESTING_PROTOCOL,
     FDR,
-    KELLY_DRY_RUN,
+    SIZING,
     RISK_LEVEL,
     LIVE_CAP,
 })

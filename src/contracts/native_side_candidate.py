@@ -61,7 +61,7 @@ _VALID_SIDES: frozenset[str] = frozenset({"YES", "NO"})
 
 
 class CandidateNoTradeReason(StrEnum):
-    """Why a native side candidate is untradeable (a diagnostic, not a loss).
+    """Why a native side candidate is untradeable (a telemetry, not a loss).
 
     A no-trade candidate is recorded — NOT silently omitted — so the
     family-wise FDR denominator and the learning layer can see that the side
@@ -358,7 +358,7 @@ class NativeSideCandidate:
         reason: CandidateNoTradeReason,
         hypothesis_id: str = "",
     ) -> "NativeSideCandidate":
-        """Build a NO-TRADE candidate: a recorded diagnostic, not a price.
+        """Build a NO-TRADE candidate: a recorded telemetry, not a price.
 
         It carries NO probability authority (``q_point``/``q_lcb`` = None),
         NO probability uncertainty, and NO executable cost curve — there is

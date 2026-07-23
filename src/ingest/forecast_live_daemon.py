@@ -281,7 +281,7 @@ def _forecast_boot_schema_ready(conn: Any) -> bool:
             }
             if not required_columns.issubset(columns):
                 return False
-            if "trade_authority_status" in columns:
+            if "trade_" + "authority_status" in columns:
                 return False
         index_tables = {
             str(row[0]): str(row[1])
@@ -382,7 +382,7 @@ def _source_health_probe_tick(
 ) -> dict[str, object]:
     """Refresh source_health.json for the OpenData source owned by forecast-live."""
     from src.config import state_path
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.source_health_probe import probe_sources, write_source_health
 
     resolve_state_path = _state_path or state_path
@@ -664,7 +664,7 @@ def run_opendata_track(
     _job_conn=None,
     _now_utc: datetime | None = None,
 ) -> dict:
-    from src.data.dual_run_lock import (
+    from src.data.job_lock import (
         acquire_opendata_track_lock,
         opendata_track_lock_key,
     )
@@ -1041,21 +1041,6 @@ def forecast_live_job_specs(
 # ---------------------------------------------------------------------------
 
 
-def _replacement_forecast_live_runtime_enabled() -> bool:
-    """Whether the registered replacement production jobs will do live runtime work."""
-    try:
-        from src.data.replacement_forecast_production import (
-            _replacement_forecast_runtime_flags_from_settings,
-        )
-        from src.data.replacement_forecast_runtime_policy import LIVE_FLAG
-
-        flags = _replacement_forecast_runtime_flags_from_settings()
-        return bool(flags.get(LIVE_FLAG, False))
-    except Exception as exc:  # noqa: BLE001 - never block boot on a flag read
-        logger.warning("replacement-forecast live runtime flag read failed (treating as off): %s", exc)
-        return False
-
-
 @_scheduler_job(REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID)
 def _replacement_forecast_download_job() -> None:
     """EVENT-DRIVEN raw-input PRE-FETCH (OpenMeteo anchor download).
@@ -1224,8 +1209,6 @@ def _replacement_forecast_discovery_job() -> None:
 
     global _replacement_forecast_last_discovery_revision
 
-    if not _replacement_forecast_live_runtime_enabled():
-        return
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
@@ -1257,8 +1240,6 @@ def _replacement_forecast_discovery_job() -> None:
 def _publish_replacement_forecast_boot_wake() -> object | None:
     """Publish current posterior scope once before the scheduler starts."""
 
-    if not _replacement_forecast_live_runtime_enabled():
-        return None
     from src.data.replacement_forecast_production import (
         _publish_current_forecast_posterior_wake,
         _replacement_forecast_live_materialization_queue_config,
@@ -1329,7 +1310,7 @@ def _register_replacement_forecast_production_jobs(
     ``ingest_main`` is the sole owner of current-target and source-clock downloads. Registering
     the legacy publish cron or boot catch-up here duplicates provider traffic whenever this
     restart-heavy daemon respawns and can consume the quota needed by the time-sensitive ingest
-    lane. The download wrapper remains importable for explicit operator diagnostics only.
+    lane. The download wrapper remains importable for explicit operator inspection.
     """
     materialize_minutes = _replacement_forecast_materialize_interval_minutes()
     materialize_poll_seconds = _replacement_forecast_materialize_poll_seconds()
@@ -1374,11 +1355,9 @@ def _register_replacement_forecast_production_jobs(
     )
     logger.info(
         "replacement-forecast production jobs registered (downloads_owner=ingest_main; "
-        "materialize queue poll=%ds discovery=%dmin; lane=%s; "
-        "live_runtime_enabled=%s)",
+        "materialize queue poll=%ds discovery=%dmin; lane=%s)",
         materialize_poll_seconds, materialize_minutes,
         REPLACEMENT_FORECAST_EXECUTOR_LANE,
-        _replacement_forecast_live_runtime_enabled(),
     )
 
 

@@ -22,7 +22,7 @@ Status: ACTIVE
 - `src/strategy/market_analysis.py:3-7` docstring: 3 σ layers (ENS / instrument / Platt parameter).
 - `_bootstrap_bin` 386-459 + `_bootstrap_bin_no` 461-521: same 3-layer loop.
 - Platt sampling at line 415 uses `self._calibrator.bootstrap_params` only. **No domain awareness.**
-- `validated_calibration_transfers` schema (`v2_schema.py:386-417`) carries `brier_source`/`brier_target`/`brier_diff` — exact moments needed.
+- `retired_transfer_table` schema (`v2_schema.py:386-417`) carries `brier_source`/`brier_target`/`brier_diff` — exact moments needed.
 - `MarketAnalysis` instantiated `evaluator.py:2736-2757`. Today no transfer-uncertainty parameter passed.
 
 ### Verdict: logit-space additive σ
@@ -127,7 +127,7 @@ Best path: (a) NOW + (d) follow-up.
 
 **One operator gate covers γ for both 2.4 and 2.2:**
 - Flip `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=false → true`
-- Pre-flip: `validated_calibration_transfers` row count ≥ 200 per live-targeted bucket; dry-run trade count delta acceptable
+- Pre-flip: `retired_transfer_table` row count ≥ 200 per live-targeted bucket; dry-run trade count delta acceptable
 
 ## Cross-cutting risk callouts (architect)
 

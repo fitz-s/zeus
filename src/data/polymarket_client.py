@@ -261,13 +261,10 @@ resolve_polymarket_credentials = _resolve_credentials
 def _resolve_clob_v2_signature_type() -> int:
     raw = os.environ.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE")
     if raw is None:
-        if _real_order_submit_enabled():
-            raise RuntimeError(
-                "POLYMARKET_CLOB_V2_SIGNATURE_TYPE is required when "
-                "edli.real_order_submit_enabled=true; live submit must not rely on "
-                "the historical implicit POLY_GNOSIS_SAFE signature_type=2 default."
-            )
-        raw = "2"
+        raise RuntimeError(
+            "POLYMARKET_CLOB_V2_SIGNATURE_TYPE is required; the live CLOB adapter "
+            "must not rely on the historical implicit POLY_GNOSIS_SAFE signature_type=2 default."
+        )
     try:
         signature_type = int(raw)
     except ValueError as exc:
@@ -279,24 +276,6 @@ def _resolve_clob_v2_signature_type() -> int:
             f"Invalid POLYMARKET_CLOB_V2_SIGNATURE_TYPE={raw!r}; expected 0, 1, 2, or 3"
         )
     return signature_type
-
-
-def _real_order_submit_enabled() -> bool:
-    """Return the live submit arming flag from strict settings.
-
-    This is intentionally fail-closed: if the config cannot be read, a caller about to
-    construct the authenticated CLOB adapter must not assume submit is disabled and fall
-    back to an implicit signature mode.
-    """
-
-    try:
-        from src.config import Settings
-
-        return bool(Settings()["edli"]["real_order_submit_enabled"])
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            "Cannot determine edli.real_order_submit_enabled for CLOB signature preflight"
-        ) from exc
 
 
 def _resolve_q1_egress_evidence_path(*, default: Path, env_name: str) -> Path:
@@ -1184,10 +1163,9 @@ class PolymarketClient:
         Not urgent (USDC stays claimable indefinitely) but without it,
         winning capital sits on-chain instead of being available for new trades.
 
-        PR-I.5.c (2026-05-18): compatibility wrapper accepts index_sets kw-only
-        for protocol parity with PolymarketV2Adapter.redeem. This wrapper still
-        returns the legacy stub — autonomous redeem routes exclusively through
-        PolymarketV2Adapter constructed by _redeem_submitter_cycle.
+        Compatibility wrapper retained for protocol parity with
+        PolymarketV2Adapter.redeem. Redeem submission is forbidden; external
+        redemption is observed through the settlement command ledger.
         """
         _ = index_sets  # kept for protocol parity; ignored in compat wrapper
         warnings.warn(

@@ -18,15 +18,13 @@ daemon (src.main) and are now hosted by the dedicated P4 process
                                        afterwards (the DATA_DEGRADED-flap root cause, §4.3).
   - ``_harvester_cycle``             — settlement P&L resolver (REDEEM_INTENT_CREATED producer)
   - ``_redeem_reconciler_cycle``     — REDEEM_TX_HASHED -> reconcile_pending_redeems
-    (``_redeem_submitter_cycle`` DELETED 2026-07-08, R6-a: dead redeem-submission
-    machinery -- Zeus never submits redeem tx, operator law 2026-06-10. Redemption
-    accounting stays live via ``request_redeem``/``reconcile_pending_redeems``.)
   - ``_wrap_intent_creator_cycle``   — enqueue WRAP_REQUESTED on balance threshold
   - ``_wrap_submitter_cycle``        — WRAP_REQUESTED/WRAP_APPROVED -> submit APPROVE/WRAP tx
   - ``_wrap_reconciler_cycle``       — WRAP_*_TX_HASHED -> advance on receipt
 
 WHY THIS IS ITS OWN PROCESS (system_decomposition_plan §4.3 / §9):
-  - ALWAYS_ON / POST_TRADE (criterion 1): a settled position must be harvested / redeemed /
+  - ALWAYS_ON / POST_TRADE (criterion 1): a settled position must be harvested /
+    externally redeemed /
     wrapped even if trading is paused for weeks. These cycles must keep running when the
     order daemon is idle or dead.
   - FAILURE_DOMAIN (criterion 3): POST_TRADE follow-up must not share the live-decision lane;
@@ -370,7 +368,7 @@ def _harvester_cycle():
     fail closed; the trading daemon must not fall back to the legacy integrated
     harvester path, which can derive and write settlement truth in the same lane.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.state.db import get_trade_connection, get_forecasts_connection
     with acquire_lock("harvester_pnl") as acquired:
         if not acquired:
@@ -416,14 +414,9 @@ def _harvester_cycle():
 # cascade-liveness boot guard travels with them (post_trade_capital_daemon.py).
 # ---------------------------------------------------------------------------
 
-# _redeem_submitter_cycle DELETED 2026-07-08 (R6-a): dead redeem-submission
-# scheduler machinery. It already unconditionally calm-skipped every cycle
-# (redeem_submission_allowed() is always False per operator law 2026-06-10)
-# -- the ~150 lines below the skip-and-return, including the submit_redeem
-# call and the autoretry reseat call, were unreachable. See
-# src.execution.settlement_commands.assert_redeem_submission_allowed for
-# the permanent enforcement point. Scheduler registration removed from
-# src/ingest/post_trade_capital_daemon.py in the same commit.
+# Redeem submission is absent by operator law 2026-06-10; this module only
+# reconciles externally recorded transactions. No redeem-submitter scheduler is
+# registered in src/ingest/post_trade_capital_daemon.py.
 
 
 def _redeem_reconciler_cycle() -> None:
@@ -434,7 +427,7 @@ def _redeem_reconciler_cycle() -> None:
     reachable in production.  Karachi anchor: tx 0x0c85d94… (negRisk market
     c8c220f5…) sitting in REDEEM_TX_HASHED since 2026-05-19T08:26 UTC.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.execution.settlement_commands import (
         SettlementState,
         list_commands,
@@ -491,7 +484,7 @@ def _wrap_intent_creator_cycle() -> None:
     On-chain balance-driven (not journal-driven). Idempotent: skips if any
     non-terminal WRAP row already exists. Skipped in non-live mode.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.polymarket_client import resolve_polymarket_credentials
     from src.execution.wrap_unwrap_commands import enqueue_wrap_if_balance_above_threshold
     from src.state.db import get_world_connection
@@ -543,7 +536,7 @@ def _wrap_submitter_cycle() -> None:
 
     Each step is a separate Safe execTransaction. Skipped in non-live mode.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.polymarket_client import (
         resolve_polymarket_credentials,
         _resolve_clob_v2_signature_type,
@@ -625,12 +618,6 @@ def _wrap_submitter_cycle() -> None:
                         tx_kind=tx_kind,
                         signer_eoa=signer_eoa,
                     )
-                    if result.get("errorCode") == "WRAP_DRY_RUN_LOGGED":
-                        logger.info(
-                            "wrap_submitter: dry_run command_id=%s tx_kind=%s fingerprint=%s",
-                            command_id, tx_kind, result.get("dry_run_fingerprint"),
-                        )
-                        continue
                     if not result.get("success"):
                         raise RuntimeError(
                             f"_wrap_via_safe failed: {result.get('errorCode')} "
@@ -681,7 +668,7 @@ def _wrap_reconciler_cycle() -> None:
     On WRAP_CONFIRMED, calls adapter.update_balance_allowance() to refresh CLOB ledger.
     Skipped in non-live mode.
     """
-    from src.data.dual_run_lock import acquire_lock
+    from src.data.job_lock import acquire_lock
     from src.data.polymarket_client import (
         resolve_polymarket_credentials,
         _resolve_clob_v2_signature_type,

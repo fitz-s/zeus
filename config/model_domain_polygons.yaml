@@ -12,10 +12,8 @@
 # data-presence gate (fail-soft drop) so a regional can ONLY enter fusion when BOTH agree.
 # Polygon membership is point-in-polygon over (lat, lon) of the city's settlement coordinate.
 #
-# IMPORTANT: presence here is domain plumbing only. It does NOT enable any source, fetch, or
-# trade authority. ICON-D2/AROME stay blocked / deferred per BAYES_PRECISION_FUSION_PROOF_RESULT.md until an
-# ingest+calibration path exists. The BAYES_PRECISION_FUSION fusion flag (replacement_0_1_bayes_precision_fusion_enabled) is
-# default-OFF; with it OFF this file is inert.
+# Presence here defines spatial domain plumbing only. Source ingestion and
+# current probability authority remain governed by their owning contracts.
 
 schema: model_domain_polygons_v1
 

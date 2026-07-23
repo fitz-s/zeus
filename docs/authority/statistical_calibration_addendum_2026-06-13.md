@@ -116,7 +116,7 @@ exposures (`posterior fill prob = 1 − (b/(b+D))^a`); queue depth r>1 → Erlan
 With 10–50 own orders the maker license will usually FAIL until the book prior is
 validated — consistent with REST_DEFAULT being currently inappropriate for
 robust-edge candidates >6h out ONLY where LAW 1 (operator) doesn't forbid crossing.
-Markout diagnostic gates the optimistic persistent-improvement variant.
+Markout evidence check gates the optimistic persistent-improvement variant.
 
 ### A9. Fitting objective: report BOTH interval log-loss and RPS
 Fable's CRPS/RPS case (distance-aware, outlier-robust, EMOS-standard) vs the
@@ -175,7 +175,7 @@ Adopted refinements (supersede the corresponding lines above where they differ):
 
 - **D1 (refines A5)**: ALWAYS fit EB partial pooling; never use the era test as
   a pool/no-pool switch (pretest-estimator risk unbounded near the null). The
-  LRT/score/boundary tests are reported diagnostics. Σ̂_era→0 recovers full
+  LRT/score/boundary tests are reported evidence checks. Σ̂_era→0 recovers full
   pooling automatically; newest era converges to its own MLE as n grows.
 - **D2 (refines A6)**: preferred DISPUTED (nee QUARANTINED) treatment = CAR interval-widening
   (observe ambiguity set A_i → censoring interval [min A_i, max A_i]); unbiased
@@ -184,7 +184,7 @@ Adopted refinements (supersede the corresponding lines above where they differ):
   directional. Fractional weighting biased for ANY w>0 (proof in both sources).
 - **D3 (refines A2)**: Tweedie's formula as the nonparametric shrinkage upgrade
   at daily N≥200 candidates; e-BH on betting e-values is the only admissible
-  FDR-style gate if risk policy demands one; winner's-curse slope diagnostic
+  FDR-style gate if risk policy demands one; winner's-curse slope evidence check
   (realized PnL/contract vs shrunk edge, slope≈1 target) goes into the
   settlement-graded monitoring set.
 - **D4 (resolves the A7 Ledoit–Wolf divergence)**: keep LW but floor ρ≥0.5

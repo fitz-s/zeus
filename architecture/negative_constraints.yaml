@@ -89,7 +89,7 @@ constraints:
         - tests/engine/test_maker_quote_empty_no_ask.py::test_quote_edge_non_positive_still_rejects
         - tests/test_probability_complement_ast_guard.py::test_decision_core_never_builds_no_from_the_overconfident_q_lcb_complement
   - id: NC-10
-    statement: No new shadow persistence surface without deletion or demotion plan.
+    statement: No new observation persistence surface without deletion or demotion plan.
     enforced_by:
       scripts:
         - scripts/check_work_packets.py

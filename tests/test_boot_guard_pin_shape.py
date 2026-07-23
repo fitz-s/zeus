@@ -40,12 +40,9 @@ def _cfg(model_keys=None, frozen_as_of=None):
 def _replacement_qkernel_cfg(*, frozen_as_of: str) -> dict:
     cfg = _cfg(frozen_as_of=frozen_as_of)
     cfg["edli"] = {
-        "live_execution_mode": "edli_live",
-        "reactor_mode": "live",
         "replacement_0_1_bayes_precision_fusion_enabled": True,
         "replacement_0_1_fused_q_shape_enabled": True,
     }
-    cfg["feature_flags"] = {"qkernel_spine_enabled": True}
     return cfg
 
 

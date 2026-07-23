@@ -48,7 +48,7 @@ failure_chain_schema:
     - WRONG_LAYER_GUARD
     - TEST_DOES_NOT_HIT_RUNTIME_PATH
     - MOCK_ONLY_TEST
-    - SHADOW_PATH_UNCOVERED
+    - OBSERVATION_PATH_UNCOVERED
     - PATH_TRIGGER_ABSENT
     - EXTERNAL_SEMANTICS_UNCHECKED
     - STATIC_PATTERN_NOT_ENCODED
@@ -136,7 +136,7 @@ chains:
       - market_discovery_scanner
     money_path_segments: [contract_semantics, source_truth, market_prior, executable_edge]
     missed_guard_type:
-      - SHADOW_PATH_UNCOVERED
+      - OBSERVATION_PATH_UNCOVERED
       - TEST_DOES_NOT_HIT_RUNTIME_PATH
       - PATH_TRIGGER_ABSENT
     required_context_packs: [market_discovery_substrate]

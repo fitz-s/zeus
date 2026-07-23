@@ -1,7 +1,7 @@
 """Decision-time truth with typed availability provenance.
 
 D4 antibody (per packet 2026-04-27 §01 §5): replaces the doc-level
-DIAGNOSTIC_REPLAY_REFERENCE_SOURCES frozenset in src/engine/replay.py with
+TELEMETRY_REPLAY_REFERENCE_SOURCES frozenset in src/engine/replay.py with
 a typed enum that callers must declare. Backtest purposes refuse provenance
 tiers below their authority — F11 hindsight leakage becomes unconstructable
 rather than discouraged.
@@ -41,7 +41,7 @@ class DecisionTimeTruth:
     def is_promotion_grade(self) -> bool:
         return self.provenance in _PROMOTION_GRADE
 
-    def is_diagnostic_only(self) -> bool:
+    def is_non_promotable(self) -> bool:
         return self.provenance not in _PROMOTION_GRADE
 
 
@@ -59,7 +59,7 @@ def gate_for_purpose(
         promotion-grade PnL claims.
     SKILL: rejects RECONSTRUCTED — heuristic timestamps corrupt forecast
         skill scoring.
-    DIAGNOSTIC: accepts all — purpose is to surface code/history divergence,
+    TELEMETRY: accepts all — purpose is to surface code/history divergence,
         not to make PnL or skill claims.
     """
     if purpose is BacktestPurpose.ECONOMICS and not truth.is_promotion_grade():

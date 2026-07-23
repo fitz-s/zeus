@@ -726,17 +726,15 @@ class EventStore:
         *,
         decision_time: str,
         limit: int = 100,
-        day0_is_tradeable: bool = True,
         targeted_event_ids: frozenset[str] = frozenset(),
         targeted_only: bool = False,
     ) -> list[OpportunityEvent]:
         """Fetch pending events in deterministic replay/inference order.
 
-        ``day0_is_tradeable`` (default True = production behaviour) controls the
-        scope-aware claim tier for test/replay callers. Production live scope
-        keeps Day0 tradeable. The tier authority lives in
-        ``src.events.event_priority.claim_tier_case_sql`` — one ordering law,
-        shared with the emit-priority constants, never a magic number here.
+        Day0 has the same live claim tier in every caller. The tier authority
+        lives in ``src.events.event_priority.claim_tier_case_sql`` — one
+        ordering law, shared with the emit-priority constants, never a magic
+        number here.
 
         STEP 3 timeliness fix (consolidated timeliness/tradeability design):
 
@@ -755,7 +753,7 @@ class EventStore:
 
         Non-FORECAST_SNAPSHOT_READY events carry no per-city forecast target and
         are NOT phase-filtered here (market-channel/day0 events have their own
-        scope); only events that expose a city+target_date are subject to the
+        authority); only events that expose a city+target_date are subject to the
         timeliness floor.
 
         ``targeted_only`` is the producer-wake fast path. It admits the
@@ -772,11 +770,9 @@ class EventStore:
         stale_processing_before = (
             parsed_decision_time - timedelta(seconds=self.processing_lease_seconds)
         ).isoformat()
-        # Scope-aware claim tier (ONE ordering authority, shared with the emit
-        # constants). day0_is_tradeable=False omits the DAY0_EXTREME_UPDATED Tier-0
-        # clause so non-tradeable day0 events fall to Tier 2 — strictly below the
-        # tradeable FORECAST_SNAPSHOT_READY Tier 1 (2026-06-11 live anti-starvation).
-        # PER-CITY ROUND-ROBIN FAIRNESS (2026-06-11 live throughput incident).
+        # Single-live claim tier (ONE ordering authority, shared with the emit
+        # constants). PER-CITY ROUND-ROBIN FAIRNESS (2026-06-11 live throughput
+        # incident).
         #
         # THE CATEGORY THIS MAKES UNCONSTRUCTABLE
         # ---------------------------------------
@@ -1163,7 +1159,6 @@ class EventStore:
         )
         ranked = _rank_pending_rows_python(
             rank_rows,
-            day0_is_tradeable=day0_is_tradeable,
             targeted_event_ids=targeted_event_ids,
             global_winner_targeted_event_ids=winner_targeted_event_ids,
         )
@@ -3476,12 +3471,10 @@ def _recent_recapture_edge_reversed_families(
 def _claim_tier_for_event(
     event: OpportunityEvent,
     payload: dict,
-    *,
-    day0_is_tradeable: bool,
 ) -> int:
     if event.event_type == "EDLI_REDECISION_PENDING":
         return 0
-    if event.event_type == "DAY0_EXTREME_UPDATED" and day0_is_tradeable:
+    if event.event_type == "DAY0_EXTREME_UPDATED":
         return 0
     if (
         event.event_type == "FORECAST_SNAPSHOT_READY"
@@ -3575,7 +3568,6 @@ def _live_redecision_retry_lane(event: OpportunityEvent, attempt_count: int) -> 
 def _rank_pending_rows_python(
     rows: list[sqlite3.Row | tuple] | tuple[sqlite3.Row | tuple, ...],
     *,
-    day0_is_tradeable: bool,
     targeted_event_ids: frozenset[str] = frozenset(),
     global_winner_targeted_event_ids: frozenset[str] = frozenset(),
 ) -> list[tuple[OpportunityEvent, int]]:
@@ -3596,7 +3588,6 @@ def _rank_pending_rows_python(
                 "tier": _claim_tier_for_event(
                     event,
                     payload,
-                    day0_is_tradeable=day0_is_tradeable,
                 ),
                 "city_key": _event_city_key(event),
                 "target_key": _date_desc_key(payload.get("target_date")),

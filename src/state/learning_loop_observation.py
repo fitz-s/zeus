@@ -6,11 +6,11 @@ Authority basis: round3_verdict.md §1 #2 (FIFTH and FINAL edge packet) +
 ULTIMATE_PLAN.md §4 #4 ("settlement-corpus → calibration update → parameter-
 drift → re-fit pipeline. Apr26 §11 corpus deferred; high/low split + DST
 resolved fixtures need owners. Apr26 Phase 4 silently dropped"). EDGE_OBSERVATION
-+ ATTRIBUTION_DRIFT + WS_OR_POLL_TIGHTENING + CALIBRATION_HARDENING measurement-
-substrate-first pattern repeated.
++ WS_OR_POLL_TIGHTENING + CALIBRATION_HARDENING measurement-substrate-first
+pattern repeated.
 
-K1 contract (mirrors src/state/edge_observation.py + attribution_drift.py +
-ws_poll_reaction.py + calibration_observation.py):
+K1 contract (mirrors src/state/edge_observation.py + ws_poll_reaction.py +
+calibration_observation.py):
   - Read-only projection. NO write path. NO JSON persistence. NO caches.
   - Reads canonical surfaces directly:
     * src.calibration.store.list_active_platt_models

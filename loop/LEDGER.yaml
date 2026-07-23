@@ -7,7 +7,7 @@
 # the work queue — there is no separate queue file). WHAT BREAKS IF THIS
 # FILE SILENTLY STOPS UPDATING: ticks keep re-reading the same stale open
 # claims and either re-do settled work or starve on an empty queue; a
-# gap here is diagnostic the same way a JOURNAL.md gap is — check the
+# gap here is telemetry the same way a JOURNAL.md gap is — check the
 # journal tail first, it will say why.
 #
 # Source of truth for the rules below:

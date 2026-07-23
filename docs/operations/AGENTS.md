@@ -115,7 +115,6 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 | `activation/` | active support (src/engine/dispatch.py + scripts/produce_activation_evidence.py refs) |
 | `live_egress/` | active support (src/venue/polymarket_v2_adapter.py ref) |
 | `edge_observation/` | active monitoring |
-| `attribution_drift/` | active monitoring |
 | `ws_poll_reaction/` | active monitoring |
 | `calibration_observation/` | active monitoring |
 | `learning_loop_observation/` | active monitoring |
@@ -182,4 +181,4 @@ Use `python scripts/zpkt.py start <slug>` to create a new plan — it writes the
   semantics without an explicit packet scope change.
 - When closeout reports unrelated global script/docs/test drift, phrase the
   result as changed-surface status plus repo-wide drift summary. Do not repair
-  unrelated weekly diagnostics just to make a narrow packet look globally clean.
+  unrelated weekly telemetrys just to make a narrow packet look globally clean.

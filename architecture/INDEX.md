@@ -134,7 +134,6 @@ Point-in-time design records. Not authority — read the YAML manifests and sour
 | `exit_strategy_audit_2026_05_27.md` | Structural verification of exit strategy code (base b360211d99) |
 | `exit_strategy_integration_plan_2026_05_27.md` | Integration plan following exit strategy math review |
 | `market_cost_seam_executable_uncertainty_2026_05_27.md` | Market-cost seam + executable-uncertainty architecture upgrade |
-| `pr348_premerge_critic_2026_05_27.md` | Pre-merge critic pass for PR #348 |
 | `pr_exit_strategy_premerge_critic_2026_05_27.md` | Pre-merge critic pass 1 for exit strategy PR |
 | `pr_exit_strategy_premerge_critic_pass2_2026_05_27.md` | Pre-merge critic pass 2 for exit strategy PR |
 | `world_mutex_io_offmutex_refactor_2026_06_04.md` | Plan to kill blocking I/O under world write mutex (2026-06-04 incident) |

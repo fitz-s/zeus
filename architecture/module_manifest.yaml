@@ -113,7 +113,6 @@ modules:
       - src/engine/monitor_refresh.py
       - src/engine/replay.py
       - src/engine/lifecycle_events.py
-      - src/engine/replacement_forecast_hook_factory.py
       - src/engine/position_belief.py
     public_entry_files:
       - src/engine/cycle_runner.py
@@ -170,7 +169,6 @@ modules:
       - src/events/opportunity_event.py
       - src/events/event_writer.py
     law_dependencies:
-      - AGENTS.md
       - architecture/db_table_ownership.yaml
       - architecture/money_path_objects.yaml
       - architecture/money_path_ci.yaml
@@ -281,7 +279,7 @@ modules:
     # family_decision_engine.py is a BUILD target at W3 (new src/solve/ module swaps in at
     # qkernel_spine_bridge.py:1332) and the selection machinery (curse bound + calibrator +
     # qlcb guard) is a W5 deletion target, per
-    # docs/rebuild/order_engine_implementation_architecture_2026-07-02.md §2-3.
+    # architecture/invariants.yaml §2-3.
     maturity: provisional
     zone: source
     authority_role: decision_logic
@@ -291,7 +289,6 @@ modules:
       - src/decision/payoff_vector.py
       - src/decision/qlcb_reliability_guard.py
       - src/decision/selection_calibrator.py
-      - src/decision/selection_curse_bound.py
       - src/decision/city_skill_gate.py
     public_entry_files:
       - src/decision/family_decision_engine.py
@@ -300,13 +297,10 @@ modules:
       - src/decision/payoff_vector.py
       - src/decision/qlcb_reliability_guard.py
       - src/decision/selection_calibrator.py
-      - src/decision/selection_curse_bound.py
-      - src/decision/selection_curse_bound_loader.py
       - src/decision/city_skill_gate.py
     law_dependencies:
-      - AGENTS.md
       - architecture/invariants.yaml
-      - docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+      - architecture/invariants.yaml
     current_fact_dependencies: []
     required_tests:
       - tests/decision/test_family_decision_engine.py
@@ -317,8 +311,6 @@ modules:
       - tests/decision/test_qlcb_guard_decision_integration.py
       - tests/decision/test_selection_calibrator.py
       - tests/decision/test_selection_calibrator_eb.py
-      - tests/decision/test_selection_curse_bound.py
-      - tests/decision/test_selection_curse_bound_loader.py
       - tests/decision/test_city_skill_gate.py
       - tests/decision/test_live_receipt_contract.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
@@ -328,121 +320,20 @@ modules:
     scoped_agents: src/solve/AGENTS.md
     module_book: null
     priority: p1_first_wave
-    # maturity: provisional — order-engine rebuild W3 SOLVE core. Math bodies land in
-    # sub-slice 2 (solver.py solve(), menu_adapter, scenario_service); the FamilyDecision
-    # shim + bridge wiring are sub-slice 3. Inert: nothing imports src/solve yet; the ONLY
-    # intended seam is qkernel_spine_bridge.py:1332 behind the w3_solve_enabled flag.
-    maturity: provisional
+    maturity: stable
     zone: source
     authority_role: decision_logic
     high_risk_files:
       - src/solve/solver.py
-      - src/solve/kappa.py
-      - src/solve/scenario_service.py
     public_entry_files:
       - src/solve/solver.py
-      - src/solve/types.py
-      - src/solve/scenario_service.py
-      - src/solve/menu_adapter.py
-      - src/solve/kappa.py
-      - src/solve/exits.py
     law_dependencies:
-      - AGENTS.md
-      - docs/rebuild/order_engine_first_principles_design_2026-07-02.md
-      - docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
-      - docs/rebuild/schema_packets/w3_solve_design_packet_2026-07-03.md
+      - architecture/invariants.yaml
     current_fact_dependencies: []
     required_tests:
       - tests/solve/test_solver_properties.py
-      - tests/solve/test_solver_numerical.py
-      - tests/solve/test_scenario_service.py
-      - tests/solve/test_menu_adapter.py
-      - tests/solve/test_types_validation.py
       - tests/solve/test_contract_validator.py
-      - tests/solve/test_joint_axis.py
-      - tests/solve/test_wealth_builder.py
-      - tests/solve/test_shim_decide.py
-      - tests/integration/test_w3_solve_seam_g3.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: not_started
-  reconcile:
-    path: src/reconcile
-    scoped_agents: src/reconcile/AGENTS.md
-    module_book: null
-    priority: p1_first_wave
-    # maturity: provisional — R2-core (docs/rebuild/EXECUTION_MASTER_2026-07-07.md
-    # §E R2-a/R2-b). Two snapshot contracts (local_truth/chain_truth) + a
-    # diff engine + a certificate-native replay harness, replacing the
-    # 31-pass command_recovery/exchange_reconcile recovery mountain. Inert:
-    # nothing outside tests/the replay harness imports src/reconcile yet --
-    # wiring reconcile() into a live cycle (with replay-evidence-gated
-    # promotion) is R2-c, the 31-pass migration wave.
-    maturity: provisional
-    zone: source
-    authority_role: reconciliation_diff_engine
-    high_risk_files:
-      - src/reconcile/diff_engine.py
-    public_entry_files:
-      - src/reconcile/local_truth.py
-      - src/reconcile/chain_truth.py
-      - src/reconcile/diff_engine.py
-      - src/reconcile/replay.py
-    law_dependencies:
-      - docs/rebuild/EXECUTION_MASTER_2026-07-07.md
-      - docs/rebuild/whole_system_first_principles_2026-07-07.md
-    current_fact_dependencies: []
-    required_tests:
-      - tests/reconcile/test_local_truth.py
-      - tests/reconcile/test_chain_truth.py
-      - tests/reconcile/test_diff_engine.py
-      - tests/reconcile/test_replay_harness.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: not_started
-  reduce:
-    path: src/reduce
-    scoped_agents: src/reduce/AGENTS.md
-    module_book: null
-    priority: p1_first_wave
-    # maturity: provisional — LX-2R-a+b (docs/rebuild/local_ledger_excision_2026-07-12.md
-    # packet). Synthetic-fixture-only per both wave-1 dual reviews
-    # (docs/rebuild/consult_answers/local_ledger_excision_wave1_review_2026-07-13.txt
-    # + local_ledger_excision_wave1_local_verifier_2026-07-13.md): reducer
-    # implementation may proceed in parallel with LX-1R source-spine repair,
-    # but no production read-model backfill, no cent-equivalence claim, and
-    # no live generation publication until the LX-1R gate closes. LX-2R-b
-    # (condition_resolver.py + materialize.py) added the whole-corpus
-    # materializer and proved it read-only against a scoped export of the
-    # live trade DB (reproduces the chain-truth scoreboard oracle exactly:
-    # aggregate -$186.31, held-to-settlement -$201.61, 63 positions
-    # recovered from fabricated-zero, 954/970 materialize, 16/970 refuse --
-    # all OversoldPositionError, all missing-ENTRY-fill-coverage, an LX-1R
-    # backfill-completeness gap, not a bug here). Still inert by design:
-    # nothing outside tests imports src.reduce yet -- this proof ran against
-    # a disposable scratch copy, never against the live DB, and stamped a
-    # validation-only fill_sync_watermarks row on that copy alone.
-    maturity: provisional
-    zone: source
-    authority_role: position_economics_reducer
-    high_risk_files:
-      - src/reduce/position_economics.py
-      - src/reduce/materialize.py
-    public_entry_files:
-      - src/reduce/position_economics.py
-      - src/reduce/generation.py
-      - src/reduce/schema/generation_schema.py
-      - src/reduce/condition_resolver.py
-      - src/reduce/materialize.py
-    law_dependencies:
-      - docs/rebuild/local_ledger_excision_2026-07-12.md
-      - docs/rebuild/consult_answers/local_ledger_excision_wave1_review_2026-07-13.txt
-      - docs/rebuild/consult_answers/local_ledger_excision_wave1_local_verifier_2026-07-13.md
-      - docs/rebuild/consult_answers/local_ledger_excision_delta_round2_2026-07-13.txt
-    current_fact_dependencies: []
-    required_tests:
-      - tests/reduce/test_position_economics.py
-      - tests/reduce/test_generation.py
-      - tests/reduce/test_condition_resolver.py
-      - tests/reduce/test_materialize.py
+      - tests/engine/test_native_holdings.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
   execution:
@@ -465,7 +356,6 @@ modules:
       - src/execution/wrap_unwrap_commands.py
       - src/execution/command_bus.py
       - src/execution/exit_safety.py
-      - src/execution/ctf_conversion_commands.py
       - src/execution/batch_order_submission.py
     public_entry_files:
       - src/execution/executor.py
@@ -477,8 +367,6 @@ modules:
       - src/execution/wrap_unwrap_commands.py
       - src/execution/command_bus.py
       - src/execution/exit_safety.py
-      - src/execution/self_trade_guard.py
-      - src/execution/ctf_conversion_commands.py
       - src/execution/batch_order_submission.py
       - src/execution/staleness_cancel.py
       - src/execution/venue_cancel_journal.py
@@ -498,9 +386,7 @@ modules:
       - tests/test_exit_safety.py
       - tests/test_exchange_reconcile.py
       - tests/test_settlement_commands.py
-      - tests/test_self_trade_guard.py
       - tests/test_risk_allocator.py
-      - tests/execution/test_ctf_conversion_commands.py
       - tests/execution/test_batch_order_submission.py
       - tests/execution/test_staleness_cancel.py
       - tests/execution/test_venue_cancel_journal.py
@@ -537,7 +423,6 @@ modules:
       - tests/test_executor_command_split.py
       - tests/test_neg_risk_passthrough.py
       - tests/venue/test_rate_budget.py
-      - tests/test_polymarket_v2_adapter_ctf_conversion.py
       - tests/venue/test_batch_submit.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: packet_owned
@@ -651,13 +536,11 @@ modules:
       - src/strategy/kelly.py
       - src/strategy/market_fusion.py
       - src/strategy/selection_family.py
-      - src/strategy/benchmark_suite.py
       - src/strategy/live_inference/source_clock_vnext.py
       - src/strategy/live_inference/source_clock_city_weights.py
     public_entry_files:
       - src/strategy/market_analysis.py
       - src/strategy/kelly.py
-      - src/strategy/benchmark_suite.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml

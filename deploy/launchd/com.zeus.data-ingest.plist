@@ -38,13 +38,9 @@
 		<string>1</string>
 		<key>ZEUS_FORECAST_LIVE_OWNER</key>
 		<string>forecast_live</string>
-		<key>ZEUS_HARVESTER_LIVE_ENABLED</key>
-		<string>1</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
 		<string>/Users/leofitz/zeus</string>
 		<key>ZEUS_USER_CHANNEL_WS_AUTO_DERIVE</key>
-		<string>1</string>
-		<key>ZEUS_USER_CHANNEL_WS_ENABLED</key>
 		<string>1</string>
 	</dict>
 	<key>KeepAlive</key>

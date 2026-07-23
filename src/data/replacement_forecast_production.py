@@ -251,16 +251,6 @@ def _scheduler_job(job_name: str):
     return _decorator
 
 
-def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
-    from src.data.replacement_forecast_runtime_policy import REQUIRED_FLAGS
-
-    try:
-        flags = settings["feature_flags"]
-    except Exception:
-        flags = {}
-    return {key: bool(flags.get(key, False)) for key in REQUIRED_FLAGS}
-
-
 def _replacement_forecast_live_materialization_queue_config() -> dict[str, object]:
     from src.config import PROJECT_ROOT, RUNTIME_ROOT, STATE_DIR
 
@@ -307,20 +297,12 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),
         "limit": materialization_limit,
         "poll_batch_limit": poll_batch_limit,
-        "download_current_targets_enabled": bool(cfg.get("download_current_targets_enabled", False)),
         "download_output_dir": _rooted_path(cfg.get("download_output_dir"), _rooted_path(raw_manifest_dir, base_dir / "raw_manifests")),
         "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
         "download_release_lag_hours": float(cfg.get("download_release_lag_hours") or 14.0),
         "download_anchor_sigma_c": float(cfg.get("download_anchor_sigma_c") or 3.0),
         "source_clock_fanout_workers": int(cfg.get("source_clock_fanout_workers") or 4),
     }
-
-
-def _replacement_forecast_live_materialization_enabled() -> bool:
-    from src.data.replacement_forecast_runtime_policy import LIVE_FLAG
-
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    return bool(flags.get(LIVE_FLAG, False))
 
 
 # The two raw-artifact sources this downloader owns. The cycle high-water mark is the MIN over
@@ -410,8 +392,6 @@ def _download_replacement_forecast_current_targets_if_needed(
     max_wall_clock_seconds: float | None = None,
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
 ) -> dict[str, object] | None:
-    if not bool(cfg.get("download_current_targets_enabled", False)):
-        return None
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
     if forecast_db is None or output_dir is None:
@@ -555,21 +535,7 @@ def _download_replacement_forecast_current_targets_if_needed(
 
 
 def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    """BAYES_PRECISION_FUSION multi-model live-input capture/accrual.
-
-    Gated by the capture flag
-    ``settings['edli']['replacement_0_1_bayes_precision_fusion_capture_enabled']`` (default FALSE),
-    SEPARATE from replacement_0_1_bayes_precision_fusion_enabled: when ON it downloads + persists the 8 extra
-    OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
-    zeus-forecasts.db. It does not directly write forecast_posteriors or orders; those rows are
-    live replacement-posterior inputs consumed by the materializer. Forward, daily, fail-soft
-    (it NEVER raises into the live materialization cycle). Returns None when the flag is OFF or
-    there is no forecast_db / no targets."""
-    try:
-        if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
-            return None
-    except Exception:
-        return None
+    """Download the multi-model inputs required by the live posterior."""
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return None
@@ -661,11 +627,6 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
     needed by the source-clock q kernel, but leaves the slower full-history
     healing pass to the normal BPF downloader.
     """
-    try:
-        if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
-            return None
-    except Exception:
-        return None
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return None
@@ -750,7 +711,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 source_cycles[source] = initialisation
                 source_availabilities[source] = availability
         else:
-            # Legacy diagnostic callers do not carry a cursor token and therefore
+            # Legacy telemetry callers do not carry a cursor token and therefore
             # cannot advance one from this mutable metadata fallback. Live probes
             # always freeze source_runs alongside their exact cursor values.
             try:
@@ -1866,9 +1827,7 @@ def _replacement_cycle_availability_poll_if_needed(
       2. Fetch the published anchor cycle when the journal does not yet hold it.
     Idempotent: source high-water marks short-circuit; the underlying downloader also
     skips already-present manifests. Fail-soft: a failed anchor fetch is retried on the
-    next tick. Returns a compact report dict (None when the feature flag is off)."""
-    if not bool(cfg.get("download_current_targets_enabled", False)):
-        return None
+    next tick. Returns a compact report dict."""
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
     if forecast_db is None or output_dir is None:
@@ -2165,8 +2124,6 @@ def _enqueue_cycle_advance_reseeds_if_needed(
 def _anchor_meta_stamp_cross_check() -> None:
     """Hourly: re-verify meta-stamped anchor artifacts against single-runs once the same
     run is served there (K4.0b(f) belt-and-suspenders; MISMATCH ⇒ ERROR + receipt)."""
-    if not _replacement_forecast_live_materialization_enabled():
-        return
     cfg = _replacement_forecast_live_materialization_queue_config()
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
@@ -2193,8 +2150,6 @@ def _replacement_cycle_availability_poll() -> None:
     """Interval job: probe provider publication state and fetch fresh raw-input legs the
     moment they exist — BEFORE the engine needs them (operator directive 2026-06-11).
     Runs on the download lane; never blocks the 5-min materialize cycle."""
-    if not _replacement_forecast_live_materialization_enabled():
-        return
     cfg = _replacement_forecast_live_materialization_queue_config()
     report = _replacement_cycle_availability_poll_if_needed(cfg)
     if report is None:
@@ -2280,8 +2235,6 @@ def _replacement_forecast_download_cycle() -> None:
     Runs on the default executor (20-worker pool) on its own long interval, so it
     overlaps the fast materialize cycle on a separate thread without blocking it.
     Fail-soft and idempotent (skips already-downloaded manifests)."""
-    if not _replacement_forecast_live_materialization_enabled():
-        return
     cfg = _replacement_forecast_live_materialization_queue_config()
     try:
         from src.data.source_clock_update_probe import (  # noqa: PLC0415
@@ -2314,7 +2267,7 @@ def _replacement_forecast_download_cycle() -> None:
                 "replacement forecast current-target download report: %s", download_report
             )
     # THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model capture/accrual (forward + fixed-lead), gated by the
-    # SEPARATE replacement_0_1_bayes_precision_fusion_capture_enabled flag. Writes only
+    # Writes only
     # raw_model_forecasts here; downstream live materialization consumes those rows to build
     # replacement posteriors. Fail-soft.
     bayes_precision_fusion_capture_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
@@ -2329,7 +2282,7 @@ def _replacement_forecast_download_cycle() -> None:
     if bayes_precision_fusion_capture_report is not None:
         _record_bayes_precision_fusion_capture_health(cfg, bayes_precision_fusion_capture_report)
     # STATION-CALIBRATED forecast ingest (CWA township / HKO fnd) runs on ingest_main's availability
-    # poll via _ingest_station_forecasts_if_due — NOT here. This cycle is unscheduled (diagnostics
+    # poll via _ingest_station_forecasts_if_due — NOT here. This cycle is unscheduled (telemetry
     # only), so it must not duplicate that ingest: doing so would double-fetch the provider APIs.
     # Release the queue lock after one micro-batch so a newly arrived source can
     # preempt old catch-up debt on the 1s poll lane. Discovery consumes existing
@@ -2358,8 +2311,6 @@ def _replacement_forecast_live_materialize_cycle(
     limit: int | None = None,
     seed_limit: int | None = None,
 ) -> None:
-    if not _replacement_forecast_live_materialization_enabled():
-        return
     cfg = _replacement_forecast_live_materialization_queue_config()
     report = _run_replacement_forecast_live_materialization_queue_once(
         cfg,

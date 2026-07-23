@@ -56,7 +56,7 @@ The implicit assumptions our system makes about each vendor:
 Notes on likelihood: T1 has not happened in Zeus history but PM has changed
 mappings in past markets per investigation logs. T5 has happened multiple
 times this year. T2 is the most insidious because detection requires
-canary-style probing.
+bounded source probing.
 
 ## §3 The Dependency Surface (exhaustive)
 
@@ -108,7 +108,7 @@ canary-style probing.
 | File | Coupling |
 |---|---|
 | `src/data/observation_instants_v2_writer.py` | Writes rows with hardcoded `source` string; gates on `tier_resolver.allowed_sources_for_city` |
-| `src/ingest/harvester_truth_writer.py` | Settlement writer; gated by `ZEUS_HARVESTER_LIVE_ENABLED` env flag (line 443) |
+| `src/ingest/harvester_truth_writer.py` | Settlement writer; gated by `retired harvester live switch` env flag (line 443) |
 | `src/data/daily_obs_append.py` | Per-source append paths; `OGIMET_CITIES` whitelist (line 1019) |
 
 ### Layer 5 — Tier Resolution / Fallback Chain
@@ -223,7 +223,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
 
 | Surface | Coupling |
 |---|---|
-| `src/ingest/harvester_truth_writer.py` cron job (`ingest_main.py` minute 45 hourly) | Reads PM settlement; gated by `ZEUS_HARVESTER_LIVE_ENABLED` env |
+| `src/ingest/harvester_truth_writer.py` cron job (`ingest_main.py` minute 45 hourly) | Reads PM settlement; gated by `retired harvester live switch` env |
 | Per-vendor backfill scripts (`scripts/backfill_*.py`, ~10 files) | Each scoped to one vendor |
 | `scripts/fill_obs_dst_gaps.py` | Lagos-class fallback decision logic |
 | `scripts/fill_obs_v2_meteostat.py` | Bulk fallback runner |
@@ -244,7 +244,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
    - Daily probe job; alert when `compare_cities_against_gamma` returns mismatches
    - SQL: `SELECT settlement_source, COUNT(*) FROM settlements_v2 WHERE recorded_at > date('now', '-7 days') GROUP BY settlement_source` — alert if a new URL appears
 2. **Containment**:
-   - Set `ZEUS_HARVESTER_LIVE_ENABLED=0` in daemon env; harvester stops writing PM truth
+   - Set `retired harvester live switch=0` in daemon env; harvester stops writing PM truth
    - Set per-city blacklist in `oracle_penalty.py` (`oracle_error_rate := 0.99` for impacted cities until cutover complete)
    - Halt entries via existing entry guard
 3. **Investigation**:
@@ -273,7 +273,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
 ### T2 — WU silently changes data
 
 1. **Detection**:
-   - `src/data/source_health_probe.py:113` `_probe_wu_pws()` — synthetic canary check
+   - `src/data/source_health_probe.py:113` `_probe_wu_pws()` — synthetic health check
    - Per-city per-day mismatch jump (bridge result drift > 2σ vs 30-day baseline)
    - Unit-flipping is the most insidious: spec says F but page returns C → contamination case in `tests/test_ingestion_guard.py` already protects against single-row, but a global flip needs a separate unit-consistency monitor
 2. **Containment**:
@@ -331,7 +331,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
 **Hard gate**: A new city MUST NOT enter live trading until all three of the following hold:
   1. A `config/reality_contracts/data.yaml` (or dedicated file) entry is captured with a `SETTLEMENT_SOURCE_<CITY>` contract
   2. `python scripts/verify_reality_contracts_2026-05-17.py --apply` exits 0 and `last_verified` is renewed for that contract
-  3. `src/strategy/oracle_penalty.py` BLACKLIST status is cleared (error_rate drops below threshold after shadow period)
+  3. `src/strategy/oracle_penalty.py` BLACKLIST status is cleared only after settled-history and current-source error evidence pass the threshold
 
 1. **Detection**:
    - Operator-driven (PM lists new market)
@@ -358,8 +358,8 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
 5. **Verification**:
    - Run `python scripts/verify_reality_contracts_2026-05-17.py --apply` — must exit 0 with `last_verified` renewed for `SETTLEMENT_SOURCE_<CITY>` (uses `config/reality_contracts/*.yaml` + live Polymarket CLOB + Open-Meteo)
    - Test entry: `tests/test_config.py` city-mapping invariants
-   - Confirm `oracle_penalty` error_rate falls below threshold after shadow period (14+ days); clear BLACKLIST only then
-   - Shadow trade for 14+ days; mismatch < 5%
+   - Confirm `oracle_penalty` error_rate falls below threshold on at least 14 days of settled/current-source evidence; clear BLACKLIST only then
+   - Require stored executable-market replay mismatch < 5%; do not run a parallel trade lane
 6. **Backfill**:
    - N/A — onboarding starts clean; schema version targets are zeus-world.db (SCHEMA_VERSION=35) and zeus-forecasts.db (SCHEMA_FORECASTS_VERSION=7)
 
@@ -491,8 +491,8 @@ Add these to the existing `source_health_probe` output and monitoring stack:
 | Weekly | Per-(city, track) Platt sample count | `SELECT city, temperature_metric, COUNT(*) FROM calibration_pairs_v2 WHERE authority='VERIFIED' GROUP BY 1,2` — alert on >10% drop WoW |
 | Weekly | Per-city 90d coverage trend | `SELECT city, AVG(distinct_hours/24.0) FROM ...` — alert when 7d MA drops > 5pp below 30d MA |
 | Weekly | `city_monthly_bounds.json` freshness | check `generated_at` is within last 90 days |
-| Per-event | PM page hash canary | curl + sha256 of last known good page; alert on mismatch |
-| Per-event | Unit-flip canary | per-city ranking of recent observation values vs historical bounds; alert if recent week's mean is > 3σ outside |
+| Per-event | PM page hash probe | curl + sha256 of last known good page; alert on mismatch |
+| Per-event | Unit-flip probe | per-city ranking of recent observation values vs historical bounds; alert if recent week's mean is > 3σ outside |
 
 ## §7 Cross-references
 

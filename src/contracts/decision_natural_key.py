@@ -6,7 +6,7 @@
 Path D v3: (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 is the 5-component natural PK for decision_events.
 condition_id is nullable enrichment — NOT in PK.
-decision_event_id is the audit-only derived hash (deid_v1_ prefix — distinct from
+decision_event_id is the derived_identity hash (deid_v1_ prefix — distinct from
 calibration's dgid_v1_ used in decision_group_id.py).
 Production pass fills NotImplementedError stubs.
 """
@@ -48,7 +48,7 @@ def make_decision_natural_key(
 
 
 # ---------------------------------------------------------------------------
-# Audit-only hash — Option β (writer-side computation)
+# Derived identity hash — Option β (writer-side computation)
 # ---------------------------------------------------------------------------
 
 _DEID_V1_PREFIX = "deid_v1_"

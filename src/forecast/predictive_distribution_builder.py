@@ -33,7 +33,7 @@ assembles the four already-built forecast-spine authorities into ONE
 
 It replaces the [BLOCKER] forecast-authority split (spec lines 23, 28): the live
 reactor had an EMOS lane (``build_emos_q`` from the event-snapshot path) AND a
-fallback/day0 lane (``_maybe_apply_edli_bias_correction``) that could produce
+fallback/day0 lane (``_maybe_apply_removed_mean_shift``) that could produce
 DIFFERENT mu*/sigma/q semantics for the same family. There is now ONE assembly,
 so every live path returns the SAME receipt contract.
 

@@ -360,66 +360,6 @@ def city_kelly_multiplier(city: str | None) -> float:
     return _CITY_KELLY_CACHE.get(name, 1.0)
 
 
-_ENV_UNIFIED_UNCERTAINTY_BUDGET = "ZEUS_UNIFIED_UNCERTAINTY_BUDGET"
-_ENV_EVALUATOR_EQE_ENABLED = "ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED"
-
-
-def _unified_uncertainty_budget_enabled() -> bool:
-    """Wave 6 (2026-05-27, INV-40) feature gate.
-
-    When OFF (default), dynamic_kelly_mult applies the legacy ci_width
-    multiplicative haircuts AND ``_size_at_execution_price_boundary``
-    multiplies ``effective_context.haircut()`` into the Kelly multiplier
-    — even though the same uncertainty also reaches edge_ci_lower when
-    Wave 5+5.5 are wired (double-count, conservative).
-
-    When ON, the multiplicative haircuts are SKIPPED so the soft-uncertainty
-    contribution enters Kelly EXACTLY ONCE via edge_LCB (per INV-40). Hard
-    vetoes (oracle_penalty=0, strategy_phase=0, executable_mask=0) stay
-    multiplicative.
-
-    SAFETY DIRECTION (corrected after Copilot review of PR #348):
-        On the multiplier basis alone, flag ON produces equal-or-LARGER
-        multipliers than flag OFF (because it REMOVES haircuts ≤ 1.0).
-        The compensating SMALLER edge comes from edge_LCB widening via
-        σ_market once Wave 5.5 (EntryQuoteEvidence) is also active in the
-        evaluator. Net sizing under the staged-promotion path:
-
-            Stage 0 (both flags OFF, default):   baseline
-            Stage 1 (Wave 5.5 ON only):          size ≤ Stage 0 (more conservative)
-            Stage 2 (both ON):                   size validated by replay to
-                                                 stay within Stage-0 envelope
-                                                 (math spec §15.8 acceptance
-                                                 criterion size_unified /
-                                                 size_legacy ∈ [1.0, 1.2]).
-
-    HARD ORDERING GUARD: flipping ``_ENV_UNIFIED_UNCERTAINTY_BUDGET=1``
-    while ``_ENV_EVALUATOR_EQE_ENABLED=0`` removes multipliers WITHOUT the
-    σ_market widening that compensates them. This combination is what the
-    staged-promotion contract explicitly forbids (Stage 2 without Stage 1).
-    Pre-Wave-6-post-Copilot-review fix (2026-05-27): this function
-    REFUSES to report enabled=True unless the Wave 5.5 flag is also set.
-    Operator must promote in order 0 → 1 → 2.
-    """
-    import os
-    own = os.environ.get(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "0") in ("1", "true", "TRUE")
-    if not own:
-        return False
-    prereq = os.environ.get(_ENV_EVALUATOR_EQE_ENABLED, "0") in ("1", "true", "TRUE")
-    if not prereq:
-        # K5#5 + X10 fix: hard ordering guard so flag-flip ordering bug
-        # cannot silently expose live capital to single-count math without
-        # the compensating σ_market widening from Wave 5.5.
-        import logging
-        logging.getLogger(__name__).warning(
-            "ZEUS_UNIFIED_UNCERTAINTY_BUDGET=1 ignored because "
-            "ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED is not set. "
-            "Staged-promotion contract requires Wave 5.5 (EQE wiring) BEFORE "
-            "Wave 6 (unified budget) — see math spec §15.8 + plan §Wave 5.5."
-        )
-        return False
-    return True
-
 
 def dynamic_kelly_mult(
     base: float = 0.25,
@@ -428,8 +368,6 @@ def dynamic_kelly_mult(
     portfolio_heat: float = 0.0,
     strategy_key: str | None = None,
     city: str | None = None,
-    *,
-    market_uncertainty_in_lcb: bool = False,
 ) -> float:
     """Compute dynamic Kelly multiplier. Spec §5.2.
 
@@ -452,28 +390,16 @@ def dynamic_kelly_mult(
 
     m = base
 
-    # CI width: wider CI → less confident → smaller size
-    # Wave 6 (INV-40, 2026-05-27): when the unified-uncertainty-budget flag
-    # is ON, ci_width information already enters Kelly via edge_LCB (the
-    # bootstrap ci_lower of p_LCB - c_UCB). Applying a multiplicative
-    # haircut on top is the double-count INV-40 forbids. Flag OFF (default)
-    # preserves the legacy chain bit-identically until the operator promotes.
-    # K1 fix (PR #348 P0-1, 2026-05-27): the global env flag is a PRECONDITION
-    # but is NOT sufficient — the per-edge ``market_uncertainty_in_lcb`` arg
-    # must also be True (i.e. EQE actually present AND cost_uncertainty > 0
-    # AND bootstrap actually sampled σ_market for THIS edge). When the env
-    # flag is ON but THIS edge has no per-edge cost evidence in edge_LCB,
-    # the legacy ci_width haircut MUST stay applied — otherwise we'd remove
-    # the multiplier without compensating widening (operator-flagged blocker).
-    _collapse_ci_width_haircut = (
-        _unified_uncertainty_budget_enabled()
-        and bool(market_uncertainty_in_lcb)
-    )
-    if not _collapse_ci_width_haircut:
-        if ci_width > 0.10:
-            m *= 0.7
-        if ci_width > 0.15:
-            m *= 0.5  # Cumulative: 0.25 * 0.7 * 0.5 = 0.0875
+    # Modifier-only CI width: wider uncertainty means smaller size when that
+    # uncertainty has not already entered the sizing objective.  The current-q
+    # global solver consumes the same uncertainty through its conservative
+    # q-band, so its SizingContext explicitly presents ci_width=0 here while
+    # retaining the observed width as counted_ci_width provenance (INV-40).
+    # Legacy/non-global callers keep the existing stepwise behavior.
+    if ci_width > 0.10:
+        m *= 0.7
+    if ci_width > 0.15:
+        m *= 0.5
 
     # Lead time: longer lead → less reliable forecast
     if lead_days >= 5:

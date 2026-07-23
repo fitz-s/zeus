@@ -19,7 +19,7 @@ Docs taxonomy: stability axis. Each subroot maps to a lifecycle tier:
 - `authority/` — durable law (never expires)
 - `reference/` — canonical reference (stable); `reference/legacy/` for demoted historical snapshots
 - `operations/` — active workbench + live control (volatile)
-- `reports/` — periodic diagnostic evidence (dated)
+- `reports/` — periodic telemetry evidence (dated)
 
 See `docs/authority/ARCHIVAL_RULES.md` for lifecycle transition rules.
 
@@ -58,7 +58,7 @@ body or bundle.
 | `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
 | `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | Packet-local R3 Z0 CLOB V2 live-money invariant summary; evidence, not authority |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
-| `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
+| `reports/` | Generated telemetry reports; evidence only -> `reports/AGENTS.md` |
 | `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |
 | `artifacts/` | Active evidence artifacts and inventories; not authority -> `artifacts/AGENTS.md` |
 | `artifacts/tigge_data_training_handoff_2026-04-23.md` | Dated TIGGE asset/training handoff for completed raw, extraction, validation, and next Zeus training steps |
@@ -75,13 +75,9 @@ When a new Polymarket weather city must be added:
 - **Hard gate — no live trades until**:
   1. `config/reality_contracts/data.yaml` entry captured for the city
   2. `verify_reality_contracts_2026-05-17.py` exits 0 with `last_verified` renewed
-  3. `oracle_penalty` BLACKLIST cleared (error_rate below threshold after 14-day shadow)
+  3. `oracle_penalty` BLACKLIST cleared (error_rate below threshold after 14-day observation)
 - **Source-contract monitor**: run `scripts/watch_source_contract.py` to validate
   Gamma settlement-source consistency before clearing the BLACKLIST.
-- **ENS bias**: `model_bias_ens` rows are live in production on the ATTACH-replicated
-  forecasts schema via `src/calibration/ens_bias_repo.py` (WORLD-domain per `src/state/domains.py`; migration `scripts/migrate_model_bias_ens_canonical_fields.py` landed);
-  observation backfill lands in zeus-world.db (SCHEMA_VERSION=35).
-
 ## Rules
 
 - New active docs belong in declared tracked subroots, not directly under

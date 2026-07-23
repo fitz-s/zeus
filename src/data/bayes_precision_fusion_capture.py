@@ -13,17 +13,15 @@ and the in-EU-polygon icon_d2 / France arome ALONGSIDE the existing AIFS+0.1 anc
 existing Open-Meteo single-runs fetch pattern. EB-bias-corrects each model from a walk-forward
 settlement-joined history, and emits the bayes_precision_fusion.ModelInstrument inputs for the fusion.
 
-FAIL-SOFT IS THE STRUCTURAL GUARANTEE (Fitz #1 + spec §6): a per-model fetch failure DROPS that
-model and the cycle proceeds with the survivors — the Bayesian fusion handles missing sources by
-construction (a dropped source is simply absent from z; Sigma shrinks toward equal-weight). A
-model with no walk-forward history is dropped from Sigma estimation but can still contribute via
-equal-weight fallback. The capture NEVER raises to the cycle; absent ALL extras -> empty result
--> the materializer keeps the existing single-anchor posterior (byte-identical).
+Per-model capture failures may yield a partial fusion, but they never authorize a
+single-anchor substitute. The capture records absent current inputs and history;
+the materializer blocks the live posterior when the fusion authority cannot be
+formed.
 
 This module performs NO DB writes and NO settlement-truth lookups itself; the walk-forward
 residual history is supplied by an injected provider (the live materializer wires the forecast/
-settlement store; tests inject a fixture). Provider failure is caught and treated as "no
-history" (fail-soft), never a crash.
+settlement store; tests inject a fixture). Provider failure is represented explicitly as absent
+history so the materializer can fail closed without crashing the cycle.
 """
 from __future__ import annotations
 
@@ -310,12 +308,17 @@ class BayesPrecisionFusionCaptureResult:
     # raw_second_moment_weights helper.  None when the anchor has no walk-forward history.
     anchor_raw_m2_native: float | None = None
     anchor_raw_n_train: int = 0
+    history_models: tuple[str, ...] = ()
 
     @property
     def has_extras(self) -> bool:
-        """True iff at least one non-anchor instrument survived. When False AND no anchor
-        history, the materializer keeps the existing single-anchor path (byte-identical)."""
+        """True iff at least one non-anchor instrument survived current-input validation."""
         return len(self.likelihood) > 0
+
+    @property
+    def has_history(self) -> bool:
+        """True iff the walk-forward provider supplied at least one usable history series."""
+        return bool(self.history_models)
 
 
 def _raw_instrument(model: str, raw_value: float, history: ModelHistory | None, parent_bias: float) -> tuple[float, int]:
@@ -377,7 +380,8 @@ def capture_bayes_precision_instruments(
     Legacy/test callers that omit ``decision_utc`` retain the historical no-arrival-guard behavior.
 
     NEVER raises. Any failure of an individual model -> that model is dropped. A total failure
-    (all extras dropped) -> empty likelihood -> the caller keeps the single-anchor posterior.
+    (all extras dropped), or no history, is returned as absent fusion evidence for the caller to
+    fail closed.
     """
     provider = history_provider or _empty_history_provider
     fetch_fn = live_fetch or _default_live_fetch
@@ -393,7 +397,7 @@ def capture_bayes_precision_instruments(
     for model in candidate_models:
         # ARRIVAL GUARD: exclude an extra whose honest availability is after the decision instant
         # (it was not possessed yet — fusing it would bias q early). Fail-OPEN on NULL/missing
-        # availability or when decision_utc is absent. Shadow-q-staged (expected to drop ~0 today).
+        # availability or when decision_utc is absent (expected to drop ~0 today).
         if decision_utc is not None:
             _raw_avail = availability.get(model)
             _avail_is_missing = (
@@ -444,7 +448,7 @@ def capture_bayes_precision_instruments(
             )
         )
     except Exception as exc:
-        _LOG.warning("BAYES_PRECISION_FUSION history provider failed (fail-soft, no history): %s", exc)
+        _LOG.warning("BAYES_PRECISION_FUSION history provider failed (no fusion history): %s", exc)
         histories = {}
 
     # parent bias = pooled mean residual across anchor + globals (structural prior, spec EB).
@@ -574,4 +578,5 @@ def capture_bayes_precision_instruments(
         anchor_sigma_repr_sq=anchor_sigma_repr_sq,
         anchor_raw_m2_native=_anchor_raw_m2,
         anchor_raw_n_train=_anchor_raw_n,
+        history_models=tuple(sorted(histories)),
     )

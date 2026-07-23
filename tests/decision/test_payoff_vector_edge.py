@@ -53,7 +53,6 @@ from src.decision.payoff_vector import (
     live_candidate_passes,
     optimize_vector_stake,
     point_fair_value,
-    scalar_trade_score,
 )
 from src.execution.negrisk_routes import RouteCost
 from src.probability.event_resolution import EventResolution, event_resolution_for_city
@@ -553,15 +552,15 @@ def test_scalar_q_minus_cost_cannot_select_candidate():
         omega=space,
     )
 
-    # The SCALAR trade_score is telemetry: q_25 (~0.40 normalized) - 0.30 > 0.
-    scalar = scalar_trade_score(jq, route)
-    assert scalar > 0.0  # scalar looks tradeable...
+    # A positive point estimate cannot select without robust vector support.
+    point_edge = point_fair_value(jq, route.payoff_vector) - float(route.route_cost.avg_cost)
+    assert point_edge > 0.0
 
     # ...but the robust VECTOR edge_lcb is <= 0 (wide band downside). Build economics by
     # hand so the test pins the GATE, not the optimizer: scalar positive, vector negative.
     econ_scalar_positive_vector_negative = CandidateEconomics(
         candidate_id="cand-yes-25",
-        point_ev=scalar,          # positive scalar edge (the telemetry number)
+        point_ev=point_edge,      # positive point edge
         edge_lcb=-0.01,           # robust vector lower bound is NEGATIVE
         delta_u_at_min=-0.001,    # robust ΔU at min order is NEGATIVE too
         optimal_stake_usd=Decimal("0"),
@@ -581,7 +580,7 @@ def test_scalar_q_minus_cost_cannot_select_candidate():
     # A candidate that DOES pass passes on the VECTOR quantities — the scalar is never read.
     econ_vector_positive = CandidateEconomics(
         candidate_id="cand-yes-25",
-        point_ev=scalar,
+        point_ev=point_edge,
         edge_lcb=0.05,            # positive robust vector edge
         delta_u_at_min=0.01,      # positive robust ΔU at min order
         optimal_stake_usd=Decimal("5"),
@@ -599,7 +598,7 @@ def test_scalar_q_minus_cost_cannot_select_candidate():
 
     econ_route_positive_chosen_negative = CandidateEconomics(
         candidate_id="cand-yes-25",
-        point_ev=scalar,
+        point_ev=point_edge,
         edge_lcb=0.05,
         delta_u_at_min=0.01,
         optimal_stake_usd=Decimal("5"),

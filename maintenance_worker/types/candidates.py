@@ -28,7 +28,7 @@ class Candidate:
              LOAD_BEARING, STALE_ARCHIVE_CANDIDATE,
              SKIP (forbidden), ARCHIVE_CANDIDATE.
     reason:  human-readable rationale for the verdict.
-    evidence: structured diagnostic data (check results, matched
+    evidence: structured telemetry data (check results, matched
               patterns, ages, etc.) — stored as dict so handlers can
               include arbitrary check outputs without widening the type.
     """

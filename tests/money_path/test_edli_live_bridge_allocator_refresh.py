@@ -327,29 +327,6 @@ def test_main_edli_cycle_wires_live_bridge_allocator_refresh_source():
     assert "live_bridge_mode" in source
 
 
-def test_main_edli_cycle_refreshes_allocator_for_shadow_no_submit_visibility():
-    """The EDLI shadow/no-submit runtime must still publish a real allocator state.
-
-    `live_no_submit` cannot place orders, but the global allocator summary is the
-    operator-visible proof of whether real-live would be blocked by risk,
-    reconcile findings, drawdown, or wiring. Leaving the singleton unconfigured
-    hides those real blockers behind `allocator_not_configured`.
-    """
-    from pathlib import Path
-
-    # R4-b3 (2026-07-08): the EDLI cycle body moved from src/main.py to
-    # src.events.reactor.run_edli_event_reactor_cycle.
-    source = Path("src/events/reactor.py").read_text()
-
-    assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
-    assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source
-    assert "trade_conn = get_trade_connection_with_world_required(write_class=None)" in source
-    assert "if live_submit_effective:" in source
-    assert "_edli_refresh_global_allocator_for_live_bridge(" in source
-    assert "portfolio_snapshot=_portfolio_snapshot" in source
-    assert "if live_bridge_mode and not _alloc_refresh.get(\"configured\")" in source
-
-
 def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
     """Held-position exits must not run before the risk allocator singleton is configured.
 
@@ -390,5 +367,5 @@ def test_chain_sync_read_lane_cannot_submit_exits():
 
     assert 'mode="exit_monitor"' in exit_source
     assert "_execute_monitoring_phase(" in exit_source
-    assert "exit_order_submit_enabled=real_order_submit_enabled" in exit_source
+    assert "exit_order_submit_enabled" not in exit_source
     assert "_run_chain_sync(" not in exit_source
