@@ -41,7 +41,7 @@ import worktree_doctor as _wt_mod  # noqa: E402
 _FAKE_PORCELAIN = """\
 worktree /fake/zeus
 HEAD aabbccdd00000000000000000000000000000000
-branch refs/heads/main
+branch refs/heads/live
 
 worktree /fake/worktrees/zeus-cleanup-debt
 HEAD 1122334400000000000000000000000000000000
@@ -123,7 +123,7 @@ def _run(*args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("subcommand", ["status", "advisory", "branch-keepup", "hygiene"])
+@pytest.mark.parametrize("subcommand", ["status", "advisory", "branch-keepup", "closeout", "hygiene"])
 def test_exits_zero_subcommand(subcommand: str) -> None:
     """Every subcommand exits 0 (advisory tool; never blocks)."""
     result = _run(subcommand)
@@ -188,18 +188,18 @@ def test_status_shows_three_worktrees() -> None:
     data = _cmd_status_with_fixture()
     count = len(data["worktrees"])
     assert count >= 3, (
-        f"Expected >= 3 worktrees from fixture (main + cleanup-debt + low-high); got {count}"
+        f"Expected >= 3 worktrees from fixture (live + cleanup-debt + low-high); got {count}"
     )
 
 
 def test_status_ahead_behind_present() -> None:
-    """Each worktree entry includes ahead_of_origin_main and behind_origin_main (fixture)."""
+    """Each worktree entry includes ahead_of_origin_live and behind_origin_live."""
     data = _cmd_status_with_fixture()
     for wt in data["worktrees"]:
-        assert "ahead_of_origin_main" in wt, f"ahead_of_origin_main missing: {wt}"
-        assert "behind_origin_main" in wt, f"behind_origin_main missing: {wt}"
-        assert isinstance(wt["ahead_of_origin_main"], int)
-        assert isinstance(wt["behind_origin_main"], int)
+        assert "ahead_of_origin_live" in wt, f"ahead_of_origin_live missing: {wt}"
+        assert "behind_origin_live" in wt, f"behind_origin_live missing: {wt}"
+        assert isinstance(wt["ahead_of_origin_live"], int)
+        assert isinstance(wt["behind_origin_live"], int)
 
 
 def test_status_current_worktree_dirty_is_bool() -> None:
@@ -369,10 +369,10 @@ def test_branch_keepup_action_is_advisory() -> None:
 
 
 @pytest.mark.parametrize("ahead,behind,merged,dirty,expected_substring", [
-    (0, 0, False, False, "current_with_main_proceed"),
+    (0, 0, False, False, "current_with_live_proceed"),
     (0, 5, False, False, "fresh_branch_or_ff_only"),
     (0, 5, False, True, "checkpoint_first"),
-    (3, 5, False, False, "rebase_if_private_else_merge_origin_main"),
+    (3, 5, False, False, "rebase_if_private_else_merge_origin_live"),
     (3, 5, False, True, "checkpoint_first_then_choose"),
     (3, 0, True, False, "branch_already_merged_close"),
     (0, 0, True, True, "checkpoint_first_then_close"),
@@ -402,6 +402,25 @@ def test_branch_keepup_detached_head_no_crash() -> None:
     """branch-keepup on detached HEAD or missing branch must exit 0."""
     result = _run("branch-keepup")
     assert result.returncode == 0
+
+
+@pytest.mark.parametrize("dirty,open_pr,merged,expected", [
+    (True, False, True, "checkpoint_or_preserve_before_closeout"),
+    (False, True, True, "wait_for_open_pr"),
+    (False, False, False, "not_landed_keep_worktree"),
+    (False, False, True, "landed_clean_closeout_ready"),
+])
+def test_closeout_recommendation_requires_landing_proof(dirty, open_pr, merged, expected):
+    assert _wt_mod._closeout_recommendation(
+        dirty=dirty, open_pr=open_pr, merged=merged
+    ) == expected
+
+
+def test_agent_worktree_merge_is_retired_fail_closed() -> None:
+    script = REPO_ROOT / "scripts" / "agent_worktree_merge.py"
+    result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "MERGE_REFUSED" in result.stderr
 
 
 # ---------------------------------------------------------------------------

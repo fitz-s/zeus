@@ -11,7 +11,7 @@ Status: ACTIVE — established 2026-07-20. Promote the binding clauses into `AGE
 1. **`live` accepts commits by exactly two lanes — hot-fix `git cherry-pick` or merged PR — and no third lane. A direct commit, amend, or in-place edit to the live checkout is forbidden.** The live daemons run from `/Users/leofitz/zeus` on the live branch; directly committing to it or force-moving that checkout out from under them is the 2026-06-12 hijack incident. `maintree_git_state_guard` enforces the no-git-state-mutation half — deliberate operator moves prefix `MAINTREE_GIT_BYPASS=1`.
 2. **All work happens in a worktree.** Branch a linked worktree (`.claude/worktrees/agent-*` or `git worktree add`) off live, make the change there, and prove it there.
 3. **Landing on live is cherry-pick or PR only.**
-   - Small, isolated, reviewed change → `git cherry-pick` onto live (or `scripts/agent_worktree_merge.py`).
+   - Small, isolated, reviewed change → the privileged hot-fix `pick` lane cherry-picks it onto live. `scripts/agent_worktree_merge.py` is retired and fails closed; no agent may update the live checkout directly.
    - Anything larger, or anything that wants review → open a **PR into `live`** and merge after review.
    - Nothing reaches live without passing review. Opening a PR fires paid auto-reviewers; bundle related work into one PR (≥300 self-authored LOC) per `architecture/agent_pr_discipline_2026_05_09.md`.
 4. **Freshness and fail-closed gates are never weakened to land faster.** The alpha-clock and failure-isolation invariants in `docs/operations/current/GOAL.md` bind every change that touches the money path.
@@ -23,6 +23,34 @@ A branch whose commits are ancestors of live (fully absorbed) is deletable. A br
 ```
 git push origin --delete <absorbed-branch>   # only if merged into live and no open PR
 ```
+
+## Mandatory worktree closeout
+
+Creating a worktree creates a cleanup obligation. The owner closes it only in
+this order — never by age alone and never before its result lands:
+
+1. **Finish:** commit the exact work, preserve unrelated dirty files, and run
+   the scoped proof. A dirty worktree is not a closeout candidate.
+2. **Land:** use exactly one lane: privileged `pick <commit>` for a hot-fix, or
+   a PR merged into `live` for milestone work. An open PR means the worktree
+   remains; it is review evidence, not clutter.
+3. **Prove absorption:** confirm the worktree HEAD is an ancestor of
+   `origin/live`, and confirm the branch no longer backs an open PR.
+4. **Retire:** from a separate development/reaper process (never from the
+   worktree being removed), remove the clean linked worktree, then use
+   `git branch -d <branch>`. Delete the remote branch only after that proof.
+
+Run this read-only classifier from every finished worktree:
+
+```bash
+python3 scripts/worktree_doctor.py closeout
+```
+
+It has four non-destructive outcomes: `checkpoint_or_preserve_before_closeout`,
+`wait_for_open_pr`, `not_landed_keep_worktree`, and
+`landed_clean_closeout_ready`. Only the last result may enter a reaper queue.
+The reaper must also reject any worktree with an active process cwd. This makes
+cleanup a post-landing consequence, not a timer that can delete concurrent work.
 
 ## Multi-agent live-repair protocol
 

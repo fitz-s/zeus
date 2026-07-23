@@ -265,18 +265,15 @@ scripts:
   agent_worktree_merge.py:
     class: utility
     module_owner: scripts
-    status: active
-    write_targets: [git_refs, worktree_files]
-    required_tests: [tests/test_cotenant_staging_guard.py]
+    status: deprecated_fail_closed
+    write_targets: [stdout]
+    canonical_command: DO_NOT_RUN
+    required_tests: [tests/test_worktree_doctor.py]
     reason: >
-      Subagent merge-back helper (operator directive 2026-06-12). Run by a
-      subagent as its LAST step from INSIDE its own linked worktree; fast-
-      forwards the session branch (the branch checked out in the MAIN tree) to
-      the agent's committed HEAD, but ONLY for a pure conflict-free ff against a
-      clean main tree (daemon-equivalent to a normal commit). Refuses if run
-      from the main tree or on a dirty worktree; defers non-ff cases to the
-      orchestrator (MERGE_PENDING). Sets MAINTREE_GIT_BYPASS=1 for its single
-      sanctioned `git -C <main> merge --ff-only` call. No canonical DB writes.
+      Retired 2026-07-23 under the two-lane live rule. It fails closed rather
+      than fast-forwarding the live checkout. Agents commit/prove their own
+      worktree, then land only through privileged pick or a merged PR; closeout
+      is classified by worktree_doctor after absorption into origin/live.
   antibody_scan.py: {class: diagnostic}
   apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
   audit_architecture_alignment.py: {class: diagnostic}
@@ -1266,10 +1263,11 @@ scripts:
     canonical_command: "python3 scripts/worktree_doctor.py <subcommand>"
     reason: >
       ADVISORY-only worktree lifecycle helper. Subcommands: status (JSON of all
-      worktrees, branches, ahead/behind vs origin/main, dirty state, PR state,
+      worktrees, branches, ahead/behind vs origin/live, dirty state, PR state,
       sentinels), advisory (cross-worktree visibility map for SessionStart),
-      branch-keepup (ff/rebase/merge/close recommendation; NEVER auto-executes),
-      hygiene (workspace clutter list; NEVER deletes). Exit code 0 always.
+      branch-keepup and closeout (finish→land→cleanup recommendation; NEVER
+      auto-execute), hygiene (workspace clutter list; NEVER deletes). Exit
+      code 0 always.
       Invoked by .claude/hooks/dispatch.py session_start_visibility hook at
       session start and by worktree_create_advisor / worktree_remove_advisor hooks.
       Flag aliases: --status, --hygiene-audit, --cross-worktree-visibility.

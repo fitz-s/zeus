@@ -7,7 +7,7 @@
 
 Subcommands (positional):
   status                  — JSON summary of all active worktrees + sentinels
-                            + ahead/behind vs origin/main + PR state
+                            + ahead/behind vs origin/live + PR state
   advisory                — additionalContext-formatted cross-worktree map for SessionStart
   branch-keepup           — recommend ff/rebase/merge/close for current branch
   hygiene                 — list workspace clutter (NEVER deletes)
@@ -41,6 +41,7 @@ except ImportError:
         return decorator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+UPSTREAM = "origin/live"
 
 SENTINEL_FILENAME = "zeus_worktree.yaml"
 
@@ -159,7 +160,7 @@ def _write_worktree_sentinel(worktree_path: str, payload: dict[str, Any]) -> Non
             "name": Path(worktree_path).name,
             "path": worktree_path,
             "branch": branch,
-            "base": f"main@{base}",
+            "base": f"live@{base}",
             "agent_class": payload.get("agent_class", "claude_code"),
             "mode": payload.get("mode", "write"),
             "task_slug": payload.get("task_slug", "unknown"),
@@ -180,10 +181,10 @@ def _write_worktree_sentinel(worktree_path: str, payload: dict[str, Any]) -> Non
 
 
 def _ahead_behind(branch: str) -> tuple[int, int]:
-    """Return (ahead, behind) vs origin/main."""
+    """Return (ahead, behind) vs the live integration branch."""
     try:
-        ahead = int(_git("rev-list", "--count", f"origin/main..{branch}").strip() or "0")
-        behind = int(_git("rev-list", "--count", f"{branch}..origin/main").strip() or "0")
+        ahead = int(_git("rev-list", "--count", f"{UPSTREAM}..{branch}").strip() or "0")
+        behind = int(_git("rev-list", "--count", f"{branch}..{UPSTREAM}").strip() or "0")
     except (ValueError, TypeError):
         ahead, behind = 0, 0
     return ahead, behind
@@ -270,8 +271,8 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "branch": branch,
             "head": wt.get("head", ""),
             "is_current": is_current,
-            "ahead_of_origin_main": ahead,
-            "behind_origin_main": behind,
+            "ahead_of_origin_live": ahead,
+            "behind_origin_live": behind,
             "dirty": dirty,
             "last_commit_ts": _last_commit_ts(branch) if branch else "",
             "pr_state": pr,
@@ -293,6 +294,9 @@ def cmd_advisory(_args: argparse.Namespace) -> int:
     """Cross-worktree visibility map for SessionStart additionalContext injection."""
     porcelain = _git("worktree", "list", "--porcelain")
     worktrees = _parse_worktree_list(porcelain)
+    pr_list = _fetch_pr_list()
+    merged_output = _git("branch", "--merged", UPSTREAM)
+    merged_branches = {line.strip().lstrip("* ") for line in merged_output.splitlines()}
 
     lines = [f"[worktree_doctor] Active worktrees: {len(worktrees)}"]
     for wt in worktrees:
@@ -322,6 +326,13 @@ def cmd_advisory(_args: argparse.Namespace) -> int:
                     lines.append(f"    ADVISORY: stale (>{age_days:.0f}d since last commit)")
             except (ValueError, TypeError):
                 pass
+        if branch and branch != "live":
+            closeout = _closeout_recommendation(
+                dirty=_dirty_state(wt_path),
+                open_pr=_pr_state_for_branch(branch, pr_list) is not None,
+                merged=branch in merged_branches,
+            )
+            lines.append(f"    closeout: {closeout}")
 
     print("\n".join(lines))
     return 0
@@ -339,39 +350,89 @@ def _decision_matrix(*, ahead: int, behind: int, merged: bool, dirty: bool) -> s
     if ahead == 0 and behind > 0:
         return "fresh_branch_or_ff_only" if not dirty else "checkpoint_first"
     if ahead > 0 and behind > 0:
-        return "rebase_if_private_else_merge_origin_main" if not dirty else "checkpoint_first_then_choose"
+        return "rebase_if_private_else_merge_origin_live" if not dirty else "checkpoint_first_then_choose"
     if ahead == 0 and behind == 0:
-        return "current_with_main_proceed"
+        return "current_with_live_proceed"
     return "uncertain_block_and_report"
 
 
 @capability("worktree_branch_keepup", lease=False)
 def cmd_branch_keepup(_args: argparse.Namespace) -> int:
-    """Decision matrix recommendation for current branch vs origin/main."""
+    """Decision matrix recommendation for the current branch vs origin/live."""
     current = _git("branch", "--show-current").strip()
-    if not current or current == "main":
+    if not current or current == "live":
         print(json.dumps({
             "recommendation": "no-action",
-            "reason": "on main or detached HEAD",
+            "reason": "on live or detached HEAD",
             "severity": "advisory",
         }, indent=2))
         return 0
 
     ahead, behind = _ahead_behind(current)
-    merged_output = _git("branch", "--merged", "origin/main")
+    merged_output = _git("branch", "--merged", UPSTREAM)
     merged = any(b.strip().lstrip("* ") == current for b in merged_output.splitlines())
     dirty = _dirty_state(str(REPO_ROOT))
     rec = _decision_matrix(ahead=ahead, behind=behind, merged=merged, dirty=dirty)
 
     print(json.dumps({
         "branch": current,
-        "ahead_of_origin_main": ahead,
-        "behind_origin_main": behind,
-        "merged_into_origin_main": merged,
+        "ahead_of_origin_live": ahead,
+        "behind_origin_live": behind,
+        "merged_into_origin_live": merged,
         "dirty": dirty,
         "recommendation": rec,
         "severity": "advisory",
         "action": "advisory_only_never_auto_executes",
+    }, indent=2))
+    return 0
+
+
+def _closeout_recommendation(*, dirty: bool, open_pr: bool, merged: bool) -> str:
+    """Classify one worktree's safe terminal action without deleting anything."""
+    if dirty:
+        return "checkpoint_or_preserve_before_closeout"
+    if open_pr:
+        return "wait_for_open_pr"
+    if not merged:
+        return "not_landed_keep_worktree"
+    return "landed_clean_closeout_ready"
+
+
+@capability("worktree_post_merge_cleanup", lease=False)
+def cmd_closeout(_args: argparse.Namespace) -> int:
+    """Emit the mandatory finish→land→cleanup checklist for this worktree.
+
+    It intentionally does not delete.  Deletion needs a separate reaper after
+    the complete evidence set (clean tree, no open PR, and HEAD absorbed by
+    live) is available; this avoids deleting a still-reviewable or active lane.
+    """
+    current = _git("branch", "--show-current").strip()
+    if not current or current == "live":
+        print(json.dumps({
+            "recommendation": "no-action",
+            "reason": "run closeout from a completed linked worktree, never live",
+            "action": "advisory_only_never_auto_delete",
+        }, indent=2))
+        return 0
+    dirty = _dirty_state(str(REPO_ROOT))
+    prs = _fetch_pr_list()
+    open_pr = _pr_state_for_branch(current, prs) is not None
+    merged_output = _git("branch", "--merged", UPSTREAM)
+    merged = any(line.strip().lstrip("* ") == current for line in merged_output.splitlines())
+    recommendation = _closeout_recommendation(dirty=dirty, open_pr=open_pr, merged=merged)
+    print(json.dumps({
+        "branch": current,
+        "dirty": dirty,
+        "open_pr": open_pr,
+        "merged_into_origin_live": merged,
+        "recommendation": recommendation,
+        "required_order": [
+            "commit_and_prove",
+            "land_via_pick_or_merged_pr",
+            "confirm_head_absorbed_by_live",
+            "remove_clean_worktree_then_delete_branch",
+        ],
+        "action": "advisory_only_never_auto_delete",
     }, indent=2))
     return 0
 
@@ -455,16 +516,16 @@ def _collect_clutter() -> list[dict[str, Any]]:
             except (ValueError, TypeError):
                 pass
 
-    # Stale branches: PR merged (branch merged into origin/main)
-    merged_output = _git("branch", "--merged", "origin/main")
+    # Stale branches: PR merged (branch merged into origin/live)
+    merged_output = _git("branch", "--merged", UPSTREAM)
     for line in merged_output.splitlines():
         b = line.strip().lstrip("* ")
-        if b and b not in ("main", "HEAD"):
+        if b and b not in ("live", "HEAD"):
             clutter.append({
                 "path": f"branch:{b}",
                 "type": "branch",
                 "severity": "advisory",
-                "advisory": "branch merged into origin/main; consider `git branch -d` after confirming",
+                "advisory": "branch merged into origin/live; use closeout before `git branch -d`",
             })
 
     return clutter
@@ -525,6 +586,7 @@ def main() -> int:
     sub.add_parser("status", help="JSON summary of all worktrees + sentinels + PR state")
     sub.add_parser("advisory", help="Cross-worktree visibility map for SessionStart")
     sub.add_parser("branch-keepup", help="Recommend ff/rebase/merge/close for current branch")
+    sub.add_parser("closeout", help="Classify this worktree's finish→land→cleanup state (never deletes)")
     sub.add_parser("hygiene", help="Advisory list of workspace clutter (never deletes)")
     sub.add_parser("post-merge-cleanup", help="Post-merge advisory checklist (never deletes)")
 
@@ -548,6 +610,7 @@ def main() -> int:
         "status": cmd_status,
         "advisory": cmd_advisory,
         "branch-keepup": cmd_branch_keepup,
+        "closeout": cmd_closeout,
         "hygiene": cmd_hygiene,
         "post-merge-cleanup": cmd_post_merge_cleanup,
     }
