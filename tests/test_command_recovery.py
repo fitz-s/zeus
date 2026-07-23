@@ -14518,6 +14518,56 @@ class TestRecoveryResolutionTable:
             "review_required_matched_order_fact_with_positive_trade_fact"
         )
 
+    def test_terminal_partial_fact_clears_review_without_equal_aggregate_position(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+
+        _insert(conn, size=47.75, price=0.42)
+        _seed_pending_entry_projection(conn)
+        _advance_to_acked(conn, venue_order_id="ord-terminal-partial")
+        _append_trade_fact(
+            conn,
+            order_id="ord-terminal-partial",
+            trade_id="trade-terminal-partial",
+            state="CONFIRMED",
+            filled_size="6.234135",
+            fill_price="0.42",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-terminal-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="6.234135",
+            remaining_size="0",
+        )
+        _advance_to_review_required(conn)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 15.446665,
+                   chain_shares = 15.446665,
+                   chain_state = 'synced',
+                   cost_basis_usd = 6.2
+             WHERE position_id = 'pos-001'
+            """
+        )
+
+        summary = reconcile_matched_cancel_review_required_entries(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        event = _get_events(conn, "cmd-001")[-1]
+        assert event["event_type"] == "PARTIAL_FILL_OBSERVED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "terminal_partial_order_fact"
+        assert payload["required_predicates"] == {
+            "terminal_order_remainder_zero": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
+            "cumulative_fill_below_requested_size": True,
+        }
+
     def test_filled_entry_execution_fact_repair_preserves_position_increments(
         self,
         conn,
