@@ -2071,11 +2071,6 @@ def _entry_same_token_cooldown_component(
         else _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS
     )
     remaining_seconds = cooldown_seconds - age_seconds
-    no_fill_redecision_proof = (
-        _entry_terminal_no_fill_redecision_proof(conn, command_id=command_id)
-        if terminal_no_fill
-        else None
-    )
     if terminal_no_fill and reprice_cancel_reason:
         existing_price = _decimal_or_none(prior_price)
         candidate_price = _decimal_or_none(limit_price)
@@ -2138,6 +2133,11 @@ def _entry_same_token_cooldown_component(
             "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
             "rest_pull_cancel_reason": reprice_cancel_reason,
         }
+    no_fill_redecision_proof = (
+        _entry_terminal_no_fill_redecision_proof(conn, command_id=command_id)
+        if terminal_no_fill
+        else None
+    )
     if no_fill_redecision_proof == "pre_submit_db_lock":
         # The exact proof says the adapter never crossed POST and canonical
         # order/trade facts are absent. Re-decision must therefore recapture a

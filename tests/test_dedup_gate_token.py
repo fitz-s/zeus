@@ -1114,7 +1114,16 @@ def test_terminal_no_fill_no_exposure_still_obeys_same_token_cooldown(mem_db):
     assert result["candidate_shares"] == "12.7"
 
 
-def test_terminal_no_fill_rest_pull_reprice_bypasses_same_token_cooldown(mem_db):
+def test_terminal_no_fill_rest_pull_reprice_bypasses_same_token_cooldown(
+    mem_db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "src.execution.executor._entry_terminal_no_fill_redecision_proof",
+        lambda *args, **kwargs: pytest.fail(
+            "rest-pull reprice must not query no-fill redecision proof"
+        ),
+    )
     _insert_position(
         mem_db,
         "stale-pending",
