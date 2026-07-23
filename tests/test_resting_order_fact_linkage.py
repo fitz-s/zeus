@@ -25,11 +25,12 @@ _NOW = datetime(2026, 6, 9, tzinfo=timezone.utc)
 
 @pytest.fixture
 def conn():
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
+    init_schema_trade_only(c)
     yield c
     c.close()
 

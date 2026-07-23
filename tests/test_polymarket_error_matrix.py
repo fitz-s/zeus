@@ -35,12 +35,13 @@ def _mem_conn(monkeypatch):
     collisions. execute_exit_order calls get_trade_connection_with_world()
     when no explicit conn is passed.
     """
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     mem = sqlite3.connect(":memory:")
     mem.row_factory = sqlite3.Row
     mem.execute("PRAGMA foreign_keys=ON")
     init_schema(mem)
+    init_schema_trade_only(mem)
     monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
     monkeypatch.setattr("src.execution.executor._assert_cutover_allows_submit", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)

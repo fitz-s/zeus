@@ -27,11 +27,12 @@ class TestINV15SourceWhitelistGate:
     """
 
     def _make_conn(self) -> sqlite3.Connection:
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
+        init_schema_trade_only(conn)
         apply_canonical_schema(conn)
         return conn
 
@@ -185,11 +186,12 @@ class TestCalibrationPairsV2IdentityFields:
     """
 
     def _make_conn(self) -> sqlite3.Connection:
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
+        init_schema_trade_only(conn)
         apply_canonical_schema(conn)
         return conn
 
@@ -323,12 +325,13 @@ class TestRebuildV2PipelineIntegration:
     _OBS_TEMP_F = 75.0
 
     def _make_conn(self) -> sqlite3.Connection:
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
+        init_schema_trade_only(conn)
         apply_canonical_schema(conn)
         return conn
 

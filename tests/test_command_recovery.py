@@ -32,13 +32,14 @@ from src.decision_kernel.canonicalization import qkernel_current_state_identity_
 @pytest.fixture
 def conn():
     """In-memory DB with full schema."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
+    init_schema_trade_only(c)
     init_collateral_schema(c)
     yield c
     c.close()
@@ -459,13 +460,14 @@ def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatc
     """Boot-fast recovery must not block scheduler startup on CLOB reads."""
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
     db_path = tmp_path / "boot-fast.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    init_schema_trade_only(seed)
     init_collateral_schema(seed)
     seed.execute(
         """
@@ -555,13 +557,14 @@ def test_boot_fast_releases_review_required_exit_mutex_before_scheduler(
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
     from src.execution.exit_safety import ExitMutex
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
     db_path = tmp_path / "boot-fast-review-mutex.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    init_schema_trade_only(seed)
     init_collateral_schema(seed)
     _insert(
         seed,
@@ -623,13 +626,14 @@ def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
     """Boot-fast must clear chain-absent positive projection debt before schedulers start."""
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
     db_path = tmp_path / "boot-fast-chain-absence.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    init_schema_trade_only(seed)
     init_collateral_schema(seed)
     # T5 REPLACEMENT PHASE LAW (docs/rebuild/quarantine_excision_2026-07-11.md):
     # the candidate query for repair_confirmed_chain_absence_positive_projections
@@ -727,13 +731,14 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     """Boot-fast recovery must defer slow local repairs instead of blocking boot."""
     from src.execution import command_recovery
     from src.execution import venue_sync_contract
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
     db_path = tmp_path / "boot-fast-budget.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    init_schema_trade_only(seed)
     init_collateral_schema(seed)
     seed.commit()
     seed.close()
@@ -3690,12 +3695,13 @@ def _get_events(conn, command_id):
 
 
 def _connect_file_db(path):
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(path)
     c.row_factory = sqlite3.Row
     init_schema(c)
+    init_schema_trade_only(c)
     return c
 
 
@@ -4068,13 +4074,14 @@ class TestRecoveryResolutionTable:
         monkeypatch,
     ):
         from src.execution import command_recovery, venue_sync_contract
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
 
         db_path = tmp_path / "restart-preflight.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _seed_pending_entry_projection(
             seed,
@@ -7471,13 +7478,14 @@ class TestRecoveryResolutionTable:
         monkeypatch,
     ):
         from src.execution import command_recovery, exchange_reconcile, venue_sync_contract
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
 
         db_path = tmp_path / "live-tick-maker-scope.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         seed.close()
 
@@ -7515,13 +7523,14 @@ class TestRecoveryResolutionTable:
     ):
         from src.execution import command_recovery
         from src.execution import venue_sync_contract
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
 
         db_path = tmp_path / "live-tick-terminal-before-snapshot.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _insert(seed)
         _advance_to_cancel_pending(seed, venue_order_id="ord-001")
@@ -9073,13 +9082,14 @@ class TestRecoveryResolutionTable:
 
         from src.execution import command_recovery, venue_sync_contract
         from src.state.collateral_ledger import init_collateral_schema
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.venue_command_repo import append_event
 
         db_path = tmp_path / f"{scope}-terminal-partial.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _insert(seed, order_type="FAK", size=15.0, price=0.08)
         _seed_pending_entry_projection(seed)
@@ -9353,7 +9363,7 @@ class TestRecoveryResolutionTable:
     ):
         """Scoped live recovery must release pending_exit when durable full-fill truth exists."""
         from src.execution import command_recovery, venue_sync_contract
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.venue_command_repo import append_event
 
@@ -9361,6 +9371,7 @@ class TestRecoveryResolutionTable:
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _insert(
             seed,
@@ -9562,7 +9573,7 @@ class TestRecoveryResolutionTable:
     ):
         """Narrow live scopes must not leave matched held entries stranded."""
         from src.execution import command_recovery, venue_sync_contract
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.venue_command_repo import append_event
 
@@ -9570,6 +9581,7 @@ class TestRecoveryResolutionTable:
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _insert(seed, size=5.0, price=0.34)
         _seed_pending_entry_projection(seed)
@@ -9680,7 +9692,7 @@ class TestRecoveryResolutionTable:
     ):
         """Terminal venue order truth plus held chain projection clears review."""
         from src.execution import command_recovery, venue_sync_contract
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.venue_command_repo import append_event
 
@@ -9688,6 +9700,7 @@ class TestRecoveryResolutionTable:
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _insert(seed, size=5.0, price=0.34)
         _seed_pending_entry_projection(seed)
@@ -9797,7 +9810,7 @@ class TestRecoveryResolutionTable:
         scope,
     ):
         from src.execution import command_recovery, venue_sync_contract
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.venue_command_repo import append_event
 
@@ -9805,6 +9818,7 @@ class TestRecoveryResolutionTable:
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _insert(seed, size=5.0, price=0.34)
         _seed_pending_entry_projection(seed)
@@ -10843,13 +10857,14 @@ class TestRecoveryResolutionTable:
         """Capital-blocking cancel proof runs even when broad DB budget is zero."""
         from src.execution import command_recovery, venue_sync_contract
         from src.state.collateral_ledger import init_collateral_schema
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.venue_command_repo import append_event
 
         db_path = tmp_path / "priority-cancel-review.db"
         seed = sqlite3.connect(db_path)
         seed.row_factory = sqlite3.Row
         init_schema(seed)
+        init_schema_trade_only(seed)
         init_collateral_schema(seed)
         _insert(seed, size=60.0, price=0.71)
         _advance_to_acked(seed, venue_order_id="ord-priority-unfilled")

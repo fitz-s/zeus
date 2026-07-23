@@ -58,13 +58,14 @@ def _submit(fake, *, token_id: str = "yes-token", price: float = 0.50, size_usd:
 
 def _persist_submit_journal_shape(result, *, prefix: str) -> dict[str, object]:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.snapshot_repo import insert_snapshot
     from src.state.venue_command_repo import append_event, insert_command, insert_submission_envelope, list_events
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    init_schema_trade_only(conn)
     now = datetime.now(timezone.utc)
     envelope = result.envelope
     snapshot_id = f"snap-{prefix}"

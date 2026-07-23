@@ -818,6 +818,7 @@ def _make_market_topology_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     state_db.init_schema(conn)
+    state_db.init_schema_trade_only(conn)
     return conn
 
 

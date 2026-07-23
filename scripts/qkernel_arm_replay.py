@@ -48,6 +48,7 @@ _ROOT = os.path.dirname(_SCRIPT_DIR)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from src.analysis.epoch import ANALYSIS_EPOCH_DATE
 from src.contracts.settlement_semantics import SettlementSemantics
 
 # --- live DBs: ALWAYS the main tree (worktree ships only stubs) -------------
@@ -798,7 +799,10 @@ def main() -> None:
         for al in getattr(c, "aliases", []) or []:
             city_alias[al.lower().replace(" ", "-")] = c.name
 
-    min_date = (date.today() - timedelta(days=WINDOW_DAYS)).isoformat()
+    # Floored at ANALYSIS_EPOCH_DATE: pre-epoch trade rows are archived out of
+    # zeus_trades.db (scripts/ops/archive_pre_epoch_trades.py); WINDOW_DAYS is a
+    # relative offset from today and must never resolve to a pre-epoch date.
+    min_date = max((date.today() - timedelta(days=WINDOW_DAYS)).isoformat(), ANALYSIS_EPOCH_DATE)
     fc_con = ro(FORECASTS_DB)
     settlements = load_settlements(fc_con, min_date)
 

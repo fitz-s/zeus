@@ -847,6 +847,11 @@ tables:
       Legacy ghost on world DB after 2026-05-20 live substrate repair. Active
       executable-market snapshot substrate is trade DB because market_discovery
       writes through get_trade_connection(write_class="live").
+      Residue dissolve 2026-07-23: init_schema no longer creates this ghost on
+      fresh world DBs (the init_snapshot_schema call was removed). The existing
+      live zeus-world.db copy (0 rows) is retained on disk until a separately
+      authorized drop; this entry stays until then so the ghost remains
+      registry-visible.
 
   - name: execution_fact
     db: trade

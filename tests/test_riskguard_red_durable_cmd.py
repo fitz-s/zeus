@@ -20,7 +20,7 @@ from src.engine import cycle_runner
 from src.engine.cycle_runner import _execute_force_exit_sweep
 from src.engine.discovery_mode import DiscoveryMode
 from src.riskguard.risk_level import RiskLevel
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.portfolio import PortfolioState, Position
 from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import get_command, list_events
@@ -33,6 +33,7 @@ def _conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    init_schema_trade_only(conn)
     insert_snapshot(conn, _snapshot())
     return conn
 
@@ -200,6 +201,7 @@ def test_run_cycle_red_risk_level_triggers_durable_sweep(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus-red.db"
     conn = _file_conn(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     insert_snapshot(conn, _snapshot(datetime.now(timezone.utc)))
     conn.commit()
     conn.close()

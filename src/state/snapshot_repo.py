@@ -159,8 +159,6 @@ def init_snapshot_schema(
         init_snapshot_invalidation_schema(conn)
     # PR 2: add microstructure transparency columns (idempotent ADD COLUMN).
     # spread_observed_window_ms deferred to follow-up PR (Finding #8 decision-a).
-    import logging as _logging
-    _pr2_logger = _logging.getLogger(__name__)
     for _ddl in (
         "ALTER TABLE executable_market_snapshots ADD COLUMN wide_spread_display_substitution INTEGER NOT NULL DEFAULT 0 CHECK (wide_spread_display_substitution IN (0,1))",
         "ALTER TABLE executable_market_snapshots ADD COLUMN depth_at_best_ask INTEGER NOT NULL DEFAULT 0",
@@ -171,7 +169,7 @@ def init_snapshot_schema(
         except Exception as _exc:
             if "duplicate column" not in str(_exc).lower():
                 raise
-            _pr2_logger.info(
+            logger.info(
                 "PR2 migration: column already exists, skipping: %s",
                 _ddl.split("ADD COLUMN ")[1].split()[0],
             )
@@ -194,7 +192,7 @@ def init_snapshot_schema(
         except Exception as _exc:
             if "duplicate column" not in str(_exc).lower():
                 raise
-            _pr2_logger.info(
+            logger.info(
                 "capture_policy migration: column already exists, skipping: %s",
                 _ddl.split("ADD COLUMN ")[1].split()[0],
             )

@@ -419,11 +419,12 @@ class TestRepoTypeAlignment:
         from src.state.venue_command_repo import find_unresolved_commands
 
         import sqlite3
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
+        init_schema_trade_only(conn)
         for i, state in enumerate(IN_FLIGHT_STATES):
             conn.execute(
                 """
@@ -522,12 +523,13 @@ class TestVenueCommandFromRow:
         from src.execution.command_bus import (
             CommandState, IdempotencyKey, IntentKind, VenueCommand,
         )
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.venue_command_repo import get_command, insert_command
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
+        init_schema_trade_only(conn)
 
         idem = IdempotencyKey.from_inputs(
             decision_id="dec-fr", token_id="tok-fr", side="BUY",
@@ -604,10 +606,11 @@ class TestVenueCommandFromRow:
 class TestRepoSeamEnumGrammar:
     def _conn(self):
         import sqlite3
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         c = sqlite3.connect(":memory:")
         c.row_factory = sqlite3.Row
         init_schema(c)
+        init_schema_trade_only(c)
         return c
 
     def test_insert_command_rejects_gibberish_intent_kind(self):
@@ -666,12 +669,13 @@ class TestVenueCommandFromRowNullPreservation:
         """
         import sqlite3
         from src.execution.command_bus import VenueCommand
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.venue_command_repo import get_command, insert_command
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
+        init_schema_trade_only(conn)
         snapshot_id = _ensure_snapshot(conn, token_id="t")
         insert_command(
             conn, command_id="cmd-null", snapshot_id=snapshot_id,
@@ -791,7 +795,7 @@ class TestCancelPendingInRecoveryFilter:
         """End-to-end: insert command, advance to CANCEL_PENDING, verify
         repo's find_unresolved_commands returns it."""
         import sqlite3
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.venue_command_repo import (
             append_event, find_unresolved_commands, insert_command,
         )
@@ -799,6 +803,7 @@ class TestCancelPendingInRecoveryFilter:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
+        init_schema_trade_only(conn)
         snapshot_id = _ensure_snapshot(conn, token_id="t")
 
         insert_command(

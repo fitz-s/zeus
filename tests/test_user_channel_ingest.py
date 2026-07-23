@@ -28,7 +28,7 @@ from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.control import ws_gap_guard
 from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor, WSAuth, _parse_dt
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import (
     append_event,
@@ -54,6 +54,7 @@ def conn():
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     ws_gap_guard.clear_for_test(observed_at=NOW)
     _seed_acknowledged_command(c)
     yield c
@@ -1270,6 +1271,7 @@ def test_subscribe_reconnect_with_empty_local_surface_clears_m5_requirement():
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     ws_gap_guard.configure_status(
         ws_gap_guard.WSGapStatus(
             connected=False,

@@ -53,6 +53,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.analysis.epoch import ANALYSIS_EPOCH  # noqa: E402
+
 ENTRY_FLOOR = 0.05  # mirrors src/engine/evaluator.py min_entry_price
 DEFAULT_PHANTOM_CAL_THRESHOLD = 0.10
 DEFAULT_SINCE_DAYS = 3
@@ -65,18 +67,22 @@ def _parse_since(since_arg: str) -> str:
       - relative: "3d", "7d", "24h", "48h"
       - ISO date: "2026-05-20"
       - ISO datetime: "2026-05-20T00:00:00"
+
+    Floored at ANALYSIS_EPOCH: pre-epoch trade rows are archived out of
+    zeus_trades.db (scripts/ops/archive_pre_epoch_trades.py) and analysis must
+    never resolve a window into them, even a relative one that grows with time.
     """
     arg = since_arg.strip()
     if arg.endswith("d") and arg[:-1].isdigit():
         days = int(arg[:-1])
         dt = datetime.now(timezone.utc) - timedelta(days=days)
-        return dt.isoformat()
+        return max(dt.isoformat(), ANALYSIS_EPOCH)
     if arg.endswith("h") and arg[:-1].isdigit():
         hours = int(arg[:-1])
         dt = datetime.now(timezone.utc) - timedelta(hours=hours)
-        return dt.isoformat()
+        return max(dt.isoformat(), ANALYSIS_EPOCH)
     # Assume date or datetime string — pass through; sqlite TEXT comparison works.
-    return arg
+    return max(arg, ANALYSIS_EPOCH)
 
 
 def _median(values: list[float]) -> float | None:

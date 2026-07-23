@@ -43,12 +43,13 @@ _NOW = datetime(2026, 5, 5, tzinfo=timezone.utc)
 @pytest.fixture
 def mem_conn():
     """In-memory DB with full schema."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     yield c
     c.close()
 
