@@ -1,13 +1,14 @@
 # GPT-5.6 Pro review request — single live semantics
 
 Status: READY FOR OPERATOR SUBMISSION
-Target: PR_URL_PENDING
-Exact head: HEAD_SHA_PENDING
+Target: https://github.com/fitz-s/zeus/pull/445
+Exact head: resolve the current head of PR #445 at submission time; do not review
+an earlier cached SHA.
 Base: `live`
 
 ## Review instruction
 
-Review the complete PR diff from `live` to the exact head above. Treat the PR as
+Review the complete PR diff from `live` to that exact head. Treat the PR as
 a live-money architecture deletion, not as a naming cleanup. Report findings
 first, ordered by severity, with exact file and line anchors. Do not approve from
 test results alone.

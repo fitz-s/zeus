@@ -4093,25 +4093,6 @@ def test_runtime_claims_appear_in_route_card_and_digest_inputs():
     assert digest["typed_runtime_inputs"]["claims"] == ["admission_valid"]
 
 
-def test_script_route_admits_real_script_and_matching_test_paths():
-    digest = topology_doctor.build_digest(
-        "add or change script: evaluate_calibration_transfer_oos OOS calibration transfer evidence writer",
-        [
-            "scripts/evaluate_calibration_transfer_oos.py",
-            "tests/test_evaluate_calibration_transfer_oos.py",
-            "architecture/script_manifest.yaml",
-            "architecture/naming_conventions.yaml",
-        ],
-        intent="add or change script",
-        write_intent="edit",
-    )
-
-    assert digest["profile"] == "add or change script"
-    assert digest["admission"]["status"] == "admitted"
-    assert "scripts/evaluate_calibration_transfer_oos.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_evaluate_calibration_transfer_oos.py" in digest["admission"]["admitted_files"]
-
-
 def test_runtime_route_card_explains_generic_source_canary_probe():
     digest = topology_doctor.build_digest(
         "change source freshness handling for provider hot-swap for Paris canary readiness only, no live execution",

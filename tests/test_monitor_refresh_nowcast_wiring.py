@@ -1796,7 +1796,6 @@ def test_held_monitor_releases_trade_transaction_before_probability_refresh(
         tracker=StrategyTracker(),
         summary={"monitors": 0, "exits": 0},
         deps=deps,
-        exit_order_submit_enabled=False,
         run_exit_preflight=False,
     )
     conn.close()

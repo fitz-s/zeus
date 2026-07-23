@@ -311,20 +311,17 @@ def test_live_bridge_refresh_fails_closed_when_load_portfolio_raises(monkeypatch
 
 
 def test_main_edli_cycle_wires_live_bridge_allocator_refresh_source():
-    """Source-level wiring guard: the EDLI cycle must call the live-bridge refresh
-    inside ``live_bridge_mode``, BEFORE the submit_adapter is built, and must
-    fail-closed (force no-submit) when the refresh did not configure."""
+    """The sole live cycle refreshes allocation before building its adapter."""
     from pathlib import Path
 
     # R4-b3 (2026-07-08): the EDLI cycle body (including this call site) moved
     # from src/main.py to src.events.reactor.run_edli_event_reactor_cycle.
     source = Path("src/events/reactor.py").read_text()
 
-    assert "_edli_refresh_global_allocator_for_live_bridge" in source
-    # The refresh must be invoked from the EDLI cycle.
-    assert source.count("_edli_refresh_global_allocator_for_live_bridge") >= 2
-    # It must be gated on live_bridge_mode.
-    assert "live_bridge_mode" in source
+    refresh_call = source.index("_alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(")
+    adapter_build = source.index("submit_adapter = event_bound_live_adapter_from_trade_conn(")
+    assert refresh_call < adapter_build
+    assert 'if not _alloc_refresh.get("configured")' in source[refresh_call:adapter_build]
 
 
 def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
@@ -363,9 +360,10 @@ def test_chain_sync_read_lane_cannot_submit_exits():
     assert "_run_chain_sync(portfolio, clob, conn)" in chain_source
     assert "conn.commit()" in chain_source
     assert "_execute_monitoring_phase(" not in chain_source
-    assert "exit_order_submit_enabled" not in chain_source
+    retired_switch = "exit_order_" + "submit_enabled"
+    assert retired_switch not in chain_source
 
     assert 'mode="exit_monitor"' in exit_source
     assert "_execute_monitoring_phase(" in exit_source
-    assert "exit_order_submit_enabled" not in exit_source
+    assert retired_switch not in exit_source
     assert "_run_chain_sync(" not in exit_source

@@ -153,35 +153,8 @@ class TestComputeWithExitCosts:
         )
 
 
-class TestFlagOffPreservesPreT64Semantics:
-    """Regression guard: when feature_flags.HOLD_VALUE_EXIT_COSTS is OFF
-    (default), the _buy_yes_exit / _buy_no_exit paths must produce HoldValue
-    records IDENTICAL to pre-T6.4 (fee=0, time=0, costs_declared=['fee','time'],
-    net_value=gross_value).
-    """
-
-    def test_zero_cost_compute_matches_legacy_call_shape(self):
-        """The fallback HoldValue.compute(gross, 0.0, 0.0) call shape the
-        four portfolio.py sites use when flag is OFF produces the same
-        HoldValue record as pre-T6.4 code."""
-        shares = 100.0
-        p_posterior = 0.6
-        hv = HoldValue.compute(
-            gross_value=shares * p_posterior,
-            fee_cost=0.0,
-            time_cost=0.0,
-        )
-        assert hv.fee_cost == 0.0
-        assert hv.time_cost == 0.0
-        assert hv.net_value == hv.gross_value
-        assert hv.costs_declared == ["fee", "time"]
-
-
 class TestPortfolioExitIntegration:
-    """Integration: verify the 4 wire-in sites in src/state/portfolio.py
-    respond correctly to the feature flag. These tests use direct Position
-    construction + _buy_yes_exit / _buy_no_exit calls.
-    """
+    """Verify exit-cost semantics at the four portfolio exit sites."""
 
     def _make_position(self, direction: str = "buy_yes"):
         from src.state.portfolio import Position
@@ -205,69 +178,31 @@ class TestPortfolioExitIntegration:
         pos.neg_edge_count = 2
         return pos
 
-    def test_flag_off_buy_yes_exit_uses_zero_cost(self):
-        """With flag OFF, _buy_yes_exit EV gate should match pre-T6.4 behavior
-        (no fee/time cost applied). The applied_validations list should NOT
-        include 'hold_value_exit_costs_enabled'."""
+    def test_buy_yes_exit_records_cost_awareness(self):
         pos = self._make_position("buy_yes")
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
-            decision = pos._buy_yes_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.55,
-                best_bid=0.50,
-                day0_active=False,
-                hours_to_settlement=48.0,
-                applied=[],
-            )
-        assert "hold_value_exit_costs_enabled" not in decision.applied_validations
-
-    def test_flag_on_buy_yes_exit_records_cost_awareness(self):
-        """With flag ON, _buy_yes_exit records the 'hold_value_exit_costs_enabled'
-        breadcrumb in applied_validations, proving the factory was routed."""
-        pos = self._make_position("buy_yes")
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            decision = pos._buy_yes_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.55,
-                best_bid=0.50,
-                day0_active=False,
-                hours_to_settlement=48.0,
-                applied=[],
-            )
-        assert "hold_value_exit_costs_enabled" in decision.applied_validations
-
-    def test_flag_off_buy_no_exit_uses_zero_cost(self):
-        """Plan-premise correction #21 scope: pre-T6.4, _buy_no_exit bypassed
-        HoldValue entirely. T6.4 brings it through the contract but preserves
-        behavior when flag is OFF — no 'hold_value_exit_costs_enabled' breadcrumb."""
-        pos = self._make_position("buy_no")
-        pos.neg_edge_count = 2  # trigger consecutive gate on this call
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
-            decision = pos._buy_no_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.85,
-                current_market_price=0.80,
-                best_bid=0.80,
-                hours_to_settlement=48.0,
-                day0_active=False,
-                applied=[],
-            )
-        assert "hold_value_exit_costs_enabled" not in decision.applied_validations
+        decision = pos._buy_yes_exit(
+            forward_edge=-0.05,
+            current_p_posterior=0.55,
+            best_bid=0.50,
+            day0_active=False,
+            hours_to_settlement=48.0,
+            applied=[],
+        )
+        assert "hold_value_exit_costs" in decision.applied_validations
 
     def test_buy_no_exit_ev_gate_uses_best_bid_not_current_market_price(self):
         """A high probability/market scalar must not become buy_no sell proceeds."""
         pos = self._make_position("buy_no")
         pos.neg_edge_count = 2
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
-            decision = pos._buy_no_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.60,
-                current_market_price=0.95,
-                best_bid=0.20,
-                hours_to_settlement=48.0,
-                day0_active=False,
-                applied=[],
-            )
+        decision = pos._buy_no_exit(
+            forward_edge=-0.05,
+            current_p_posterior=0.60,
+            current_market_price=0.95,
+            best_bid=0.20,
+            hours_to_settlement=48.0,
+            day0_active=False,
+            applied=[],
+        )
 
         assert decision.should_exit is False
 
@@ -275,16 +210,15 @@ class TestPortfolioExitIntegration:
         """A real held-token bid can authorize exit even when market scalar is low."""
         pos = self._make_position("buy_no")
         pos.neg_edge_count = 2
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
-            decision = pos._buy_no_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.60,
-                current_market_price=0.05,
-                best_bid=0.70,
-                hours_to_settlement=48.0,
-                day0_active=False,
-                applied=[],
-            )
+        decision = pos._buy_no_exit(
+            forward_edge=-0.05,
+            current_p_posterior=0.60,
+            current_market_price=0.05,
+            best_bid=0.70,
+            hours_to_settlement=48.0,
+            day0_active=False,
+            applied=[],
+        )
 
         assert decision.should_exit is True
         assert decision.trigger == "BUY_NO_EDGE_EXIT"
@@ -293,16 +227,15 @@ class TestPortfolioExitIntegration:
         """Consecutive buy_no reversal must not bypass held-token quote authority."""
         pos = self._make_position("buy_no")
         pos.neg_edge_count = 2
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
-            decision = pos._buy_no_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.60,
-                current_market_price=0.95,
-                best_bid=None,
-                hours_to_settlement=48.0,
-                day0_active=False,
-                applied=[],
-            )
+        decision = pos._buy_no_exit(
+            forward_edge=-0.05,
+            current_p_posterior=0.60,
+            current_market_price=0.95,
+            best_bid=None,
+            hours_to_settlement=48.0,
+            day0_active=False,
+            applied=[],
+        )
 
         assert decision.should_exit is False
         assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
@@ -312,81 +245,66 @@ class TestPortfolioExitIntegration:
         """Day0 buy_no reversal also fails closed without held-token quote."""
         pos = self._make_position("buy_no")
         pos.neg_edge_count = 2
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
-            decision = pos._buy_no_exit(
-                forward_edge=-0.10,
-                current_p_posterior=0.60,
-                current_market_price=0.95,
-                best_bid=None,
-                hours_to_settlement=12.0,
-                day0_active=True,
-                applied=[],
-            )
+        decision = pos._buy_no_exit(
+            forward_edge=-0.10,
+            current_p_posterior=0.60,
+            current_market_price=0.95,
+            best_bid=None,
+            hours_to_settlement=12.0,
+            day0_active=True,
+            applied=[],
+        )
 
         assert decision.should_exit is False
         assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
         assert "day0_observation_gate" in decision.applied_validations
         assert "best_bid_unavailable" in decision.applied_validations
 
-    def test_flag_on_buy_no_exit_records_cost_awareness(self):
-        """T6.4 contract-consistency fix: _buy_no_exit now goes through
-        HoldValue under flag ON, parity with _buy_yes_exit."""
+    def test_buy_no_exit_records_cost_awareness(self):
         pos = self._make_position("buy_no")
         pos.neg_edge_count = 2
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            decision = pos._buy_no_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.85,
-                current_market_price=0.80,
-                best_bid=0.80,
-                hours_to_settlement=48.0,
-                day0_active=False,
-                applied=[],
-            )
-        assert "hold_value_exit_costs_enabled" in decision.applied_validations
+        decision = pos._buy_no_exit(
+            forward_edge=-0.05,
+            current_p_posterior=0.85,
+            current_market_price=0.80,
+            best_bid=0.80,
+            hours_to_settlement=48.0,
+            day0_active=False,
+            applied=[],
+        )
+        assert "hold_value_exit_costs" in decision.applied_validations
 
-    def test_flag_on_buy_yes_day0_exit_records_cost_awareness(self):
-        """T6.4-hardening (surrogate HIGH finding): Day0 EV-gate site at
-        portfolio.py:545 was claimed wire-in but had zero integration test.
-        This test exercises that path to prove flag-ON routes through the
-        cost-aware factory when day0_active=True.
-        """
+    def test_buy_yes_day0_exit_records_cost_awareness(self):
         pos = self._make_position("buy_yes")
         pos.neg_edge_count = 2
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            decision = pos._buy_yes_exit(
-                forward_edge=-0.10,  # below edge_threshold, triggers Day0 gate
-                current_p_posterior=0.55,
-                best_bid=0.50,
-                day0_active=True,
-                hours_to_settlement=12.0,
-                applied=[],
-            )
-        assert "hold_value_exit_costs_enabled" in decision.applied_validations
+        decision = pos._buy_yes_exit(
+            forward_edge=-0.10,
+            current_p_posterior=0.55,
+            best_bid=0.50,
+            day0_active=True,
+            hours_to_settlement=12.0,
+            applied=[],
+        )
+        assert "hold_value_exit_costs" in decision.applied_validations
         # Day0 gate path must tag day0_observation_gate breadcrumb too
         assert "day0_observation_gate" in decision.applied_validations
 
-    def test_flag_on_buy_no_day0_exit_records_cost_awareness(self):
-        """T6.4-hardening (surrogate HIGH finding): Day0 EV-gate site at
-        portfolio.py:684 (_buy_no_exit Day0 branch) proven wired under
-        flag ON via integration path, not just factory-level assertion.
-        """
+    def test_buy_no_day0_exit_records_cost_awareness(self):
         pos = self._make_position("buy_no")
         pos.neg_edge_count = 2
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            decision = pos._buy_no_exit(
-                forward_edge=-0.10,
-                current_p_posterior=0.85,
-                current_market_price=0.80,
-                best_bid=0.80,
-                hours_to_settlement=12.0,
-                day0_active=True,
-                applied=[],
-            )
-        assert "hold_value_exit_costs_enabled" in decision.applied_validations
+        decision = pos._buy_no_exit(
+            forward_edge=-0.10,
+            current_p_posterior=0.85,
+            current_market_price=0.80,
+            best_bid=0.80,
+            hours_to_settlement=12.0,
+            day0_active=True,
+            applied=[],
+        )
+        assert "hold_value_exit_costs" in decision.applied_validations
         assert "day0_observation_gate" in decision.applied_validations
 
-    def test_flag_on_extreme_best_bid_does_not_crash(self):
+    def test_extreme_best_bid_does_not_crash(self):
         """T6.4-hardening (surrogate HIGH finding): pre-fix, best_bid ∈
         {0.0, 1.0} would hit polymarket_fee ValueError and be caught by
         the cycle_runtime except-all, silently converting should_exit=True
@@ -398,34 +316,29 @@ class TestPortfolioExitIntegration:
         # Trigger Day0 path which has the best_bid proxy `max(0, market*0.95)`
         # that can legally produce 0.0.
         pos = self._make_position("buy_yes")
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            # Extreme price: best_bid=0.0 previously crashed via polymarket_fee
-            decision_zero = pos._buy_yes_exit(
-                forward_edge=-0.10,
-                current_p_posterior=0.55,
-                best_bid=0.0,
-                day0_active=True,
-                hours_to_settlement=12.0,
-                applied=[],
-            )
-            # Does not crash — returns a valid ExitDecision
-            assert decision_zero is not None
-            assert "hold_value_exit_costs_enabled" in decision_zero.applied_validations
+        decision_zero = pos._buy_yes_exit(
+            forward_edge=-0.10,
+            current_p_posterior=0.55,
+            best_bid=0.0,
+            day0_active=True,
+            hours_to_settlement=12.0,
+            applied=[],
+        )
+        assert decision_zero is not None
+        assert "hold_value_exit_costs" in decision_zero.applied_validations
 
         pos2 = self._make_position("buy_no")
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            # Extreme upper: current_market_price=1.0 previously crashed
-            decision_one = pos2._buy_no_exit(
-                forward_edge=-0.10,
-                current_p_posterior=0.85,
-                current_market_price=1.0,
-                best_bid=1.0,
-                hours_to_settlement=12.0,
-                day0_active=True,
-                applied=[],
-            )
-            assert decision_one is not None
-            assert "hold_value_exit_costs_enabled" in decision_one.applied_validations
+        decision_one = pos2._buy_no_exit(
+            forward_edge=-0.10,
+            current_p_posterior=0.85,
+            current_market_price=1.0,
+            best_bid=1.0,
+            hours_to_settlement=12.0,
+            day0_active=True,
+            applied=[],
+        )
+        assert decision_one is not None
+        assert "hold_value_exit_costs" in decision_one.applied_validations
 
 
 class TestHardeningValidators:
@@ -511,93 +424,47 @@ class TestConNyxPostEditHardening:
         pos.neg_edge_count = 2
         return pos
 
-    def test_flag_on_hours_none_emits_authority_gap_breadcrumb(self):
-        """Con-nyx finding (c): when flag ON and hours_to_settlement is
-        None, time_cost silently collapses to 0.0. Surface the authority
-        gap via applied_validations breadcrumb so monitor summaries can
-        count these D6-bypass occurrences.
-        """
+    def test_hours_none_emits_authority_gap_breadcrumb(self):
         pos = self._make_position("buy_yes")
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            decision = pos._buy_yes_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.55,
-                best_bid=0.50,
-                day0_active=False,
-                hours_to_settlement=None,  # authority gap
-                applied=[],
-            )
-        assert "hold_value_exit_costs_enabled" in decision.applied_validations
+        decision = pos._buy_yes_exit(
+            forward_edge=-0.05,
+            current_p_posterior=0.55,
+            best_bid=0.50,
+            day0_active=False,
+            hours_to_settlement=None,
+            applied=[],
+        )
+        assert "hold_value_exit_costs" in decision.applied_validations
         assert "hold_value_hours_unknown_time_cost_zero" in decision.applied_validations
 
-    def test_flag_on_hours_none_buy_no_emits_breadcrumb(self):
-        """Finding (c) for buy_no path: hours=None under flag ON also
-        surfaces the authority gap."""
+    def test_hours_none_buy_no_emits_breadcrumb(self):
         pos = self._make_position("buy_no")
         pos.neg_edge_count = 2
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            decision = pos._buy_no_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.85,
-                current_market_price=0.80,
-                best_bid=0.80,
-                hours_to_settlement=None,
-                day0_active=False,
-                applied=[],
-            )
+        decision = pos._buy_no_exit(
+            forward_edge=-0.05,
+            current_p_posterior=0.85,
+            current_market_price=0.80,
+            best_bid=0.80,
+            hours_to_settlement=None,
+            day0_active=False,
+            applied=[],
+        )
         assert "hold_value_hours_unknown_time_cost_zero" in decision.applied_validations
 
-    def test_flag_on_hours_positive_does_not_emit_unknown_breadcrumb(self):
+    def test_hours_positive_does_not_emit_unknown_breadcrumb(self):
         """Regression: breadcrumb MUST NOT fire when hours is valid
         (non-None, non-negative). Otherwise it becomes a noisy spam
         indistinguishable from real authority gaps."""
         pos = self._make_position("buy_yes")
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
-            decision = pos._buy_yes_exit(
-                forward_edge=-0.05,
-                current_p_posterior=0.55,
-                best_bid=0.50,
-                day0_active=False,
-                hours_to_settlement=48.0,
-                applied=[],
-            )
+        decision = pos._buy_yes_exit(
+            forward_edge=-0.05,
+            current_p_posterior=0.55,
+            best_bid=0.50,
+            day0_active=False,
+            hours_to_settlement=48.0,
+            applied=[],
+        )
         assert "hold_value_hours_unknown_time_cost_zero" not in decision.applied_validations
-
-    def test_flag_off_parity_with_pre_t64_bare_math(self):
-        """Con-nyx finding (d) belt-and-suspenders: flag-OFF path must
-        produce the SAME ExitDecision as the pre-T6.4 bare-math formula
-        for identical inputs. This test computes the bare-math expected
-        decision inline and asserts the wired path matches.
-        """
-        pos = self._make_position("buy_yes")
-        # Inputs: shares * best_bid vs shares * p_posterior comparison.
-        shares = pos.size_usd / pos.entry_price  # 50 / 0.40 = 125
-        p_posterior = 0.50
-        best_bid = 0.48
-        # Pre-T6.4 logic: sell_value <= hold_gross → don't exit
-        # sell_value = 125 * 0.48 = 60; hold_gross = 125 * 0.50 = 62.5
-        # 60 <= 62.5 → don't exit → should_exit=False
-        expected_should_exit = not (shares * best_bid <= shares * p_posterior)
-
-        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
-            decision = pos._buy_yes_exit(
-                forward_edge=-0.02,
-                current_p_posterior=p_posterior,
-                best_bid=best_bid,
-                day0_active=False,
-                hours_to_settlement=24.0,
-                applied=[],
-            )
-        # Pre-T6.4 bare math says don't exit (60 < 62.5); flag-OFF must agree.
-        # Note: decision.should_exit depends on all the EV gate layers, not
-        # just the hold-value test; this asserts the hold-value gate
-        # specifically by checking it returned False (held) not True (exit).
-        if expected_should_exit is False:
-            assert decision.should_exit is False, (
-                f"Flag-OFF should match pre-T6.4 bare math. "
-                f"Pre-T6.4 said hold (sell={shares*best_bid:.2f} <= "
-                f"hold={shares*p_posterior:.2f}), got should_exit={decision.should_exit}"
-            )
 
     def test_fee_rate_config_matches_polymarket_fee_default(self):
         """Con-nyx finding (i) — two sources of truth for fee_rate:
@@ -622,13 +489,7 @@ class TestConNyxPostEditHardening:
 
 
 class TestCorrelationCrowdingPhase2:
-    """T6.4-phase2: correlation-crowding cost wired through ExitContext
-    into HoldValue.compute_with_exit_costs. Feature-flag-gated via
-    HOLD_VALUE_EXIT_COSTS (ON → computed; OFF → untouched) + rate-gated
-    via exit.correlation_crowding_rate (default 0.0 = no-op even when
-    feature flag ON, so phase2 shipping doesn't alter live behavior
-    without operator config flip).
-    """
+    """Correlation crowding cost wired through current ExitContext."""
 
     def _make_position(self, direction: str = "buy_yes", trade_id: str = "pos_self"):
         from src.state.portfolio import Position
@@ -775,10 +636,7 @@ class TestCorrelationCrowdingPhase2:
             "must be 0.0 until operator flips post-replay-audit."
         )
 
-    def test_flag_on_crowding_breadcrumb_when_rate_positive(self):
-        """Integration: under flag ON + rate > 0 + portfolio has co-held
-        positions + bankroll, exit path appends hold_value_correlation_
-        crowding_applied to applied_validations."""
+    def test_crowding_breadcrumb_when_rate_positive(self):
         from unittest.mock import patch
 
         from src.state.portfolio import Position
@@ -799,7 +657,6 @@ class TestCorrelationCrowdingPhase2:
         pos.neg_edge_count = 2
 
         patches = [
-            patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True),
             patch("src.state.portfolio.exit_correlation_crowding_rate", return_value=0.01),
             patch("src.state.portfolio.get_correlation", return_value=0.80),
         ]
@@ -822,7 +679,7 @@ class TestCorrelationCrowdingPhase2:
 
         assert "hold_value_correlation_crowding_applied" in decision.applied_validations
 
-    def test_flag_on_no_crowding_breadcrumb_when_rate_zero(self):
+    def test_no_crowding_breadcrumb_when_rate_zero(self):
         """Regression: default rate=0.0 means crowding cost is 0.0 even
         when portfolio has co-held positions — breadcrumb must NOT fire
         (otherwise phase2 noisily breadcrumbs every decision when rate is
@@ -832,10 +689,7 @@ class TestCorrelationCrowdingPhase2:
         pos = self._make_position("buy_yes", trade_id="pos_self")
         pos.neg_edge_count = 2
 
-        patches = [
-            patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True),
-            # rate stays at default 0.0
-        ]
+        patches = []
         for p in patches:
             p.start()
         try:

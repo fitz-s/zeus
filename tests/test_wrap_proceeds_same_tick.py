@@ -154,6 +154,26 @@ def test_t1_confirmed_batch_leaves_zero_usdce_same_call(world_conn):
     assert out["pending"] == [], "T1 FAIL: pending wrap rows remain."
 
 
+def test_retired_wrap_configuration_blocks_before_broadcast(
+    world_conn, monkeypatch
+):
+    from src.execution.wrap_unwrap_commands import wrap_proceeds_now
+
+    retired_key = "ZEUS_AUTONOMOUS_WRAP_" + "DRY_RUN"
+    monkeypatch.setenv(retired_key, "1")
+    adapter = _FakeWrapAdapter(balance_micro=857_476_847)
+
+    with pytest.raises(RuntimeError, match="must be removed before broadcast"):
+        wrap_proceeds_now(
+            world_conn,
+            adapter,
+            _SAFE,
+            _EOA,
+            poll_interval_s=0.0,
+        )
+    assert adapter.wrap_calls == []
+
+
 def test_t2_stranded_mid_flight_row_driven_forward(world_conn):
     """T2: a WRAP_APPROVED row stranded by the old per-tick machine (the
     d6d2e6f0 case) advances in one call."""
@@ -405,69 +425,4 @@ def test_p0_3_legacy_mined_timeout_is_clamped(world_conn):
     elapsed = time.monotonic() - t0
     assert elapsed < 10.0, (
         f"P0-3 FAIL: legacy mined_timeout_s=120 not clamped (wall-time {elapsed:.1f}s)."
-    )
-
-
-def test_w2_reconciler_cycle_triggers_same_tick_wrap(monkeypatch):
-    """W2 (wiring): a REDEEM_CONFIRMED batch from reconcile_pending_redeems
-    makes _redeem_reconciler_cycle invoke _wrap_proceeds_same_tick.
-
-    Sed-flip: delete the same-tick wrap call in the reconciler -> RED."""
-    import src.main as main_mod
-    from src.execution.settlement_commands import SettlementState, SettlementResult
-
-    monkeypatch.setattr("src.main.get_mode", lambda: "live")
-
-    @contextmanager
-    def _fake_lock(name):
-        yield True
-
-    import src.data.dual_run_lock as _lock_mod
-    monkeypatch.setattr(_lock_mod, "acquire_lock", _fake_lock)
-
-    class _FakeConn:
-        def commit(self): pass
-        def rollback(self): pass
-        def close(self): pass
-
-    import src.state.db as db_mod
-    monkeypatch.setattr(db_mod, "get_trade_connection", lambda **_kw: _FakeConn())
-
-    # One TX_HASHED row exists so the cycle proceeds to reconcile.
-    import src.execution.settlement_commands as sc
-    monkeypatch.setattr(sc, "list_commands", lambda conn, state=None: [{"command_id": "x"}])
-    confirmed = SettlementResult("cmdX", SettlementState.REDEEM_CONFIRMED, tx_hash="0x" + "a" * 64)
-    monkeypatch.setattr(sc, "reconcile_pending_redeems", lambda w3, conn: [confirmed])
-
-    # Fake web3 (imported inside the cycle).
-    _web3_mod = pytest.importorskip("web3")
-
-    class _FakeWeb3:
-        class HTTPProvider:
-            def __init__(self, *a, **kw): pass
-        def __init__(self, *a, **kw): pass
-        eth = SimpleNamespace()
-
-    monkeypatch.setattr(_web3_mod, "Web3", _FakeWeb3)
-
-    # Fake creds + adapter construction inside the confirmed-batch branch.
-    import src.data.polymarket_client as pc
-    monkeypatch.setattr(
-        pc, "resolve_polymarket_credentials",
-        lambda: {"private_key": "0x" + "1" * 64, "funder_address": _SAFE},
-    )
-    monkeypatch.setattr(pc, "_resolve_clob_v2_signature_type", lambda: 2)
-    import src.venue.polymarket_v2_adapter as va
-    monkeypatch.setattr(va, "PolymarketV2Adapter", lambda **kw: SimpleNamespace(**kw))
-
-    calls = []
-    monkeypatch.setattr(
-        main_mod, "_wrap_proceeds_same_tick", lambda creds, adapter: calls.append(1)
-    )
-    monkeypatch.setattr("src.main._write_scheduler_health", lambda *a, **kw: None)
-
-    main_mod._redeem_reconciler_cycle()
-    assert calls, (
-        "W2 FAIL: _redeem_reconciler_cycle did not invoke the same-tick wrap "
-        "after a REDEEM_CONFIRMED batch — proceeds would sit unwrapped again."
     )

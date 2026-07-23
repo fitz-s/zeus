@@ -9,7 +9,10 @@ on:
     paths:
       - "src/**"
       - "scripts/check_single_live_semantics.py"
+      - "scripts/migrations/202607_single_live_semantics_cutover.py"
       - "tests/test_single_live_semantics.py"
+      - "tests/test_single_live_semantics_migration.py"
+      - "tests/state/test_table_registry_coherence.py"
       - "tests/test_money_path_lifecycle_replay.py"
       - "tests/test_pre_existing_failure_registry.py"
       - "tests/test_monitor_refresh_nowcast_wiring.py"
@@ -23,13 +26,24 @@ on:
       - "architecture/test_topology.yaml"
       - "architecture/pre_existing_failure_registry.yaml"
       - "architecture/db_table_ownership.yaml"
+      - "architecture/docs_registry.yaml"
+      - "architecture/money_path_objects.yaml"
+      - "architecture/source_rationale.yaml"
+      - ".github/instructions/**"
       - ".github/workflows/money-path-release-gate.yml"
   push:
     branches: [live]
     paths:
       - "src/**"
       - "scripts/check_single_live_semantics.py"
+      - "scripts/migrations/202607_single_live_semantics_cutover.py"
       - "tests/test_single_live_semantics.py"
+      - "tests/test_single_live_semantics_migration.py"
+      - "tests/state/test_table_registry_coherence.py"
+      - "architecture/docs_registry.yaml"
+      - "architecture/money_path_objects.yaml"
+      - "architecture/source_rationale.yaml"
+      - ".github/instructions/**"
       - ".github/workflows/money-path-release-gate.yml"
   workflow_dispatch:
 
@@ -71,6 +85,7 @@ jobs:
           pytest -q \
             tests/test_single_live_semantics.py \
             tests/test_single_live_semantics_migration.py \
+            tests/state/test_table_registry_coherence.py \
             tests/strategy/test_single_count_uncertainty.py \
             tests/engine/test_multiwinner_wealth_composition.py \
             tests/engine/test_native_holdings.py \

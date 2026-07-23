@@ -85,15 +85,10 @@ This order separates decision truth from execution readiness and prevents an acc
 
 ## Implementation Plan
 
-Implementation update, 2026-06-17 11:22 UTC: replacement forecast live-only decoupling has been implemented and live-verified.
-
-- Runtime policy is now live-or-disabled for replacement forecast authority. `SHADOW_ONLY` / `SHADOW_VETO_ONLY` remain only as one-time migration inputs for old DB rows and diagnostic-only non-money surfaces; they are not live reader, reactor, coverage, or production-job authority.
-- `forecast_posteriors` now has `DIAGNOSTIC_ONLY` / `LIVE_AUTHORITY` row authority. Live DB proof after repair: `DIAGNOSTIC_ONLY=4461`, `LIVE_AUTHORITY=3152`, legacy posterior status count `0`.
-- `readiness_state.provenance_json.trade_authority_status` was repaired: `DIAGNOSTIC_ONLY=101`, `LIVE_AUTHORITY=606`, legacy readiness provenance count `0`.
-- Replacement forecast production config moved to `replacement_forecast_live`; runtime state directory was renamed from `state/replacement_forecast_shadow` to `state/replacement_forecast_live`.
-- Forecast-live proof after reload: scheduler registered `replacement_forecast_live_materialize` and logged `live_authority_enabled=True`.
-- Healthcheck proof after reload: process code fresh, live health composite OK, heartbeat fresh, `status_process_contract_ok=True`, forecast posterior schema OK, entry execution capability OK, `entry_forecast_status.status=LIVE_ELIGIBLE`. Overall health remains false due to dirty code-plane and the pre-existing Celsius city partition assumption mismatch, not due to replacement live authority, heartbeat, forecast schema, or entry capability.
-- Dry-run proof: `scripts/check_replacement_forecast_live_dry_run.py --stdout` now executes against live config and reports runtime `LIVE_AUTHORITY`; remaining block is real current-target live coverage gap, not missing refit handoff or crash.
+Implementation update, 2026-07-23: this old cutover description is superseded by
+the single-live-semantics deletion. Its transitional row classes, state directory,
+switch scripts, and readiness vocabulary no longer describe executable law and
+must not be used to reconstruct a second runtime behavior.
 
 Implementation status, 2026-06-17 09:52 UTC: source repair and live verification are complete for this slice. Live side effects applied during implementation: additive trade DB schema migration for `position_current` monitor freshness columns; venue heartbeat LaunchAgent contract reload; live daemon kickstart to load repaired source; command-recovery journal repair for `5d9e33cd1a61463e`; M5 recovery journal repair for live open partial SELL order `0x9b70c47cc25103138fde1db1f4c231eabbcd4ff4e82556c7b7509ceb6e15243b`. No submit, cancel, or operator control mutation was performed.
 

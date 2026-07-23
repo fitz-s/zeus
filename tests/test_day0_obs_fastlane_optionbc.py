@@ -1022,7 +1022,6 @@ class TestObsFastTickSchedulerRegistration:
                     "enabled": True,
                     "event_writer_enabled": True,
                     "day0_extreme_trigger_enabled": True,
-                    "edli_live_scope": "forecast_plus_day0",
                 }
             },
         )
@@ -1092,7 +1091,6 @@ class TestDay0MetarSourceClockTick:
                     "event_writer_enabled": True,
                     "day0_extreme_trigger_enabled": True,
                     "day0_fast_obs_lane_enabled": True,
-                    "edli_live_scope": "forecast_plus_day0",
                 }
             },
         )
@@ -1193,7 +1191,6 @@ class TestDay0MetarSourceClockTick:
                     "event_writer_enabled": True,
                     "day0_extreme_trigger_enabled": True,
                     "day0_fast_obs_lane_enabled": True,
-                    "edli_live_scope": "forecast_plus_day0",
                 }
 
         prefetch = SimpleNamespace(

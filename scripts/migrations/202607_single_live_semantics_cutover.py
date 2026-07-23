@@ -26,14 +26,8 @@ OLD_LIVE_AUTHORITY = "LIVE_" + "AUTHORITY"
 OLD_ELIGIBILITY = "promotion_" + "eligible"
 OLD_AUDIT_INDEX = "idx_edli_live_profit_audit_" + "promotion"
 TRANSFER_TABLE = "validated_calibration_" + "transfers"
-TIER_TABLE = "evidence_tier_" + "assignments"
 CONVERSION_TABLE = "ctf_conversion_" + "commands"
 CONVERSION_EVENTS = "ctf_conversion_command_" + "events"
-FRONTIER_TABLE = "source_time_" + "frontier"
-BIAS_TABLE = "model_" + "bias_ens"
-LEGACY_BIAS_TABLE = "model_" + "bias"
-LEGACY_SKILL_TABLE = "forecast_" + "skill"
-TRUTH_EPOCH_TABLE = "truth_" + "epoch"
 FORCE_EXIT_COLUMN = "force_exit_" + "review"
 OLD_PRE_SUBMIT_MODE = "NO_" + "SUBMIT"
 OLD_REPLAY_MODE = "REPLAY_" + "COUNTERFACTUAL"
@@ -150,7 +144,14 @@ TRADES_GHOST_DROP_ORDER = (
 )
 LIVE_MODE = "LIVE"
 PROTECTED_POSITION_PHASES = frozenset(
-    {"pending_entry", "active", "day0_window", "pending_exit", "economically_closed"}
+    {
+        "pending_entry",
+        "active",
+        "day0_window",
+        "pending_exit",
+        "economically_closed",
+        "unknown",
+    }
 )
 TERMINAL_COMMAND_STATES = frozenset(
     {"SUBMIT_REJECTED", "FILLED", "CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "FAILED"}
@@ -238,6 +239,93 @@ def live_writers() -> list[str]:
         if pid != current and "python" in command and any(marker in command for marker in PROCESS_MARKERS):
             found.append(line.strip())
     return found
+
+
+def loaded_writer_jobs(root: Path) -> list[str]:
+    """Return loaded launchd jobs capable of restarting a target writer."""
+
+    try:
+        out = subprocess.check_output(
+            ["launchctl", "print", f"gui/{os.getuid()}"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("cannot prove launchd writer jobs are unloaded") from exc
+    root_text = str(root.resolve())
+    blocks = re.split(r"\n\s*(?=service = |[A-Za-z0-9_.-]+ = \{)", out)
+    return [
+        block.splitlines()[0].strip()
+        for block in blocks
+        if root_text in block and any(marker in block for marker in PROCESS_MARKERS)
+    ]
+
+
+def open_canonical_db_handles(root: Path) -> list[str]:
+    """Return foreign processes holding any canonical DB or WAL/SHM handle."""
+
+    state = root / "state"
+    targets = [
+        state / name
+        for db in ("zeus-world.db", "zeus-forecasts.db", "zeus_trades.db", "risk_state.db")
+        for name in (db, f"{db}-wal", f"{db}-shm")
+        if (state / name).exists()
+    ]
+    if not targets:
+        return []
+    result = subprocess.run(
+        ["lsof", "-Fn", "--", *(str(path) for path in targets)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"cannot prove canonical DB handles are closed: {result.stderr.strip()}")
+    current = f"p{os.getpid()}"
+    records = result.stdout.splitlines()
+    found: list[str] = []
+    owner = ""
+    for record in records:
+        if record.startswith("p"):
+            owner = record
+        elif record.startswith("n") and owner and owner != current:
+            found.append(f"{owner} {record[1:]}")
+    return sorted(set(found))
+
+
+def assert_writer_fence(root: Path) -> None:
+    writers = live_writers()
+    jobs = loaded_writer_jobs(root)
+    handles = open_canonical_db_handles(root)
+    if writers or jobs or handles:
+        detail = [
+            *(f"process {item}" for item in writers),
+            *(f"launchd {item}" for item in jobs),
+            *(f"open_handle {item}" for item in handles),
+        ]
+        raise RuntimeError("live writer fence is not durable:\n  " + "\n  ".join(detail))
+
+
+def target_release_identity(root: Path) -> dict[str, str]:
+    """Bind apply/resume to the checkout that owns this exact migration code."""
+
+    if root.resolve() != ROOT.resolve():
+        raise RuntimeError("apply must run from the target checkout itself")
+    head = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    script_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    fingerprint_path = root / "architecture" / "_schema_fingerprint.txt"
+    schema_fingerprint = fingerprint_path.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise RuntimeError("target git HEAD is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", schema_fingerprint):
+        raise RuntimeError("target schema fingerprint is invalid")
+    return {
+        "target_head": head,
+        "migration_script_sha256": script_hash,
+        "schema_fingerprint": schema_fingerprint,
+    }
 
 
 def utc_now() -> str:
@@ -1215,7 +1303,6 @@ def describe_db(path: Path) -> list[str]:
         found: list[str] = []
         for table in (
             TRANSFER_TABLE,
-            TIER_TABLE,
             CONVERSION_TABLE,
             CONVERSION_EVENTS,
             "raw_forecast_artifacts",
@@ -1225,11 +1312,6 @@ def describe_db(path: Path) -> list[str]:
             "edli_live_profit_audit",
             "edli_no_submit_receipts",
             "risk_state",
-            FRONTIER_TABLE,
-            BIAS_TABLE,
-            LEGACY_BIAS_TABLE,
-            LEGACY_SKILL_TABLE,
-            TRUTH_EPOCH_TABLE,
         ):
             if not table_exists(conn, table):
                 continue
@@ -1246,14 +1328,8 @@ def describe_db(path: Path) -> list[str]:
             )
             if relevant or table in {
                 TRANSFER_TABLE,
-                TIER_TABLE,
                 CONVERSION_TABLE,
                 CONVERSION_EVENTS,
-                FRONTIER_TABLE,
-                BIAS_TABLE,
-                LEGACY_BIAS_TABLE,
-                LEGACY_SKILL_TABLE,
-                TRUTH_EPOCH_TABLE,
             }:
                 found.append(f"{table}: rows={count} retired_columns={relevant}")
         if table_exists(conn, "decision_certificates"):
@@ -1293,7 +1369,11 @@ def mutation_blockers(path: Path) -> list[str]:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         blockers: list[str] = []
-        for table in (TIER_TABLE, CONVERSION_TABLE, CONVERSION_EVENTS, FRONTIER_TABLE):
+        for table in (
+            TRANSFER_TABLE,
+            CONVERSION_TABLE,
+            CONVERSION_EVENTS,
+        ):
             if table_exists(conn, table):
                 count = int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
                 if count:
@@ -1348,23 +1428,12 @@ def mutate_db(path: Path) -> list[str]:
         try:
             for table in (
                 TRANSFER_TABLE,
-                TIER_TABLE,
                 CONVERSION_EVENTS,
                 CONVERSION_TABLE,
-                FRONTIER_TABLE,
-                BIAS_TABLE,
-                LEGACY_BIAS_TABLE,
-                LEGACY_SKILL_TABLE,
-                TRUTH_EPOCH_TABLE,
             ):
                 if table_exists(conn, table):
                     count = int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
-                    if table in {
-                        TIER_TABLE,
-                        CONVERSION_TABLE,
-                        CONVERSION_EVENTS,
-                        FRONTIER_TABLE,
-                    } and count != 0:
+                    if count != 0:
                         raise RuntimeError(f"refusing to drop non-empty retired table {table}: {count} rows")
                     conn.execute(f"DROP TABLE {table}")
                     changed.append(f"dropped {table} ({count} rows)")
@@ -1502,7 +1571,12 @@ def clean_config(path: Path) -> list[str]:
     return removed
 
 
-def _open_stage_journal(progress_path: Path, root: Path) -> dict[str, Any]:
+def _open_stage_journal(
+    progress_path: Path,
+    root: Path,
+    *,
+    target_identity: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Open a durable, target-bound journal without erasing interrupted state."""
     if progress_path.exists():
         try:
@@ -1510,9 +1584,10 @@ def _open_stage_journal(progress_path: Path, root: Path) -> dict[str, Any]:
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"unreadable migration stage journal: {progress_path}: {exc}") from exc
         expected = {
-            "schema_version": 1,
+            "schema_version": 2 if target_identity else 1,
             "migration": "202607_single_live_semantics_cutover",
             "root": str(root),
+            **(target_identity or {}),
         }
         if not isinstance(progress, dict) or any(
             progress.get(key) != value for key, value in expected.items()
@@ -1527,9 +1602,10 @@ def _open_stage_journal(progress_path: Path, root: Path) -> dict[str, Any]:
         progress["resumed_at"] = utc_now()
     else:
         progress = {
-            "schema_version": 1,
+            "schema_version": 2 if target_identity else 1,
             "migration": "202607_single_live_semantics_cutover",
             "root": str(root),
+            **(target_identity or {}),
             "status": "running",
             "started_at": utc_now(),
             "completed_stages": [],
@@ -1558,9 +1634,13 @@ def _run_journaled_stage(
     progress: dict[str, Any],
     stage: str,
     action: Any,
+    *,
+    precondition: Any | None = None,
 ) -> Any:
     if stage in progress["completed_stages"]:
         return None
+    if precondition is not None:
+        precondition()
     _record_stage_journal(progress_path, progress, stage, complete=False)
     result = action()
     _record_stage_journal(progress_path, progress, stage, complete=True)
@@ -1620,9 +1700,11 @@ def main() -> int:
         return 0
     if not args.operator_confirms_fenced:
         raise SystemExit("REFUSED: --apply requires --operator-confirms-fenced")
-    writers = live_writers()
-    if writers:
-        raise SystemExit("REFUSED: live writers remain:\n  " + "\n  ".join(writers))
+    try:
+        release_identity = target_release_identity(root)
+        assert_writer_fence(root)
+    except RuntimeError as exc:
+        raise SystemExit(f"REFUSED: {exc}") from exc
 
     deterministic_blockers = [
         blocker for path in dbs for blocker in mutation_blockers(path)
@@ -1643,7 +1725,11 @@ def main() -> int:
     elif not receipt_path.is_absolute():
         receipt_path = root / receipt_path
     progress_path = receipt_path.with_name(receipt_path.stem + ".progress.json")
-    progress = _open_stage_journal(progress_path, root)
+    progress = _open_stage_journal(
+        progress_path,
+        root,
+        target_identity=release_identity,
+    )
     if progress["status"] == "complete":
         print(f"APPLY ALREADY COMPLETE: journal={progress_path}")
         return 0
@@ -1655,6 +1741,7 @@ def main() -> int:
             progress,
             "decision_graphs",
             lambda: migrate_world_decision_graph(world_path, trades_path, receipt_path),
+            precondition=lambda: assert_writer_fence(root),
         )
         if receipt is not None:
             print(
@@ -1676,6 +1763,7 @@ def main() -> int:
                 progress,
                 f"mutated:{path.name}",
                 lambda path=path: mutate_db(path),
+                precondition=lambda: assert_writer_fence(root),
             )
             if changed is not None:
                 for line in changed:
@@ -1685,6 +1773,7 @@ def main() -> int:
             progress,
             "runtime_json",
             lambda: [rewrite_json_without_field(path, REMOVED_MANIFEST_FIELD) for path in json_paths],
+            precondition=lambda: assert_writer_fence(root),
         )
         def remove_retired_files() -> list[Path]:
             removed: list[Path] = []
@@ -1699,6 +1788,7 @@ def main() -> int:
             progress,
             "runtime_files",
             remove_retired_files,
+            precondition=lambda: assert_writer_fence(root),
         )
         if removed_files is not None:
             for path in removed_files:
@@ -1708,6 +1798,7 @@ def main() -> int:
             progress,
             "config",
             lambda: clean_config(root / "config" / "settings.json"),
+            precondition=lambda: assert_writer_fence(root),
         )
         progress["status"] = "complete"
         _record_stage_journal(progress_path, progress, "complete", complete=True)

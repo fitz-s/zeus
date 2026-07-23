@@ -47,7 +47,6 @@ def _patch_non_freshness_deps(monkeypatch):
     from src.riskguard.risk_level import RiskLevel
 
     monkeypatch.setattr(cr, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cr, "get_force_exit_review", lambda: False)
 
 
 # ---------------------------------------------------------------------------

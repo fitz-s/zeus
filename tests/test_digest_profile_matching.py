@@ -475,32 +475,6 @@ def test_object_meaning_settlement_authority_cutover_blocks_live_side_effect_sco
     assert "src/contracts/settlement_semantics.py" not in digest["admission"]["forbidden_hits"]
 
 
-def test_object_meaning_calibration_transfer_oos_evidence_routes_to_wave18_profile():
-    digest = build_digest(
-        "object-meaning invariance wave 18: time-blocked calibration transfer evidence "
-        "must reject row-modulo pseudo-OOS for validated_calibration_transfers time basis",
-        [
-            "docs/operations/task_2026-05-05_object_invariance_wave18/PLAN.md",
-            "docs/operations/AGENTS.md",
-            "scripts/evaluate_calibration_transfer_oos.py",
-            "src/data/calibration_transfer_policy.py",
-            "tests/test_evaluate_calibration_transfer_oos.py",
-            "tests/test_calibration_transfer_policy_with_evidence.py",
-        ],
-        write_intent="edit",
-    )
-
-    assert digest["profile"] == "object meaning calibration transfer oos evidence"
-    assert digest["admission"]["status"] == "admitted"
-    for path in [
-        "scripts/evaluate_calibration_transfer_oos.py",
-        "src/data/calibration_transfer_policy.py",
-        "tests/test_evaluate_calibration_transfer_oos.py",
-        "tests/test_calibration_transfer_policy_with_evidence.py",
-    ]:
-        assert path in digest["admission"]["admitted_files"]
-
-
 def test_object_meaning_operator_status_bankroll_semantics_routes_to_wave12_profile():
     digest = build_digest(
         "object-meaning invariance wave 12: status_summary wallet equity semantics "

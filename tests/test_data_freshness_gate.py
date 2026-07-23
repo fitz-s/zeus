@@ -420,7 +420,6 @@ class TestRunCycleFreshnessIntegration:
 
         monkeypatch.setattr(cr_module, "evaluate_freshness_mid_run", lambda state_dir: verdict)
         monkeypatch.setattr(cr_module, "get_current_level", lambda: RiskLevel.GREEN)
-        monkeypatch.setattr(cr_module, "get_force_exit_review", lambda: False)
         monkeypatch.setattr(cr_module, "get_connection", lambda: _DummyConn())
         monkeypatch.setattr(cr_module, "load_portfolio", lambda: PortfolioState())
         monkeypatch.setattr(cr_module, "save_portfolio", lambda state, *args, **kwargs: None)

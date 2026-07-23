@@ -1054,7 +1054,6 @@ state_machines:
       - QKERNEL_FINAL_SUBMIT_FLOOR
       - DIRECTION_LAW_REJECTED_PROOF
       - SELECTION_GUARD_ABSTAINED_UNKNOWN
-      - NO_SUBMIT_ADAPTER
       - SOURCE_CLOCK_MARKET_REACTION_UNKNOWN
     invariant_tests:
       - tests/contracts/test_k2_rejection_reason_registry.py

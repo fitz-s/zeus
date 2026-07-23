@@ -4,8 +4,8 @@ applyTo: "src/analysis/**/*.py,src/backtest/**/*.py,src/strategy/**/*.py,src/sta
 
 # Zeus risk, evidence, and learning review
 
-These paths govern promotion authority, cluster risk, and shadow/paper
-learning loops. Errors here produce systematic bias in go-live decisions
+These paths govern offline evidence, cluster risk, and learning loops. Errors
+here produce systematic bias in live decisions
 or mask capital-concentration risk.
 
 ## Evidence cohort scope
@@ -44,9 +44,8 @@ and strategy_key. Checks that collapse dimensions (e.g. summing
 YES+NO exposures into a single position cap) silently allow
 factor-2 over-concentration.
 
-## Shadow replay integrity
+## Offline replay integrity
 
-Shadow replay harness must never produce decision_events rows that
-contaminate live evidence. `source` must be `shadow_decision` for all
-replay-generated rows. Replay must not commit to the live world DB —
-use an isolated fixture DB or transaction rollback.
+Replay must be structurally unable to produce canonical `decision_events` rows
+or commit to the live world DB. Use an isolated fixture DB. Transaction rollback
+inside a live DB is not sufficient isolation.

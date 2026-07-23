@@ -59,11 +59,11 @@ dry-run protection. Do not re-run applied migrations.
 
 `health_probe.py` (see Start Here), `orderable_bias_pass_candidates.py`
 
-### `calibration/` — Calibration diagnostics (1 script)
+### `calibration/` — Calibration analysis (1 script)
 
 `q_lcb_coverage_audit.py` — q_lcb coverage audit
 
-### `fusion/` — Fusion diagnostics (1 script)
+### `fusion/` — Fusion analysis (1 script)
 
 `lead_profile_walkforward.py` — walk-forward lead profile analysis
 
@@ -93,7 +93,7 @@ heartbeat, e2e canary, work-packet, and writer-signature checks.
 `assert_invariant_coverage.py`, `assert_test_quality.py` (in `ci/`)
 `semantic_linter.py`, `source_contract_lint.py`, `doc_citation_lint.py`, `antibody_scan.py`
 
-### Diagnostics (read-only investigations)
+### Analysis (read-only investigations)
 
 `audit_*` (15 scripts): architecture alignment, city data readiness, error model,
 market price semantics, observation instants, replay fidelity, settlement provenance,
@@ -156,8 +156,7 @@ reference but are **not repeatable tools**. Do not re-run without reading the he
 **Dated task scripts**: `task_2026-06-09_drop_dead_tables.py`,
 `task_2026-06-09_restart_zeus_daemons.sh`, `run_platt_oos_49.sh`
 
-**Single-use switches**: `apply_replacement_forecast_live_switch.py`,
-`rollback_phase3_t3.py`, `init_replacement_forecast_live_schema.py`,
+**Single-use repairs**: `rollback_phase3_t3.py`,
 `backfill_london_f_to_c_2026_05_08.py`,
 `backfill_settlement_outcomes_canonical_2026_06_02.py`,
 `backfill_settlement_unit_2026_06_03.py`

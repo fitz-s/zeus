@@ -25,7 +25,6 @@ def _call_pulse(**overrides):
         dead_lettered=0,
         rejection_reason_counts={"TRADE_SCORE_BLOCKED": 1},
         risk_level="GREEN",
-        submit_disabled_effective_mode=False,
         live_submit_attempts=0,
     )
     defaults.update(overrides)
@@ -71,30 +70,6 @@ def test_live_cycle_partial_submit() -> None:
     assert pulse["proof_accepted"] == 3
 
 
-def test_deterministic_rejections_reported_in_no_submit_mode() -> None:
-    """In submit_disabled_effective_mode with proof_accepted>0, the pulse records
-    real_order_submit_disabled in deterministic_rejections."""
-    pulse = _call_pulse(
-        proof_accepted=4,
-        live_submit_attempts=0,
-        submit_disabled_effective_mode=True,
-    )
-
-    assert pulse["deterministic_rejections"] == {"real_order_submit_disabled": 4}
-    assert pulse["submit_attempts"] == 0
-
-
-def test_no_deterministic_rejections_when_live_submit() -> None:
-    """In live mode (submit_disabled_effective_mode=False), deterministic_rejections is empty."""
-    pulse = _call_pulse(
-        proof_accepted=2,
-        live_submit_attempts=2,
-        submit_disabled_effective_mode=False,
-    )
-
-    assert pulse["deterministic_rejections"] == {}
-
-
 def test_final_intents_built_equals_proof_accepted() -> None:
     """final_intents_built reflects proof_accepted (intent is built when proof is accepted)."""
     pulse = _call_pulse(proof_accepted=5, live_submit_attempts=0)
@@ -122,7 +97,6 @@ def test_live_adapter_exposes_live_submit_count_attribute() -> None:
     submit = adapter.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
-        edli_live_scope="forecast_only",
     )
 
     count_ref = getattr(submit, "_live_submit_count", None)
@@ -141,27 +115,19 @@ def test_live_submit_counter_increments_only_after_venue_call_started() -> None:
 
     source = inspect.getsource(adapter.event_bound_live_adapter_from_trade_conn)
     venue_guard = "if submit_result.venue_call_started:"
+    receipt_guard = "if not preflight_only and receipt.venue_call_started:"
     counter_line = "_live_submit_count[0] += 1"
     attempted_event = "_append_venue_submit_attempted_aggregate_event("
 
     assert venue_guard in source
-    counter_pos = source.index(counter_line)
+    assert receipt_guard in source
+    counter_positions = [
+        index
+        for index in range(len(source))
+        if source.startswith(counter_line, index)
+    ]
+    assert len(counter_positions) == 2
     attempted_pos = source.index(attempted_event)
-    assert source.rindex(venue_guard, 0, counter_pos) < counter_pos
+    assert source.rindex(receipt_guard, 0, counter_positions[0]) < counter_positions[0]
+    assert source.rindex(venue_guard, 0, counter_positions[1]) < counter_positions[1]
     assert source.rindex(venue_guard, 0, attempted_pos) < attempted_pos
-
-
-def test_no_submit_adapter_missing_count_attribute_gives_zero_default() -> None:
-    """The no-submit adapter does NOT carry _live_submit_count.
-    The getattr fallback in main.py must yield [0] → live_submit_attempts=0."""
-    import sqlite3
-    from src.engine import event_reactor_adapter as adapter
-    from src.riskguard.risk_level import RiskLevel
-
-    no_submit = adapter.event_bound_no_submit_adapter_from_trade_conn(
-        sqlite3.connect(":memory:"),
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
-
-    count_ref = getattr(no_submit, "_live_submit_count", [0])
-    assert count_ref[0] == 0, "No-submit adapter must report 0 via getattr fallback"

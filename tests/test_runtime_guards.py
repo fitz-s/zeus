@@ -124,7 +124,6 @@ def _allow_entry_gates_for_runtime_test(monkeypatch) -> None:
     This helper is intentionally targeted (not autouse): runtime_guards also
     contains tests that verify entry blocking behavior.
     """
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner.cutover_guard, "summary", lambda: {"state": "READY", "entry": {"allow_submit": True}})
     monkeypatch.setattr(
         "src.control.heartbeat_supervisor.summary",
@@ -2872,7 +2871,6 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
 
     monkeypatch.setattr(cycle_runner, "settings", _CycleSettingsStub())
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
@@ -7036,76 +7034,6 @@ def test_elevated_risk_still_runs_monitoring_and_reports_block_reason(monkeypatc
     assert summary["candidates"] == 0
 
 
-def test_force_exit_review_scope_is_entry_block_only(monkeypatch, tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    init_schema_trade_only(conn)
-    conn.close()
-    portfolio = PortfolioState(positions=[_position(target_date="2026-12-01")])
-
-    class DummyClob:
-        def __init__(self):
-            pass
-
-        def get_balance(self):
-            return 100.0
-
-    monitored: list[str] = []
-
-    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: True)
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
-    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
-    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
-    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
-    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
-    monkeypatch.setattr(
-        cycle_runner,
-        "_reconcile_pending_positions",
-        lambda *args, **kwargs: {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False},
-    )
-    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
-    monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda portfolio, clob: 0)
-    monkeypatch.setattr(
-        cycle_runner,
-        "_entry_bankroll_for_cycle",
-        lambda portfolio, clob: (100.0, {"portfolio_initial_bankroll_usd": 100.0}),
-    )
-
-    def _monitor(conn, clob, portfolio, artifact, tracker, summary):
-        monitored.extend(pos.trade_id for pos in portfolio.positions)
-        summary["monitors"] += len(portfolio.positions)
-        return False, False
-
-    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", _monitor)
-    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
-    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
-
-    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
-
-    # Phase 9B DT#2 / R-BV: scope widened from "entry_block_only" to
-    # "sweep_active_positions". Pre-P9B this test asserted entry-block-only
-    # scope; P9B lands the sweep so the assertion flips to
-    # "sweep_active_positions" AND the sweep mark is visible on the position.
-    # This is a critic-beth-style "stale antibody flip at guard-removal"
-    # update — the test is intentionally re-purposed for the new law.
-    assert monitored == ["t1"]
-    assert summary["force_exit_review"] is True
-    assert summary["force_exit_review_scope"] == "sweep_active_positions"
-    assert summary["force_exit_sweep"]["attempted"] == 1, (
-        f"Phase 9B R-BV: sweep should have marked 1 active position; "
-        f"got summary={summary.get('force_exit_sweep')!r}"
-    )
-    # Position must carry the sweep exit_reason (exit_lifecycle picks it up next cycle)
-    assert portfolio.positions[0].exit_reason == "red_force_exit"
-    assert summary["entries_blocked_reason"] == "force_exit_review_daily_loss_red"
-    assert summary["monitors"] == 1
-    assert summary["candidates"] == 0
-
-
 def test_entries_paused_reports_block_reason(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
@@ -7119,7 +7047,6 @@ def test_entries_paused_reports_block_reason(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
@@ -12391,7 +12318,6 @@ def test_monitoring_phase_pre_chain_refresh_skips_exit_preflight(monkeypatch):
         tracker=StrategyTracker(),
         summary=summary,
         deps=_monitor_chain_deps(datetime(2026, 3, 31, 20, 0, tzinfo=timezone.utc)),
-        exit_order_submit_enabled=False,
         run_exit_preflight=False,
     )
 

@@ -13,7 +13,7 @@
 Two invariants:
   1. HASH STABILITY: a receipt with q_source=None serializes byte-identically to
      the pre-#120 baseline (the field is omitted) — no EdliReceiptHashDrift on the
-     ~60k existing shadow receipts.
+     ~60k existing historical receipts.
   2. PROVENANCE: a receipt with q_source set carries it in receipt_json, so the
      calibrator is auditable from the DB forever (json_extract).
 """

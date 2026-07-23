@@ -34,7 +34,7 @@ write_routes:
     db_gate: src/state/db.py
     # Settlement writes are authoritative only through the current harvester
     # path and SettlementSemantics.assert_settlement_value.
-  backtest_diagnostic_write:
+  offline_replay_write:
     owner: src/engine/replay.py
     db: state/zeus_backtest.db
     authority_scope: offline_no_promotion
@@ -267,17 +267,17 @@ package_defaults:
     - pytest -q tests/test_market_analysis.py tests/test_fdr.py tests/test_kelly.py
   src/backtest:
     zone: K3_extension
-    authority_role: backtest_diagnostic
+    authority_role: offline_replay
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH
     gates:
     - pytest -q tests/test_backtest_purpose_contract.py
     note: |
-      Typed backtest purpose contracts (SKILL/ECONOMICS/DIAGNOSTIC) and
+      Typed backtest purpose contracts (SKILL/ECONOMICS/AUDIT_REPLAY) and
       decision-time truth provenance. Does NOT carry promotion authority.
       ECONOMICS purpose is tombstoned until market_events + parity gates
-      pass; SKILL/DIAGNOSTIC are runnable today.
+      pass; SKILL/AUDIT_REPLAY are runnable today.
   src/observability:
     zone: K2_runtime
     authority_role: derived_operator_read_model
@@ -1037,7 +1037,7 @@ files:
       and a single live_blocker reason (NOT_RELEASED/STALE_SOURCE/SOURCE_DOWN/PARTIAL_RUN/
       READINESS_BLOCKED/NOT_LIVE_AUTHORIZED/UNKNOWN_BLOCKED). PR #329 C: now FEDERATES over all
       live data families (observation/market_topology/settlement probed on their own event-time
-      tables; executable_market/venue_user_ws/solar/diagnostic degrade to honest COVERAGE_UNKNOWN
+      tables; executable_market/venue_user_ws/solar/operator_state degrade to honest COVERAGE_UNKNOWN
       where truth is outside the forecasts conn). Reads forecasts DB best-effort. The COMPUTE is
       read-only; persistence lives in frontier_store (PR #329 D). NOT_DAEMON_WIRED.
     hazards:
@@ -1778,12 +1778,12 @@ files:
     why: Prevents overlapping daemon instances.
   src/engine/replay.py:
     zone: K3_extension
-    authority_role: diagnostic_replay
-    why: Runs diagnostic replay/backtest lanes with non-promotion authority.
+    authority_role: offline_replay
+    why: Runs isolated replay/backtest analysis with no production authority.
     hazards:
     - DERIVED_ONLY
     write_routes:
-    - backtest_diagnostic_write
+    - offline_replay_write
   src/engine/event_reactor_adapter.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_adapter
@@ -2582,7 +2582,7 @@ files:
     write_routes:
     - canonical_position_write
     - settlement_write
-    - backtest_diagnostic_write
+    - offline_replay_write
     downstream:
     - src/calibration/store.py
     - src/control/control_plane.py
@@ -2738,7 +2738,7 @@ files:
   src/contracts/no_trade_reason.py:
     zone: K1_contracts
     authority_role: no_trade_reason_enum
-    why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): StrEnum (66 members) covering all 69 rejection_reasons=[...] callsites in evaluator.py. Two-tier model: reason=CATEGORY (enum CHECK), reason_detail=free-form diagnostic. UNCATEGORIZED is the §13 fallback. Production wiring complete (T2 production pass)."
+    why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): StrEnum (66 members) covering all 69 rejection_reasons=[...] callsites in evaluator.py. Two-tier model: reason=CATEGORY (enum CHECK), reason_detail=free-form detail. UNCATEGORIZED is the §13 fallback. Production wiring complete (T2 production pass)."
     write_routes: []
     downstream:
     - src/state/no_trade_events.py
