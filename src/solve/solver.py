@@ -126,7 +126,7 @@ def _live_unit_price_in_band(value: Decimal) -> bool:
     )
 
 # CVaR tail stability (consult REV-2 follow-up): a robust ΔU at alpha needs enough draws in
-# the alpha-tail to be meaningful. Below this the plan is STAMPED (diagnostics) so the promotion
+# the alpha-tail to be meaningful. Below this the plan is STAMPED (metrics) so the promotion
 # evidence gate can down-weight it; a one-draw band is stamped point_belief. Not a hard reject.
 _MIN_TAIL_DRAWS = 20
 
@@ -1723,7 +1723,7 @@ class BinaryTerminalWealthCertificate:
     median_payoff_usd: Decimal
     wealth_after_loss_usd: Decimal
     wealth_after_win_usd: Decimal
-    expected_value_diagnostic_usd: float
+    expected_value_usd: float
 
     def __post_init__(self) -> None:
         if self.win_probability_lcb > 0.5:
@@ -1752,7 +1752,7 @@ class BinaryTerminalWealthCertificate:
             or not median_coherent
             or self.wealth_after_loss_usd <= 0
             or self.wealth_after_win_usd <= 0
-            or not math.isfinite(self.expected_value_diagnostic_usd)
+            or not math.isfinite(self.expected_value_usd)
         ):
             raise ValueError("terminal-wealth certificate is not branch coherent")
 
@@ -2159,7 +2159,7 @@ class GlobalSellPointCounterfactual:
             or terminal.wealth_after_win_usd
             != self.wealth_ceiling_usd + self.cash_proceeds_usd
             or not math.isclose(
-                terminal.expected_value_diagnostic_usd,
+                terminal.expected_value_usd,
                 self.expected_ev_usd,
                 rel_tol=0.0,
                 abs_tol=1e-12,
@@ -2418,7 +2418,7 @@ class GlobalSingleOrderCandidateEvaluation:
                 or terminal.loss_payoff_usd != -self.cost_usd
                 or terminal.win_payoff_usd != self.cash_proceeds_usd
                 or not math.isclose(
-                    terminal.expected_value_diagnostic_usd,
+                    terminal.expected_value_usd,
                     self.robust_ev_usd,
                     rel_tol=0.0,
                     abs_tol=1e-12,
@@ -2882,7 +2882,7 @@ class GlobalSingleOrderDecision:
                 )
             )
             or not math.isclose(
-                self.terminal_wealth.expected_value_diagnostic_usd,
+                self.terminal_wealth.expected_value_usd,
                 self.robust_ev_usd,
                 rel_tol=0.0,
                 abs_tol=1e-12,
@@ -3777,7 +3777,7 @@ def _binary_terminal_wealth_certificate(
         median_payoff_usd=(win_payoff if robust_q > 0.5 else loss_payoff),
         wealth_after_loss_usd=Decimal(wealth_floor_usd) + loss_payoff,
         wealth_after_win_usd=Decimal(wealth_ceiling_usd) + win_payoff,
-        expected_value_diagnostic_usd=(
+        expected_value_usd=(
             float(robust_q) * float(shares) - float(cost_usd)
         ),
     )
@@ -3937,7 +3937,7 @@ def _buy_rejection_economics(
             probe_expected_fill_price_before_fee=expected_fill_price,
         )
     except ValueError:
-        # This certificate is diagnostic-only: the candidate is already rejected.
+        # This certificate explains an already-final rejection; it cannot authorize action.
         # A non-representable counterfactual must not abort the whole auction.
         return None
 
@@ -4710,7 +4710,7 @@ def _score_global_single_order_sell(
         ),
         wealth_after_loss_usd=loss_after,
         wealth_after_win_usd=win_after,
-        expected_value_diagnostic_usd=float(robust_ev),
+        expected_value_usd=float(robust_ev),
     )
     scored = GlobalSingleOrderDecision(
         candidate=candidate,
@@ -4893,7 +4893,7 @@ def _score_global_sell_point_counterfactual(
     sample_count: int,
     band_alpha: float,
 ) -> GlobalSellPointCounterfactual:
-    """Replay-complete point-q diagnostic; never participates in order selection."""
+    """Replay-complete point-q point_evidence; never participates in order selection."""
 
     point_q = float(point_held_payoff_q)
     if not math.isfinite(point_q) or not 0.0 <= point_q <= 1.0:
@@ -5443,7 +5443,7 @@ def select_global_single_order(
                         sample_count=q_samples.size,
                         band_alpha=band_alpha,
                     )
-                except Exception:  # noqa: BLE001 - diagnostics cannot alter live action
+                except Exception:  # noqa: BLE001 - metrics cannot alter live action
                     point_counterfactual = GlobalSellPointCounterfactual(
                         status="UNAVAILABLE",
                         point_held_payoff_q=point_q,

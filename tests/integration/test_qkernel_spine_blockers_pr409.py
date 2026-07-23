@@ -1642,10 +1642,10 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "global_terminal_median_payoff_usd": "24",
         "global_terminal_wealth_after_loss_usd": "999",
         "global_terminal_wealth_after_win_usd": "1024",
-        "global_cut_time_expected_value_diagnostic_usd": 14.0,
-        "global_expected_value_diagnostic_usd": 14.0,
+        "global_cut_time_expected_value_usd": 14.0,
+        "global_expected_value_usd": 14.0,
         "global_expected_value_semantics": (
-            "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+            "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
         ),
         "global_terminal_payoff_semantics": "BINARY_0_1",
     }
@@ -2489,17 +2489,17 @@ def test_retired_near_settled_rejection_is_rescored_by_current_economics(monkeyp
         honor_admission_rejections=False,
         enforce_win_rate_floor=False,
     )
-    diagnostic = {}
+    point_evidence = {}
     global_rebind = era._selection_scoped_proofs(
         proofs=(proof,),
         honor_admission_rejections=False,
         allow_global_near_settled_rebind=True,
         enforce_win_rate_floor=False,
-        diagnostic_out=diagnostic,
+        point_evidence_out=point_evidence,
     )
 
     assert ordinary == (proof,)
-    assert global_rebind == (proof,), diagnostic
+    assert global_rebind == (proof,), point_evidence
 
     monkeypatch.setattr(
         era,

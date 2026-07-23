@@ -117,7 +117,7 @@ def _global_decision(
         ),
         wealth_after_loss_usd=wealth_decimal - cost_decimal,
         wealth_after_win_usd=wealth_decimal + shares_decimal - cost_decimal,
-        expected_value_diagnostic_usd=float(robust_ev),
+        expected_value_usd=float(robust_ev),
     )
     return SimpleNamespace(
         candidate=candidate,
@@ -179,9 +179,9 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_terminal_median_payoff_usd="19",
         global_terminal_wealth_after_loss_usd="99",
         global_terminal_wealth_after_win_usd="119",
-        global_cut_time_expected_value_diagnostic_usd=11.0,
-        global_expected_value_diagnostic_usd=11.0,
-        global_expected_value_semantics="DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN",
+        global_cut_time_expected_value_usd=11.0,
+        global_expected_value_usd=11.0,
+        global_expected_value_semantics="POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN",
         global_terminal_payoff_semantics="BINARY_0_1",
     )
     _seal_current_qkernel_cert(cert)
@@ -365,8 +365,8 @@ def _deterministic_day0_global_qkernel_cert() -> dict[str, object]:
         global_terminal_median_payoff_usd="3.2",
         global_terminal_wealth_after_loss_usd="83.2",
         global_terminal_wealth_after_win_usd="103.2",
-        global_cut_time_expected_value_diagnostic_usd=3.2,
-        global_expected_value_diagnostic_usd=3.2,
+        global_cut_time_expected_value_usd=3.2,
+        global_expected_value_usd=3.2,
     )
     _seal_current_qkernel_cert(cert)
     return cert
@@ -2199,7 +2199,7 @@ def test_global_current_band_rejects_terminal_certificate_incoherent_with_its_br
         median_payoff_usd=win_payoff,
         wealth_after_loss_usd=Decimal("1000") - cost,
         wealth_after_win_usd=Decimal("1000") + win_payoff,
-        expected_value_diagnostic_usd=float(Decimal("0.13") * shares - cost),
+        expected_value_usd=float(Decimal("0.13") * shares - cost),
     )
     decision = SimpleNamespace(
         candidate=None,
@@ -2338,8 +2338,8 @@ def test_global_current_certificate_accepts_live_complement_rounding(
         global_terminal_median_payoff_usd=win_payoff,
         global_terminal_wealth_after_loss_usd=100.0 - expected_cost,
         global_terminal_wealth_after_win_usd=100.0 + win_payoff,
-        global_cut_time_expected_value_diagnostic_usd=q_lcb * shares - expected_cost,
-        global_expected_value_diagnostic_usd=q_lcb * shares - expected_cost,
+        global_cut_time_expected_value_usd=q_lcb * shares - expected_cost,
+        global_expected_value_usd=q_lcb * shares - expected_cost,
     )
     _seal_current_qkernel_cert(cert)
 
@@ -2726,7 +2726,7 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_legacy_served_bound_is_diagnostic_only(side):
+def test_global_actuation_legacy_served_bound_is_point_evidence_only(side):
     """A historical served shrink cannot veto the current source-clock band."""
 
     cert = _current_qkernel_cert(side=side)
@@ -2849,7 +2849,7 @@ def test_global_actuation_reauctions_prior_band_above_served_point(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_legacy_prior_below_majority_is_diagnostic_only(side):
+def test_global_actuation_legacy_prior_below_majority_is_point_evidence_only(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         payoff_q_point=0.80,

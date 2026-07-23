@@ -19,6 +19,8 @@ SCAN_ROOTS = (
     "docs/reference",
 )
 SCAN_FILES = (
+    "AGENTS.md",
+    "scripts/AGENTS.md",
     "scripts/arm_live_mode.sh",
     "scripts/check_live_restart_preflight.py",
     "scripts/preflight_restart_check.py",
@@ -83,6 +85,11 @@ _RUNTIME_CATEGORY_FORBIDDEN = (
     "observe_only",
     "observation_only",
 )
+_CONCEPT_TOKENS = (
+    "sha" + "dow",
+    "diag" + "nostic",
+    "diag" + "nostics",
+)
 
 
 def violations(
@@ -116,6 +123,9 @@ def violations(
         if rel in EXCLUDED:
             continue
         text = path.read_text(encoding="utf-8", errors="replace").lower()
+        for token in _CONCEPT_TOKENS:
+            if _contains_concept(token, rel_lower) or _contains_concept(token, text):
+                out.append(f"{rel}: forbidden alternate-runtime concept {token!r}")
         for token in _FORBIDDEN:
             if _contains_exact(token, rel_lower) or _contains_exact(token, text):
                 out.append(f"{rel}: forbidden dormant-runtime token {token!r}")
@@ -130,6 +140,11 @@ def violations(
 
 def _contains_exact(token: str, value: str) -> bool:
     pattern = rf"(?<![a-z0-9_]){re.escape(token)}(?![a-z0-9_])"
+    return re.search(pattern, value) is not None
+
+
+def _contains_concept(token: str, value: str) -> bool:
+    pattern = rf"(?<![a-z0-9]){re.escape(token)}(?:[a-z0-9_-]*)"
     return re.search(pattern, value) is not None
 
 

@@ -87,7 +87,6 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # Exchange reconcile — writes observations column for audit
         "src/execution/exchange_reconcile.py",
         # Strategy benchmark suite — writes observations for backtesting
-        "src/strategy/benchmark_suite.py",
         # ---------------------------------------------------------------------------
         # Runtime modules added post-2026-04-30 audit (wave6 + G4 bundle)
         # ---------------------------------------------------------------------------

@@ -349,7 +349,7 @@ def load_bucket_residuals(
         training_allowed, causality OK;
       - "legacy_tigge_null_passthrough": contributes NULL-or-1, not boundary-ambiguous —
         use ONLY for enumerated legacy TIGGE data_versions (pre-extractor NULL rows);
-      - "all_for_diagnostic": no contributor filter.
+      - "all_contributors_offline": no contributor filter.
     NOTE: ``settled_before`` is a TARGET-DATE cutoff (target_date < cutoff), a first
     anti-leakage seam — NOT a settlement-known-time cutoff. For rigorous historical
     rebuilds, prefer a settled_at/fact-known-time cutoff once that column is available.
@@ -395,7 +395,7 @@ def load_bucket_residuals(
             "(e.contributes_to_target_extrema IS NULL OR e.contributes_to_target_extrema = 1) "
             "AND COALESCE(e.boundary_ambiguous, 0) = 0"
         )
-    elif contributor_policy != "all_for_diagnostic":
+    elif contributor_policy != "all_contributors_offline":
         raise ValueError(f"unknown contributor_policy: {contributor_policy!r}")
     if settled_before is not None:
         where.append("e.target_date < ?")

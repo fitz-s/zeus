@@ -1465,52 +1465,6 @@ def test_r3_t1_fake_venue_routes_to_t1_profile_not_heartbeat():
     assert "src/venue/polymarket_v2_adapter.py" in digest["admission"]["admitted_files"]
 
 
-def test_r3_a1_strategy_benchmark_routes_to_a1_profile_not_heartbeat():
-    """A1 shares broad strategy/live-shadow/replay terms with R3 runtime work;
-    strong benchmark-suite phrases must admit the A1 strategy benchmark surface
-    instead of falling through to heartbeat or generic strategy routing."""
-    digest = build_digest(
-        "R3 A1 StrategyBenchmarkSuite alpha execution metrics diagnostic simulated read-only live "
-        "promotion gate strategy_benchmark_runs INV-NEW-Q",
-        [
-            "src/strategy/benchmark_suite.py",
-            "src/strategy/data_lake.py",
-            "tests/test_strategy_benchmark.py",
-            "docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml",
-        ],
-    )
-
-    assert digest["profile"] == "r3 strategy benchmark suite implementation"
-    assert digest["admission"]["status"] == "admitted"
-    assert "src/strategy/benchmark_suite.py" in digest["admission"]["admitted_files"]
-    assert "src/strategy/data_lake.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_strategy_benchmark.py" in digest["admission"]["admitted_files"]
-
-
-def test_dsa08_dsa17_evidence_grade_cleanup_routes_to_a1_profile():
-    digest = build_digest(
-        "DSA-08 DSA-17 strategy benchmark evidence-grade naming cleanup "
-        "simulated read-only evidence-grade naming cleanup no production DB mutation "
-        "no live venue side effects no CLOB cutover",
-        [
-            "src/strategy/benchmark_suite.py",
-            "tests/test_strategy_benchmark.py",
-            "docs/reference/modules/strategy.md",
-            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
-            "architecture/topology.yaml",
-            "architecture/digest_profiles.py",
-        ],
-    )
-
-    assert digest["profile"] == "r3 strategy benchmark suite implementation"
-    assert digest["admission"]["status"] == "admitted"
-    assert "src/strategy/benchmark_suite.py" in digest["admission"]["admitted_files"]
-    assert "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md" in (
-        digest["admission"]["admitted_files"]
-    )
-    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
-
-
 def test_dsa12_zeus_mode_selector_cleanup_routes_to_phase0b_profile():
     digest = build_digest(
         "DSA-12 ZEUS_MODE compatibility cleanup; get_mode ignores ZEUS_MODE "

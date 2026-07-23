@@ -21,7 +21,7 @@ def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("mode = '" + "shadow_" + "veto_only'\n", encoding="utf-8")
-    assert len(violations(tmp_path)) == 5
+    assert len({item.split(":", 1)[0] for item in violations(tmp_path)}) == 5
 
 
 def test_gate_rejects_resurrected_inactive_lane(tmp_path: Path) -> None:
@@ -40,16 +40,16 @@ def test_gate_rejects_retired_runtime_category(tmp_path: Path) -> None:
     assert violations(tmp_path)
 
 
-def test_gate_allows_current_diagnostic_and_fail_closed_language(tmp_path: Path) -> None:
+def test_gate_rejects_extended_alternate_concept_variants(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()
     (source / "allowed.py").write_text(
-        "# diagnostic canary/readiness/promotion/no-submit path\n"
+        "# " + "diag" + "nostic alternate path\n"
         "# offline replay remains evidence-only\n"
         "mode = 'shadow_veto_only_extended'\n",
         encoding="utf-8",
     )
-    assert violations(tmp_path) == []
+    assert violations(tmp_path)
 
 
 def test_gate_ignores_historical_and_migration_preview_surfaces(tmp_path: Path) -> None:

@@ -509,7 +509,7 @@ def test_monitor_quote_refresh_parses_two_sided_book_once(monkeypatch):
     assert quote.best_ask == pytest.approx(0.44)
     assert quote.bid_size == pytest.approx(30.0)
     assert quote.ask_size == pytest.approx(10.0)
-    assert quote.diagnostic_market_price == pytest.approx(0.43)
+    assert quote.mark_price == pytest.approx(0.43)
     assert clob.orderbook_calls == 1
     assert clob.best_bid_ask_calls == 0
 
@@ -651,7 +651,7 @@ def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeyp
     assert quote.best_bid == pytest.approx(0.998)
     assert quote.best_ask is None
     assert quote.ask_size == pytest.approx(0.0)
-    assert quote.diagnostic_market_price == pytest.approx(0.998)
+    assert quote.mark_price == pytest.approx(0.998)
     assert clob.orderbook_calls == 1
     assert clob.best_bid_ask_calls == 0
 
@@ -671,7 +671,7 @@ def test_day0_monitor_quote_refresh_uses_zero_sell_value_when_bids_absent(monkey
     assert quote.best_ask == pytest.approx(0.001)
     assert quote.bid_size == pytest.approx(0.0)
     assert quote.ask_size == pytest.approx(100.0)
-    assert quote.diagnostic_market_price == pytest.approx(0.0)
+    assert quote.mark_price == pytest.approx(0.0)
     assert clob.orderbook_calls == 1
     assert clob.best_bid_ask_calls == 0
 
@@ -694,7 +694,7 @@ def test_target_local_day_active_position_uses_bid_only_quote_when_asks_absent(m
     assert quote is not None
     assert quote.best_bid == pytest.approx(0.998)
     assert quote.best_ask is None
-    assert quote.diagnostic_market_price == pytest.approx(0.998)
+    assert quote.mark_price == pytest.approx(0.998)
 
 
 def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch):

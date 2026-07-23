@@ -245,7 +245,7 @@ class HeldTokenMonitorQuote:
     best_ask: float | None
     bid_size: float
     ask_size: float
-    diagnostic_market_price: float
+    mark_price: float
     source_timestamp: str
 
 
@@ -1620,7 +1620,7 @@ def _read_monitor_executable_forecast(
     A held-position monitor must not fall back to the legacy Open-Meteo
     ``fetch_ensemble`` adapter for that source, because that path cannot prove the
     executable forecast reader contract.  Non-real sqlite connections return
-    ``(None, None)`` so legacy unit tests and diagnostic callsites keep their
+    ``(None, None)`` so offline callers retain their
     existing fallback behavior.
     """
 
@@ -2644,7 +2644,7 @@ def _day0_one_sided_monitor_quote(
             best_ask=ask_f,
             bid_size=bid_sz_f,
             ask_size=ask_sz_f,
-            diagnostic_market_price=bid_f,
+            mark_price=bid_f,
             source_timestamp=source_timestamp,
         )
     except Exception as exc:
@@ -2701,7 +2701,7 @@ def monitor_quote_refresh(
         ask_f = float(ask)
         bid_sz_f = float(bid_sz)
         ask_sz_f = float(ask_sz)
-        diagnostic_market_price = (
+        mark_price = (
             bid_f
             if pos.state == "day0_window"
             else float(vwmp(bid_f, ask_f, bid_sz_f, ask_sz_f))
@@ -2713,7 +2713,7 @@ def monitor_quote_refresh(
             best_ask=ask_f,
             bid_size=bid_sz_f,
             ask_size=ask_sz_f,
-            diagnostic_market_price=diagnostic_market_price,
+            mark_price=mark_price,
             source_timestamp=source_timestamp,
         )
     except Exception as e:
@@ -2751,7 +2751,7 @@ def _persist_monitor_quote(conn, pos: Position, quote: HeldTokenMonitorQuote | N
             city=pos.city,
             target_date=pos.target_date,
             range_label=pos.bin_label,
-            price=float(quote.diagnostic_market_price),
+            price=float(quote.mark_price),
             volume=float(quote.bid_size + quote.ask_size),
             bid=float(quote.best_bid),
             ask=(float(ask) if ask is not None else None),
@@ -5182,7 +5182,7 @@ def refresh_exact_zero_position(
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
-        current_p_market = quote.diagnostic_market_price
+        current_p_market = quote.mark_price
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
 
@@ -5268,7 +5268,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
-        current_p_market = quote.diagnostic_market_price
+        current_p_market = quote.mark_price
         market_refreshed = True
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True

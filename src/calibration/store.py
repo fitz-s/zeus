@@ -5,7 +5,7 @@ All writes include proper timestamps. All reads enforce available_at constraint.
 
 K4: get_pairs_for_bucket now defaults to authority_filter='VERIFIED' so all
 callers get only provenance-verified pairs by default. Pass
-authority_filter='any' to bypass (diagnostic / rebuild use only).
+authority_filter='any' to bypass (offline / rebuild use only).
 If the authority column is missing (pre-migration DB), the filter is skipped
 so existing callers are not broken.
 """
@@ -334,7 +334,7 @@ def get_pairs_for_bucket(
 
     K4: authority_filter defaults to 'VERIFIED' so all callers get only
     provenance-verified pairs by default. Pass authority_filter='any' to
-    bypass the filter (diagnostic / rebuild use only).
+    bypass the filter (offline / rebuild use only).
 
     If the authority column is absent (pre-migration DB), the filter is
     silently skipped so existing callers are not broken by the schema gap.
@@ -422,7 +422,7 @@ def get_pairs_count(
     """Count calibration pairs in a bucket.
 
     K4.5 H5 fix: filters by authority='VERIFIED' by default.
-    Pass authority_filter='any' to count all rows (diagnostics only).
+    Pass authority_filter='any' only for explicit offline analysis.
 
     `metric` enforces the legacy-table HIGH-only convention
     (see `get_pairs_for_bucket` docstring). `metric="low"` raises

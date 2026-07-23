@@ -162,7 +162,7 @@ class SizingContext:
             pressure; it must not become a hard total-portfolio cap. Default
             0.0 (no portfolio context).
         counted_ci_width: CI width already consumed by the current-q global
-            solver's conservative q-band. It is diagnostic provenance only and
+            solver's conservative q-band. It is offline provenance only and
             must not feed another Kelly multiplier haircut.
     """
 
