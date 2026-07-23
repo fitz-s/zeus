@@ -228,6 +228,66 @@ def test_monitor_selection_syncs_pending_exit_projection_over_stale_runtime_stat
     assert "DUST" in pos.exit_reason
 
 
+def test_monitor_selection_hydrates_sibling_value_inputs_from_canonical_projection():
+    """Every family leg must retain its latest canonical probability and bid."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            last_monitor_prob REAL,
+            last_monitor_prob_is_fresh INTEGER,
+            last_monitor_market_price_is_fresh INTEGER,
+            last_monitor_best_bid REAL
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, 'active', ?, ?, ?, 1, 1, ?)",
+        [
+            ("singapore-30-yes", 189.77, 189.77, 0.30056, 0.07),
+            ("singapore-32-no", 40.0, 40.0, 0.82404, 0.53),
+        ],
+    )
+    current = _make_position(
+        trade_id="singapore-30-yes",
+        city="Singapore",
+        target_date="2026-07-24",
+        bin_label="30C",
+        direction="buy_yes",
+        shares=189.77,
+        chain_shares=189.77,
+    )
+    sibling = _make_position(
+        trade_id="singapore-32-no",
+        city="Singapore",
+        target_date="2026-07-24",
+        bin_label="32C",
+        direction="buy_no",
+        shares=40.0,
+        chain_shares=40.0,
+    )
+
+    selected = cycle_runtime._monitoring_phase_positions(
+        _make_portfolio(current, sibling),
+        conn=conn,
+    )
+
+    assert selected == [current, sibling]
+    assert cycle_runtime._monitor_value_inputs(current) == pytest.approx(
+        (189.77, 0.30056, 0.07, None, None)
+    )
+    assert cycle_runtime._monitor_value_inputs(sibling) == pytest.approx(
+        (40.0, 0.82404, 0.53, None, None)
+    )
+
+
 def test_targeted_monitor_scopes_canonical_projection_to_runtime_exposure():
     """A family wake must not scan canonical history outside its loaded subset."""
     from src.engine import cycle_runtime

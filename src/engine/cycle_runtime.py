@@ -4231,12 +4231,20 @@ def _canonical_monitor_position_rows(
             _select_expr(columns, "exit_retry_count", "exit_retry_count", "0"),
             _select_expr(columns, "next_exit_retry_at", "next_exit_retry_at", "''"),
             _select_expr(columns, "exit_reason", "exit_reason", "''"),
+            _select_expr(columns, "last_monitor_prob", "last_monitor_prob"),
+            _select_expr(
+                columns,
+                "last_monitor_prob_is_fresh",
+                "last_monitor_prob_is_fresh",
+                "0",
+            ),
             _select_expr(
                 columns,
                 "last_monitor_market_price_is_fresh",
                 "last_monitor_market_price_is_fresh",
                 "0",
             ),
+            _select_expr(columns, "last_monitor_best_bid", "last_monitor_best_bid"),
             monitor_event_payload,
             monitor_event_occurred_at,
         ]
@@ -4331,6 +4339,18 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
     exit_reason = str(_row_get(row, "exit_reason", "") or "").strip()
     if exit_reason:
         pos.exit_reason = exit_reason
+    pos.last_monitor_prob = _finite_probability_or_none(
+        _row_get(row, "last_monitor_prob")
+    )
+    pos.last_monitor_prob_is_fresh = (
+        int(_row_get(row, "last_monitor_prob_is_fresh", 0) or 0) == 1
+    )
+    pos.last_monitor_market_price_is_fresh = (
+        int(_row_get(row, "last_monitor_market_price_is_fresh", 0) or 0) == 1
+    )
+    pos.last_monitor_best_bid = _finite_probability_or_none(
+        _row_get(row, "last_monitor_best_bid")
+    )
     pos.neg_edge_count = 0
     monitor_payload = _row_get(row, "last_monitor_event_payload_json")
     pos._canonical_monitor_refreshed_at = str(
