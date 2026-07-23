@@ -1087,13 +1087,15 @@ def _latest_authorized_day0_fact(
                 placeholders = ",".join("?" for _ in allowed_channels)
                 print_rows = conn.execute(
                     f"""
-                    SELECT source_channel, publish_ts_utc, value_native, unit, station_id, raw_report
+                    SELECT source_channel, publish_ts_utc, value_native, unit,
+                           station_id, raw_report, fetched_at_utc
                       FROM observation_prints
                      WHERE city = ?
                        AND source_channel IN ({placeholders})
                        AND publish_ts_utc >= ?
                        AND publish_ts_utc < ?
                        AND publish_ts_utc <= ?
+                       AND julianday(fetched_at_utc) <= julianday(?)
                     """,
                     (
                         city,
@@ -1101,12 +1103,14 @@ def _latest_authorized_day0_fact(
                         local_day_start_utc.isoformat(),
                         local_day_end_utc.isoformat(),
                         decision_utc.isoformat(),
+                        decision_utc.isoformat(),
                     ),
                 ).fetchall()
                 margin_by_channel: dict[str, float | None] = {}
                 best_value: float | None = None
                 best_channel = ""
                 best_publish_ts = ""
+                best_fetched_at = ""
                 for print_row in print_rows:
                     channel = str(print_row["source_channel"])
                     print_unit = str(print_row["unit"] or "").strip().upper()
@@ -1123,12 +1127,20 @@ def _latest_authorized_day0_fact(
                         # only trust a report carrying a T-group; a whole-C
                         # ->F conversion is imprecise enough to falsely cross
                         # a bin edge) instead of the generic unit-match check.
-                        from src.data.day0_fast_obs import _T_GROUP_RE
+                        from src.data.day0_fast_obs import (
+                            _T_GROUP_RE,
+                            metar_t_group_temperature_c,
+                        )
 
                         if expected_unit == "F":
                             if not _T_GROUP_RE.search(str(print_row["raw_report"] or "")):
                                 continue
-                            value = value * 9.0 / 5.0 + 32.0
+                            precise_c = metar_t_group_temperature_c(
+                                str(print_row["raw_report"] or "")
+                            )
+                            if precise_c is None:
+                                continue
+                            value = precise_c * 9.0 / 5.0 + 32.0
                         elif expected_unit != "C":
                             continue
                         # Same-station fast channel (not the settlement
@@ -1151,13 +1163,16 @@ def _latest_authorized_day0_fact(
                     elif print_unit != expected_unit:
                         continue
                     publish_ts = str(print_row["publish_ts_utc"])
+                    fetched_at = str(print_row["fetched_at_utc"])
                     if best_value is None or (
                         (metric == "high" and value > best_value)
                         or (metric == "low" and value < best_value)
+                        or (value == best_value and publish_ts > best_publish_ts)
                     ):
                         best_value = value
                         best_channel = channel
                         best_publish_ts = publish_ts
+                        best_fetched_at = fetched_at
                 if best_value is not None:
                     facts.append(
                         {
@@ -1168,7 +1183,7 @@ def _latest_authorized_day0_fact(
                             "observation_source": best_channel,
                             "station_id": expected_station or "",
                             "unit": expected_unit,
-                            "observation_available_at": best_publish_ts,
+                            "observation_available_at": best_fetched_at,
                         }
                     )
 

@@ -29229,6 +29229,14 @@ def _global_day0_execution_payload(
     )
     if fact is None:
         raise ValueError("GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING")
+    physical_fact = _latest_authorized_day0_fact(
+        observation_conn,
+        city=str(getattr(family, "city", "") or ""),
+        target_date=str(getattr(family, "target_date", "") or ""),
+        temperature_metric=str(getattr(family, "metric", "") or ""),
+        decision_time=decision_time,
+        require_settlement_channel=False,
+    )
 
     def utc(value: object, *, reason: str) -> datetime:
         try:
@@ -29320,6 +29328,55 @@ def _global_day0_execution_payload(
         "settlement_unit": unit,
         "evidence_finality": evidence_finality,
     }
+    physical_clock: dict[str, object] | None = None
+    if physical_fact is not None:
+        try:
+            physical_native = float(physical_fact["observed_extreme_native"])
+            physical_at = utc(
+                physical_fact.get("observation_time"),
+                reason="GLOBAL_DAY0_PHYSICAL_FRONTIER_TIME_INVALID",
+            )
+            physical_available_at = utc(
+                physical_fact.get("observation_available_at")
+                or physical_fact.get("observation_time"),
+                reason="GLOBAL_DAY0_PHYSICAL_FRONTIER_AVAILABLE_AT_INVALID",
+            )
+        except (KeyError, TypeError, ValueError):
+            physical_native = math.nan
+            physical_at = observed_at
+            physical_available_at = observed_at
+        physical_station = str(physical_fact.get("station_id") or "").strip().upper()
+        physical_unit = str(physical_fact.get("unit") or "").strip().upper()
+        physical_source = str(
+            physical_fact.get("observation_source") or ""
+        ).strip()
+        # A same-station physical channel advances only the INFORMATION CLOCK.
+        # The settlement-channel value remains the sole deterministic payoff
+        # boundary. Equality is required so a faster proxy can neither invent
+        # nor retract settlement certainty.
+        if (
+            math.isfinite(physical_native)
+            and math.isclose(
+                physical_native,
+                observed_native,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            and physical_at > observed_at
+            and physical_available_at <= decision_time.astimezone(UTC)
+            and physical_station == station_id
+            and physical_unit == unit
+            and physical_source
+        ):
+            physical_clock = {
+                "observation_time": physical_at.isoformat(),
+                "observation_available_at": physical_available_at.isoformat(),
+                "source": physical_source,
+                "station_id": physical_station,
+                "unit": physical_unit,
+                "value_role": "clock_only_equal_settlement_frontier",
+            }
+            binding["physical_frontier_clock"] = physical_clock
     if posterior_id not in (None, ""):
         try:
             binding["posterior_id"] = int(posterior_id)
@@ -29330,7 +29387,7 @@ def _global_day0_execution_payload(
         binding["probability_base_identity"] = base_identity
     if "posterior_id" not in binding and not base_identity:
         raise ValueError("GLOBAL_DAY0_PROBABILITY_BASE_IDENTITY_MISSING")
-    return {
+    payload = {
         "observation_time": binding["observation_time"],
         "observation_available_at": binding["observation_available_at"],
         "raw_value": observed_native,
@@ -29354,6 +29411,19 @@ def _global_day0_execution_payload(
         "observation_context_id": "global_current_day0:" + stable_hash(binding),
         "_edli_global_day0_binding": binding,
     }
+    if physical_clock is not None:
+        payload.update(
+            {
+                "_edli_day0_physical_frontier_observation_time": (
+                    physical_clock["observation_time"]
+                ),
+                "_edli_day0_physical_frontier_available_at": (
+                    physical_clock["observation_available_at"]
+                ),
+                "_edli_day0_physical_frontier_source": physical_clock["source"],
+            }
+        )
+    return payload
 
 
 def _global_day0_probability_authority_payload(
@@ -33008,10 +33078,11 @@ def _day0_process_sigma_native(
 ) -> float | None:
     """Day0 observation/process width in the settlement native unit.
 
-    Day0 remaining-day q is conditioned on an observed running boundary, but that
-    boundary still has instrument noise and publication latency. This helper is
-    the single process-sigma seam used by both q_lcb bootstrap and qkernel served
-    sigma threading, so a single-model remaining-day bundle still carries a real
+    Day0 remaining-day q is conditioned on a fixed observed running boundary.
+    This width belongs to the still-unobserved trajectory: instrument noise plus
+    publication-latency and unseen-peak uncertainty are applied before the
+    physical max/min with that boundary.  The helper is shared by point q and
+    q_lcb bootstrap, so a single-model remaining-day bundle still carries a real
     positive predictive width instead of failing with MU_SIGMA_NOT_STASHED.
     """
     try:
@@ -33056,10 +33127,10 @@ def _day0_extra_member_sigma_native(
 ) -> float:
     """Extra member-space sigma for Day0 point q integration.
 
-    ``p_raw_vector_from_maxes`` already adds instrument sigma.  The Day0 process
-    seam includes instrument + staleness + unseen-peak uncertainty because the
-    q_lcb bootstrap samples raw member values directly.  For point q, pass only
-    the extra part so instrument noise is not double-counted.
+    The Day0 point-q operator already adds instrument sigma to raw future
+    extrema.  The process seam includes instrument + staleness + unseen-peak
+    uncertainty because q_lcb samples those same raw future values.  Pass only
+    the extra part to point q so instrument noise is not double-counted.
     """
 
     sigma = _day0_process_sigma_native(
@@ -33428,13 +33499,14 @@ def _market_analysis_from_event_snapshot(
         # When fresh hourly vectors are persisted for this family
         # (day0_hourly_vectors lane), the member array becomes the pooled per-model
         # REMAINING-day extremes (hours >= now, city-local), clamped to the absorbing
-        # physical law (HIGH: max(model_remaining, running max)). This prices
+        # physical law only after future-path noise is drawn. This prices
         # P(remaining excursion | now) instead of the full-day distribution —
         # below-floor remaining members land IN the floor bin (the post-peak
         # repricing) rather than being renormalized away. Platt is SKIPPED in this
         # mode (identity p_cal): the fitted Platt's domain is full-day member
         # distributions, not remaining-day pools. The absorbing mask below still
-        # applies, and the day0 bootstrap sampler draws from the SAME members.
+        # applies, and point q plus the day0 bootstrap sampler draw from the
+        # SAME un-clamped future extrema before applying the observed boundary.
         _day0_rd_members = None
         _day0_rd_required = is_day0 and _day0_remaining_day_q_enabled()
         if _day0_rd_required:
@@ -33451,7 +33523,15 @@ def _market_analysis_from_event_snapshot(
                 payload["_edli_day0_q_block_reason"] = "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
                 raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
         if _day0_rd_members is not None:
-            members = _day0_rd_members
+            raw_remaining = payload.get(
+                "_edli_day0_unclamped_remaining_extrema_native"
+            )
+            members = np.asarray(
+                raw_remaining
+                if isinstance(raw_remaining, (list, tuple)) and raw_remaining
+                else _day0_rd_members,
+                dtype=float,
+            )
             _bias_corrected = False
             payload["_edli_q_source"] = "day0_remaining_day"
             payload["_edli_day0_q_mode"] = "remaining_day"
@@ -33543,7 +33623,7 @@ def _market_analysis_from_event_snapshot(
         # percentile collapsed to the point estimate (q_lcb == q — ZERO
         # uncertainty quantification on the day0 lane). Replace with a real
         # obs-floor-conditional member bootstrap: each draw resamples the
-        # member extremes, adds instrument noise WIDENED by the measured
+        # un-clamped future extremes, adds instrument noise WIDENED by the measured
         # per-city obs staleness (config/wu_obs_latency.json), clamps to the
         # absorbing physical law (final >= running max / final <= running min),
         # settles, bins, and applies the absorbing mask. q_lcb < q again, and
@@ -35393,13 +35473,23 @@ def _snapshot_p_raw(
         )
         if _bias_corrected:
             payload["_edli_bias_corrected"] = True
-    arr = p_raw_vector_from_maxes(
-        members,
-        city,
-        semantics,
-        bins,
-        extra_member_sigma=extra_member_sigma,
-    )
+    if str(payload.get("_edli_q_source") or "") == "day0_remaining_day":
+        arr = _day0_remaining_p_raw_vector(
+            members,
+            city=city,
+            settlement_semantics=semantics,
+            bins=bins,
+            payload=payload,
+            extra_member_sigma=extra_member_sigma,
+        )
+    else:
+        arr = p_raw_vector_from_maxes(
+            members,
+            city,
+            semantics,
+            bins,
+            extra_member_sigma=extra_member_sigma,
+        )
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
         raise ValueError("event-bound p_raw vector invalid")
     total = float(arr.sum())
@@ -35407,6 +35497,80 @@ def _snapshot_p_raw(
         raise ValueError("event-bound p_raw vector has zero mass")
     arr = arr / total
     return arr
+
+
+def _day0_remaining_p_raw_vector(
+    future_extremes: np.ndarray,
+    *,
+    city: object,
+    settlement_semantics: SettlementSemantics,
+    bins: list[Bin],
+    payload: dict[str, object],
+    extra_member_sigma: float,
+) -> np.ndarray:
+    """Integrate ``extreme(observed, noisy_future)`` in physical order.
+
+    Instrument/process uncertainty belongs to the still-unobserved trajectory,
+    not to an already observed settlement-channel boundary. Applying noise
+    after clamping manufactures excursions from a completed plateau.
+    """
+
+    from src.config import ensemble_n_mc
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    members = np.asarray(future_extremes, dtype=float).ravel()
+    rounded = _optional_float(payload.get("rounded_value"))
+    metric = str(
+        payload.get("metric") or payload.get("temperature_metric") or ""
+    ).strip().lower()
+    if (
+        members.size == 0
+        or not np.isfinite(members).all()
+        or rounded is None
+        or metric not in {"high", "low"}
+        or extra_member_sigma < 0.0
+        or not math.isfinite(extra_member_sigma)
+    ):
+        raise ValueError("DAY0_REMAINING_OPERATOR_INPUT_INVALID")
+    n_mc = int(ensemble_n_mc())
+    sigma = float(
+        np.hypot(
+            sigma_instrument_for_city(city).value,
+            extra_member_sigma,
+        )
+    )
+    seed = int(
+        stable_hash(
+            {
+                "operator": "day0_extreme_observed_then_noisy_future_v1",
+                "city": str(getattr(city, "name", "") or ""),
+                "metric": metric,
+                "rounded": rounded,
+                "future_extremes": sorted(float(v) for v in members.tolist()),
+                "sigma": sigma,
+                "n_mc": n_mc,
+                "bins": [str(bin_value) for bin_value in bins],
+            }
+        )[:16],
+        16,
+    )
+    rng = np.random.default_rng(seed)
+    future = members + rng.normal(0.0, sigma, (n_mc, members.size))
+    final = (
+        np.maximum(future, rounded)
+        if metric == "high"
+        else np.minimum(future, rounded)
+    )
+    measured = settlement_semantics.round_values(final)
+    probabilities = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
+    probabilities /= float(n_mc * members.size)
+    total = float(probabilities.sum())
+    if total > 0.0:
+        probabilities /= total
+    payload["_edli_day0_probability_operator"] = (
+        "extreme_observed_then_noisy_future_v1"
+    )
+    return probabilities
 
 
 def _snapshot_p_cal(
@@ -35648,17 +35812,22 @@ def _day0_probability_clock(decision_time: "datetime | None") -> "datetime | Non
 def _day0_observation_age_minutes(
     payload: dict[str, object], decision_time: "datetime | None"
 ) -> float | None:
-    """Age of the day0 running extreme at decision time, in minutes.
+    """Age of the latest conservative Day0 physical frontier, in minutes.
 
-    Measured from the OBSERVATION VALID TIME (payload.observation_time — the
-    station report timestamp), not from imported_at/observation_available_at:
-    the absorbing boundary's truth-age is how old the station report itself is.
+    A same-station physical channel may advance this clock only when its
+    conservative running extreme exactly equals the settlement-channel bound;
+    the settlement value remains authoritative. Measured from observation valid
+    time, never fetch/availability time.
     Returns None when unparseable (callers must treat None as MAXIMALLY STALE —
     fail-closed; see day0 first-principles review 2026-06-10, charge #1).
     """
     if decision_time is None:
         return None
-    raw = payload.get("observation_time") or payload.get("observation_available_at")
+    raw = (
+        payload.get("_edli_day0_physical_frontier_observation_time")
+        or payload.get("observation_time")
+        or payload.get("observation_available_at")
+    )
     if not raw:
         return None
     try:
@@ -35789,8 +35958,11 @@ def _record_day0_remaining_day_exit_authority(
                 str(family.city),
                 target,
                 timezone_name,
-                observation_time=payload.get("observation_time")
-                or payload.get("observation_available_at"),
+                observation_time=(
+                    payload.get("_edli_day0_physical_frontier_observation_time")
+                    or payload.get("observation_time")
+                    or payload.get("observation_available_at")
+                ),
                 observation_source="day0_extreme_updated_event",
                 conn=world_conn,
             )
@@ -35959,13 +36131,16 @@ def _latest_day0_current_temperature_native(
     if not expected_station:
         return None
     if source_type == "wu_icao":
-        channels = ("wu_icao_history",)
+        channels = ("wu_icao_history", "aviationweather_metar")
     elif source_type == "hko":
         # Instantaneous HKO spot temperature may condition a forecast path;
         # it still cannot create a settlement extreme or deterministic payoff.
         channels = ("hko_rhrread_spot",)
     elif source_type == "noaa":
-        channels = (f"ogimet_metar_{expected_station.lower()}",)
+        channels = (
+            f"ogimet_metar_{expected_station.lower()}",
+            "aviationweather_metar",
+        )
     else:
         return None
     try:
@@ -35978,13 +36153,15 @@ def _latest_day0_current_temperature_native(
     placeholders = ",".join("?" for _ in channels)
     rows = world_conn.execute(
         f"""
-        SELECT publish_ts_utc, value_native, unit, station_id, source_channel
+        SELECT publish_ts_utc, value_native, unit, station_id, source_channel,
+               raw_report, fetched_at_utc
           FROM observation_prints
          WHERE city = ?
            AND source_channel IN ({placeholders})
            AND publish_ts_utc >= ?
            AND publish_ts_utc < ?
            AND publish_ts_utc <= ?
+           AND julianday(fetched_at_utc) <= julianday(?)
          ORDER BY publish_ts_utc DESC, id DESC
         """,
         (
@@ -35993,26 +36170,62 @@ def _latest_day0_current_temperature_native(
             start.isoformat(),
             end.isoformat(),
             decision_time.astimezone(UTC).isoformat(),
+            decision_time.astimezone(UTC).isoformat(),
         ),
     ).fetchall()
     expected_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
     for row in rows:
-        publish_raw, value_raw, unit_raw, station_raw, channel_raw = row
-        if (
-            str(unit_raw or "").strip().upper() != expected_unit
-            or not _station_matches(
-                str(station_raw or "").strip().upper(), expected_station
-            )
+        (
+            publish_raw,
+            value_raw,
+            unit_raw,
+            station_raw,
+            channel_raw,
+            raw_report,
+            fetched_raw,
+        ) = row
+        channel = str(channel_raw or "").strip().lower()
+        if not _station_matches(
+            str(station_raw or "").strip().upper(), expected_station
         ):
             continue
         try:
             published = datetime.fromisoformat(
                 str(publish_raw).replace("Z", "+00:00")
             )
+            fetched = datetime.fromisoformat(
+                str(fetched_raw).replace("Z", "+00:00")
+            )
             value = float(value_raw)
         except (TypeError, ValueError):
             continue
-        if published.tzinfo is None or not math.isfinite(value):
+        if (
+            published.tzinfo is None
+            or fetched.tzinfo is None
+            or fetched.astimezone(UTC) > decision_time.astimezone(UTC)
+        ):
+            continue
+        if channel == "aviationweather_metar":
+            # The fast ledger stores wire Celsius. Fahrenheit-settled cities
+            # require the precise METAR T-group before conversion; a rounded
+            # whole-C report is not precise enough to condition a bin path.
+            from src.data.day0_fast_obs import (
+                _T_GROUP_RE,
+                metar_t_group_temperature_c,
+            )
+
+            if expected_unit == "F":
+                if not _T_GROUP_RE.search(str(raw_report or "")):
+                    continue
+                precise_c = metar_t_group_temperature_c(str(raw_report or ""))
+                if precise_c is None:
+                    continue
+                value = precise_c * 9.0 / 5.0 + 32.0
+            elif expected_unit != "C":
+                continue
+        elif str(unit_raw or "").strip().upper() != expected_unit:
+            continue
+        if not math.isfinite(value):
             continue
         return value, published.astimezone(UTC), str(channel_raw)
     return None
@@ -36224,6 +36437,9 @@ def _day0_remaining_day_members(
         values = np.asarray(extremes_c, dtype=float)
         if str(unit).upper() == "F":
             values = values * 9.0 / 5.0 + 32.0
+        payload["_edli_day0_unclamped_remaining_extrema_native"] = [
+            float(value) for value in values.tolist()
+        ]
         maturity_values = np.asarray(values, dtype=float).copy()
         _record_day0_remaining_day_exit_authority(
             payload=payload,

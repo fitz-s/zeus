@@ -4,6 +4,60 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-23 continuous-time plateau redecision correction
+
+The loss-to-zero reconstruction found that the fast Day0 source clock emitted a
+new `DAY0_EXTREME_UPDATED` event only when the rounded running extreme moved.
+An unchanged HIGH after the peak, or unchanged LOW after the overnight trough,
+was treated as no new information even when the settlement-station observation
+version advanced. That froze the conditioned probability surface precisely when
+elapsed time and a shrinking remaining window should continuously remove paths
+to a different settlement bin. The replacement materializer already treats a
+strictly newer observation version on a plateau as new information; the event
+producer discarded that version before it could reach the materializer.
+
+The hot-fix extends the existing split event memo with a monotone source-time
+version. Rounded extremes remain absorbing and may only move in their physical
+direction; observation versions may only move strictly forward. Either change
+emits one event, while a repeated source version remains idempotent. This keeps
+the source-report cadence (normally 30/60 minutes) and does not restore the
+per-scan event firehose that the rounded-extreme gate removed.
+
+Money path: source truth -> Day0 conditioned probability -> held-position
+redecision -> exit. Re-decision behavior: plateau evidence now refreshes q(t)
+using the shorter remaining window; no market-price anchor or price-only stop is
+introduced. The 72-hour causal replay rejected a generic trailing stop because
+its apparent gain depended on one large outlier and it sold multiple eventual
+winners; this change repairs the missing fact instead of optimizing that
+loss-only proxy.
+
+The London 26°C NO incident then exposed a second, independent category error.
+At 19:55–22:55 UTC every current remaining-path member was below the already
+observed 26°C high, yet live q for the held NO repeatedly rose toward 0.28. The
+old calculation evaluated `noise(max(observed_high, future_high))`, so fixed
+instrument noise was applied to the already observed settlement boundary and
+manufactured a 27°C tail even as current temperature fell to 21°C. Physical law
+is `max(observed_high, noisy_future_high)` (and symmetrically `min` for LOW).
+The corrected Day0-only operator preserves real future excursions, removes only
+the impossible post-boundary noise, and persists its operator identity in the
+probability receipt. A same-station fast print may advance the physical clock
+and trajectory state, but it cannot replace the settlement-channel value used
+for deterministic payoffs. Trajectory state is causal on both source publish
+time and local fetch time; Fahrenheit cities require and parse the METAR
+tenths-Celsius T-group instead of converting a rounded whole-C ledger value.
+Those rules live at the central Day0 fact reduction as well as the trajectory
+reader, so global redecision and remaining-path conditioning cannot construct
+different information sets from the same observation ledger.
+
+Live resampling exposed a third independent continuity defect: the Day0 hourly
+refresh cursor advanced only when an HTTP attempt occurred and took modulo the
+already-truncated three-city microbatch. With twelve held cities, throttle made
+the cursor repeatedly offer the same first page while later holdings exceeded
+the three-hour probability freshness window. The corrected cursor advances by
+held slots offered, including throttled/failed slots, and takes modulo the full
+held-capital segment. This preserves the bounded HTTP budget while guaranteeing
+coverage; it increases fairness, not request volume.
+
 ## 2026-07-23 loss-to-zero causality correction
 
 The 72-hour loss census and decision-time reconstruction found three defects that

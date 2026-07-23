@@ -12,8 +12,9 @@ The day0 absorbing boundary is driven by the settlement station's running
 extreme. WU (the Polymarket settlement reference) publishes the same ASOS/METAR
 stream after the observation. NOAA/NWS station files expose exact held-family
 updates, cycle files expose global METAR deltas, and aviationweather.gov
-supplies bounded history and recovery. This module emits DAY0_EXTREME_UPDATED
-events when the running extreme moves.
+supplies bounded history and recovery. This module emits
+``DAY0_EXTREME_UPDATED`` when the running extreme moves or a strictly newer
+station observation advances the remaining-window clock.
 
 Provenance law (source + authority on every datum):
 - source_id "aviationweather_metar"; station identity validated against the
@@ -86,7 +87,7 @@ METAR_AWC_RECOVERY_INTERVAL_S = 90.0
 FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
 
 _MemoKey = tuple[str, str, str]
-_MemoUpdate = tuple[Optional[int], Optional[int]]
+_MemoUpdate = tuple[Optional[int], Optional[int], Optional[str]]
 
 # Soft entry signal for tomorrow's LOW markets. These are defaults only; the
 # live evaluator uses the deployed empirical residual model's policy. The
@@ -102,6 +103,26 @@ def _absorbs(metric: str, value: int, previous: Optional[int]) -> bool:
         or (metric == "high" and value > previous)
         or (metric == "low" and value < previous)
     )
+
+
+def _observation_version(value: object) -> str | None:
+    """Return one canonical UTC source-observation version."""
+
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _observation_version_advances(incoming: object, previous: object) -> bool:
+    current = _observation_version(incoming)
+    if current is None:
+        return False
+    prior = _observation_version(previous)
+    return prior is None or current > prior
 
 
 def _positive_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
@@ -290,12 +311,21 @@ def parse_metar_api_payload(payload: object) -> list[MetarReport]:
     return out
 
 
-def _temperature_from_raw_metar(raw: str) -> float | None:
+def metar_t_group_temperature_c(raw: str) -> float | None:
+    """Return the precise tenths-Celsius METAR T-group value, if present."""
+
     groups = _T_GROUP_RE.findall(raw)
-    if groups:
-        token = groups[-1]
-        sign = -1.0 if token[1] == "1" else 1.0
-        return sign * int(token[2:5]) / 10.0
+    if not groups:
+        return None
+    token = groups[-1]
+    sign = -1.0 if token[1] == "1" else 1.0
+    return sign * int(token[2:5]) / 10.0
+
+
+def _temperature_from_raw_metar(raw: str) -> float | None:
+    precise = metar_t_group_temperature_c(raw)
+    if precise is not None:
+        return precise
     match = _METAR_TEMP_RE.search(raw)
     if match is None:
         return None
@@ -1299,6 +1329,10 @@ class Day0FastObsEmitter:
     # exit lane's state). Two memos, two consumers, two update rules.
     _last_kill_memo_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _last_live_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
+    _last_live_emitted_observation_time: dict[tuple[str, str, str], str] = field(
+        default_factory=dict,
+        init=False,
+    )
     _event_memo_snapshot_rowid: int | None = field(default=None, init=False)
     _event_memo_snapshot_keys: set[_MemoKey] = field(default_factory=set, init=False)
     _ledgered_report_keys: set[tuple[str, str, float]] = field(default_factory=set, init=False)
@@ -1491,7 +1525,7 @@ class Day0FastObsEmitter:
                 ).fetchone() is not None
 
             requested = keys if day0_changed else keys - checked
-            recovered: dict[_MemoKey, int] = {}
+            recovered: dict[_MemoKey, tuple[int, str | None]] = {}
             families = sorted({(city, target_date) for city, target_date, _metric in requested})
             for city_name, target_date in families:
                 rows = world_conn.execute(
@@ -1504,7 +1538,10 @@ class Day0FastObsEmitter:
                                ELSE MIN(CAST(json_extract(
                                    payload_json, '$.rounded_value'
                                ) AS INTEGER))
-                           END AS extreme
+                           END AS extreme,
+                           MAX(json_extract(
+                               payload_json, '$.observation_time'
+                           )) AS observation_time
                       FROM opportunity_events
                      WHERE event_type = 'DAY0_EXTREME_UPDATED'
                        AND json_extract(payload_json, '$.city') = ?
@@ -1518,10 +1555,13 @@ class Day0FastObsEmitter:
                     """,
                     (city_name, target_date),
                 ).fetchall()
-                for metric, value in rows:
+                for metric, value, observation_time in rows:
                     key = (city_name, target_date, str(metric))
                     if key in requested and value is not None:
-                        recovered[key] = int(value)
+                        recovered[key] = (
+                            int(value),
+                            _observation_version(observation_time),
+                        )
         except Exception as exc:  # noqa: BLE001 - restart recovery is fail-soft
             logger.debug(
                 "DAY0_EVENT_MEMO_HYDRATE_FAILED exc=%s: %s",
@@ -1530,7 +1570,10 @@ class Day0FastObsEmitter:
             )
             return 0
 
-        updates = {key: (value, value) for key, value in recovered.items()}
+        updates = {
+            key: (value, value, observation_time)
+            for key, (value, observation_time) in recovered.items()
+        }
         self.apply_memo_updates(updates)
         with self._lock:
             if day0_changed:
@@ -1543,7 +1586,7 @@ class Day0FastObsEmitter:
         """Apply staged memo movement after its event transaction commits."""
 
         with self._lock:
-            for key, (kill_value, live_value) in updates.items():
+            for key, (kill_value, live_value, observation_time) in updates.items():
                 metric = key[2]
                 if kill_value is not None and _absorbs(
                     metric,
@@ -1557,6 +1600,13 @@ class Day0FastObsEmitter:
                     self._last_live_emitted_rounded.get(key),
                 ):
                     self._last_live_emitted_rounded[key] = live_value
+                if _observation_version_advances(
+                    observation_time,
+                    self._last_live_emitted_observation_time.get(key),
+                ):
+                    normalized = _observation_version(observation_time)
+                    if normalized is not None:
+                        self._last_live_emitted_observation_time[key] = normalized
 
     def mark_event_memo_snapshot(self, world_conn: Any) -> None:
         """Advance the recovery watermark only after durable commit."""
@@ -2687,10 +2737,15 @@ class Day0FastObsEmitter:
             with self._lock:
                 kill_value = self._last_kill_memo_rounded.get(key)
                 live_value = self._last_live_emitted_rounded.get(key)
-            pending_kill, pending_live = pending_memo_updates.get(key, (None, None))
+                observation_time = self._last_live_emitted_observation_time.get(key)
+            pending_kill, pending_live, pending_observation_time = pending_memo_updates.get(
+                key,
+                (None, None, None),
+            )
             return (
                 pending_kill if pending_kill is not None else kill_value,
                 pending_live if pending_live is not None else live_value,
+                pending_observation_time or observation_time,
             )
 
         def _stage_memo(
@@ -2698,11 +2753,16 @@ class Day0FastObsEmitter:
             *,
             kill_value: int | None = None,
             live_value: int | None = None,
+            observation_time: str | None = None,
         ) -> None:
-            pending_kill, pending_live = pending_memo_updates.get(key, (None, None))
+            pending_kill, pending_live, pending_observation_time = pending_memo_updates.get(
+                key,
+                (None, None, None),
+            )
             pending_memo_updates[key] = (
                 kill_value if kill_value is not None else pending_kill,
                 live_value if live_value is not None else pending_live,
+                observation_time or pending_observation_time,
             )
 
         emitted = 0
@@ -2744,14 +2804,24 @@ class Day0FastObsEmitter:
                     # event), never the kill memo — a kill-memo-only update
                     # from a withheld pass must not suppress the later live
                     # event for the same rounded extreme.
-                    kill_previous, live_previous = _memo_values(key)
+                    kill_previous, live_previous, live_observation_time = _memo_values(key)
                     kill_moved = _absorbs(metric, rounded, kill_previous)
                     live_moved = _absorbs(metric, rounded, live_previous)
-                    if not kill_moved and not live_moved:
-                        continue
                     observation = fast_obs_to_day0_observation(
                         city=city, extremes=extremes, metric=metric, source=source
                     )
+                    observation_time = _observation_version(
+                        observation.get("observation_time")
+                    )
+                    observation_advanced = (
+                        (live_previous is None or rounded == live_previous)
+                        and _observation_version_advances(
+                            observation_time,
+                            live_observation_time,
+                        )
+                    )
+                    if not kill_moved and not live_moved and not observation_advanced:
+                        continue
                     # KILL-MEMO SAFETY: only station/source/unit/local-date
                     # authorized values may advance the monotone kill memo
                     # (a wrong-day or wrong-station value must never kill bins).
@@ -2778,7 +2848,7 @@ class Day0FastObsEmitter:
                                 observation["live_authority_status"],
                             )
                         continue
-                    if not live_moved:
+                    if not live_moved and not observation_advanced:
                         _stage_memo(key, kill_value=kill_update)
                         continue
                     result = trigger.emit_from_observation(
@@ -2802,6 +2872,7 @@ class Day0FastObsEmitter:
                             key,
                             kill_value=kill_update,
                             live_value=rounded,
+                            observation_time=observation_time,
                         )
                     if result.inserted:
                         emitted += 1
@@ -2813,11 +2884,14 @@ class Day0FastObsEmitter:
                             )
                         logger.info(
                             "DAY0_FAST_OBS_EMIT city=%s date=%s metric=%s rounded=%s "
-                            "obs_time=%s available_at=%s samples=%d skipped_unit_law=%d freshness=%s",
+                            "obs_time=%s available_at=%s samples=%d skipped_unit_law=%d "
+                            "freshness=%s moved=%s observation_advanced=%s",
                             city_name, target_date, metric, rounded,
                             observation["observation_time"], observation["observation_available_at"],
                             extremes.sample_count, extremes.skipped_unit_law,
                             prefetch.freshness_status,
+                            live_moved,
+                            observation_advanced,
                         )
                     elif result.duplicate:
                         logger.debug(

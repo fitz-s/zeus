@@ -335,6 +335,13 @@ files:
     - src/ingest/harvester_truth_writer.py
     - src/state/uma_resolution_listener.py
     - scripts/etl_forecast_skill_from_forecasts.py
+  src/data/day0_fast_obs.py:
+    zone: K1_truth
+    authority_role: same_station_day0_physical_clock
+    why: Appends same-station METAR prints and emits authorized Day0 redecision events. The absorbing extreme and source observation version are independent monotone state; a newer plateau advances the remaining-window clock once without promoting the monitoring channel to final settlement truth.
+    downstream:
+    - src/ingest_main.py
+    - src/events/triggers/day0_extreme_updated.py
   src/data/replacement_forecast_live_materialization_queue.py:
     zone: K2_runtime
     authority_role: replacement_live_materialization_queue
@@ -377,6 +384,16 @@ files:
     - src/data/replacement_forecast_materializer.py
     - src/engine/event_reactor_adapter.py
     - src/engine/position_belief.py
+  src/data/replacement_forecast_current_target_plan.py:
+    zone: K2_runtime
+    authority_role: replacement_current_target_and_day0_fact_reader
+    why: Plans current replacement posterior coverage and reduces causal Day0 facts across settlement and same-station physical channels. Observation-ledger facts require both source publish and local fetch clocks inside the decision snapshot; equal-value plateaus advance only the physical time frontier, and Fahrenheit METAR evidence is derived from the precise tenths-Celsius T-group before unit conversion.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_seed_discovery.py
+    - src/data/replacement_forecast_production.py
+    - src/engine/event_reactor_adapter.py
   src/data/replacement_forecast_bundle_reader.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_reader
@@ -1856,7 +1873,7 @@ files:
   src/engine/event_reactor_adapter.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_adapter
-    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler through the executor boundary. Submit-outcome receipts preserve the complete admitted economics plus durable command and venue-side-effect identity so an acknowledged or unknown submit cannot be reclassified as a retryable pre-venue rejection. A persisted current-evidence shape must carry the shared current probability-semantics revision before it can become forecast authority. The global SELL actuation binds the solver-selected reduction size and close-vs-reduce intent into the exit boundary. Global BUY winner preflight consumes and persists the same immutable native JIT bid/ask book before curve re-auction; an unproven fresh mode falls through candidate-locally, while a valid fresh mode reaches the final mode-specific builder without weakening submit authority or inventing maker availability from an ask-only projection. A deterministic Day0 revalidation atomically serializes the auction's immutable witness, including current native token bindings, source/certificate identities, and capture clock, into its proof payload; fallthrough then rebuilds the nested probability block from the exact selected condition, bin, token, side, and q. Neither stale topology tokens, a mixed witness generation, nor a rejected earlier winner can poison the next certificate identity. After a real maker window expires, a sealed positive global current-state solve keeps its current posterior band as the taker bound instead of applying a historical scalar correction after the portfolio argmax; full-depth cost, final JIT, fee, price, and taker-quality walls remain mandatory.
+    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler through the executor boundary. Submit-outcome receipts preserve the complete admitted economics plus durable command and venue-side-effect identity so an acknowledged or unknown submit cannot be reclassified as a retryable pre-venue rejection. A persisted current-evidence shape must carry the shared current probability-semantics revision before it can become forecast authority. The global SELL actuation binds the solver-selected reduction size and close-vs-reduce intent into the exit boundary. Global BUY winner preflight consumes and persists the same immutable native JIT bid/ask book before curve re-auction; an unproven fresh mode falls through candidate-locally, while a valid fresh mode reaches the final mode-specific builder without weakening submit authority or inventing maker availability from an ask-only projection. A deterministic Day0 revalidation atomically serializes the auction's immutable witness, including current native token bindings, source/certificate identities, and capture clock, into its proof payload; fallthrough then rebuilds the nested probability block from the exact selected condition, bin, token, side, and q. Day0 remaining-window probability keeps settlement-boundary value authority separate from same-station physical time authority and integrates extreme(observed, noisy_future), never noise(extreme(observed, future)); plateau time can shrink the remaining path without fabricating deterministic settlement truth or terminal excursion mass. Current trajectory conditioning admits only prints fetched by the decision snapshot and derives Fahrenheit precision from the METAR T-group. Neither stale topology tokens, a mixed witness generation, nor a rejected earlier winner can poison the next certificate identity. After a real maker window expires, a sealed positive global current-state solve keeps its current posterior band as the taker bound instead of applying a historical scalar correction after the portfolio argmax; full-depth cost, final JIT, fee, price, and taker-quality walls remain mandatory.
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
@@ -1924,7 +1941,7 @@ files:
   src/events/reactor.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_runtime
-    why: Owns canonical EDLI opportunity discovery, bounded claim and processing, producer-wake preemption, durable event finalization, and fail-safe dispatcher-lock release across setup and teardown faults while routing venue side effects through injected engine and executor contracts. The unpaged winner claim path threads the actual retained carrier through claimed-set coverage and actuation. Qkernel MAKER_TAKER_FORBIDDEN after fresh-book revalidation is a transient re-rank condition, not a terminal event verdict.
+    why: Owns canonical EDLI opportunity discovery, bounded claim and processing, producer-wake preemption, durable event finalization, and fail-safe dispatcher-lock release across setup and teardown faults while routing venue side effects through injected engine and executor contracts. The unpaged winner claim path threads the actual retained carrier through claimed-set coverage and actuation. Qkernel MAKER_TAKER_FORBIDDEN after fresh-book revalidation is a transient re-rank condition, not a terminal event verdict. Day0 hourly refresh rotates over the complete held-capital segment by offered slots, so throttle and provider failure cannot trap a bounded microbatch on its first page or starve later held families of current probability authority.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/engine/global_batch_runtime.py

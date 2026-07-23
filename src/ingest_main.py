@@ -501,7 +501,7 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
     inserted_families: list[tuple[str, str, str]] = []
     evaluated_report_keys: list[tuple[str, str, float]] = []
     deferred_memo_updates: dict[
-        tuple[str, str, str], tuple[int | None, int | None]
+        tuple[str, str, str], tuple[int | None, int | None, str | None]
     ] = {}
     pending_reports = 0
     try:
