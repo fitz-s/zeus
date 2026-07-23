@@ -1209,6 +1209,25 @@ def test_polymarket_client_defaults_to_current_keychain_funder_signature_type(mo
     assert adapter.polygon_rpc_url
 
 
+def test_polymarket_client_translates_split_http_timeout_for_v2_reads(monkeypatch):
+    """Authenticated monitor reads receive scalar seconds, never httpx.Timeout."""
+    from src.data import polymarket_client as pm
+
+    monkeypatch.setattr(
+        pm,
+        "_resolve_credentials",
+        lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
+    )
+    monkeypatch.setenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", "2")
+    timeout = pm.httpx.Timeout(connect=1.8, read=2.0, write=0.25, pool=0.1)
+
+    adapter = pm.PolymarketClient(
+        public_http_timeout=timeout,
+    )._ensure_v2_adapter()
+
+    assert adapter.network_timeout_seconds == pytest.approx(2.0)
+
+
 def test_polymarket_client_requires_explicit_signature_type_when_submit_armed(monkeypatch):
     from src.data import polymarket_client as pm
 

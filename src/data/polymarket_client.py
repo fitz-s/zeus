@@ -515,6 +515,19 @@ class PolymarketClient:
         )
         return self._ensure_v2_adapter()
 
+    def _v2_network_timeout_seconds(self) -> float | None:
+        """Translate the public HTTP timeout contract to the V2 scalar seam."""
+
+        timeout = self._public_http_timeout
+        if isinstance(timeout, httpx.Timeout):
+            connect_read = [
+                float(value)
+                for value in (timeout.connect, timeout.read)
+                if value is not None and float(value) > 0.0
+            ]
+            return max(connect_read) if connect_read else None
+        return float(timeout) if timeout is not None else None
+
     def _ensure_v2_adapter(self):
         """Lazy init: connect live CLOB I/O through the strict V2 adapter."""
         adapter = getattr(self, "_v2_adapter", None)
@@ -543,7 +556,7 @@ class PolymarketClient:
             polygon_rpc_url=os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL),
             api_creds=creds.get("api_creds"),
             q1_egress_evidence_path=q1_egress_evidence,
-            network_timeout_seconds=self._public_http_timeout,
+            network_timeout_seconds=self._v2_network_timeout_seconds(),
         )
         self._v2_adapter = adapter
         logger.info("Polymarket CLOB V2 adapter initialized (live mode)")
