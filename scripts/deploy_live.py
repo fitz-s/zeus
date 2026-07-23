@@ -1177,25 +1177,35 @@ def _pause_entries_with_stuck_live_recovery(
     *,
     live_was_loaded: bool,
 ) -> tuple[bool, str]:
-    """Arm the restart guard after physically stopping a lock-stuck live daemon.
+    """Arm the restart guard after stopping requested daemons that hold the writer.
 
-    A live process can hold the world DB writer longer than the guard timeout.
-    Once that process is unloaded it has no entry side-effect authority, so it
+    Any daemon in a live restart scope can hold the world DB writer longer than
+    the guard timeout. Stop live-trading first, then only the other labels that
+    this deploy already intends to restart. With live entry authority absent it
     is safe to retry the durable pause before any daemon is started again.
-    Other pause failures remain fail-closed.
+    Other pause failures remain fail-closed, with every stopped label left down.
     """
 
     ok, detail = _pause_entries_for_live_restart_if_needed(labels)
     writer_stuck = "timed out after" in detail or "database is locked" in detail
-    if ok or not live_was_loaded or not writer_stuck:
+    if ok or not writer_stuck:
         return ok, detail
-    stopped, stop_detail = _stop_label(LIVE_TRADING_LABEL)
-    if not stopped:
-        return False, f"{detail}\n{stop_detail}"
+    stop_order = _dedupe_labels([LIVE_TRADING_LABEL, *labels])
+    stop_details: list[str] = []
+    for label in stop_order:
+        stopped, stop_detail = _stop_label(label)
+        stop_details.append(stop_detail)
+        if not stopped:
+            return False, f"{detail}\n" + "; ".join(stop_details)
+        if not _wait_for_launchctl_unloaded(label):
+            stop_details.append(f"FAILED unload wait {label}")
+            return False, f"{detail}\n" + "; ".join(stop_details)
     retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(labels)
+    prior_state = "loaded" if live_was_loaded else "already absent"
     return (
         retry_ok,
-        f"{detail}\n{stop_detail}; pause guard retry after process absence: "
+        f"{detail}\nlive-trading was {prior_state}; "
+        f"{'; '.join(stop_details)}; pause guard retry after requested daemon absence: "
         f"{retry_detail}",
     )
 

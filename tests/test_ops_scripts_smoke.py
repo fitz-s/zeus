@@ -3371,8 +3371,13 @@ def test_deploy_live_restart_pause_stops_lock_stuck_live_before_retry(monkeypatc
         calls.append(("stop", label))
         return True, f"stopped {label}"
 
+    def wait_unloaded(label):
+        calls.append(("wait_unloaded", label))
+        return True
+
     monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", pause)
     monkeypatch.setattr(dl, "_stop_label", stop)
+    monkeypatch.setattr(dl, "_wait_for_launchctl_unloaded", wait_unloaded)
     labels = [dl.LIVE_TRADING_LABEL]
 
     ok, detail = dl._pause_entries_with_stuck_live_recovery(
@@ -3384,9 +3389,106 @@ def test_deploy_live_restart_pause_stops_lock_stuck_live_before_retry(monkeypatc
     assert calls == [
         ("pause", tuple(labels)),
         ("stop", dl.LIVE_TRADING_LABEL),
+        ("wait_unloaded", dl.LIVE_TRADING_LABEL),
         ("pause", tuple(labels)),
     ]
-    assert "pause guard retry after process absence" in detail
+    assert "pause guard retry after requested daemon absence" in detail
+
+
+def test_deploy_live_restart_pause_stops_requested_writer_sidecars_before_retry(
+    monkeypatch,
+):
+    dl = _load("deploy_live_restart_pause_stuck_sidecar_writer", "deploy_live.py")
+    calls = []
+    outcomes = iter(
+        (
+            (False, "live restart entry pause guard could not run: timed out after 30s"),
+            (True, "live restart entry pause guard armed"),
+        )
+    )
+
+    def pause(labels):
+        calls.append(("pause", tuple(labels)))
+        return next(outcomes)
+
+    def stop(label):
+        calls.append(("stop", label))
+        return True, f"stopped {label}"
+
+    def wait_unloaded(label):
+        calls.append(("wait_unloaded", label))
+        return True
+
+    monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", pause)
+    monkeypatch.setattr(dl, "_stop_label", stop)
+    monkeypatch.setattr(dl, "_wait_for_launchctl_unloaded", wait_unloaded)
+    labels = [
+        dl.DAEMONS["data-ingest"],
+        dl.LIVE_TRADING_LABEL,
+        dl.DAEMONS["price-channel-ingest"],
+    ]
+
+    ok, detail = dl._pause_entries_with_stuck_live_recovery(
+        labels,
+        live_was_loaded=False,
+    )
+
+    assert ok is True
+    assert calls == [
+        ("pause", tuple(labels)),
+        ("stop", dl.LIVE_TRADING_LABEL),
+        ("wait_unloaded", dl.LIVE_TRADING_LABEL),
+        ("stop", dl.DAEMONS["data-ingest"]),
+        ("wait_unloaded", dl.DAEMONS["data-ingest"]),
+        ("stop", dl.DAEMONS["price-channel-ingest"]),
+        ("wait_unloaded", dl.DAEMONS["price-channel-ingest"]),
+        ("pause", tuple(labels)),
+    ]
+    assert "live-trading was already absent" in detail
+    assert "pause guard retry after requested daemon absence" in detail
+
+
+def test_deploy_live_restart_pause_does_not_retry_before_scoped_unload(
+    monkeypatch,
+):
+    dl = _load("deploy_live_restart_pause_unload_timeout", "deploy_live.py")
+    calls = []
+
+    def pause(labels):
+        calls.append(("pause", tuple(labels)))
+        return False, "live restart entry pause guard could not run: timed out after 30s"
+
+    def stop(label):
+        calls.append(("stop", label))
+        return True, f"stopped {label}"
+
+    def wait_unloaded(label):
+        calls.append(("wait_unloaded", label))
+        return label == dl.LIVE_TRADING_LABEL
+
+    monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", pause)
+    monkeypatch.setattr(dl, "_stop_label", stop)
+    monkeypatch.setattr(dl, "_wait_for_launchctl_unloaded", wait_unloaded)
+    labels = [
+        dl.DAEMONS["data-ingest"],
+        dl.LIVE_TRADING_LABEL,
+        dl.DAEMONS["price-channel-ingest"],
+    ]
+
+    ok, detail = dl._pause_entries_with_stuck_live_recovery(
+        labels,
+        live_was_loaded=True,
+    )
+
+    assert ok is False
+    assert calls == [
+        ("pause", tuple(labels)),
+        ("stop", dl.LIVE_TRADING_LABEL),
+        ("wait_unloaded", dl.LIVE_TRADING_LABEL),
+        ("stop", dl.DAEMONS["data-ingest"]),
+        ("wait_unloaded", dl.DAEMONS["data-ingest"]),
+    ]
+    assert "FAILED unload wait" in detail
 
 
 def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch, tmp_path):
