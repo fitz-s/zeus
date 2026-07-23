@@ -17490,7 +17490,13 @@ def _authenticated_entry_trade_fact_candidates(
             ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state IN ('ACKED', 'POST_ACKED', 'PARTIAL', 'CANCEL_PENDING')
+           AND cmd.state IN (
+                'SUBMITTING',
+                'POST_ACKED',
+                'ACKED',
+                'PARTIAL',
+                'CANCEL_PENDING'
+           )
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND (
                 pc.position_id IS NULL
@@ -17649,11 +17655,14 @@ def _reconcile_authenticated_entry_trade_fact(
         raise ValueError(
             "authenticated entry fill exceeds submitted share/capital bound"
         )
-    if _latest_order_fact_matched_size(
-        conn,
-        command_id=command_id,
-        venue_order_id=venue_order_id,
-    ) >= filled - Decimal("0.000001"):
+    if (
+        str(command.get("state") or "") == CommandState.PARTIAL.value
+        and _latest_order_fact_matched_size(
+            conn,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+        ) >= filled - Decimal("0.000001")
+    ):
         return "stayed"
 
     complete = _fill_size_completes_limit_order(
@@ -17726,6 +17735,27 @@ def _reconcile_authenticated_entry_trade_fact(
     sp_name = f"sp_authenticated_entry_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
+        if str(command.get("state") or "") == CommandState.SUBMITTING.value:
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=CommandEventType.SUBMIT_ACKED.value,
+                occurred_at=observed_at,
+                payload={
+                    "schema_version": 1,
+                    "reason": "authenticated_entry_trade_fact_implies_submit_ack",
+                    "proof_class": "canonical_confirmed_trade_facts_exact_order",
+                    "command_id": command_id,
+                    "venue_order_id": venue_order_id,
+                    "trade_ids": list(facts["trade_ids"]),
+                    "source": source,
+                    "required_predicates": {
+                        "bound_venue_order_id_matches_trade": True,
+                        "authenticated_confirmed_trade_facts": True,
+                        "positive_fill_economics": True,
+                    },
+                },
+            )
         if cancel_pending:
             append_event(
                 conn,
@@ -20561,17 +20591,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     if scope == "live_tick":
         _already_canceled_review_fast_pass()
 
-    if scope == "live_tick":
-        # This pass closes the narrow provenance gap that otherwise blocks the
-        # entire entry reactor.  Keep it ahead of authenticated-fill and broad
-        # maintenance queries so cumulative lock/budget deferral cannot starve
-        # a repair whose source facts are already durable in zeus_trades.
-        _db_pass(
-            "missing_filled_entry_execution_fact_repair",
-            reconcile_missing_filled_entry_execution_fact_repairs,
-            "missing_filled_entry_execution_fact_repair",
-        )
-
     _db_pass(
         "authenticated_entry_trade_fact",
         reconcile_authenticated_entry_trade_facts,
@@ -20605,6 +20624,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "completed_partial_order_facts",
             reconcile_completed_partial_order_facts,
             "completed_partial_order_facts",
+        )
+
+    if scope == "live_tick":
+        # Command-bound fills and terminal partials are current collateral
+        # truth.  Consume both before historical projection maintenance so a
+        # broad repair query cannot strand spendable capital behind them.
+        _db_pass(
+            "missing_filled_entry_execution_fact_repair",
+            reconcile_missing_filled_entry_execution_fact_repairs,
+            "missing_filled_entry_execution_fact_repair",
         )
 
     if scope == "live_tick":

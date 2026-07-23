@@ -1003,12 +1003,12 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
 
     def _execution_fact_repair(_conn):
         calls.append("missing_filled_entry_execution_fact_repair")
-        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
 
     def _authenticated_fill(_conn):
         calls.append("authenticated_entry_trade_fact")
-        now[0] = 1.0
-        raise sqlite3.OperationalError("interrupted")
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
 
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
     monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
@@ -1031,12 +1031,14 @@ def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
     )
 
     assert calls == [
-        "missing_filled_entry_execution_fact_repair",
         "authenticated_entry_trade_fact",
+        "missing_filled_entry_execution_fact_repair",
     ]
-    assert summary["missing_filled_entry_execution_fact_repair"]["advanced"] == 1
+    assert summary["authenticated_entry_trade_fact"]["advanced"] == 1
     assert summary["db_budget_deferred"] is True
-    assert summary["db_budget_deferred_at"] == "authenticated_entry_trade_fact"
+    assert summary["db_budget_deferred_at"] == (
+        "missing_filled_entry_execution_fact_repair"
+    )
 
 
 def test_live_tick_recovers_confirmed_review_fill_before_maintenance_budget_defer(
@@ -2699,6 +2701,88 @@ def _append_trade_fact(
 
 class TestAuthenticatedEntryTradeFactProjection:
     """A confirmed authenticated fill must become owned wealth immediately."""
+
+    def test_submitting_fill_synthesizes_ack_and_releases_reservation(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = "cmd-authenticated-submitting"
+        position_id = "pos-authenticated-submitting"
+        order_id = "ord-authenticated-submitting"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-submitting",
+            token_id="tok-authenticated-submitting",
+            size=10.0,
+            price=0.50,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id="tok-authenticated-submitting",
+        )
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+                command_id, reservation_type, token_id, amount, created_at
+            ) VALUES (?, 'PUSD_BUY', NULL, 5000000, ?)
+            """,
+            (command_id, datetime.now(timezone.utc).isoformat()),
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-submitting",
+            filled_size="10",
+            fill_price="0.40",
+        )
+        _append_order_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            state="MATCHED",
+            matched_size="10",
+            remaining_size="0",
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        events = _get_events(conn, command_id)
+        assert [event["event_type"] for event in events][-2:] == [
+            "SUBMIT_ACKED",
+            "FILL_CONFIRMED",
+        ]
+        ack_payload = json.loads(events[-2]["payload_json"])
+        assert ack_payload["proof_class"] == (
+            "canonical_confirmed_trade_facts_exact_order"
+        )
+        reservation = conn.execute(
+            """
+            SELECT released_at, release_reason, converted_amount
+              FROM collateral_reservations
+             WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        assert reservation["released_at"] is not None
+        assert reservation["release_reason"] == "CONVERTED_ON_FILL"
+        assert reservation["converted_amount"] == 5000000
 
     def test_full_fill_atomically_advances_command_and_position(self, conn):
         from src.execution.command_recovery import (
