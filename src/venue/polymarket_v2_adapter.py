@@ -584,6 +584,7 @@ class PolymarketV2Adapter:
             creds=effective_api_creds,
             signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
             funder=kwargs.get("funder_address"),
+            use_server_time=True,
         )
         # CLOB v2 L2 endpoints (balance/order/user-channel auth) require L2 API
         # creds bound to the active signer. Use runtime creds first: Keychain is

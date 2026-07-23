@@ -307,6 +307,7 @@ class FakeAuthClient:
         creds=None,
         signature_type=None,
         funder=None,
+        use_server_time=False,
     ):
         self.host = host
         self.chain_id = chain_id
@@ -314,6 +315,7 @@ class FakeAuthClient:
         self.creds = creds
         self.signature_type = signature_type
         self.funder = funder
+        self.use_server_time = use_server_time
         self.calls = []
         type(self).instances.append(self)
 
@@ -548,6 +550,32 @@ def test_default_client_factory_uses_env_creds_when_keychain_absent(monkeypatch)
     assert client.creds.api_secret == "env-secret"
     assert client.creds.api_passphrase == "env-passphrase"
     assert client.calls == []
+
+
+def test_default_client_factory_signs_l1_auth_with_venue_time(monkeypatch):
+    _install_fake_py_clob_client_v2(monkeypatch)
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    adapter_mod._DERIVED_API_CREDS_CACHE.clear()
+    FakeAuthClient.instances = []
+    FakeAuthClient.derive_error = AssertionError("derive should not run when env creds exist")
+    FakeAuthClient.derive_response = None
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: None)
+    monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
+    monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        q1_egress_evidence_path=None,
+    )
+
+    client = adapter._sdk_client()
+
+    assert client.use_server_time is True
 
 
 def test_default_client_factory_does_not_create_api_key_when_derive_supported(monkeypatch):
