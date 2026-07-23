@@ -2866,6 +2866,18 @@ class TestOrderStatusResponseContract:
     response item that carries neither 'status' nor 'state', rather than
     silently defaulting to the placeholder status string "UNKNOWN"."""
 
+    def test_get_order_empty_payload_raises_typed_not_found(self, tmp_path):
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        class EmptyPointOrderClient:
+            def get_order(self, _order_id):
+                return {}
+
+        adapter, _ = _adapter(tmp_path, EmptyPointOrderClient())
+
+        with pytest.raises(VenueOrderNotFound, match="ord-missing"):
+            adapter.get_order("ord-missing")
+
     def test_get_order_missing_status_key_raises(self, tmp_path):
         from src.venue.response_contracts import VenueResponseShapeError
 
@@ -2950,6 +2962,20 @@ def test_polymarket_client_cancel_payload_is_exit_safety_parseable(monkeypatch):
     assert payload["orderID"] == "ord-cancel"
     assert payload["status"] == "CANCELED"
     assert parse_cancel_response(payload).status == "CANCELED"
+
+
+def test_polymarket_client_maps_typed_point_order_absence_to_none():
+    from src.data.polymarket_client import PolymarketClient
+    from src.venue.response_contracts import VenueOrderNotFound
+
+    class FakeAdapter:
+        def get_order(self, order_id):
+            raise VenueOrderNotFound(order_id)
+
+    client = PolymarketClient()
+    client._v2_adapter = FakeAdapter()
+
+    assert client.get_order("ord-missing") is None
 
 
 def test_polymarket_client_wrapper_fails_closed_before_unbound_v2_preflight():

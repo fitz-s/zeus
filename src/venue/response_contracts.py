@@ -67,6 +67,14 @@ class VenueResponseShapeError(RuntimeError):
         )
 
 
+class VenueOrderNotFound(LookupError):
+    """The authenticated point-order endpoint returned its empty absence shape."""
+
+    def __init__(self, order_id: str) -> None:
+        self.order_id = order_id
+        super().__init__(f"venue order not found: {order_id}")
+
+
 def _nonempty(value: Any) -> bool:
     if value is None:
         return False

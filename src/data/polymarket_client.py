@@ -978,8 +978,12 @@ class PolymarketClient:
         recovery loop catches and logs them so a single bad lookup does not
         kill the loop.
         """
+        from src.venue.response_contracts import VenueOrderNotFound
+
         try:
             state = self._ensure_v2_adapter().get_order(order_id)
+        except VenueOrderNotFound:
+            return None
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
