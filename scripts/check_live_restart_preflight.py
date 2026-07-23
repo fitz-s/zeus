@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import plistlib
+import re
 import shlex
 import sqlite3
 import subprocess
@@ -2523,24 +2524,26 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
             )
 
         reconciled_projection_exclusion = ""
-        if _table_exists(conn, "main", "edli_live_order_projection"):
+        events_schema = "world" if events_table.startswith("world.") else "main"
+        if _table_exists(conn, events_schema, "edli_live_order_projection"):
             projection_columns = _table_columns(
-                conn, "main", "edli_live_order_projection"
+                conn, events_schema, "edli_live_order_projection"
             )
             if {
                 "aggregate_id",
                 "current_state",
                 "pending_reconcile",
             }.issubset(projection_columns):
+                projection_table = f"{events_schema}.edli_live_order_projection"
                 reconciled_projection_exclusion = """
                            AND NOT EXISTS (
                                  SELECT 1
-                                   FROM edli_live_order_projection projection
+                                   FROM {projection_table} projection
                                   WHERE projection.aggregate_id = exec.aggregate_id
                                     AND projection.current_state = 'RECONCILED'
                                     AND COALESCE(projection.pending_reconcile, 0) = 0
                                )
-                """
+                """.format(projection_table=projection_table)
         evidence["terminal_reconciled_projection_excluded"] = bool(
             reconciled_projection_exclusion
         )
@@ -5305,6 +5308,16 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
                 "repair_evidence": _active_evidence,
             }
             tolerated.append(item)
+        elif (
+            order_status == "backoff_exhausted"
+            and _min_order_dust_is_non_executable(reason=reason, shares=shares)
+        ):
+            item = {
+                **item,
+                "restart_resolution": "monitor_redecision_or_settlement",
+                "risk": "venue_min_order_dust_non_executable",
+            }
+            tolerated.append(item)
         elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
             tolerated.append(item)
             if order_status != "backoff_exhausted":
@@ -5318,6 +5331,30 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         not risky,
         "no restart-dangerous pending exits" if not risky else "pending exits need resolution before armed restart",
         {"risky": risky, "tolerated": tolerated},
+    )
+
+
+_MIN_ORDER_DUST_RE = re.compile(
+    r"\[DUST:\s*executable_snapshot_gate:\s*size\s+"
+    r"(?P<size>[0-9]+(?:\.[0-9]+)?)\s+is below snapshot min_order_size\s+"
+    r"(?P<minimum>[0-9]+(?:\.[0-9]+)?)\s*\]"
+)
+
+
+def _min_order_dust_is_non_executable(*, reason: str, shares: float) -> bool:
+    """Prove a pending exit is below the venue minimum, not merely labelled dust."""
+
+    match = _MIN_ORDER_DUST_RE.search(reason)
+    if match is None:
+        return False
+    projected = Decimal(str(shares))
+    cited_size = Decimal(match.group("size"))
+    minimum = Decimal(match.group("minimum"))
+    return (
+        projected > 0
+        and minimum > 0
+        and abs(projected - cited_size) <= Decimal("0.000001")
+        and cited_size < minimum
     )
 
 

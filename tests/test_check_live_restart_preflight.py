@@ -5317,6 +5317,37 @@ def test_preflight_blocks_dust_projection_that_would_reload_as_pending_exit(monk
     assert pending["evidence"]["risky"][0]["risk"] == "dust_projection_needs_backoff_exhausted_reload_repair"
 
 
+def test_preflight_tolerates_backoff_exhausted_venue_min_order_dust(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'venue-dust-pos', 'pending_exit', 'Wuhan', '2026-07-23', 'high',
+            'Will the highest temperature in Wuhan be 32°C on July 23?',
+            'buy_yes', 3.1125, 3.1125, 'backoff_exhausted',
+            'DAY0_HARD_FACT_BIN_DEAD [DUST: executable_snapshot_gate: '
+            || 'size 3.1125 is below snapshot min_order_size 5]',
+            7, NULL, 0.0, 1, 0.0, 1, '2026-07-23T07:10:00+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["risk"] == "venue_min_order_dust_non_executable"
+    assert tolerated["restart_resolution"] == "monitor_redecision_or_settlement"
+
+
 def test_preflight_tolerates_pending_exit_with_full_exit_fill_repair_evidence(monkeypatch, tmp_path):
     trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
@@ -5621,6 +5652,60 @@ def test_confirmed_fill_bridge_coverage_ignores_terminal_reconciled_rest_fill(
     assert check.evidence["terminal_reconciled_projection_excluded"] is True
     assert check.evidence["missing_confirmed_fill_count"] == 0
     assert check.evidence["missing_rest_filled_orphan_count"] == 0
+
+
+def test_confirmed_fill_bridge_coverage_uses_world_projection_schema(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_forecast_db(forecast_db).close()
+    conn = _init_confirmed_fill_bridge_gap_db(trade_db)
+    conn.execute("DELETE FROM venue_trade_facts")
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-1', 'ord-1', 'trade-rest-world-reconciled', 'REST', 'MATCHED',
+            '10.5', '0.54', '2026-06-29T20:00:10+00:00'
+        )
+        """
+    )
+    conn.execute("ATTACH DATABASE ? AS world", (str(preflight.WORLD_DB),))
+    conn.execute(
+        """
+        CREATE TABLE world.edli_live_order_events (
+            aggregate_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO world.edli_live_order_events SELECT * FROM main.edli_live_order_events"
+    )
+    conn.execute("DROP TABLE main.edli_live_order_events")
+    conn.execute(
+        """
+        CREATE TABLE world.edli_live_order_projection (
+            aggregate_id TEXT PRIMARY KEY,
+            current_state TEXT NOT NULL,
+            pending_reconcile INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO world.edli_live_order_projection VALUES ('agg-1', 'RECONCILED', 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    check = preflight._edli_confirmed_fill_bridge_coverage_check()
+
+    assert check.ok is True
+    assert check.evidence["events_table"] == "world.edli_live_order_events"
+    assert check.evidence["terminal_reconciled_projection_excluded"] is True
+    assert check.evidence["missing_confirmed_fill_count"] == 0
 
 
 def test_confirmed_fill_bridge_coverage_ignores_terminal_position_rest_fill(
