@@ -1,6 +1,6 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-07-18
-# Lifecycle: created=2026-05-17; last_reviewed=2026-07-17; last_reused=2026-07-18
+# Last reused/audited: 2026-07-23
+# Lifecycle: created=2026-05-17; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Protect same-token entry deduplication and certified global increments.
 # Reuse: Run when entry dedup, fill materialization, or increment admission changes.
 # Authority basis: first-principles global marginal-increment execution repair
@@ -1359,7 +1359,7 @@ def test_terminal_fok_no_fill_redecision_allows_same_price_after_cooldown(
     assert ready["candidate_shares"] == "1016"
 
 
-def test_pre_submit_db_lock_redecision_allows_same_price_after_cooldown(mem_db):
+def test_pre_submit_db_lock_redecision_bypasses_terminal_no_fill_cooldown(mem_db):
     mem_db.execute(
         """INSERT INTO venue_commands
            (command_id, position_id, token_id, intent_kind, side, size, price,
@@ -1388,30 +1388,21 @@ def test_pre_submit_db_lock_redecision_allows_same_price_after_cooldown(mem_db):
     )
     mem_db.commit()
 
-    cooling = _entry_same_token_cooldown_component(
-        mem_db,
-        token_id=TOKEN_X,
-        candidate_position_id="fresh-candidate",
-        limit_price=0.10,
-        shares=254,
-        now=datetime.fromisoformat("2026-07-23T08:08:50+00:00"),
-    )
     ready = _entry_same_token_cooldown_component(
         mem_db,
         token_id=TOKEN_X,
         candidate_position_id="fresh-candidate",
         limit_price=0.10,
         shares=254,
-        now=datetime.fromisoformat("2026-07-23T08:09:51+00:00"),
+        now=datetime.fromisoformat("2026-07-23T08:07:51+00:00"),
     )
 
-    assert cooling["allowed"] is False
-    assert cooling["reason"] == "same_token_terminal_no_fill_cooling_down"
     assert ready["allowed"] is True
     assert ready["reason"] == (
         "allowed_terminal_pre_submit_db_lock_no_fill_redecision"
     )
     assert ready["terminal_no_fill_redecision_proof"] == "pre_submit_db_lock"
+    assert ready["cooldown_seconds"] == 0
     assert ready["existing_price"] == "0.1"
     assert ready["candidate_price"] == "0.1"
 
