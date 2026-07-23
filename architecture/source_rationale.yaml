@@ -2433,13 +2433,6 @@ files:
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH
-  src/strategy/benchmark_suite.py:
-    zone: K3_extension
-    authority_role: strategy_benchmark_gate
-    why: R3 A1 diagnostic/simulated/read-only-live benchmark metrics and promotion gate; computes evidence-only StrategyMetrics and blocks live promotion unless promotion-grade economics plus supporting diagnostic, simulated-venue, and read-only-live evidence pass.
-    downstream:
-    - src/strategy/candidates/__init__.py
-    - tests/test_strategy_benchmark.py
   src/cron/settlement_attribution.py:
     zone: K3_extension
     authority_role: receipt_attribution_cron
@@ -3125,3 +3118,21 @@ files:
     why: Launchable daemon boundary for P4 post-trade capital lifecycle so chain/redeem/wrap faults and WAL contention do not block live order decisions.
     downstream:
     - deploy/launchd/com.zeus.post-trade-capital.plist
+  src/data/job_lock.py:
+    zone: K2_runtime
+    authority_role: forecast_writer_job_lock
+    why: Single advisory lock shared by forecast writer jobs so concurrent producers cannot overlap canonical writes; it carries no alternate-owner or rollout semantics.
+  src/decision_kernel/certificates/pre_submit.py:
+    zone: K2_runtime
+    authority_role: pre_submit_certificate_contract
+    why: Typed pre-submit certificate helpers for the sole live submission chain; every certificate binds current executable evidence before venue POST.
+  src/engine/native_holdings.py:
+    zone: K2_runtime
+    authority_role: native_holdings_projection
+    why: Projects exact current YES and NO holdings into the global capital objective without inventing mutually exclusive family constraints.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+  src/state/schema/regret_decompositions_schema.py:
+    zone: K2_runtime
+    authority_role: regret_decompositions_schema_owner
+    why: DDL owner for the derived regret decomposition table; canonical trade and settlement facts remain upstream authority.

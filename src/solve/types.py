@@ -352,7 +352,7 @@ MenuItemKind = Literal[
     "split_collateral",           #   route builder lands (packet §5)
     "merge_full_set",
     "maker_quote",      # post-only; DISABLED in W3 (taker-only, consult REV-2 ruling 6)
-    "hold_cash",        # cash with release-time shadow value
+    "hold_cash",        # cash with release-time opportunity value
 ]
 
 
@@ -503,7 +503,7 @@ class SolutionPlan:
     q_version: str                       # family-level decision basis (all orders share)
     no_trade_reason: Optional[str]       # None iff orders non-empty
     repair_certificate: Optional[RepairCertificate] = None
-    diagnostics: Mapping[str, float] = field(default_factory=dict)
+    metrics: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.orders:

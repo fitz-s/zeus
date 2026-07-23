@@ -50,11 +50,11 @@ renaming, and removal of active-law surfaces that preserve the forbidden concept
 5. Active authority, registries, tests, and generated topology contain a blocking
    relapse antibody; historical evidence is not a default routing surface.
 
-The relapse antibody is deliberately scoped: it inspects executable live
-surfaces and current authority/reference/operations surfaces, then rejects only
-exact retired identifiers and runtime categories. Generic diagnostic, canary,
-readiness, promotion, and no-submit language remains valid; fail-closed
-no-submit and offline replay are not alternate live runtimes.
+The relapse antibody inspects executable live surfaces and current
+authority/reference/router surfaces. It rejects the retired concept families and
+their variants, not merely a closed list of old identifiers. Fail-closed
+rejection and offline replay remain valid only as direct behavior with typed
+boundaries; neither may become a selectable alternate live runtime.
 
 ## Execution waves
 

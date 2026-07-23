@@ -1248,10 +1248,10 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
             "global_terminal_median_payoff_usd": "0.60",
             "global_terminal_wealth_after_loss_usd": "99.60",
             "global_terminal_wealth_after_win_usd": "100.60",
-            "global_cut_time_expected_value_diagnostic_usd": 0.20,
-            "global_expected_value_diagnostic_usd": 0.20,
+            "global_cut_time_expected_value_usd": 0.20,
+            "global_expected_value_usd": 0.20,
             "global_expected_value_semantics": (
-                "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+                "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
             ),
             "global_terminal_payoff_semantics": "BINARY_0_1",
         }
@@ -1382,10 +1382,10 @@ def test_pre_submit_current_state_cannot_waive_venue_tick_boundary(
             "global_terminal_median_payoff_usd": "999.0",
             "global_terminal_wealth_after_loss_usd": "99.0",
             "global_terminal_wealth_after_win_usd": "1099.0",
-            "global_cut_time_expected_value_diagnostic_usd": 799.0,
-            "global_expected_value_diagnostic_usd": 799.0,
+            "global_cut_time_expected_value_usd": 799.0,
+            "global_expected_value_usd": 799.0,
             "global_expected_value_semantics": (
-                "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+                "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
             ),
             "global_terminal_payoff_semantics": "BINARY_0_1",
         }
@@ -1491,10 +1491,10 @@ def test_pre_submit_recomputed_current_state_marker_cannot_bypass_decision_proof
             "global_terminal_median_payoff_usd": "0.60",
             "global_terminal_wealth_after_loss_usd": "99.60",
             "global_terminal_wealth_after_win_usd": "100.60",
-            "global_cut_time_expected_value_diagnostic_usd": 0.20,
-            "global_expected_value_diagnostic_usd": 0.20,
+            "global_cut_time_expected_value_usd": 0.20,
+            "global_expected_value_usd": 0.20,
             "global_expected_value_semantics": (
-                "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+                "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
             ),
             "global_terminal_payoff_semantics": "BINARY_0_1",
         }

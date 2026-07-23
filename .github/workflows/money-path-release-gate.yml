@@ -70,12 +70,16 @@ jobs:
         run: |
           pytest -q \
             tests/test_single_live_semantics.py \
-            tests/test_executable_market_snapshot.py \
-            tests/test_market_scanner_negrisk.py \
-            tests/test_decision_seq_cross_table_no_collision.py \
-            tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py \
-            tests/state/test_schema_current_invariant.py \
-            tests/test_money_path_lifecycle_replay.py \
-            tests/test_pre_existing_failure_registry.py \
-            tests/test_monitor_refresh_nowcast_wiring.py \
-            tests/test_strategy_profile_registry.py
+            tests/test_single_live_semantics_migration.py \
+            tests/strategy/test_single_count_uncertainty.py \
+            tests/engine/test_multiwinner_wealth_composition.py \
+            tests/engine/test_native_holdings.py \
+            tests/test_no_aifs_module_resurrection.py \
+            tests/calibration/test_scaled_normal_uniform_q_builder.py \
+            tests/test_hk_settlement_preimage_contract.py \
+            tests/test_path_b_qlcb_modal_collapse_regression.py \
+            tests/decision/test_payoff_vector_edge.py \
+            tests/test_backtest_purpose_contract.py \
+            tests/test_backtest_skill_economics.py \
+            tests/test_replay_learning_authority.py \
+            tests/test_riskguard_daily_loss_realized_basis.py

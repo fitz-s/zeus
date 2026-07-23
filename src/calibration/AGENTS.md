@@ -3,9 +3,9 @@
 Module book: `docs/reference/modules/calibration.md`
 Machine registry: `architecture/module_manifest.yaml`
 
-## Strategy of record — Extended Platt is the diagnostic BASELINE, not the live path
+## Strategy of record — Extended Platt is the offline BASELINE, not the live path
 
-Live q-construction is the **replacement chain** (`docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block): per-model walk-forward de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`, λ=n/(n+8)) → T2 Bayesian precision fusion, Ledoit-Wolf Σ (`fuse_bayes_precision_posterior`) → settlement-preimage bin integration (**`src/calibration/emos.py` `bin_probability_settlement`** — this zone owns the live integrator). Extended Platt below (`platt.py`) is diagnostic/comparison baseline calibration, NOT the primary path. `emos.py` (not Platt) builds the live q; Platt must not cap, floor, or veto it without new authority.
+Live q-construction is the **replacement chain** (`docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block): per-model walk-forward de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`, λ=n/(n+8)) → T2 Bayesian precision fusion, Ledoit-Wolf Σ (`fuse_bayes_precision_posterior`) → settlement-preimage bin integration (**`src/calibration/emos.py` `bin_probability_settlement`** — this zone owns the live integrator). Extended Platt below (`platt.py`) is offline/comparison baseline calibration, NOT the primary path. `emos.py` (not Platt) builds the live q; Platt must not cap, floor, or veto it without new authority.
 
 ## WHY this zone matters
 
@@ -18,7 +18,7 @@ The critical design decision: `lead_days` is an **input feature**, not a bucket 
 | File | What it does | Danger level |
 |------|-------------|--------------|
 | `emos.py` | **LIVE settlement integrator** — `bin_probability_settlement(μ*,σ)` WMO round-half preimage → bin q; primary q-construction for the replacement chain | HIGH — strategy-of-record q |
-| `platt.py` | Extended Platt calibrator + bootstrap | HIGH — diagnostic baseline calibration, not primary q |
+| `platt.py` | Extended Platt calibrator + bootstrap | HIGH — offline baseline calibration, not primary q |
 | `manager.py` | Calibration lifecycle, maturity gates | HIGH — controls when calibration applies |
 | `store.py` | Persistence of calibration parameters | MEDIUM |
 | `retrain_trigger.py` | Operator-gated retrain/promotion wiring + frozen-replay gate | HIGH — live calibration promotion seam |
