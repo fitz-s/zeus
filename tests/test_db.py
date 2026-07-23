@@ -315,7 +315,10 @@ def test_init_schema_world_does_not_create_trade_latest_snapshot_mirror():
     }
     conn.close()
 
-    assert "executable_market_snapshots" in tables
+    # K1 split (residue dissolve 2026-07-23): executable_market_snapshots is
+    # trade-class, created only by init_schema_trade_only on zeus_trades.db.
+    # World init_schema no longer creates it (nor the trade_latest mirror).
+    assert "executable_market_snapshots" not in tables
     assert "executable_market_snapshot_latest" not in tables
 
 
