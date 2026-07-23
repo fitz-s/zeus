@@ -8257,13 +8257,74 @@ def _weather_identity_from_snapshot_slug(command: dict) -> dict:
     if not month:
         return {}
     city = " ".join(part.capitalize() for part in match.group("city").split("-") if part)
-    return {
+    identity = {
         "city": city,
         "cluster": city,
         "target_date": f"{match.group('year')}-{month}-{int(match.group('day')):02d}",
         "temperature_metric": "high" if match.group("metric") == "highest" else "low",
         "bin_label": slug,
     }
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_cfg = runtime_cities_by_name().get(city)
+        unit = str(getattr(city_cfg, "settlement_unit", "") or "").upper()
+        if unit in {"F", "C"}:
+            identity["unit"] = unit
+        cluster = str(getattr(city_cfg, "cluster", "") or "").strip()
+        if cluster:
+            identity["cluster"] = cluster
+    except Exception:  # noqa: BLE001 - identity stays fail-closed downstream
+        pass
+    return identity
+
+
+def _immutable_snapshot_identity_for_missing_entry_projection(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> tuple[dict, dict]:
+    """Bind a missing-position recovery to one immutable executable snapshot."""
+
+    hydrated = _hydrate_command_execution_identity(conn, command)
+    condition_id = str(hydrated.get("snapshot_condition_id") or "").strip()
+    yes_token = str(hydrated.get("snapshot_yes_token_id") or "").strip()
+    no_token = str(hydrated.get("snapshot_no_token_id") or "").strip()
+    selected_token = str(
+        hydrated.get("snapshot_selected_outcome_token_id") or ""
+    ).strip()
+    command_token = str(hydrated.get("token_id") or "").strip()
+    if not all((condition_id, yes_token, no_token, selected_token, command_token)):
+        raise ValueError(
+            "missing entry projection requires complete immutable snapshot identity"
+        )
+    if selected_token not in {yes_token, no_token} or command_token != selected_token:
+        raise ValueError(
+            "missing entry projection command token does not match immutable snapshot"
+        )
+    for field in (
+        "condition_id",
+        "yes_token_id",
+        "no_token_id",
+        "selected_outcome_token_id",
+    ):
+        snapshot_value = str(hydrated.get(f"snapshot_{field}") or "").strip()
+        envelope_value = str(hydrated.get(f"env_{field}") or "").strip()
+        if not envelope_value or envelope_value != snapshot_value:
+            raise ValueError(
+                "missing entry projection envelope/snapshot identity mismatch "
+                f"field={field}"
+            )
+    identity = _weather_identity_from_snapshot_slug(hydrated)
+    if (
+        not str(identity.get("city") or "").strip()
+        or not str(identity.get("target_date") or "").strip()
+        or identity.get("temperature_metric") not in {"high", "low"}
+        or identity.get("unit") not in {"F", "C"}
+    ):
+        raise ValueError(
+            "missing entry projection requires parseable immutable weather snapshot"
+        )
+    return hydrated, identity
 
 
 def _strategy_key_for_terminal_no_fill_direction(direction: str) -> str:
@@ -17284,7 +17345,12 @@ def _authenticated_entry_trade_fact_candidates(
 
     if not all(
         _table_exists(conn, table)
-        for table in ("venue_commands", "venue_trade_facts", "position_current")
+        for table in (
+            "venue_commands",
+            "venue_submission_envelopes",
+            "venue_trade_facts",
+            "position_current",
+        )
     ):
         return []
     params: list[object] = []
@@ -17297,17 +17363,25 @@ def _authenticated_entry_trade_fact_candidates(
         + _canonical_trade_fact_cte()
         + """
         SELECT cmd.*,
+               envelope.order_type AS submission_order_type,
+               envelope.price AS submission_price,
+               envelope.size AS submission_size,
                pc.phase AS projected_phase,
                pc.shares AS projected_shares,
                pc.cost_basis_usd AS projected_cost_basis_usd
           FROM venue_commands cmd
-          JOIN position_current pc
+          JOIN venue_submission_envelopes envelope
+            ON envelope.envelope_id = cmd.envelope_id
+          LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
            AND cmd.state IN ('ACKED', 'POST_ACKED', 'PARTIAL', 'CANCEL_PENDING')
            AND COALESCE(cmd.venue_order_id, '') != ''
-           AND pc.phase IN ('pending_entry', 'active', 'day0_window')
+           AND (
+                pc.position_id IS NULL
+                OR pc.phase IN ('pending_entry', 'active', 'day0_window')
+           )
            AND EXISTS (
                 SELECT 1
                   FROM canonical_trade_fact fact
@@ -17421,18 +17495,46 @@ def _reconcile_authenticated_entry_trade_fact(
     )
     filled = _positive_decimal_or_none(facts.get("filled_size"))
     fill_price = _positive_decimal_or_none(facts.get("fill_price"))
-    requested = _positive_decimal_or_none(command.get("size"))
-    if not facts["count"] or filled is None or fill_price is None or requested is None:
+    command_size = _positive_decimal_or_none(command.get("size"))
+    requested = _positive_decimal_or_none(command.get("submission_size"))
+    command_price = _positive_decimal_or_none(command.get("price"))
+    submitted_price = _positive_decimal_or_none(command.get("submission_price"))
+    if not facts["count"] or any(
+        value is None
+        for value in (
+            filled,
+            fill_price,
+            command_size,
+            requested,
+            command_price,
+            submitted_price,
+        )
+    ):
         return "stayed"
+    if command_size != requested or command_price != submitted_price:
+        raise ValueError("authenticated entry command/envelope economics mismatch")
     if not _fill_price_respects_limit(
         fill_price,
-        command.get("price"),
+        submitted_price,
         side=command.get("side"),
     ):
         raise ValueError("authenticated entry fill is worse than submitted limit")
     tolerance = Decimal("0.01")
-    if filled - requested > tolerance:
-        raise ValueError("authenticated entry fill exceeds submitted size")
+    share_overfill = filled - requested > tolerance
+    order_type = str(command.get("submission_order_type") or "").upper()
+    order_type = order_type.removesuffix("_LIMIT")
+    filled_notional = filled * fill_price
+    submitted_notional = requested * submitted_price
+    price_improved_fak_overfill = bool(
+        share_overfill
+        and str(command.get("side") or "").upper() == "BUY"
+        and order_type == "FAK"
+        and filled_notional <= submitted_notional
+    )
+    if share_overfill and not price_improved_fak_overfill:
+        raise ValueError(
+            "authenticated entry fill exceeds submitted share/capital bound"
+        )
     if _latest_order_fact_matched_size(
         conn,
         command_id=command_id,
@@ -17468,6 +17570,13 @@ def _reconcile_authenticated_entry_trade_fact(
         "filled_size": _decimal_text(filled),
         "fill_price": _decimal_text(fill_price),
         "requested_size": _decimal_text(requested),
+        "filled_notional": _decimal_text(filled_notional),
+        "submitted_notional": _decimal_text(submitted_notional),
+        "fill_bound_semantics": (
+            "PRICE_IMPROVED_FAK_NOTIONAL_BOUNDED"
+            if price_improved_fak_overfill
+            else "SHARE_AND_NOTIONAL_BOUNDED"
+        ),
         "remaining_size": _decimal_text(remaining),
         "source": source,
         "required_predicates": {
@@ -17476,7 +17585,8 @@ def _reconcile_authenticated_entry_trade_fact(
             "bound_venue_order_id_matches_trade": True,
             "authenticated_confirmed_trade_facts": True,
             "fill_price_respects_submitted_limit": True,
-            "cumulative_fill_does_not_exceed_requested_size": True,
+            "cumulative_fill_within_submitted_capital_bound": True,
+            "price_improved_fak_share_overfill": price_improved_fak_overfill,
         },
         "source_proof": {
             "source_function": (
@@ -17486,6 +17596,13 @@ def _reconcile_authenticated_entry_trade_fact(
             "source_commit": "runtime",
         },
     }
+    projection_command = command
+    snapshot_market_identity: dict[str, object] | None = None
+    if not str(command.get("projected_phase") or "").strip():
+        projection_command, snapshot_market_identity = (
+            _immutable_snapshot_identity_for_missing_entry_projection(conn, command)
+        )
+
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
     sp_name = f"sp_authenticated_entry_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
@@ -17542,13 +17659,14 @@ def _reconcile_authenticated_entry_trade_fact(
 
         _ensure_entry_fill_position_event(
             conn,
-            command=command,
+            command=projection_command,
             venue_order_id=venue_order_id,
             filled_size=_decimal_text(filled),
             fill_price=_decimal_text(fill_price),
             observed_at=_coerce_iso_datetime(observed_at),
             command_event=event_type,
             order_fact_source=source,
+            authoritative_market_metadata=snapshot_market_identity,
         )
         expected_state = (
             CommandState.FILLED.value if complete else CommandState.PARTIAL.value

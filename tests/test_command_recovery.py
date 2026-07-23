@@ -2783,6 +2783,315 @@ class TestAuthenticatedEntryTradeFactProjection:
             (position_id, order_id),
         ).fetchone()[0] == 1
 
+    def test_price_improved_fak_overfill_bootstraps_missing_position(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = "cmd-authenticated-fak-price-improvement"
+        position_id = "pos-authenticated-fak-price-improvement"
+        order_id = "ord-authenticated-fak-price-improvement"
+        token_id = "tok-authenticated-fak-price-improvement"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-fak-price-improvement",
+            token_id=token_id,
+            event_slug="highest-temperature-in-singapore-on-july-24-2026",
+            order_type="FAK",
+            size=173.0,
+            price=0.09,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        conn.execute(
+            """
+            CREATE TABLE market_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_slug TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                condition_id TEXT,
+                token_id TEXT,
+                range_label TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO market_events (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "lowest-temperature-in-spoof-city-on-december-31-2099",
+                "Spoof City",
+                "2099-12-31",
+                "low",
+                "condition-test",
+                token_id,
+                "spoof mutable metadata",
+            ),
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-fak-price-improvement",
+            filled_size="189.77",
+            fill_price="0.08",
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        position = conn.execute(
+            """
+            SELECT phase, city, target_date, temperature_metric, unit, token_id,
+                   shares, cost_basis_usd, entry_price, order_id, order_status
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "city": "Singapore",
+            "target_date": "2026-07-24",
+            "temperature_metric": "high",
+            "unit": "C",
+            "token_id": token_id,
+            "shares": 189.77,
+            "cost_basis_usd": 15.1816,
+            "entry_price": 0.08,
+            "order_id": order_id,
+            "order_status": "filled",
+        }
+        fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ? AND venue_order_id = ?
+            """,
+            (command_id, order_id),
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "MATCHED",
+            "matched_size": "189.77",
+            "remaining_size": "0",
+        }
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+             FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND order_id = ?
+            """,
+            (position_id, order_id),
+        ).fetchone()[0] == 1
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price, terminal_exec_status, command_id
+              FROM execution_fact
+             WHERE position_id = ? AND order_role = 'entry'
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": 189.77,
+            "fill_price": 0.08,
+            "terminal_exec_status": "filled",
+            "command_id": command_id,
+        }
+        counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in (
+                "venue_order_facts",
+                "position_events",
+                "position_current",
+                "execution_fact",
+            )
+        }
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert counts == {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in counts
+        }
+
+    def test_missing_position_requires_parseable_immutable_snapshot(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = "cmd-authenticated-fak-invalid-snapshot"
+        position_id = "pos-authenticated-fak-invalid-snapshot"
+        order_id = "ord-authenticated-fak-invalid-snapshot"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-fak-invalid-snapshot",
+            token_id="tok-authenticated-fak-invalid-snapshot",
+            event_slug="not-a-weather-event",
+            order_type="FAK",
+            size=173.0,
+            price=0.09,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-fak-invalid-snapshot",
+            filled_size="189.77",
+            fill_price="0.08",
+        )
+
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        ) == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+        assert _get_state(conn, command_id) == "ACKED"
+        for table in ("venue_order_facts", "position_events", "position_current", "execution_fact"):
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE "
+                + (
+                    "command_id = ?"
+                    if table != "position_current"
+                    else "position_id = ?"
+                ),
+                (command_id if table != "position_current" else position_id,),
+            ).fetchone()[0] == 0
+
+    def test_missing_position_projection_failure_rolls_back_fill_fold(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        from src.execution import exchange_reconcile
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        command_id = "cmd-authenticated-fak-projection-failure"
+        position_id = "pos-authenticated-fak-projection-failure"
+        order_id = "ord-authenticated-fak-projection-failure"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-fak-projection-failure",
+            token_id="tok-authenticated-fak-projection-failure",
+            event_slug="highest-temperature-in-singapore-on-july-24-2026",
+            order_type="FAK",
+            size=173.0,
+            price=0.09,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-fak-projection-failure",
+            filled_size="189.77",
+            fill_price="0.08",
+        )
+
+        def _fail_projection(*_args, **_kwargs):
+            raise RuntimeError("injected projection failure")
+
+        monkeypatch.setattr(
+            exchange_reconcile,
+            "_ensure_entry_fill_position_event",
+            _fail_projection,
+        )
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        ) == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+        assert _get_state(conn, command_id) == "ACKED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = ? "
+            "AND event_type IN ('FILL_CONFIRMED', 'PARTIAL_FILL_OBSERVED')",
+            (command_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_fact WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
+
+    @pytest.mark.parametrize(
+        ("order_type", "filled_size", "fill_price"),
+        [
+            ("FAK", "200", "0.08"),
+            ("GTC", "189.77", "0.08"),
+        ],
+    )
+    def test_share_overfill_requires_fak_and_notional_bound(
+        self,
+        conn,
+        order_type,
+        filled_size,
+        fill_price,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        suffix = f"{order_type.lower()}-{filled_size.replace('.', '_')}"
+        command_id = f"cmd-authenticated-overfill-{suffix}"
+        position_id = f"pos-authenticated-overfill-{suffix}"
+        order_id = f"ord-authenticated-overfill-{suffix}"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id=f"dec-authenticated-overfill-{suffix}",
+            token_id=f"tok-authenticated-overfill-{suffix}",
+            order_type=order_type,
+            size=173.0,
+            price=0.09,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id=f"trade-authenticated-overfill-{suffix}",
+            filled_size=filled_size,
+            fill_price=fill_price,
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+        assert _get_state(conn, command_id) == "ACKED"
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone() is None
+
     def test_partial_then_full_rebuilds_cumulative_fill_once(self, conn):
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,

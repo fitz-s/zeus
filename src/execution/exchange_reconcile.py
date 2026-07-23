@@ -4376,6 +4376,7 @@ def _missing_entry_projection_from_linked_fill(
     command: Mapping[str, Any],
     venue_order_id: str,
     observed_at: datetime,
+    authoritative_market_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Recover a monitorable position row when fill truth outruns projection.
 
@@ -4421,6 +4422,11 @@ def _missing_entry_projection_from_linked_fill(
         no_token = token_id
 
     def _meta(field: str, default: object = "") -> object:
+        if (
+            authoritative_market_metadata is not None
+            and authoritative_market_metadata.get(field) not in (None, "")
+        ):
+            return authoritative_market_metadata.get(field)
         if metadata_row is not None and metadata_row.get(field) not in (None, ""):
             return metadata_row.get(field)
         if market_event is not None and market_event.get(field) not in (None, ""):
@@ -4498,6 +4504,7 @@ def _ensure_entry_fill_position_event(
     observed_at: datetime,
     command_event: str | None = None,
     order_fact_source: str = "REST",
+    authoritative_market_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     if str(command.get("intent_kind") or "").upper() != "ENTRY":
         return
@@ -4523,6 +4530,7 @@ def _ensure_entry_fill_position_event(
             command=command,
             venue_order_id=venue_order_id,
             observed_at=observed_at,
+            authoritative_market_metadata=authoritative_market_metadata,
         )
         if current is None:
             return
