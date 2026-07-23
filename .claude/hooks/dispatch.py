@@ -1709,7 +1709,10 @@ def _run_advisory_check_maintree_git_state_guard(
     elif subcmd == "apply":
         mutating = "--check" not in sub_args.split()
     elif subcmd == "clean":
-        mutating = not any(arg in {"-n", "--dry-run"} for arg in sub_args.split())
+        mutating = not any(
+            arg == "--dry-run" or (arg.startswith("-") and not arg.startswith("--") and "n" in arg[1:])
+            for arg in sub_args.split()
+        )
     if not mutating:
         return None
 

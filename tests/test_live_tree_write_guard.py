@@ -1,5 +1,6 @@
-# Created: 2026-07-22
-# Last reused/audited: 2026-07-22
+# Lifecycle: created=2026-07-22; last_reviewed=2026-07-22; last_reused=2026-07-22
+# Purpose: Prevent agents from directly modifying the live checkout.
+# Reuse: Run after changing the live-tree write or Git-mutation guard.
 """Regression tests for the live checkout agent-write boundary."""
 
 from __future__ import annotations
@@ -86,10 +87,12 @@ def test_direct_live_git_mutations_are_blocked_but_cherry_pick_is_allowed():
 
     commit = run(f"git -C {LIVE_ROOT} commit -m forbidden")
     merge = run(f"git -C {LIVE_ROOT} merge forbidden")
+    dry_clean = run(f"git -C {LIVE_ROOT} clean -nd")
     hot_pick = run(f"git -C {LIVE_ROOT} cherry-pick deadbeef")
 
     assert commit.returncode == 2
     assert merge.returncode == 2
+    assert dry_clean.returncode == 0
     assert hot_pick.returncode == 0
 
 
