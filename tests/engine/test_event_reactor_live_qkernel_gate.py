@@ -2008,6 +2008,30 @@ def test_global_current_entry_feasibility_is_native_side_symmetric_without_price
     )
 
 
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_current_entry_feasibility_enforces_owner_strategy_floor(side):
+    def candidate(price):
+        return SimpleNamespace(
+            action="BUY",
+            side=side,
+            executable_cost_curve=SimpleNamespace(
+                levels=(SimpleNamespace(price=Decimal(price)),)
+            ),
+        )
+
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate("0.099"),
+        strategy_key="forecast_qkernel_entry",
+    ) == (
+        "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+        "strategy=forecast_qkernel_entry:ask=0.099:floor=0.1"
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate("0.10"),
+        strategy_key="forecast_qkernel_entry",
+    ) is None
+
+
 @pytest.mark.parametrize(
     ("side", "levels", "expected"),
     (

@@ -5192,14 +5192,18 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
-def _global_current_entry_feasibility_rejection_reason(candidate: object) -> str | None:
-    """Reject malformed BUYs without imposing a nominal entry-price floor.
+def _global_current_entry_feasibility_rejection_reason(
+    candidate: object,
+    *,
+    strategy_key: str | None = None,
+) -> str | None:
+    """Reject malformed or strategy-unlicensed BUY quotes before scoring.
 
-    The auction owns economic selection: current q bounds, fees, full depth,
-    robust utility, Kelly sizing, wealth, and caps determine whether either
-    YES or NO is a winner.  This adapter policy merely requires a native,
-    executable BUY quote; a low or high valid price is not a feasible-set
-    exclusion.  SELL compares against HOLD and does not consume BUY authority.
+    The auction still owns economic selection through current q bounds, fees,
+    depth, robust utility, Kelly, wealth, and caps.  The strategy registry owns
+    the narrower domain license: a BUY below its declared native entry-price
+    floor is not part of that strategy's feasible set.  SELL compares against
+    HOLD and does not consume BUY authority.
     """
 
     action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
@@ -5218,6 +5222,15 @@ def _global_current_entry_feasibility_rejection_reason(candidate: object) -> str
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
     if not best_ask.is_finite() or not Decimal("0") < best_ask < Decimal("1"):
         return "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"
+    normalized_strategy = str(strategy_key or "").strip()
+    if normalized_strategy:
+        floors = _event_bound_strategy_live_quality_floors(normalized_strategy)
+        floor = Decimal(str(floors["min_entry_price"]))
+        if best_ask + Decimal("1e-12") < floor:
+            return (
+                "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+                f"strategy={normalized_strategy}:ask={best_ask}:floor={floor}"
+            )
     return None
 
 
@@ -9350,7 +9363,20 @@ def event_bound_live_adapter_from_trade_conn(
             side = str(getattr(candidate, "side", "") or "").strip().upper()
             if owner is None or side not in {"YES", "NO"}:
                 return "GLOBAL_ENTRY_FEASIBILITY_OWNER_MISSING"
-            return _global_current_entry_feasibility_rejection_reason(candidate)
+            event_type, metric = owner
+            try:
+                strategy_key = _event_bound_strategy_key(
+                    event_type=event_type,
+                    direction=f"buy_{side.lower()}",
+                    metric=metric,
+                    require_metric_live=True,
+                )
+            except ValueError as exc:
+                return str(exc)
+            return _global_current_entry_feasibility_rejection_reason(
+                candidate,
+                strategy_key=strategy_key,
+            )
 
         try:
             result = process_current_global_batch(
