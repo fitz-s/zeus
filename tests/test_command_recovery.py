@@ -1076,7 +1076,7 @@ def test_live_tick_recovers_confirmed_review_fill_before_maintenance_budget_defe
 
     def _run_priority_pass(label, fn, **kwargs):
         if label in {
-            "already_canceled_review_fast",
+            "cancel_recovery_fast",
             "review_required_exit_mutex_release",
         }:
             return None
@@ -11056,7 +11056,7 @@ class TestRecoveryResolutionTable:
             scope="live_tick",
         )
 
-        assert summary["already_canceled_review_fast"] == {
+        assert summary["cancel_recovery_fast"] == {
             "scanned": 1,
             "advanced": 1,
             "stayed": 0,
@@ -11065,6 +11065,60 @@ class TestRecoveryResolutionTable:
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "EXPIRED"
+        finally:
+            verified.close()
+
+    def test_live_tick_prioritizes_cancel_pending_before_general_budget(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_client,
+    ):
+        """A zero DB budget cannot strand a venue-absent CANCEL_PENDING order."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+
+        db_path = tmp_path / "priority-cancel-pending.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed, size=81.0, price=0.58)
+        _advance_to_cancel_pending(seed, venue_order_id="ord-cancel-pending")
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=mock_client,
+            scope="live_tick",
+        )
+
+        assert summary["cancel_recovery_fast"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "CANCELLED"
         finally:
             verified.close()
 
