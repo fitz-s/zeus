@@ -26,7 +26,7 @@ from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.execution.order_truth_reducer import PARTIAL_WITH_REMAINDER, TERMINAL_FILLED, VenueOrderTruthReducer
 from src.execution.settlement_commands import SettlementState, _atomic_transition, reconcile_pending_redeems, request_redeem
 from src.state.collateral_ledger import init_collateral_schema
-from src.state.db import _install_connection_functions, init_schema
+from src.state.db import _install_connection_functions, init_schema, init_schema_trade_only
 from src.state.decision_events import write_decision_event
 from src.state.no_trade_events import write_no_trade_event
 from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -67,6 +67,7 @@ class ReplayHarness:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         init_schema(conn)
+        init_schema_trade_only(conn)
         # Single-connection harness plays both DB roles; since 1b51db387 the
         # world init_schema no longer creates trade-class tables (K1 split),
         # so the collateral schema must be initialized explicitly.

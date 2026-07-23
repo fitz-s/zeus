@@ -55,7 +55,7 @@ from src.engine.event_reactor_adapter import (
     _latest_snapshot_rows_for_event_family,
     _snapshot_token_maps_by_condition,
 )
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.snapshot_repo import get_snapshot
 
 NOW = datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc)
@@ -172,6 +172,7 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
+    init_schema_trade_only(c)
     yield c
     c.close()
 

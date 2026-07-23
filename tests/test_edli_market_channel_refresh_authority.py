@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +37,7 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    init_schema_trade_only(conn)
     return conn
 
 

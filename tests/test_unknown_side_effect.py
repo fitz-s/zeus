@@ -146,7 +146,7 @@ def _insert_actionable_certificate(conn: sqlite3.Connection, *, token_id: str, p
 @pytest.fixture
 def conn(monkeypatch):
     """In-memory trades DB with live-money gates neutralized for unit tests."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
 
@@ -154,6 +154,7 @@ def conn(monkeypatch):
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     init_collateral_schema(c)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)

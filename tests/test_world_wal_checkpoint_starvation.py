@@ -36,7 +36,7 @@ This test reproduces the disease at the raw-SQLite level (no production import
 needed for the mechanism proof) using literal TRUNCATE calls, since TRUNCATE is
 the mode where "BUSY while a reader pins the floor" / "shrinks once released"
 is easiest to observe directly. Probe 3 then asserts what the production
-helper (``checkpoint_world_wal``) actually runs — PASSIVE, not TRUNCATE (W5-3,
+helper (``checkpoint_wal``) actually runs — PASSIVE, not TRUNCATE (W5-3,
 2026-07-21: this file previously assumed TRUNCATE; the implementation has
 always run PASSIVE, for live-writer-priority reasons — see that function's
 docstring): it drains the log fully once no reader pins the floor, but unlike
@@ -170,19 +170,19 @@ def test_released_reader_lets_checkpoint_truncate(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Probe 3: the db.py production helper truncates the world WAL.
+# Probe 3: the db.py production helper drains the WAL.
 # ---------------------------------------------------------------------------
 
-def test_checkpoint_world_wal_helper_drains_without_truncating(tmp_path: Path, monkeypatch) -> None:
-    """``checkpoint_world_wal`` runs wal_checkpoint(PASSIVE) on zeus-world.db and
-    returns the (busy, log_frames, checkpointed_frames) triple for observability.
+def test_checkpoint_wal_helper_drains_without_truncating(tmp_path: Path) -> None:
+    """``checkpoint_wal`` (the one helper shared by all three canonical DBs since
+    the 2026-07-23 residue dissolve) runs wal_checkpoint(PASSIVE) and returns the
+    (busy, log_frames, checkpointed_frames, page_size) quad for observability.
     With no competing reader, PASSIVE fully drains the log (checkpointed_frames
     == log_frames) — but unlike TRUNCATE it never shrinks the -wal file itself;
     that is intentional (live-writer priority), not a bug (W5-3)."""
     from src.state import db as db_module
 
     world_db = tmp_path / "zeus-world.db"
-    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db, raising=True)
 
     writer = _open_wal(world_db)
     _write_many_frames(writer, n=2000)
@@ -195,10 +195,10 @@ def test_checkpoint_world_wal_helper_drains_without_truncating(tmp_path: Path, m
     wal_before = _wal_size_bytes(world_db)
     assert wal_before > 0
 
-    result = db_module.checkpoint_world_wal()
+    result = db_module.checkpoint_wal(world_db)
 
     assert isinstance(result, tuple) and len(result) == 4, (
-        f"checkpoint_world_wal must return a 4-tuple "
+        f"checkpoint_wal must return a 4-tuple "
         f"(busy, log_frames, checkpointed_frames, page_size), got {result!r}"
     )
     busy, log_frames, ckpt_frames, page_size = result
@@ -222,8 +222,8 @@ def test_checkpoint_world_wal_helper_drains_without_truncating(tmp_path: Path, m
 # ---------------------------------------------------------------------------
 
 def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
-    """``_world_wal_checkpoint_cycle`` invokes ``checkpoint_world_wal`` and logs
-    the (busy, log_frames, checkpointed_frames) triple. A starved result (not
+    """``_world_wal_checkpoint_cycle`` invokes ``checkpoint_wal`` and logs the
+    (busy, log_frames, checkpointed_frames) triple. A starved result (not
     draining AND past the healthy oscillation band — W5-2 fix, 2026-07-21) is
     logged at WARNING (loud, not silent); a healthy result at INFO."""
     import logging
@@ -241,16 +241,16 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     # Patch the helper at the source module so the job's local import resolves it.
     calls = {"n": 0}
 
-    def _fake_checkpoint() -> tuple[int, int, int, int]:
+    def _fake_checkpoint(_db_path) -> tuple[int, int, int, int]:
         calls["n"] += 1
         return (0, 5, 5, 4096)  # PASSIVE busy=0, fully drained -> healthy
 
-    monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_checkpoint, raising=True)
+    monkeypatch.setattr(db_module, "checkpoint_wal", _fake_checkpoint, raising=True)
 
     with caplog.at_level(logging.INFO):
         main_module._world_wal_checkpoint_cycle()
 
-    assert calls["n"] == 1, "job must invoke checkpoint_world_wal exactly once"
+    assert calls["n"] == 1, "job must invoke checkpoint_wal exactly once"
     log_text = "\n".join(r.getMessage() for r in caplog.records)
     assert "world WAL checkpoint" in log_text, f"job must log the checkpoint result; got: {log_text!r}"
     assert "busy=0" in log_text and "checkpointed=5" in log_text, (
@@ -264,10 +264,10 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     caplog.clear()
     starved_frames = main_module._WAL_STARVATION_BACKLOG_BYTES // 4096 + 1
 
-    def _fake_starved() -> tuple[int, int, int, int]:
+    def _fake_starved(_db_path) -> tuple[int, int, int, int]:
         return (0, starved_frames, 0, 4096)
 
-    monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_starved, raising=True)
+    monkeypatch.setattr(db_module, "checkpoint_wal", _fake_starved, raising=True)
     with caplog.at_level(logging.WARNING):
         main_module._world_wal_checkpoint_cycle()
     warn_text = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
@@ -281,10 +281,10 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     # re-review 2026-07-22).
     caplog.clear()
 
-    def _fake_contended() -> tuple[int, int, int, int]:
+    def _fake_contended(_db_path) -> tuple[int, int, int, int]:
         return (1, starved_frames, 0, 4096)  # busy=1 but frames would trip BACKLOG
 
-    monkeypatch.setattr(db_module, "checkpoint_world_wal", _fake_contended, raising=True)
+    monkeypatch.setattr(db_module, "checkpoint_wal", _fake_contended, raising=True)
     with caplog.at_level(logging.INFO):
         main_module._world_wal_checkpoint_cycle()
     text = "\n".join(r.getMessage() for r in caplog.records)

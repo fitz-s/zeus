@@ -20,7 +20,7 @@ from src.contracts.executable_market_snapshot import (
     StaleMarketSnapshotError,
 )
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import (
     append_event,
@@ -49,6 +49,7 @@ def conn():
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     yield c
     c.close()
 

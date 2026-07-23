@@ -398,10 +398,11 @@ class TestR2V2PreflightBlocksPlacement:
     def _mem_conn(self):
         """In-memory DB with schema for P1.S3 persist phase."""
         import sqlite3 as _sqlite3
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         c = _sqlite3.connect(":memory:")
         c.row_factory = _sqlite3.Row
         init_schema(c)
+        init_schema_trade_only(c)
         yield c
         c.close()
 
