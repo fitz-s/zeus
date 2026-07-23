@@ -305,7 +305,7 @@ test_trust_policy:
     tests/test_backtest_training_eligibility.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-15"}
-    tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-07-14"}
+    tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-07-23"}
     tests/test_solar_append_future_window.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_data_density_discount_v2.py: {created: "2026-05-03", last_used: "2026-05-15"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-07-17", note: "Ensemble cache, source-role gates, provenance, and pre-request shared quota reservation."}

@@ -2133,6 +2133,33 @@ def _entry_same_token_cooldown_component(
             "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
             "rest_pull_cancel_reason": reprice_cancel_reason,
         }
+    no_fill_redecision_proof = (
+        _entry_terminal_no_fill_redecision_proof(conn, command_id=command_id)
+        if terminal_no_fill
+        else None
+    )
+    if no_fill_redecision_proof == "pre_submit_db_lock":
+        # The exact proof says the adapter never crossed POST and canonical
+        # order/trade facts are absent. Re-decision must therefore recapture a
+        # fresh quote immediately; applying the generic terminal-no-fill
+        # cooldown only turns local writer contention into lost alpha.
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_terminal_pre_submit_db_lock_no_fill_redecision",
+            "terminal_no_fill_redecision_proof": no_fill_redecision_proof,
+            "cooldown_seconds": 0,
+            "age_seconds": int(age_seconds),
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+            "existing_updated_at": str(updated_at or ""),
+            "existing_created_at": str(created_at or ""),
+            "existing_price": str(prior_price or ""),
+            "existing_size": str(prior_size or ""),
+            "candidate_price": str(limit_price or ""),
+            "candidate_shares": str(shares or ""),
+        }
     if remaining_seconds > 0:
         return {
             "component": "entry_same_token_cooldown",
@@ -2154,11 +2181,6 @@ def _entry_same_token_cooldown_component(
             "candidate_price": str(limit_price or ""),
             "candidate_shares": str(shares or ""),
         }
-    no_fill_redecision_proof = (
-        _entry_terminal_no_fill_redecision_proof(conn, command_id=command_id)
-        if terminal_no_fill
-        else None
-    )
     if no_fill_redecision_proof:
         return {
             "component": "entry_same_token_cooldown",
