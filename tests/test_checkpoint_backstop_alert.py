@@ -104,8 +104,9 @@ def test_quiet_on_failed_checkpoint_sentinel() -> None:
 
 
 # ---------------------------------------------------------------------------
-# checkpoint_forecasts_wal: W5-4, the forecasts twin of checkpoint_world_wal /
-# checkpoint_trades_wal.
+# checkpoint_wal: the one PASSIVE-checkpoint helper shared by all three
+# canonical DBs (residue dissolve 2026-07-23 collapsed the world/trades/
+# forecasts triplets into this single path-parameterized function).
 # ---------------------------------------------------------------------------
 
 def _wal_size_bytes(db_path: Path) -> int:
@@ -120,14 +121,12 @@ def _open_wal(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def test_checkpoint_forecasts_wal_returns_quad_against_tmp_db(tmp_path: Path, monkeypatch) -> None:
-    """``checkpoint_forecasts_wal`` runs against a tmp zeus-forecasts.db and
-    returns the (busy, log_frames, checkpointed_frames, page_size) 4-tuple,
-    mirroring checkpoint_world_wal / checkpoint_trades_wal exactly."""
+def test_checkpoint_wal_returns_quad_against_tmp_db(tmp_path: Path) -> None:
+    """``checkpoint_wal`` runs against a tmp WAL DB and returns the
+    (busy, log_frames, checkpointed_frames, page_size) 4-tuple."""
     from src.state import db as db_module
 
     forecasts_db = tmp_path / "zeus-forecasts.db"
-    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_db, raising=True)
 
     writer = _open_wal(forecasts_db)
     writer.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, blob TEXT)")
@@ -143,10 +142,10 @@ def test_checkpoint_forecasts_wal_returns_quad_against_tmp_db(tmp_path: Path, mo
     wal_before = _wal_size_bytes(forecasts_db)
     assert wal_before > 0, "precondition: WAL must have frames to checkpoint"
 
-    result = db_module.checkpoint_forecasts_wal()
+    result = db_module.checkpoint_wal(forecasts_db)
 
     assert isinstance(result, tuple) and len(result) == 4, (
-        f"checkpoint_forecasts_wal must return a 4-tuple "
+        f"checkpoint_wal must return a 4-tuple "
         f"(busy, log_frames, checkpointed_frames, page_size), got {result!r}"
     )
     busy, log_frames, ckpt_frames, page_size = result

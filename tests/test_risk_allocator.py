@@ -108,12 +108,13 @@ def _state(**kwargs):
 
 
 def _trade_conn() -> sqlite3.Connection:
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     init_schema(conn)
+    init_schema_trade_only(conn)
     return conn
 
 

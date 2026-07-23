@@ -26,7 +26,14 @@ import argparse
 import json
 import sqlite3
 import sys
+from pathlib import Path
 from typing import Any
+
+_ROOT = str(Path(__file__).resolve().parents[1])
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from src.analysis.epoch import ANALYSIS_EPOCH_NAIVE  # noqa: E402
 
 TRADES_DB = "file:state/zeus_trades.db?mode=ro"
 WORLD_DB = "file:state/zeus-world.db?mode=ro"
@@ -159,7 +166,11 @@ def main() -> int:
     ap.add_argument("--since", default="2026-06-10T06:00:00")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
-    code, results = verify(args.since)
+    # Floored at ANALYSIS_EPOCH_NAIVE: pre-epoch rows are archived out of
+    # zeus_trades.db (scripts/ops/archive_pre_epoch_trades.py); the stale
+    # 2026-06-10 default predates the epoch and must never resolve there again.
+    since = max(args.since, ANALYSIS_EPOCH_NAIVE)
+    code, results = verify(since)
     if args.json:
         print(json.dumps(results, indent=1, default=str))
     else:
@@ -171,7 +182,7 @@ def main() -> int:
             for k, v in r["checks"].items():
                 print(f"    {k}: {v}")
     if code == 3:
-        print("no venue commands since", args.since)
+        print("no venue commands since", since)
     return code
 
 

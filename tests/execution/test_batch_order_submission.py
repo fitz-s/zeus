@@ -26,13 +26,14 @@ _NOW = datetime(2026, 7, 2, tzinfo=timezone.utc)
 
 @pytest.fixture
 def mem_conn():
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     init_collateral_schema(c)
     yield c
     c.close()

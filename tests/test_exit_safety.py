@@ -24,13 +24,14 @@ _CTF_SCALE = 1_000_000
 
 @pytest.fixture
 def conn():
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     init_collateral_schema(c)
     yield c
     c.close()
@@ -426,12 +427,13 @@ def test_cancel_requested_persists_execution_capability_before_cancel_callable(c
 def test_cancel_caller_connection_commits_requested_before_cancel_callable(tmp_path, monkeypatch):
     from src.execution.exit_safety import request_cancel_for_command
     from src.state.collateral_ledger import init_collateral_schema
-    from src.state.db import get_connection, init_schema
+    from src.state.db import get_connection, init_schema, init_schema_trade_only
 
     monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "100")
     db_path = tmp_path / "cancel-caller-conn-durable.db"
     setup_conn = get_connection(db_path)
     init_schema(setup_conn)
+    init_schema_trade_only(setup_conn)
     init_collateral_schema(setup_conn)
     _insert_exit_command(setup_conn, venue_order_id="ord-1")
     _ack_exit(setup_conn)
@@ -440,11 +442,13 @@ def test_cancel_caller_connection_commits_requested_before_cancel_callable(tmp_p
 
     submit_conn = get_connection(db_path)
     init_schema(submit_conn)
+    init_schema_trade_only(submit_conn)
     observed = {}
 
     def cancel(order_id: str):
         read_conn = get_connection(db_path)
         init_schema(read_conn)
+        init_schema_trade_only(read_conn)
         try:
             row = read_conn.execute(
                 """
@@ -3428,16 +3432,18 @@ def test_exit_snapshot_deadline_cannot_be_extended_by_caller(conn, monkeypatch):
 
 def test_execute_exit_order_rejects_submit_connection_snapshot_hash_drift(monkeypatch):
     from src.execution.executor import create_exit_order_intent, execute_exit_order
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     decision_conn = sqlite3.connect(":memory:")
     decision_conn.row_factory = sqlite3.Row
     decision_conn.execute("PRAGMA foreign_keys=ON")
     init_schema(decision_conn)
+    init_schema_trade_only(decision_conn)
     submit_conn = sqlite3.connect(":memory:")
     submit_conn.row_factory = sqlite3.Row
     submit_conn.execute("PRAGMA foreign_keys=ON")
     init_schema(submit_conn)
+    init_schema_trade_only(submit_conn)
     snapshot_id = "snap-exit-drift"
     _ensure_snapshot(decision_conn, snapshot_id=snapshot_id, raw_orderbook_hash="c" * 64)
     _ensure_snapshot(submit_conn, snapshot_id=snapshot_id, raw_orderbook_hash="d" * 64)

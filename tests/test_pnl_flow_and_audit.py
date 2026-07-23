@@ -43,6 +43,7 @@ from src.state.db import (
     _create_readiness_state,
     get_connection,
     init_schema,
+    init_schema_trade_only,
     log_settlement_event,
     query_portfolio_loader_view,
     query_position_current_status_view,
@@ -1163,6 +1164,7 @@ def test_status_summary_separates_current_open_entry_orders_from_cycle_submissio
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     now = datetime.now(timezone.utc).isoformat()
     later = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
     _insert_position_current_row(
@@ -1513,6 +1515,7 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
     status_path.write_text(
         json.dumps(
@@ -1578,6 +1581,7 @@ def test_write_cycle_pulse_clears_prior_process_boot_block(monkeypatch, tmp_path
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
     status_path.write_text(
         json.dumps(
@@ -1754,6 +1758,7 @@ def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
 
     class DummyClob:
@@ -2038,6 +2043,7 @@ def test_status_summary_cycle_pulse_refreshes_current_open_entry_orders(monkeypa
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     now = datetime.now(timezone.utc).isoformat()
     status_path.write_text(
         json.dumps(
@@ -3278,6 +3284,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.execute(
         "INSERT INTO model_bias (city, season, source, bias, mae, n_samples, discount_factor) VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("NYC", "MAM", "ecmwf", 1.5, 2.0, 20, 0.7),
@@ -3390,6 +3397,7 @@ def test_inv_daily_loss_enforced(monkeypatch, tmp_path):
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(zeus_db)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
 
     portfolio = PortfolioState(
@@ -3423,6 +3431,7 @@ def test_inv_riskguard_does_not_promote_legacy_settlement_pnl(monkeypatch, tmp_p
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(zeus_db)
     init_schema(conn)
+    init_schema_trade_only(conn)
     store_settlement_records(conn, [
         SettlementRecord(
             trade_id="trade-1",
@@ -3480,6 +3489,7 @@ def test_inv_status_summary_does_not_promote_legacy_realized_truth(monkeypatch, 
     status_path = tmp_path / "status_summary.json"
     conn = get_connection(zeus_db)
     init_schema(conn)
+    init_schema_trade_only(conn)
     store_settlement_records(conn, [
         SettlementRecord(
             trade_id="trade-1",
@@ -3554,6 +3564,7 @@ def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(zeus_db)
     init_schema(conn)
+    init_schema_trade_only(conn)
     store_settlement_records(conn, [
         SettlementRecord(
             trade_id="trade-1",
@@ -3597,6 +3608,7 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(zeus_db)
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     pos = Position(
         trade_id="rt-settle-auth",
@@ -3702,6 +3714,7 @@ def test_inv_riskguard_falls_back_to_legacy_settlement_source(monkeypatch, tmp_p
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(zeus_db)
     init_schema(conn)
+    init_schema_trade_only(conn)
     store_settlement_records(conn, [
         SettlementRecord(
             trade_id="legacy-settle",
@@ -3748,6 +3761,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
     _create_calibration_pairs(conn)  # Cluster A: FK dep needed post K1 split
 
@@ -3974,6 +3988,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
     _create_calibration_pairs(conn)  # Cluster A: FK dep needed post K1 split
 
@@ -4122,6 +4137,7 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
     _create_calibration_pairs(conn)  # Cluster A: FK dep needed post K1 split
 
@@ -4259,6 +4275,7 @@ def test_query_position_current_status_view_ignores_terminal_trade_decision_shad
     conn = get_connection(db_path)
     apply_architecture_kernel_schema(conn)
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     _insert_position_current_row(
         conn,
@@ -4321,6 +4338,7 @@ def test_position_current_views_ignore_terminal_trade_decision_shadow_status_whe
     current_conn = get_connection(current_db)
     apply_architecture_kernel_schema(current_conn)
     init_schema(current_conn)
+    init_schema_trade_only(current_conn)
     _insert_position_current_row(
         current_conn,
         position_id="trade-lagged",
@@ -4335,6 +4353,7 @@ def test_position_current_views_ignore_terminal_trade_decision_shadow_status_whe
 
     legacy_conn = get_connection(legacy_db)
     init_schema(legacy_conn)
+    init_schema_trade_only(legacy_conn)
     legacy_conn.execute(
         """
         INSERT INTO trade_decisions (
@@ -4385,6 +4404,7 @@ def test_harvester_settlement_chronicle_event_carries_exit_price(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     pos = _position(
         trade_id="trade-settle",

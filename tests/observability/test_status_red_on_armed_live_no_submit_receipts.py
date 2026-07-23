@@ -43,8 +43,9 @@ def _make_in_memory_db_with_submit_events(
     """Return an in-memory DB with schema + optional submit events seeded."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     for i, event_type in enumerate(event_types):
         # Insert a minimal command row to satisfy FK, then the event.

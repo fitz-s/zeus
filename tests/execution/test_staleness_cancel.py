@@ -161,11 +161,12 @@ class TestQVersionStaleCancel:
 
 
 def _trade_db() -> sqlite3.Connection:
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    init_schema_trade_only(conn)
     return conn
 
 
@@ -1120,7 +1121,7 @@ class TestMainC3StalenessCancelCycleGlue:
         import src.execution.command_recovery as command_recovery_module
         import src.main as main_module
         import src.state.db as state_db
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.schema.v2_schema import apply_canonical_schema
 
         trade_db_path = tmp_path / "trade.db"
@@ -1129,6 +1130,7 @@ class TestMainC3StalenessCancelCycleGlue:
         seed_trade = sqlite3.connect(str(trade_db_path))
         seed_trade.row_factory = sqlite3.Row
         init_schema(seed_trade)
+        init_schema_trade_only(seed_trade)
         _seed_open_entry(
             seed_trade, command_id="c1", token_id="tok1", venue_order_id="v1",
             q_version=None,
@@ -1223,7 +1225,7 @@ class TestMainC3StalenessCancelCycleGlue:
         import src.execution.command_recovery as command_recovery_module
         import src.main as main_module
         import src.state.db as state_db
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
         from src.state.schema.v2_schema import apply_canonical_schema
 
         trade_db_path = tmp_path / "trade.db"
@@ -1232,6 +1234,7 @@ class TestMainC3StalenessCancelCycleGlue:
         seed_trade = sqlite3.connect(str(trade_db_path))
         seed_trade.row_factory = sqlite3.Row
         init_schema(seed_trade)
+        init_schema_trade_only(seed_trade)
         _seed_open_entry(
             seed_trade, command_id="c1", token_id="tok1", venue_order_id="v1",
             q_version=None,

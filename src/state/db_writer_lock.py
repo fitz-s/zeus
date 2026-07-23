@@ -775,6 +775,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/migrations/202607_regret_decompositions_drop_dead_fk.py",  # operator_invoked + daemon-fenced: --dry-run default; drops the dead regret_decompositions FK with --apply (world DB, 0 rows); daemon never imports
         "scripts/ops/reconcile_settlement_outcomes.py",  # read_only_ro_uri: opens trade+forecasts DBs via file:...?mode=ro&query_only; SELECT-only cross-DB settled-vs-outcome anti-join; writes stdout only; daemon never imports
         "scripts/ops/backup_canonical_dbs.py",  # operator_invoked: SQLite backup API reads each canonical DB (incl. WAL) into an EXTERNAL backup file + streamed SHA-256; never writes canonical DBs; daemon never imports
+        "scripts/ops/archive_pre_epoch_trades.py",  # operator_invoked: dry-run default; --execute copies pre-epoch trade rows into a NEW archive DB then deletes them from zeus_trades.db in FK-ordered batches, gated on an open-position precondition + a same-day backup manifest ack; daemon never imports
         "scripts/ops/db_safety_gates.py",  # read_only: combined preflight (dangling-FK + manifest-rot + stray-decoy); SELECT-only inspection; writes stdout only; daemon never imports
         "scripts/ops/audit_manifest_rot.py",  # read_only: manifest-rot heuristic writer scan; SELECT-only + static text scan; writes stdout only; daemon never imports
         "scripts/replay_probability_edge_bin_sanity.py", # read_only (SELECT-only; LIVE-PROB-P0 §D.4 replay)

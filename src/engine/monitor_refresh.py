@@ -4402,6 +4402,18 @@ def _target_day_has_canonical_observation(conn, position: Position) -> bool:
     )
 
 
+def _target_day_has_canonical_observation_now(position: Position) -> bool:
+    """Revalidate a cached zero-observation proof against canonical truth."""
+
+    from src.state.db import get_world_connection_read_only
+
+    world = get_world_connection_read_only()
+    try:
+        return _target_day_has_canonical_observation(world, position)
+    finally:
+        world.close()
+
+
 def _materialize_current_global_day0_probability(
     position: Position,
     snapshot: _CurrentGlobalDay0FamilySnapshot,
@@ -4470,7 +4482,7 @@ def _materialize_current_global_day0_probability(
     elif is_unobserved_prefix_replacement:
         _append_monitor_validation(
             refreshed,
-            "day0_unobserved_prefix_within_start_grace:"
+            "day0_unobserved_prefix_zero_observation_proven:"
             "replacement_global_probability_authority",
         )
     elif is_provisional_observation_replacement:
@@ -4593,11 +4605,6 @@ def _build_current_global_day0_family_snapshot(
         unobserved_prefix = bool(
             city is not None
             and not _target_day_has_canonical_observation(world, position)
-            and _within_day0_observation_start_grace(
-                city,
-                position.target_date,
-                now=now,
-            )
         )
         try:
             prepared = _prepare_current_global_probability_family(
@@ -4730,18 +4737,32 @@ def _refresh_current_global_day0_probability(
         if family_cache is not None
         else ()
     )
-    for snapshot in cached_snapshots:
+    for snapshot in tuple(cached_snapshots):
         if _day0_family_snapshot_covers_condition(snapshot, condition_id):
+            if (
+                snapshot.probability_authority
+                == "replacement_unobserved_day0_prefix_global_probability_v1"
+                and _target_day_has_canonical_observation_now(position)
+            ):
+                cached_snapshots.remove(snapshot)
+                _cnt_inc("monitor_day0_unobserved_snapshot_cache_invalidated_total")
+                continue
             _cnt_inc("monitor_day0_family_snapshot_cache_hit_total")
             return _materialize_current_global_day0_probability(position, snapshot)
     if family_cache is not None:
         cached_failure = family_cache.failures.get(family_key)
         if cached_failure is not None:
-            _cnt_inc("monitor_day0_family_failure_cache_hit_total")
             failure_type, reason = cached_failure
             if failure_type is _Day0UnobservedPrefixUnavailable:
-                raise _Day0UnobservedPrefixUnavailable(reason)
-            raise _CachedCurrentGlobalDay0FamilyError(reason)
+                if _target_day_has_canonical_observation_now(position):
+                    del family_cache.failures[family_key]
+                    _cnt_inc("monitor_day0_unobserved_failure_cache_invalidated_total")
+                else:
+                    _cnt_inc("monitor_day0_family_failure_cache_hit_total")
+                    raise _Day0UnobservedPrefixUnavailable(reason)
+            else:
+                _cnt_inc("monitor_day0_family_failure_cache_hit_total")
+                raise _CachedCurrentGlobalDay0FamilyError(reason)
 
     try:
         snapshot = _build_current_global_day0_family_snapshot(
@@ -4769,10 +4790,20 @@ def _refresh_day0_unobserved_prefix_probability(
     *,
     city,
     target_d,
+    zero_observation_proven: bool = False,
 ) -> tuple[float, Position, bool] | None:
-    """Keep current belief continuous before the first target-day observation."""
+    """Keep current belief continuous before the first target-day observation.
 
-    if not _within_day0_observation_start_grace(city, target_d):
+    A typed zero-observation result is stronger than the source-coverage grace:
+    it proves no Day0 evidence exists yet, so local midnight cannot invalidate a
+    fresh full-day posterior.  Generic observation failures retain the bounded
+    grace because they do not prove that the Day0 evidence plane is empty.
+    """
+
+    if (
+        not zero_observation_proven
+        and not _within_day0_observation_start_grace(city, target_d)
+    ):
         return None
 
     metric = resolve_position_metric(position)[0]
@@ -4805,11 +4836,23 @@ def _refresh_day0_unobserved_prefix_probability(
     refreshed.selected_method = SELECTED_METHOD_REPLACEMENT_POSTERIOR
     _append_monitor_validation(
         refreshed,
-        "day0_unobserved_prefix_within_start_grace:replacement_posterior_authority",
+        (
+            "day0_unobserved_prefix_zero_observation_proven:"
+            "replacement_posterior_authority"
+            if zero_observation_proven
+            else "day0_unobserved_prefix_within_start_grace:"
+            "replacement_posterior_authority"
+        ),
     )
     _append_monitor_validation(
         refreshed,
-        "day0_observation_unavailable_within_start_grace:replacement_posterior_authority",
+        (
+            "day0_observation_unavailable_zero_observation_proven:"
+            "replacement_posterior_authority"
+            if zero_observation_proven
+            else "day0_observation_unavailable_within_start_grace:"
+            "replacement_posterior_authority"
+        ),
     )
     _append_monitor_validation(refreshed, belief.freshness_validation())
     _set_monitor_probability_fresh(refreshed, True)
@@ -4988,6 +5031,7 @@ def monitor_probability_refresh(
                         pos,
                         city=city,
                         target_d=target_d,
+                        zero_observation_proven=True,
                     )
                     if unobserved_prefix is not None:
                         return unobserved_prefix
