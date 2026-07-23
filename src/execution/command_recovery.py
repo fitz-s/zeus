@@ -9870,6 +9870,100 @@ def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list
     return [_dict_row(row) for row in rows]
 
 
+def _clear_review_required_terminal_partial(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    order_fact: Mapping[str, object],
+    trade_summary: Mapping[str, object],
+) -> bool:
+    """Restore PARTIAL when exact venue facts prove a zero-remainder fill."""
+
+    fact_state = str(order_fact.get("state") or "").upper()
+    matched = _positive_decimal_or_none(order_fact.get("matched_size"))
+    filled = _positive_decimal_or_none(trade_summary.get("filled_size"))
+    requested = _positive_decimal_or_none(command.get("size"))
+    remaining = _decimal_or_none(order_fact.get("remaining_size"))
+    if not (
+        fact_state in {"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
+        and int(trade_summary.get("count") or 0) > 0
+        and matched is not None
+        and filled == matched
+        and requested is not None
+        and filled < requested
+        and remaining is not None
+        and remaining == 0
+    ):
+        return False
+
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    observed_at = str(
+        order_fact.get("venue_timestamp")
+        or order_fact.get("observed_at")
+        or trade_summary.get("observed_at")
+        or _now_iso()
+    )
+    filled_size = format(filled, "f")
+    payload = {
+        "reason": "terminal_partial_order_fact_corrected",
+        "proof_class": "terminal_partial_order_fact",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": venue_order_id,
+        "matched_size": filled_size,
+        "filled_size": filled_size,
+        "remaining_size": "0",
+        "requested_size": str(command.get("size") or ""),
+        "latest_order_fact_id": order_fact.get("fact_id"),
+        "latest_order_fact_state": order_fact.get("state"),
+        "latest_order_fact_source": order_fact.get("source"),
+        "latest_order_fact_observed_at": order_fact.get("observed_at"),
+        "required_predicates": {
+            "terminal_order_remainder_zero": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
+            "cumulative_fill_below_requested_size": True,
+        },
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": (
+                "command_recovery."
+                "reconcile_matched_cancel_review_required_entries"
+            ),
+            "source_reason": "review_required_terminal_partial_clearance",
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": observed_at,
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+    sp_name = f"sp_terminal_partial_review_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
+            occurred_at=observed_at,
+            payload=payload,
+        )
+        if str(command.get("intent_kind") or "").upper() == "ENTRY":
+            _append_matched_order_fill_projection(
+                conn,
+                command=dict(command),
+                venue_order_id=venue_order_id,
+                matched_size=filled_size,
+                fill_price=str(trade_summary.get("fill_price") or command.get("price") or ""),
+                observed_at=observed_at,
+                order_fact_source=str(order_fact.get("source") or "REST"),
+            )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    return True
+
+
 def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -> dict:
     """Clear REVIEW_REQUIRED entries when canonical venue facts prove a fill.
 
@@ -9931,6 +10025,14 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                 command_id=command_id,
                 venue_order_id=venue_order_id,
             )
+            if order_fact and _clear_review_required_terminal_partial(
+                conn,
+                command=command,
+                order_fact=order_fact,
+                trade_summary=trade_summary,
+            ):
+                summary["advanced"] += 1
+                continue
             if (
                 len(confirmed_rows) == 1
                 and order_fact

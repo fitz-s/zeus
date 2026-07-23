@@ -203,7 +203,10 @@ world. Current member values stay in memory for settlement-preimage hit counts;
 their hash, count, and resulting per-bin bounds are persisted as provenance. The
 historical `FAR_TAIL_LCB_FLOOR` is not applied on this source-clock route. Day0
 absorbing observation facts dominate the forecast ambiguity band and are not
-widened by it. Missing or invalid current members block source-clock bound
+widened by it. Local midnight without a causal target-day observation is not an
+absorbing fact: held-position redecision continues to use the fresh replacement
+carrier until the first observation arrives, while entry remains coverage-gated.
+Missing or invalid current members block source-clock bound
 construction; it never invents an arbitrary probability cap or historical
 fallback.
 

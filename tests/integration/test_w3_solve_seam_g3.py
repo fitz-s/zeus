@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-23
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -3730,6 +3730,32 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         )
     assert len(reads) == reads_before
     observations.execute("DELETE FROM observation_instants")
+    after_grace = decision_at + _dt.timedelta(
+        hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS + 1
+    )
+    held_after_grace = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=after_grace,
+        max_age=_dt.timedelta(seconds=30),
+        allow_unobserved_day0_replacement=True,
+        entry_authority=False,
+    )
+    held_after_grace_bin_id = next(
+        binding.bin_id
+        for binding in held_after_grace.probability_witness.bindings
+        if binding.condition_id == "c14"
+    )
+    held_after_grace_yes = family_payoff_q_samples(
+        held_after_grace.probability_witness,
+        bin_id=held_after_grace_bin_id,
+        side="YES",
+    )
+    assert held_after_grace_yes is not None
+    assert held_after_grace_yes.tolist() == pytest.approx([0.3] * 400)
+    assert len(reads) == reads_before + 1
     with pytest.raises(
         ValueError, match="GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING"
     ):
@@ -3738,16 +3764,12 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
             forecast_conn=forecast,
             topology_conn=forecast,
             observation_conn=observations,
-            decision_time=(
-                decision_at
-                + _dt.timedelta(
-                    hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS + 1
-                )
-            ),
+            decision_time=after_grace,
             max_age=_dt.timedelta(seconds=30),
             allow_unobserved_day0_replacement=True,
+            entry_authority=True,
         )
-    assert len(reads) == reads_before
+    assert len(reads) == reads_before + 1
     bundle_result["value"] = SimpleNamespace(
         ok=False,
         bundle=None,
