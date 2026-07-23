@@ -1494,7 +1494,7 @@ def append_event(
             payload=payload,
             command_id=command_id,
         )
-        _validate_terminal_partial_command_correction_payload(
+        terminal_partial = _validate_terminal_partial_command_correction_payload(
             conn=conn,
             current_state=current_state,
             event_type=event_type,
@@ -1554,7 +1554,10 @@ def append_event(
             payload={"state_after": state_after, "payload": payload},
         )
         from src.execution.command_bus import TERMINAL_STATES as _TERMINAL_COMMAND_STATES
-        if state_after in {state.value for state in _TERMINAL_COMMAND_STATES}:
+        if (
+            state_after in {state.value for state in _TERMINAL_COMMAND_STATES}
+            or terminal_partial
+        ):
             from src.state.collateral_ledger import (
                 _CONVERT_STATES as _COLLATERAL_CONVERT_STATES,
                 convert_reservation_on_fill,
@@ -1563,13 +1566,14 @@ def append_event(
             from src.execution.exit_safety import release_exit_mutex_for_command_state
 
             # SCH-W1.1-CAS-LEDGER terminalization-centrality invariant: this is
-            # the SOLE seam where a reservation-bearing command reaches a
-            # terminal state and converts/releases collateral. Fill-class
-            # terminals (may carry a nonzero matched_size, per _CONVERT_STATES)
-            # convert the filled portion and release the remainder in one
-            # idempotent write; the remaining zero-fill terminals use the
-            # existing unconditional release.
-            if str(state_after).upper() in _COLLATERAL_CONVERT_STATES:
+            # the SOLE seam where a reservation-bearing command loses its
+            # remaining venue obligation and converts/releases collateral.
+            # A terminal partial stays PARTIAL as fill truth, but its proven
+            # zero remainder is terminal for collateral ownership.
+            if (
+                terminal_partial
+                or str(state_after).upper() in _COLLATERAL_CONVERT_STATES
+            ):
                 convert_reservation_on_fill(conn, command_id, state_after)
             else:
                 release_reservation_for_command_state(conn, command_id, state_after)
@@ -1642,14 +1646,17 @@ def _validate_terminal_partial_command_correction_payload(
     event_type: str,
     payload: Optional[dict],
     command_id: str,
-) -> None:
-    """Allow a false full-fill command to return to proven terminal PARTIAL."""
+) -> bool:
+    """Validate a terminal PARTIAL and return its collateral-finality proof."""
 
-    if event_type != "PARTIAL_FILL_OBSERVED" or current_state not in {
-        "FILLED",
-        "REVIEW_REQUIRED",
-    }:
-        return
+    if event_type != "PARTIAL_FILL_OBSERVED":
+        return False
+    proof_claimed = (
+        isinstance(payload, dict)
+        and payload.get("proof_class") == "terminal_partial_order_fact"
+    )
+    if current_state not in {"FILLED", "REVIEW_REQUIRED"} and not proof_claimed:
+        return False
     if not isinstance(payload, dict):
         raise ValueError("terminal partial command correction requires proof payload")
     if (
@@ -1749,6 +1756,7 @@ def _validate_terminal_partial_command_correction_payload(
         and actual.get("matched_order_fact_positive")
     ):
         raise ValueError("terminal partial command correction trade proof does not match")
+    return True
 
 
 def _validate_review_clearance_payload(

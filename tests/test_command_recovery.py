@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-22
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-23
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-23
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -8764,6 +8764,21 @@ class TestRecoveryResolutionTable:
         _seed_pending_entry_projection(conn)
         _open_test_entry_obligation(conn, "cmd-001")
         _advance_to_partial(conn, venue_order_id="ord-001")
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+                command_id, reservation_type, token_id, amount, created_at
+            ) VALUES ('cmd-001', 'PUSD_BUY', NULL, 1200000, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        assert conn.execute(
+            """
+            SELECT released_at
+              FROM collateral_reservations
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()["released_at"] is None
         _append_trade_fact(
             conn,
             command_id="cmd-001",
@@ -8857,6 +8872,27 @@ class TestRecoveryResolutionTable:
             "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
         ).fetchone()
         assert obligation["status"] == "RESOLVED"
+        reservation = conn.execute(
+            """
+            SELECT released_at, release_reason, converted_amount
+              FROM collateral_reservations
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert reservation["released_at"] is not None
+        assert reservation["release_reason"] == "CONVERTED_ON_FILL"
+        assert reservation["converted_amount"] == 880000
+        unsettled = conn.execute(
+            """
+            SELECT direction, amount_micro
+              FROM collateral_unsettled_proceeds
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert dict(unsettled) == {
+            "direction": "OUTGOING_DEDUCTION",
+            "amount_micro": 880000,
+        }
 
         repeated = reconcile_unresolved_commands(conn, mock_client)
         assert repeated["completed_partial_order_facts"] == {
@@ -8987,6 +9023,7 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
         assert _get_state(conn, "cmd-001") == "PARTIAL"
+
         events = _get_events(conn, "cmd-001")
         assert events[-1]["event_type"] == "PARTIAL_FILL_OBSERVED"
         payload = json.loads(events[-1]["payload_json"])

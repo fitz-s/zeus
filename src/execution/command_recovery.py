@@ -9333,14 +9333,13 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
                 sp_name = f"sp_terminal_partial_order_{safe_command_id}"
                 conn.execute(f"SAVEPOINT {sp_name}")
                 try:
-                    if str(row.get("state") or "").upper() == CommandState.FILLED.value:
-                        append_event(
-                            conn,
-                            command_id=command_id,
-                            event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
-                            occurred_at=observed_at,
-                            payload=payload,
-                        )
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
+                        occurred_at=observed_at,
+                        payload=payload,
+                    )
                     _append_terminal_partial_order_fact(
                         conn,
                         venue_order_id=order_id,
