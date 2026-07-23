@@ -4706,8 +4706,15 @@ def _reserve_held_monitor_positions(
         take = min(limit, len(keyed))
         with _HELD_MONITOR_CURSOR_LOCK:
             attempts = _HELD_MONITOR_ATTEMPT_STATE_BY_LANE.setdefault(lane, {})
-            for stale_key in attempts.keys() - current_keys:
-                del attempts[stale_key]
+            known_keys = set(attempts)
+            # Urgent family wakes deliberately pass a strict subset of the held
+            # book through this same lane.  Absence from that scoped call is not
+            # closure: pruning it would reset full-book fairness and repeatedly
+            # starve the tail.  A non-subset scope can authoritatively replace
+            # stale keys; an empty scope is handled above.
+            if not current_keys < known_keys:
+                for stale_key in known_keys - current_keys:
+                    del attempts[stale_key]
             sequence = _HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE.get(lane, 0)
             for key, refreshed_at, _pos in keyed:
                 prior = attempts.get(key)

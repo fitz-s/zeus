@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-22; last_reused=2026-07-22
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-23
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -1486,6 +1486,33 @@ def test_monitor_reservation_attempts_full_batch_before_retry(monkeypatch):
     assert [pos.trade_id for pos in first] == ["held-0", "held-1"]
     assert [pos.trade_id for pos in second] == ["held-2", "held-3"]
     assert [pos.trade_id for pos in third] == ["held-4", "held-0"]
+
+
+def test_monitor_reservation_targeted_subset_preserves_full_book_fairness(
+    monkeypatch,
+):
+    """A targeted wake cannot erase the full monitor lane's unattempted tail."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    positions = [_make_position(trade_id=f"held-{index}") for index in range(5)]
+    for index, pos in enumerate(positions):
+        pos._canonical_monitor_refreshed_at = f"2026-07-22T12:0{index}:00+00:00"
+
+    first_full = cycle_runtime._reserve_held_monitor_positions(
+        "shared", positions, limit=2
+    )
+    targeted = cycle_runtime._reserve_held_monitor_positions(
+        "shared", [positions[0]], limit=1
+    )
+    second_full = cycle_runtime._reserve_held_monitor_positions(
+        "shared", positions, limit=2
+    )
+
+    assert [pos.trade_id for pos in first_full] == ["held-0", "held-1"]
+    assert targeted == [positions[0]]
+    assert [pos.trade_id for pos in second_full] == ["held-2", "held-3"]
 
 
 def test_monitor_reservation_durable_progress_moves_attempt_to_tail(monkeypatch):
