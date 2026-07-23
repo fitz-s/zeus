@@ -4164,11 +4164,9 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "SUBMIT_ABORTED_MODE_FLIPPED",
     # SUBMIT-LANE DEGRADE (silent-trade-kill antibody 2026-06-12;
     # /tmp/allpass_nosubmit_rootcause.md). A FULL-PASS candidate decided on the
-    # no-submit (degrade) adapter while the live lane was dark this cycle
-    # (live_submit_effective False / operator_arm None during a crash-loop). The
-    # live-lane-dark condition is intrinsically TRANSIENT — it clears when the
-    # allocator/portfolio/operator arm recovers. Requeue the candidate (re-decide
-    # on the next cycle's substrate, on the live lane if it is back up) rather than
+    # wrong adapter while the executable dependency set was unavailable. This
+    # condition is intrinsically TRANSIENT — requeue the candidate and re-decide
+    # on the next cycle's current substrate rather than
     # terminally consuming a tradeable $16-Kelly full-pass entry as an "accepted"
     # no-submit. This is the strongest form of the fix: the silent-kill category is
     # impossible because the entry is never consumed while the lane is degraded.

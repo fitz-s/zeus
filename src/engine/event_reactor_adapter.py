@@ -6974,14 +6974,6 @@ def event_bound_live_adapter_from_trade_conn(
                 reason="EXECUTOR_BOUNDARY_MISSING",
                 proof_accepted=False,
             )
-        if real_order_submit_enabled and operator_arm is None:
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
-                reason="OPERATOR_ARM_REQUIRED",
-                proof_accepted=False,
-            )
         if real_order_submit_enabled:
             entries_pause_reason = _entry_pause_blocks_live_submit(live_cap_conn or trade_conn)
             if entries_pause_reason is not None:
@@ -11981,8 +11973,8 @@ def _global_current_state_execution_economics(
         median_payoff = Decimal(terminal.median_payoff_usd)
         wealth_after_loss = Decimal(terminal.wealth_after_loss_usd)
         wealth_after_win = Decimal(terminal.wealth_after_win_usd)
-        expected_value_diagnostic = Decimal(
-            str(terminal.expected_value_diagnostic_usd)
+        expected_value = Decimal(
+            str(terminal.expected_value_usd)
         )
     except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID") from exc
@@ -12061,7 +12053,7 @@ def _global_current_state_execution_economics(
                 median_payoff,
                 wealth_after_loss,
                 wealth_after_win,
-                expected_value_diagnostic,
+                expected_value,
             )
         )
         or not math.isclose(
@@ -12075,7 +12067,7 @@ def _global_current_state_execution_economics(
         or wealth_after_loss <= 0
         or wealth_after_win <= 0
         or not math.isclose(
-            float(expected_value_diagnostic),
+            float(expected_value),
             float(robust_ev),
             rel_tol=0.0,
             abs_tol=1e-12,
@@ -12217,14 +12209,14 @@ def _global_current_state_execution_economics(
             "global_terminal_median_payoff_usd": str(median_payoff),
             "global_terminal_wealth_after_loss_usd": str(wealth_after_loss),
             "global_terminal_wealth_after_win_usd": str(wealth_after_win),
-            "global_cut_time_expected_value_diagnostic_usd": float(
-                expected_value_diagnostic
+            "global_cut_time_expected_value_usd": float(
+                expected_value
             ),
-            "global_expected_value_diagnostic_usd": float(
+            "global_expected_value_usd": float(
                 payoff_q_lcb * shares - cost
             ),
             "global_expected_value_semantics": (
-                "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+                "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
             ),
             "global_terminal_payoff_semantics": "BINARY_0_1",
             "global_current_band_sample_identity": sample_hash,

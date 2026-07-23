@@ -1872,7 +1872,6 @@ def test_current_state_marker_rejects_unsealed_economics_mutation():
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
 def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
-    monkeypatch,
     side,
     direction,
 ):
@@ -1914,14 +1913,7 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
     assert current["sample_hash"] == witness.sample_matrix_identity
     assert era._qkernel_current_state_solve_economics(current) is True
 
-    def legacy_selection_curse_must_not_run(**_kwargs):
-        raise AssertionError("global current-band certificate was downgraded")
-
-    monkeypatch.setattr(
-        era,
-        "_event_bound_q_exec_lcb",
-        legacy_selection_curse_must_not_run,
-    )
+    assert not hasattr(era, "_event_bound_q_exec_lcb")
     proof = era._build_event_bound_taker_quality_proof(
         actionable_payload={
             "direction": direction,
@@ -1954,13 +1946,10 @@ def test_global_current_post_rest_escalation_uses_sealed_current_objective():
     assert era._global_current_taker_escalation(proof, more_expensive) is False
 
 
-def test_global_current_fresh_mode_does_not_reapply_selection_curse(monkeypatch):
+def test_global_current_fresh_mode_does_not_reapply_selection_curse():
     cert = _global_current_qkernel_cert(side="NO")
 
-    def historical_bound_must_not_run(**_kwargs):
-        raise AssertionError("sealed global current-state winner was historically retightened")
-
-    monkeypatch.setattr(era, "_event_bound_q_exec_lcb", historical_bound_must_not_run)
+    assert not hasattr(era, "_event_bound_q_exec_lcb")
     mode = era._fresh_rest_then_cross_mode(
         actionable_payload={
             "direction": "buy_no",
@@ -4572,7 +4561,7 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(
         ],
     )
 
-    monkeypatch.setattr(era, "_replacement_authority_enabled", lambda: True)
+    assert not hasattr(era, "_replacement_authority_enabled")
     monkeypatch.setattr(
         era,
         "runtime_cities_by_name",
