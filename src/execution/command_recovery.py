@@ -16280,11 +16280,16 @@ def _fill_price_respects_limit(fill_price, limit_price, *, side: object) -> bool
     limit = _positive_decimal_or_none(limit_price)
     if fill is None or limit is None or fill > 1 or limit > 1:
         return False
+    # REST trade aggregation can recover a maker price a few sub-micro units
+    # beyond its submitted decimal after complementary-outcome conversion.
+    # One USDC precision unit is accounting noise; anything larger remains a
+    # genuine limit violation.
+    tolerance = Decimal("0.000001")
     normalized_side = str(side or "").upper()
     if normalized_side == "BUY":
-        return fill <= limit
+        return fill <= limit + tolerance
     if normalized_side == "SELL":
-        return fill >= limit
+        return fill + tolerance >= limit
     return False
 
 

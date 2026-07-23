@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-04; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-07-04; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Regression tests for REVIEW_REQUIRED no-venue-exposure repair triage.
 # Reuse: Run when command recovery REVIEW_REQUIRED clearance or operator repair scripts change.
 # Authority basis: AGENTS.md position/execution proof gates; scripts/AGENTS.md repair contract.
@@ -465,8 +465,12 @@ def test_review_required_confirmed_trade_match_rejects_unbound_counterparty_make
     [
         ("BUY", "0.012", "0.011", True),
         ("BUY", "0.012", "0.013", False),
+        ("BUY", "0.420000", "0.420000174", True),
+        ("BUY", "0.420000", "0.420002", False),
         ("SELL", "0.400", "0.410", True),
         ("SELL", "0.400", "0.390", False),
+        ("SELL", "0.420000", "0.419999826", True),
+        ("SELL", "0.420000", "0.419998", False),
         ("SELL", "0.400", "1.100", False),
         ("SELL", "1.100", "0.900", False),
         ("BUY", "0.012", "0", False),
