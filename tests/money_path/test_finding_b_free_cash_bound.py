@@ -27,9 +27,16 @@ from src.events.reactor import _is_transient_money_path_reason
 # Reuse the proven receipt-sizing harness + fixtures.
 from tests.engine.test_event_reactor_no_bypass import (  # noqa: E402
     _bound_forecast_event,
+    _insert_replacement_forecast_fixture,
     _receipt,
     _trade_conn_with_snapshot,
 )
+
+
+def _current_trade_conn():
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    return conn
 
 
 @pytest.fixture(autouse=True)
@@ -186,11 +193,11 @@ def test_free_cash_provider_binds_stake_to_free_cash():
     ~14 USD: the chosen stake MUST be clamped to <= free cash (the one-time cash bound)."""
     receipt = _receipt(
         _bound_forecast_event(),
-        _trade_conn_with_snapshot(),
+        _current_trade_conn(),
         bankroll_usd_provider=lambda: 1000.0,
         free_cash_usd_provider=lambda: 5.0,
     )
-    assert receipt.kelly_pass is True
+    assert receipt.kelly_pass is True, receipt.reason
     assert receipt.kelly_size_usd is not None
     assert receipt.kelly_size_usd <= 5.0 + 1e-9
 
@@ -200,7 +207,7 @@ def test_free_cash_above_stake_does_not_inflate():
     the stake stays at its equity-scaled value, never raised to free cash."""
     receipt = _receipt(
         _bound_forecast_event(),
-        _trade_conn_with_snapshot(),
+        _current_trade_conn(),
         bankroll_usd_provider=lambda: 1000.0,
         free_cash_usd_provider=lambda: 1000.0,
     )
@@ -216,7 +223,7 @@ def test_free_cash_unresolvable_under_live_provider_fails_closed_transient():
     (requeue) so the next warm cycle re-resolves the wallet rather than terminal-burning."""
     receipt = _receipt(
         _bound_forecast_event(),
-        _trade_conn_with_snapshot(),
+        _current_trade_conn(),
         bankroll_usd_provider=lambda: 1000.0,
         free_cash_usd_provider=lambda: None,
     )
@@ -231,7 +238,7 @@ def test_no_free_cash_provider_is_legacy_no_clamp():
     NOT fail closed, so existing proof-only callers are unaffected."""
     receipt = _receipt(
         _bound_forecast_event(),
-        _trade_conn_with_snapshot(),
+        _current_trade_conn(),
         bankroll_usd_provider=lambda: 1000.0,
     )
     assert receipt.kelly_pass is True

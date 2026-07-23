@@ -387,6 +387,94 @@ def test_protected_missing_attribution_fails_before_closure_materialization(
     assert not receipt.exists()
 
 
+def test_unknown_position_attribution_blocks_before_any_graph_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world, trades, wconn, tconn = _fixture(tmp_path)
+    receipt = tmp_path / "unknown-refused.json"
+    try:
+        _insert_certificate(wconn, "retired", "hash-retired", mode=_retired_mode())
+        tconn.execute("INSERT INTO position_current VALUES ('position-unknown', 'unknown')")
+        wconn.commit()
+        tconn.commit()
+    finally:
+        wconn.close()
+        tconn.close()
+
+    monkeypatch.setattr(
+        migration,
+        "_materialize_retired_closure",
+        lambda _: (_ for _ in ()).throw(AssertionError("must not traverse graph")),
+    )
+    plan = migration.plan_world_decision_graph(world, trades)
+    assert plan["fast_fail"] == "protected_position_attribution"
+    assert plan["trades_preflight"]["unresolved_current_projection_count"] == 1
+    with pytest.raises(RuntimeError, match="current_projection_attribution_unresolved"):
+        migration.migrate_world_decision_graph(world, trades, receipt)
+    assert not receipt.exists()
+
+
+@pytest.mark.parametrize(
+    "table",
+    (
+        migration.TRANSFER_TABLE,
+        migration.CONVERSION_TABLE,
+        migration.CONVERSION_EVENTS,
+    ),
+)
+def test_nonempty_retired_table_is_never_dropped(tmp_path: Path, table: str) -> None:
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY)')
+        conn.execute(f'INSERT INTO "{table}" VALUES (1)')
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert migration.mutation_blockers(path) == [
+        f"state.db:{table} is non-empty (1)"
+    ]
+    with pytest.raises(RuntimeError, match="refusing to drop non-empty retired table"):
+        migration.mutate_db(path)
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "table",
+    (
+        "evidence_tier_assignments",
+        "source_time_frontier",
+        "model_bias_ens",
+        "model_bias",
+        "forecast_skill",
+        "truth_epoch",
+    ),
+)
+def test_current_evidence_and_epoch_tables_are_preserved(
+    tmp_path: Path, table: str
+) -> None:
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(f'CREATE TABLE "{table}" (value TEXT PRIMARY KEY)')
+        conn.execute(f'INSERT INTO "{table}" VALUES (?)', ("keep-byte-for-byte",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert migration.mutation_blockers(path) == []
+    assert migration.mutate_db(path) == []
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute(f'SELECT value FROM "{table}"').fetchone()[0] == "keep-byte-for-byte"
+    finally:
+        conn.close()
+
 def test_retired_attribution_hash_matching_is_case_insensitive(tmp_path: Path) -> None:
     world, trades, wconn, tconn = _fixture(tmp_path)
     try:
@@ -508,6 +596,64 @@ def test_stage_journal_resumes_interrupted_idempotent_stage(tmp_path: Path) -> N
     assert durable["completed_stages"] == ["decision_graphs"]
     assert durable["current_stage"] == "decision_graphs"
     assert calls == ["interrupted", "finished"]
+
+
+def test_stage_precondition_runs_before_action(tmp_path: Path) -> None:
+    journal = tmp_path / "cutover.progress.json"
+    root = tmp_path / "root"
+    root.mkdir()
+    progress = migration._open_stage_journal(journal, root)
+    calls: list[str] = []
+
+    def refuse() -> None:
+        calls.append("fence")
+        raise RuntimeError("writer appeared")
+
+    with pytest.raises(RuntimeError, match="writer appeared"):
+        migration._run_journaled_stage(
+            journal,
+            progress,
+            "db",
+            lambda: calls.append("write"),
+            precondition=refuse,
+        )
+    assert calls == ["fence"]
+    assert progress["completed_stages"] == []
+
+
+def test_writer_fence_rejects_loaded_job_and_open_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(migration, "live_writers", lambda: [])
+    monkeypatch.setattr(migration, "loaded_writer_jobs", lambda _root: ["com.zeus.main"])
+    monkeypatch.setattr(
+        migration,
+        "open_canonical_db_handles",
+        lambda _root: ["p123 state/zeus-world.db"],
+    )
+    with pytest.raises(RuntimeError, match="launchd com.zeus.main") as exc:
+        migration.assert_writer_fence(tmp_path)
+    assert "open_handle p123 state/zeus-world.db" in str(exc.value)
+
+
+def test_stage_journal_rejects_release_identity_drift(tmp_path: Path) -> None:
+    journal = tmp_path / "cutover.progress.json"
+    root = tmp_path / "root"
+    root.mkdir()
+    identity = {
+        "target_head": "a" * 40,
+        "migration_script_sha256": "b" * 64,
+        "schema_fingerprint": "c" * 64,
+    }
+    migration._open_stage_journal(journal, root, target_identity=identity)
+    drifted = {**identity, "target_head": "d" * 40}
+    with pytest.raises(RuntimeError, match="does not match this migration target"):
+        migration._open_stage_journal(journal, root, target_identity=drifted)
+
+
+def test_target_release_identity_refuses_foreign_checkout(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="target checkout itself"):
+        migration.target_release_identity(tmp_path)
 
 
 def test_world_committed_trades_interruption_converges_on_rerun(

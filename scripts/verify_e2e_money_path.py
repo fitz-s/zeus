@@ -367,8 +367,6 @@ class Walker:
         try:
             from src.config import settings
 
-            edli = settings["edli"]
-            details.append(f"scope={edli.get('edli_live_scope')}")
             details.append("replacement_cycles=00/06/12/18Z_live")
         except Exception as exc:  # noqa: BLE001
             details.append(f"settings=unreadable({exc})")

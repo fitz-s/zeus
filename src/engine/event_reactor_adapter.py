@@ -6502,54 +6502,6 @@ def replacement_forecast_baseline_bundle_provider_from_forecast_conn(
 # EventSubmissionReceipt at adapter construction so a full-pass no-submit can never
 # be mistaken for a genuine decision-declined no-submit.
 SUBMIT_LANE_LIVE = "LIVE"
-SUBMIT_LANE_SUBMIT_DISABLED = "SUBMIT_DISABLED"
-SUBMIT_LANE_NO_SUBMIT_ADAPTER = "NO_SUBMIT_ADAPTER"
-
-# The default no-submit reason hardcoded by the serializer. Honest ONLY where no
-# control-blocked live-submit selector drove this lane (test/replay). On the
-# NO_SUBMIT_ADAPTER lane a full-pass receipt carrying THIS reason is the
-# silent-kill signature, so the lane stamp rewrites it to name the live block.
-_DEFAULT_NO_SUBMIT_REASON = "event_bound_final_intent_no_submit"
-
-
-def _stamp_no_submit_adapter_lane(
-    receipt: EventSubmissionReceipt, *, live_block_cause: str
-) -> EventSubmissionReceipt:
-    """Stamp submit_lane=NO_SUBMIT_ADAPTER and, for a full-pass receipt carrying the
-    DEFAULT no-submit reason, derive a named block reason from the selector's typed
-    cause (single source of truth, mirrors _SUBMIT_ABORT_RECEIPT_REASON).
-
-    The default literal is the silent-kill signature on this lane (a full-pass
-    candidate that WOULD have submitted on the live lane, consumed with a reason
-    indistinguishable from a genuine decline). For such receipts the reason becomes
-    ``NO_SUBMIT_ADAPTER_LANE:<live_block_cause>`` so the receipt itself names why the
-    live lane was dark this cycle. Receipts that already carry a SPECIFIC reason (a
-    gate rejection — TRADE_SCORE_NON_POSITIVE, FDR_REJECTED, etc.) keep it: those are
-    honest no-edge declines, not a lane-selection block, and are only lane-stamped.
-
-    ``live_block_cause`` is REQUIRED and must be non-empty — the no-submit adapter is
-    only ever selected because live submit is blocked (live_submit_effective False /
-    operator_arm None), so a full-pass on this lane MUST be able to name it. An empty
-    cause makes the named block unconstructable and raises.
-    """
-    if not live_block_cause:
-        raise ValueError(
-            "NO_SUBMIT_ADAPTER lane requires a non-empty live_block_cause; a full-pass "
-            "receipt on this lane must name why the live lane was dark"
-        )
-    is_full_pass_default = (
-        receipt.proof_accepted is True
-        and receipt.side_effect_status == "NO_SUBMIT"
-        and (receipt.reason or _DEFAULT_NO_SUBMIT_REASON) == _DEFAULT_NO_SUBMIT_REASON
-    )
-    if is_full_pass_default:
-        return dataclass_replace(
-            receipt,
-            submit_lane=SUBMIT_LANE_NO_SUBMIT_ADAPTER,
-            reason=f"NO_SUBMIT_ADAPTER_LANE:{live_block_cause}",
-        )
-    return dataclass_replace(receipt, submit_lane=SUBMIT_LANE_NO_SUBMIT_ADAPTER)
-
 
 def _stamp_live_adapter_lane(
     receipt: EventSubmissionReceipt, *, real_order_submit_enabled: bool
@@ -6564,121 +6516,6 @@ def _stamp_live_adapter_lane(
         return receipt
     lane = SUBMIT_LANE_LIVE if real_order_submit_enabled else SUBMIT_LANE_SUBMIT_DISABLED
     return dataclass_replace(receipt, submit_lane=lane)
-
-
-def event_bound_no_submit_adapter_from_trade_conn(
-    trade_conn: sqlite3.Connection,
-    *,
-    get_current_level: Callable[[], RiskLevel],
-    forecast_conn: sqlite3.Connection | None = None,
-    topology_conn: sqlite3.Connection | None = None,
-    calibration_conn: sqlite3.Connection | None = None,
-    live_cap_conn: sqlite3.Connection | None = None,
-    bankroll_usd_provider: Callable[[], float | None] | None = None,
-    free_cash_usd_provider: Callable[[], float | None] | None = None,
-    portfolio_state_provider: "Callable[[], Any] | None" = None,
-    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
-    replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
-    replacement_forecast_baseline_bundle_provider: Callable[["_CandidateProof", OpportunityEvent, datetime], object | None] | None = None,
-    replacement_forecast_world_tables: tuple[str, ...] = (),
-    replacement_forecast_source_fact_status: str = "STALE_FOR_LIVE",
-    replacement_forecast_data_fact_status: str = "STALE_FOR_LIVE",
-    replacement_forecast_refit_decision: ReplacementForecastRefitDecision | None = None,
-    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
-    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
-    family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
-    live_block_cause: str = "live_lane_unselected",
-) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
-    """Build a proof-only final-intent receipt adapter for EDLI events.
-
-    SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12): ``live_block_cause`` is the
-    TYPED reason the main.py selector chose this no-submit adapter over the live lane
-    (e.g. ``live_submit_effective_false:<sub-reason>`` or ``operator_arm_none``). Every
-    receipt this adapter emits is stamped submit_lane=NO_SUBMIT_ADAPTER, and a full-pass
-    receipt that would otherwise carry the DEFAULT no-submit reason has its reason
-    rewritten to ``NO_SUBMIT_ADAPTER_LANE:<live_block_cause>`` so a full-pass entry consumed
-    on the no-submit lane names why the live lane was dark — never the default literal that
-    is byte-identical to a genuine decline. The default ``"live_lane_unselected"`` keeps
-    test/replay construction working; main.py threads the real cause.
-
-    Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
-    ``bankroll_usd_provider``) lets Kelly size against the bankroll NET of
-    correlation-weighted committed capital. The per-cycle in-flight reservation
-    accumulator (INV-K7) is CLOSURE-held here — NOT module-global — so parallel
-    cycles / tests stay isolated. One adapter instance == one reactor cycle, so
-    the accumulator is fresh per cycle by construction."""
-
-    # INV-K7 reservation ledger: closure-held (test-isolation safe), fresh per
-    # adapter instance (== per reactor cycle). FIX B (2026-06-05): rollback-aware
-    # ledger (not a bare list) so a candidate rejected downstream of Kelly is
-    # rolled back by the reactor before the next sequential event reads it.
-    portfolio_reservation = PortfolioReservationLedger()
-    _seed_portfolio_reservations_from_durable_live_cap(
-        portfolio_reservation,
-        live_cap_conn,
-        trade_conn=trade_conn,
-    )
-    resolved_replacement_forecast_hook = _resolve_replacement_forecast_adapter_hook(
-        replacement_forecast_hook=replacement_forecast_hook,
-        replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
-        replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
-        replacement_forecast_world_tables=replacement_forecast_world_tables,
-        replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
-        replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
-        replacement_forecast_refit_decision=replacement_forecast_refit_decision,
-        replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
-        replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-        forecast_conn=forecast_conn,
-        trade_conn=trade_conn,
-    )
-
-    def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
-        # CATEGORY ANTIBODY (2026-06-08, "database is locked" HOLDER-side kill):
-        # same trade-DB lock-hold disease as the live adapter — the reactor's single
-        # per-cycle trade_conn is read/written here via build_event_bound_no_submit_
-        # receipt and committed NOWHERE in process_pending (only closed at cycle end),
-        # so the implicit transaction pins the trade-DB WAL lock / read-mark across
-        # the whole multi-event cycle and starves concurrent trade-DB writers
-        # (substrate warm, log_trade_exit, CollateralLedger heartbeat). Commit
-        # trade_conn per event in a finally to release the lock and end the WAL-floor-
-        # pinning read txn each event (mirrors the live adapter + reactor world-DB
-        # per-event windows). In-memory reservation ledger is unaffected; no gate or
-        # decision semantics change — this only bounds the lock-hold.
-        try:
-            receipt = build_event_bound_no_submit_receipt(
-                event,
-                trade_conn=trade_conn,
-                decision_time=decision_time,
-                forecast_conn=forecast_conn,
-                topology_conn=topology_conn,
-                calibration_conn=calibration_conn,
-                get_current_level=get_current_level,
-                bankroll_usd_provider=bankroll_usd_provider,
-                free_cash_usd_provider=free_cash_usd_provider,
-                portfolio_state_provider=portfolio_state_provider,
-                portfolio_reservation=portfolio_reservation,
-                locked_opportunity_conn=live_cap_conn or trade_conn,
-                replacement_forecast_hook=resolved_replacement_forecast_hook,
-                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
-                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-                family_snapshot_refresher=family_snapshot_refresher,
-            )
-            # SUBMIT-LANE STAMP: this adapter is the control-blocked no-submit lane. Stamp every receipt
-            # NO_SUBMIT_ADAPTER and rewrite a full-pass default reason to name the
-            # live block that drove the selector here (single source of truth).
-            return _stamp_no_submit_adapter_lane(receipt, live_block_cause=live_block_cause)
-        finally:
-            try:
-                trade_conn.commit()
-            except Exception:  # noqa: BLE001 - commit is a lock-release boundary; never mask the real result/raise
-                pass
-
-    # Expose the per-cycle ledger so the reactor can commit/rollback provisional
-    # reservations in its post-submit phase (FIX B). The reactor reads this
-    # attribute off the injected submit callable; absent it falls back to the
-    # legacy append-only behavior (no commit/rollback).
-    _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
-    return _submit
 
 
 def event_bound_live_adapter_from_trade_conn(
@@ -15770,23 +15607,6 @@ def _build_event_bound_no_submit_receipt_core(
         )
     if opportunity_book is not None:
         raw_receipt["opportunity_book"] = _json_finite(opportunity_book.to_receipt_dict())
-    if replacement_forecast_receipt_tag is not None:
-        raw_receipt["replacement_forecast"] = replacement_forecast_receipt_tag
-    # Mainstream-agreement gate fields (#135). Added when the verdict is available on the
-    # selected proof; absent otherwise (gate OFF or evaluation error — receipt stays clean).
-    if proof.mainstream_agreement is not None:
-        _mav = proof.mainstream_agreement
-        raw_receipt.update(
-            {
-                "mainstream_agreement_pass": _mav.get("mainstream_agreement_pass"),
-                "mainstream_agreement_fail_reason": _mav.get("mainstream_agreement_fail_reason"),
-                "mainstream_point": _mav.get("mainstream_point"),
-                "mainstream_delta": _mav.get("forecast_delta"),
-                "mainstream_bin_label": _mav.get("mainstream_bin_label"),
-                "mainstream_source": _mav.get("mainstream_source"),
-                "mainstream_fetched_at_utc": _mav.get("mainstream_fetched_at_utc"),
-            }
-        )
     # WRONG-BOOK / IDENTITY WALL #5 (live incident 2026-06-12, Busan 27°C NO POST_ONLY
     # 0.02 vs real book 0.63/0.65). `row` (= _selected_snapshot_row_for_event(family_rows,
     # payload)) is keyed by the EVENT's *trigger* token (payload.token_id) — the bin that

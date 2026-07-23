@@ -13,15 +13,31 @@ from scripts.check_single_live_semantics import violations
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",
+        "architecture/live.yaml",
         "config/settings.json",
         "deploy/live.plist",
+        ".github/instructions/live.instructions.md",
+        ".github/workflows/live.yml",
         "docs/authority/current.md",
         "docs/reference/current.md",
     ):
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("mode = '" + "shadow_" + "veto_only'\n", encoding="utf-8")
-    assert len({item.split(":", 1)[0] for item in violations(tmp_path)}) == 5
+    assert len({item.split(":", 1)[0] for item in violations(tmp_path)}) == 8
+
+
+def test_gate_scans_selected_active_scripts_and_current_plan(tmp_path: Path) -> None:
+    for relative in (
+        "scripts/INDEX.md",
+        "scripts/migrations/202607_single_live_semantics_cutover.py",
+        "docs/operations/current/plans/INDEX.md",
+        "docs/operations/current/plans/single_live_semantics_2026-07-22.md",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("mode = '" + "sha" + "dow'\n", encoding="utf-8")
+    assert len({item.split(":", 1)[0] for item in violations(tmp_path)}) == 4
 
 
 def test_gate_rejects_resurrected_inactive_lane(tmp_path: Path) -> None:

@@ -678,26 +678,6 @@ scripts:
     required_helpers: [src.state.chain_mirror_reconciler.reconcile, src.state.db.append_many_and_project]
     required_tests: [tests/test_reconcile_chain_mirror.py]
     reason: "Standing chain-mirror invariant: the local position book must mirror on-chain state (operator law 2026-07-04). Drains gradable quarantined/stale position_current rows into settled within one reconcile cycle without requiring every quarantine writer to be rewired in this slice (design doc §5)."
-  init_replacement_forecast_live_schema.py:
-    # Created: 2026-06-18
-    # Last reused or audited: 2026-06-18
-    # Authority basis: forecast DB schema ownership; replacement live-support schema migration
-    class: repair
-    lifecycle: long_lived
-    status: active
-    authority_scope: forecast_schema_repair
-    canonical_command: "python3 scripts/init_replacement_forecast_live_schema.py --stdout [--commit]"
-    read_targets: [state/zeus-forecasts.db]
-    write_targets: [state/zeus-forecasts.db, stdout]
-    dry_run_default: true
-    apply_flag: "--commit"
-    target_db: state/zeus-forecasts.db
-    external_inputs: [live_runtime_dbs]
-    dangerous_if_run: true
-    promotion_barrier: "Initializes or repairs forecast-class live-support schema only; does not authorize trading, start daemons, submit/cancel orders, or promote experiment rows."
-    required_helpers: [src.state.schema.v2_schema.ensure_replacement_forecast_live_schema]
-    required_tests: [tests/test_replacement_forecast_live_schema.py]
-    reason: "Operator-runnable targeted initializer for replacement forecast live-support schema after removing legacy authority-status columns from the execution path."
   build_oof_qlcb_reliability_table.py:
     # Created: 2026-06-18
     # Last reused or audited: 2026-06-18

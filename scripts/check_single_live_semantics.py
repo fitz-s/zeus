@@ -13,17 +13,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_ROOTS = (
     "src",
+    "architecture",
     "config",
     "deploy",
+    ".github/instructions",
+    ".github/workflows",
     "docs/authority",
     "docs/reference",
 )
 SCAN_FILES = (
     "AGENTS.md",
     "scripts/AGENTS.md",
+    "scripts/INDEX.md",
     "scripts/arm_live_mode.sh",
     "scripts/check_live_restart_preflight.py",
+    "scripts/migrations/202607_single_live_semantics_cutover.py",
     "scripts/preflight_restart_check.py",
+    "scripts/zeus_status.py",
+    "docs/operations/current/GOAL.md",
+    "docs/operations/current/package.yaml",
+    "docs/operations/current/plans/INDEX.md",
+    "docs/operations/current/plans/single_live_semantics_2026-07-22.md",
 )
 TEXT_SUFFIXES = {".json", ".md", ".plist", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 EXCLUDED = {Path("scripts/check_single_live_semantics.py")}
@@ -35,6 +45,7 @@ EXCLUDED_PARTS = {
     "history",
     "implementation",
     "rebuild",
+    "tasks",
 }
 MIGRATION_PREVIEW_MARKERS = (
     "migration_preview",
@@ -72,7 +83,6 @@ _FORBIDDEN = (
     "kelly_dry_" + "run",
     "city_skill_gate_live_" + "enabled",
     "ingest_etl_forecast_" + "skill",
-    "etl_forecast_skill_from_" + "forecasts",
     "replacement_0_1_bayes_precision_fusion_" + "capture_enabled",
     "replacement_0_1_bayes_precision_fusion_" + "enabled",
     "openmeteo_ecmwf_ifs9_bayes_fusion_live_" + "enabled",
@@ -129,7 +139,13 @@ def violations(
         for token in _FORBIDDEN:
             if _contains_exact(token, rel_lower) or _contains_exact(token, text):
                 out.append(f"{rel}: forbidden dormant-runtime token {token!r}")
-        if rel.parts and rel.parts[0] in {"src", "scripts", "config", "deploy"}:
+        if rel.parts and rel.parts[0] in {
+            "src",
+            "scripts",
+            "config",
+            "deploy",
+            ".github",
+        }:
             for token in _RUNTIME_CATEGORY_FORBIDDEN:
                 if _contains_exact(token, rel_lower) or _contains_exact(token, text):
                     out.append(

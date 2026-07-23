@@ -98,7 +98,6 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # Scripts added post-2026-04-30 audit — operator-run offline
         # ---------------------------------------------------------------------------
         "scripts/backfill_london_f_to_c_2026_05_08.py",
-        "scripts/evaluate_calibration_transfer_oos.py",
         # scripts/migrate_phase2_cycle_stratification.py removed — file deleted (B3 cleanup)
         "scripts/migrations/202605_add_redeem_operator_required_state.py",
         "scripts/promote_calibration.py",
