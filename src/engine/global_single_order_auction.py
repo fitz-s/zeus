@@ -22,16 +22,12 @@ from src.engine.global_auction_universe import (
 )
 from src.solve.solver import (
     CandidatePortfolioEndowment,
-    ComonotoneFamilyEndowment,
-    ComonotonePortfolioEnvelope,
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
-    DeterministicBinPayoffWitness,
     FamilyPortfolioEndowment,
     GlobalSingleOrderAnyCandidate,
     GlobalSingleOrderDecision,
     GlobalSingleOrderSellCandidate,
-    JointOutcomeProbabilityWitness,
     PortfolioWealthWitness,
     global_candidate_from_native,
     global_sell_candidate_from_holding,
@@ -202,17 +198,6 @@ def global_single_order_actuation_identity(
         else ()
     )
     repair = decision.buy_minimum_marketable_repair
-    envelope = getattr(decision, "portfolio_envelope_certificate", None)
-    envelope_identity = (
-        ()
-        if envelope is None
-        else (
-            envelope.envelope_identity,
-            repr(envelope.effective_delta_log_wealth),
-            repr(envelope.effective_ev_usd),
-            repr(envelope.effective_log_growth_per_hour),
-        )
-    )
     buy_sizing_identity = (
         (decision.buy_sizing_mode,)
         if repair is None
@@ -255,7 +240,6 @@ def global_single_order_actuation_identity(
         repr(decision.robust_delta_log_wealth),
         repr(decision.robust_ev_usd),
         repr(decision.capital_efficiency),
-        *envelope_identity,
         repr(terminal.win_probability_lcb),
         repr(terminal.loss_probability_ucb),
         terminal.loss_payoff_usd,
@@ -300,17 +284,6 @@ def global_single_order_economic_identity(
         else ()
     )
     repair = decision.buy_minimum_marketable_repair
-    envelope = getattr(decision, "portfolio_envelope_certificate", None)
-    envelope_identity = (
-        ()
-        if envelope is None
-        else (
-            envelope.envelope_identity,
-            repr(envelope.effective_delta_log_wealth),
-            repr(envelope.effective_ev_usd),
-            repr(envelope.effective_log_growth_per_hour),
-        )
-    )
     buy_sizing_identity = (
         (decision.buy_sizing_mode,)
         if repair is None
@@ -355,7 +328,6 @@ def global_single_order_economic_identity(
         repr(decision.robust_delta_log_wealth),
         repr(decision.robust_ev_usd),
         repr(decision.capital_efficiency),
-        *envelope_identity,
         repr(terminal.win_probability_lcb),
         repr(terminal.loss_probability_ucb),
         terminal.loss_payoff_usd,
@@ -520,13 +492,13 @@ def _candidate_portfolio_endowment(
     )
 
 
-def _family_claim_projection(
+def _family_portfolio_endowment(
     *,
     probability_witness: Any,
     holdings_snapshot: Any,
-    ledger_snapshot_id: str,
-) -> tuple[tuple[str, ...], dict[str, Decimal], dict[str, Decimal]]:
-    """Project exact native family claims onto every MECE settlement outcome."""
+    wealth_witness: PortfolioWealthWitness,
+) -> FamilyPortfolioEndowment:
+    """Project claims and cumulative capital ownership onto one MECE family."""
 
     family_key = str(getattr(probability_witness, "family_key", "") or "")
     outcomes = tuple(str(bin_id) for bin_id in probability_witness.bin_ids)
@@ -535,7 +507,7 @@ def _family_claim_projection(
         or len(set(outcomes)) != len(outcomes)
         or str(getattr(holdings_snapshot, "family_key", "") or "") != family_key
         or str(getattr(holdings_snapshot, "ledger_snapshot_id", "") or "")
-        != ledger_snapshot_id
+        != wealth_witness.ledger_snapshot_id
     ):
         raise ValueError("family holdings topology is not ledger aligned")
     payout = {outcome: Decimal("0") for outcome in outcomes}
@@ -563,23 +535,6 @@ def _family_claim_projection(
                 if outcome != bin_id:
                     payout[outcome] += shares
         shares_by_token[token_id] = shares_by_token.get(token_id, Decimal("0")) + shares
-    return outcomes, payout, shares_by_token
-
-
-def _family_portfolio_endowment(
-    *,
-    probability_witness: Any,
-    holdings_snapshot: Any,
-    wealth_witness: PortfolioWealthWitness,
-) -> FamilyPortfolioEndowment:
-    """Project claims and cumulative capital ownership onto one MECE family."""
-
-    outcomes, payout, shares_by_token = _family_claim_projection(
-        probability_witness=probability_witness,
-        holdings_snapshot=holdings_snapshot,
-        ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
-    )
-    family_key = str(probability_witness.family_key)
     commitments = {
         str(token): Decimal(int(amount)) / Decimal("1000000")
         for token, amount in wealth_witness.native_commitments_micro
@@ -607,59 +562,6 @@ def _family_portfolio_endowment(
         portfolio_capital_usd=portfolio_capital,
         committed_capital_usd=family_committed,
         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
-    )
-
-
-def _comonotone_portfolio_envelope(
-    *,
-    probability_witnesses: Mapping[str, Any],
-    holdings_by_family: Mapping[str, Any],
-    wealth_witness: PortfolioWealthWitness,
-) -> ComonotonePortfolioEnvelope:
-    """Build the current conservative cross-family endowment certificate."""
-
-    families: list[ComonotoneFamilyEndowment] = []
-    for family_key, probability in sorted(probability_witnesses.items()):
-        holdings = holdings_by_family.get(family_key)
-        if holdings is None:
-            raise ValueError("GLOBAL_PORTFOLIO_ENVELOPE_HOLDINGS_MISSING")
-        bins, payout_by_bin, _ = _family_claim_projection(
-            probability_witness=probability,
-            holdings_snapshot=holdings,
-            ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
-        )
-        if isinstance(probability, JointOutcomeProbabilityWitness):
-            point_q = tuple(float(value) for value in probability.yes_point_q)
-        elif isinstance(probability, DeterministicBinPayoffWitness):
-            exact = dict(probability.exact_yes_payoffs)
-            proved = tuple(bin_id for bin_id, value in exact.items() if value == 1)
-            if proved:
-                selected_bin = proved[0]
-            else:
-                compatible = tuple(bin_id for bin_id in bins if exact.get(bin_id) != 0)
-                if not compatible:
-                    raise ValueError(
-                        "GLOBAL_PORTFOLIO_ENVELOPE_DETERMINISTIC_EMPTY"
-                    )
-                selected_bin = min(
-                    compatible,
-                    key=lambda bin_id: (payout_by_bin[bin_id], bin_id),
-                )
-            point_q = tuple(1.0 if bin_id == selected_bin else 0.0 for bin_id in bins)
-        else:
-            raise ValueError("GLOBAL_PORTFOLIO_ENVELOPE_PROBABILITY_UNSUPPORTED")
-        families.append(
-            ComonotoneFamilyEndowment(
-                family_key=family_key,
-                bin_ids=bins,
-                point_q=point_q,
-                payout_by_bin_usd=tuple(payout_by_bin[bin_id] for bin_id in bins),
-            )
-        )
-    return ComonotonePortfolioEnvelope(
-        spendable_cash_usd=wealth_witness.spendable_cash_usd,
-        ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
-        families=tuple(families),
     )
 
 
@@ -1061,20 +963,6 @@ def select_prepared_global_auction(
             wealth_witness=wealth_witness,
         )
 
-    portfolio_envelope = None
-    if book_epoch is not None and wealth_witness.spendable_cash_usd > 0:
-        try:
-            portfolio_envelope = _comonotone_portfolio_envelope(
-                probability_witnesses=probability_witnesses,
-                holdings_by_family=holdings_by_family,
-                wealth_witness=wealth_witness,
-            )
-        except Exception as exc:  # noqa: BLE001 - incomplete capital truth blocks BUY
-            return _no_trade(
-                "GLOBAL_PORTFOLIO_ENVELOPE_UNAVAILABLE:"
-                f"{type(exc).__name__}:{exc}"
-            )
-
     decision = select_global_single_order(
         tuple(candidates),
         probability_witnesses=probability_witnesses,
@@ -1094,7 +982,6 @@ def select_prepared_global_auction(
         family_portfolio_endowment_resolver=(
             _family_endowment if book_epoch is not None else None
         ),
-        portfolio_envelope=portfolio_envelope,
         candidate_payoff_q_lcb_resolver=_candidate_payoff_q_lcb,
         candidate_policy_rejection_resolver=_candidate_policy_rejection,
         cancelled=cancelled,
