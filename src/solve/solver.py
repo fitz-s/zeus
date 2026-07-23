@@ -3433,7 +3433,10 @@ def _score_global_single_order(
             )
         except ValueError:
             continue
-        if not _live_unit_price_in_band(limit_price):
+        if not (
+            _live_unit_price_in_band(limit_price)
+            and _live_unit_price_in_band(expected_fill_price)
+        ):
             full_price_band_rejected = True
             continue
         if max_spend > optimization_limit:
@@ -3600,7 +3603,10 @@ def _score_global_single_order(
             )
         except ValueError:
             continue
-        if not _live_unit_price_in_band(limit_price):
+        if not (
+            _live_unit_price_in_band(limit_price)
+            and _live_unit_price_in_band(expected_fill_price)
+        ):
             projected_price_band_rejected = True
             continue
         if max_spend > spend_limit:

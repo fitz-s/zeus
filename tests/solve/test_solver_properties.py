@@ -3481,6 +3481,32 @@ def test_global_single_order_buy_price_band_is_inclusive(side, price, q):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_buy_rejects_legal_limit_with_illegal_fill_vwap(side):
+    out_of_band = _global_candidate(
+        candidate_id=f"illegal-fill-vwap-{side}",
+        family=f"illegal-fill-vwap-{side}-family",
+        side=side,
+        q=0.80,
+        levels=(("0.03", "1000"), ("0.05", "1000")),
+    )
+    legal = _global_candidate(
+        candidate_id=f"legal-fill-vwap-{side}",
+        family=f"legal-fill-vwap-{side}-family",
+        side=side,
+        q=0.75,
+        levels=(("0.06", "1000"),),
+    )
+
+    decision = _global_select((out_of_band, legal))
+
+    assert decision.candidate is legal
+    assert (
+        decision.rejection_reasons[out_of_band.candidate_id]
+        == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_single_order_buy_price_band_applies_to_raw_limit_not_fee_vwap(side):
     candidate = _global_candidate(
         candidate_id=f"fee-boundary-{side}",
