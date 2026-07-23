@@ -1269,7 +1269,7 @@ def test_terminal_no_fill_redecision_allowed_after_same_token_cooldown(mem_db):
     assert result["existing_command_id"] == "cmd-cancelled"
 
 
-def test_terminal_no_fill_redecision_after_cooldown_requires_actual_reprice(mem_db):
+def test_terminal_no_fill_redecision_after_cooldown_allows_same_price(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -1305,8 +1305,8 @@ def test_terminal_no_fill_redecision_after_cooldown_requires_actual_reprice(mem_
         now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
     )
 
-    assert result["allowed"] is False
-    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+    assert result["allowed"] is True
+    assert result["reason"] == "allowed_terminal_no_fill_no_exposure_cooldown_elapsed"
     assert result["existing_command_id"] == "cmd-cancelled"
     assert result["existing_price"] == "0.73"
     assert result["candidate_price"] == "0.73"

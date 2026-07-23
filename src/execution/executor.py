@@ -2071,7 +2071,7 @@ def _entry_same_token_cooldown_component(
         else _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS
     )
     remaining_seconds = cooldown_seconds - age_seconds
-    if terminal_no_fill and reprice_cancel_reason:
+    if terminal_no_fill and reprice_cancel_reason and remaining_seconds > 0:
         existing_price = _decimal_or_none(prior_price)
         candidate_price = _decimal_or_none(limit_price)
         if existing_price is None or candidate_price is None:
@@ -2199,7 +2199,11 @@ def _entry_same_token_cooldown_component(
             "candidate_price": str(limit_price or ""),
             "candidate_shares": str(shares or ""),
         }
-    if terminal_no_fill:
+    terminal_order_fact_proven = (
+        terminal_no_fill
+        and _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
+    )
+    if terminal_no_fill and not terminal_order_fact_proven:
         existing_price = _decimal_or_none(prior_price)
         candidate_price = _decimal_or_none(limit_price)
         if existing_price is None or candidate_price is None:

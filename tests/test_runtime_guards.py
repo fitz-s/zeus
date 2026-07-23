@@ -2428,7 +2428,19 @@ def test_entry_order_cleanup_recent_same_token_exit_cooldown_expires(monkeypatch
     assert state == "ACKED"
 
 
-def test_entry_order_cleanup_cancels_same_price_terminal_no_fill_repost(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("prior_age_seconds", "expected_cancelled"),
+    [
+        (0, 1),
+        (cycle_runtime._ENTRY_TERMINAL_NO_FILL_REPRICE_LOOKBACK_SECONDS + 1, 0),
+    ],
+)
+def test_entry_order_cleanup_terminal_no_fill_repost_cooldown_expires(
+    monkeypatch,
+    tmp_path,
+    prior_age_seconds,
+    expected_cancelled,
+):
     conn = get_connection(tmp_path / "same-price-terminal-no-fill-repost.db")
     init_schema(conn)
     init_schema_trade_only(conn)
@@ -2459,10 +2471,12 @@ def test_entry_order_cleanup_cancels_same_price_terminal_no_fill_repost(monkeypa
         state="CANCEL_CONFIRMED",
         matched_size="0",
     )
-    recent_iso = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    recent_iso = now.isoformat()
+    prior_iso = (now - timedelta(seconds=prior_age_seconds)).isoformat()
     conn.execute(
         "UPDATE venue_commands SET updated_at = ?, created_at = ? WHERE command_id = 'cmd-old'",
-        (recent_iso, recent_iso),
+        (prior_iso, prior_iso),
     )
     _seed_pending_entry_command(
         conn,
@@ -2510,9 +2524,9 @@ def test_entry_order_cleanup_cancels_same_price_terminal_no_fill_repost(monkeypa
     finally:
         conn.close()
 
-    assert cancelled_count == 1
-    assert cancelled == ["order-entry"]
-    assert state == "CANCELLED"
+    assert cancelled_count == expected_cancelled
+    assert cancelled == (["order-entry"] if expected_cancelled else [])
+    assert state == ("CANCELLED" if expected_cancelled else "ACKED")
 
 
 def test_stale_entry_order_cleanup_skips_when_fresh_book_no_longer_improves(monkeypatch, tmp_path):
