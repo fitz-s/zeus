@@ -484,6 +484,21 @@ def _entry_terminal_no_fill_redecision_proof(
         return None
     if not isinstance(payload, dict):
         return None
+    if (
+        payload.get("reason") == "V2_PRE_SUBMIT_EXCEPTION"
+        and "database is locked" in str(payload.get("detail") or "").lower()
+        and not str(venue_order_id or "").strip()
+        and _table_exists(conn, "venue_order_facts")
+        and not _entry_has_positive_trade_fact(conn, command_id=command_id)
+        and not conn.execute(
+            "SELECT 1 FROM venue_order_facts WHERE command_id = ? LIMIT 1",
+            (command_id,),
+        ).fetchone()
+    ):
+        # The adapter emits V2_PRE_SUBMIT_EXCEPTION only while post_started is
+        # false. With no bound/order/trade identity, the lock created no venue
+        # exposure and a fresh decision may retry the same executable price.
+        return "pre_submit_db_lock"
     proof_class = str(payload.get("proof_class") or "")
     if proof_class == "deterministic_venue_fak_no_match_400":
         payload_order_id = str(payload.get("venue_order_id") or "").strip()
@@ -4170,6 +4185,7 @@ def _persist_signed_submission_identity_before_post(
     """Commit deterministic signed-order identity before venue side effect."""
 
     from src.state.venue_command_repo import bind_signed_submission_identity
+    from src.state.db import _apply_busy_timeout
     from src.venue.polymarket_v2_adapter import (
         _issue_signed_identity_persistence_receipt,
     )
@@ -4191,6 +4207,10 @@ def _persist_signed_submission_identity_before_post(
         )
 
     try:
+        # Reactor preparation temporarily shortens this connection-wide handler.
+        # Restore the canonical live write budget at the final pre-POST boundary;
+        # otherwise every retry inherits the leaked short timeout and spins.
+        _apply_busy_timeout(conn)
         # This is still strictly pre-POST. Retrying only the local durable bind
         # cannot duplicate a venue order, while treating a transient writer lock
         # as a terminal submit rejection drops otherwise executable orders.

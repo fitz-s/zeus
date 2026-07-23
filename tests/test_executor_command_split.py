@@ -39,7 +39,10 @@ def test_pre_post_signed_identity_helper_commits_before_return(monkeypatch):
         def rollback(self):
             calls.append("rollback")
 
-        def execute(self, query, params):
+        def execute(self, query, params=None):
+            if query.startswith("PRAGMA busy_timeout"):
+                calls.append("busy_timeout")
+                return None
             assert "commit" in calls
             calls.append(("readback", params))
 
@@ -70,6 +73,7 @@ def test_pre_post_signed_identity_helper_commits_before_return(monkeypatch):
     )
 
     assert calls == [
+        "busy_timeout",
         ("bind", "command-1", "signed-envelope"),
         "commit",
         ("readback", ("signed-envelope-id", "command-1")),
@@ -92,7 +96,10 @@ def test_pre_post_signed_identity_helper_retries_transient_lock_before_post(monk
         def rollback(self):
             calls.append("rollback")
 
-        def execute(self, query, params):
+        def execute(self, query, params=None):
+            if query.startswith("PRAGMA busy_timeout"):
+                calls.append("busy_timeout")
+                return None
             assert "commit" in calls
 
             class Cursor:
@@ -128,7 +135,7 @@ def test_pre_post_signed_identity_helper_retries_transient_lock_before_post(monk
     )
 
     assert attempts == 2
-    assert calls == ["rollback", "commit"]
+    assert calls == ["busy_timeout", "rollback", "commit"]
     assert receipt.command_id == "command-1"
     assert receipt.order_id == "0xorder"
 
@@ -146,6 +153,10 @@ def test_pre_post_signed_identity_helper_refuses_post_after_persistent_lock(monk
         def rollback(self):
             calls.append("rollback")
 
+        def execute(self, query, params=None):
+            assert query.startswith("PRAGMA busy_timeout")
+            calls.append("busy_timeout")
+
     def _fail(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
 
@@ -159,7 +170,13 @@ def test_pre_post_signed_identity_helper_refuses_post_after_persistent_lock(monk
             command_id="command-1",
         )
 
-    assert calls == ["rollback", "rollback", "rollback", "rollback"]
+    assert calls == [
+        "busy_timeout",
+        "rollback",
+        "rollback",
+        "rollback",
+        "rollback",
+    ]
 
 
 def test_executor_refuses_client_without_signed_identity_binder():

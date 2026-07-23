@@ -1359,6 +1359,63 @@ def test_terminal_fok_no_fill_redecision_allows_same_price_after_cooldown(
     assert ready["candidate_shares"] == "1016"
 
 
+def test_pre_submit_db_lock_redecision_allows_same_price_after_cooldown(mem_db):
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-pre-submit-lock', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   253, 0.10, NULL, 'REJECTED',
+                   '2026-07-23T08:07:47+00:00', '2026-07-23T08:07:50+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-pre-submit-lock', 'cmd-pre-submit-lock', 3,
+                   'SUBMIT_REJECTED', '2026-07-23T08:07:50+00:00', ?,
+                   'REJECTED')""",
+        (
+            json.dumps(
+                {
+                    "reason": "V2_PRE_SUBMIT_EXCEPTION",
+                    "detail": "database is locked",
+                    "final_submission_envelope_stage": "post_submit_result",
+                }
+            ),
+        ),
+    )
+    mem_db.commit()
+
+    cooling = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.10,
+        shares=254,
+        now=datetime.fromisoformat("2026-07-23T08:08:50+00:00"),
+    )
+    ready = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.10,
+        shares=254,
+        now=datetime.fromisoformat("2026-07-23T08:09:51+00:00"),
+    )
+
+    assert cooling["allowed"] is False
+    assert cooling["reason"] == "same_token_terminal_no_fill_cooling_down"
+    assert ready["allowed"] is True
+    assert ready["reason"] == (
+        "allowed_terminal_pre_submit_db_lock_no_fill_redecision"
+    )
+    assert ready["terminal_no_fill_redecision_proof"] == "pre_submit_db_lock"
+    assert ready["existing_price"] == "0.1"
+    assert ready["candidate_price"] == "0.1"
+
+
 def test_terminal_fak_no_match_redecision_allows_same_price_after_cooldown(mem_db):
     venue_order_id = "0x" + "8e" * 32
     mem_db.execute(
