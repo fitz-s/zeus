@@ -5293,6 +5293,7 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v7",
             "zlib+base64+canonical-json-v8",
             "zlib+base64+canonical-json-v9",
+            "zlib+base64+canonical-json-v10",
         }:
             return invalid("ENCODING")
         payload = _current_global_auction_candidate_payload(conn, summary)

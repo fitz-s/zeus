@@ -12612,7 +12612,7 @@ def _global_actuation_selected_proof(
     if any(
         getattr(prepared_witness, field, None) != getattr(witness, field, None)
         for field in probability_fields
-    ):
+    ) or not _global_probability_point_q_matches(prepared_witness, witness):
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_REBIND_MISMATCH")
     if (
         str(getattr(family, "family_id", "") or "") != candidate.family_key
@@ -13053,9 +13053,9 @@ def _current_global_actuation_prepared_family(
         ),
     )
     current_witness = getattr(current, "probability_witness", None)
-    if current_witness is None or any(
-        getattr(current_witness, field, None) != getattr(selected, field, None)
-        for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
+    if current_witness is None or not _global_probability_witness_content_matches(
+        current_witness,
+        selected,
     ):
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
     if isinstance(selected, DeterministicBinPayoffWitness):
@@ -29223,6 +29223,38 @@ _GLOBAL_PROBABILITY_CONTENT_FIELDS = (
 )
 
 
+def _global_probability_witness_content_matches(
+    current: object,
+    selected: object,
+) -> bool:
+    """Compare submit-time probability content, including the point simplex."""
+
+    if any(
+        getattr(current, field, None) != getattr(selected, field, None)
+        for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
+    ):
+        return False
+    return _global_probability_point_q_matches(current, selected)
+
+
+def _global_probability_point_q_matches(left: object, right: object) -> bool:
+    """Compare optional point simplexes without ndarray truth-value coercion."""
+
+    left_point = getattr(left, "yes_point_q", None)
+    right_point = getattr(right, "yes_point_q", None)
+    if left_point is None or right_point is None:
+        return left_point is None and right_point is None
+    try:
+        left_array = np.asarray(left_point, dtype=np.float64)
+        right_array = np.asarray(right_point, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    return left_array.shape == right_array.shape and np.array_equal(
+        left_array,
+        right_array,
+    )
+
+
 def _global_day0_execution_payload(
     event: OpportunityEvent,
     *,
@@ -30971,12 +31003,14 @@ def _prepare_current_global_probability_family(
         authority_certificate_hash=authority_certificate_hash,
         band_alpha=alpha,
         band_basis=band_basis,
+        yes_point_q=point_q,
         yes_q_samples=samples,
         captured_at_utc=decision_time,
     )
     witness = JointOutcomeProbabilityWitness(
         family_key=family.family_id,
         bindings=bindings,
+        yes_point_q=point_q,
         yes_q_samples=samples,
         q_version=q_version,
         resolution_identity=resolution_identity,
@@ -31005,13 +31039,13 @@ def _prepare_current_global_probability_family(
     )
 
 
-def _current_global_probability_sample_matrix(
+def _current_global_probability_components(
     forecast_conn: sqlite3.Connection,
     event: OpportunityEvent,
     replacement_bundle: object,
     witness: object,
-) -> np.ndarray | None:
-    """Rebuild the witness matrix from the current canonical posterior row."""
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Rebuild point and sampled probability authority from the canonical row."""
 
     payload = _payload(event)
     try:
@@ -31027,7 +31061,7 @@ def _current_global_probability_sample_matrix(
         candidates=candidates,
         bindings=bindings,
     )
-    return components[0] if components is not None else None
+    return (components[0], components[1]) if components is not None else None
 
 
 def current_global_probability_authority(
@@ -31137,20 +31171,31 @@ def current_global_probability_authority(
         != str(getattr(witness, "posterior_identity_hash", ""))
     ):
         return None
-    current_samples = _current_global_probability_sample_matrix(
+    current_components = _current_global_probability_components(
         forecast_conn,
         event,
         result.bundle,
         witness,
     )
-    if current_samples is None:
+    if current_components is None:
         return None
+    current_samples, current_point_q = current_components
     try:
         current_sample_identity = probability_sample_matrix_identity(current_samples)
     except ValueError:
         return None
     if current_sample_identity != str(
         getattr(witness, "sample_matrix_identity", "")
+    ):
+        return None
+    witness_point_q = np.asarray(
+        getattr(witness, "yes_point_q", ()), dtype=np.float64
+    )
+    if (
+        witness_point_q.shape != current_point_q.shape
+        or not np.allclose(
+            witness_point_q, current_point_q, rtol=0.0, atol=1e-12
+        )
     ):
         return None
     return CurrentFamilyProbabilityAuthority.from_witness(witness)

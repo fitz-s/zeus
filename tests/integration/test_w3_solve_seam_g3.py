@@ -92,6 +92,7 @@ from src.solve.solver import (
     GlobalSingleOrderCandidateEvaluation,
     GlobalSingleOrderDecision,
     GlobalSingleOrderSellCandidate,
+    GlobalSellPointCounterfactual,
     JointOutcomeProbabilityWitness,
     OutcomeTokenBinding,
     PortfolioWealthWitness,
@@ -183,6 +184,33 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         wealth_after_win_usd=Decimal("106.12"),
         expected_value_diagnostic_usd=0.08,
     )
+    sell_point_counterfactual = GlobalSellPointCounterfactual(
+        status="POSITIVE",
+        point_held_payoff_q=0.2,
+        probability_witness_identity="q-sell",
+        wealth_economic_identity="wealth-sell",
+        wealth_floor_usd=Decimal("100"),
+        wealth_ceiling_usd=Decimal("100"),
+        held_shares=Decimal("12.34"),
+        shares=Decimal("12.34"),
+        loss_at_risk_usd=Decimal("2.34"),
+        cash_proceeds_usd=Decimal("10"),
+        expected_delta_log_wealth=0.05,
+        expected_ev_usd=7.532,
+        capital_efficiency=0.05 / 2.34,
+        limit_price=Decimal("0.80"),
+        expected_fill_price_before_fee=Decimal("0.81"),
+        terminal_wealth=BinaryTerminalWealthCertificate(
+            win_probability_lcb=0.8,
+            loss_probability_ucb=0.2,
+            loss_payoff_usd=Decimal("-2.34"),
+            win_payoff_usd=Decimal("10"),
+            median_payoff_usd=Decimal("10"),
+            wealth_after_loss_usd=Decimal("110"),
+            wealth_after_win_usd=Decimal("110"),
+            expected_value_diagnostic_usd=7.532,
+        ),
+    )
     evaluations = (
         GlobalSingleOrderCandidateEvaluation(
             candidate_id="buy-repaired",
@@ -246,6 +274,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 wealth_after_win_usd=Decimal("110"),
                 expected_value_diagnostic_usd=-1.106,
             ),
+            sell_point_counterfactual=sell_point_counterfactual,
         ),
     )
     decision = GlobalSingleOrderDecision(
@@ -698,8 +727,11 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v9"
+        "zlib+base64+canonical-json-v10"
     )
+    assert summary["sell_point_counterfactual_count"] == 1
+    assert summary["sell_point_counterfactual_positive_count"] == 1
+    assert summary["sell_point_counterfactual_unavailable_count"] == 0
     candidate_evaluations = json.loads(evaluation_json)
     repair_row = dict(
         zip(
@@ -780,6 +812,17 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert sell_evaluation["capital_action_mode"] == (
         "IMMEDIATE_REDUCE_ONLY_SELL"
     )
+    assert sell_evaluation["sell_point_counterfactual"]["status"] == "POSITIVE"
+    assert sell_evaluation["sell_point_counterfactual"][
+        "point_held_payoff_q"
+    ] == 0.2
+    assert sell_evaluation["sell_point_counterfactual"]["shares"] == "12.34"
+    assert sell_evaluation["sell_point_counterfactual"][
+        "probability_witness_identity"
+    ] == "q-sell"
+    assert sell_evaluation["sell_point_counterfactual"][
+        "expected_ev_usd"
+    ] == 7.532
     assert sell_evaluation["resolution_at_utc"] == (
         "2026-07-16 01:00:00+00:00"
     )
@@ -2263,8 +2306,17 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
         field: f"current-{field}"
         for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
     }
-    selected = SimpleNamespace(**content, authority_certificate_hash="selected-cert")
-    refreshed = SimpleNamespace(**content, authority_certificate_hash="fresh-cert")
+    point_q = np.asarray((0.2, 0.8), dtype=np.float64)
+    selected = SimpleNamespace(
+        **content,
+        yes_point_q=point_q,
+        authority_certificate_hash="selected-cert",
+    )
+    refreshed = SimpleNamespace(
+        **content,
+        yes_point_q=np.array(point_q, copy=True),
+        authority_certificate_hash="fresh-cert",
+    )
     current_family = bridge.PreparedGlobalFamily(
         decision_id="fresh-decision",
         probability_witness=refreshed,
@@ -2305,6 +2357,28 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
         lambda *_args, **_kwargs: replace(
             current_family,
             probability_witness=SimpleNamespace(**{**content, "q_version": "moved"}),
+        ),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+        era._current_global_actuation_prepared_family(
+            SimpleNamespace(),
+            global_actuation=actuation,
+            forecast_conn=conn,
+            topology_conn=conn,
+            observation_conn=conn,
+            decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        lambda *_args, **_kwargs: replace(
+            current_family,
+            probability_witness=SimpleNamespace(
+                **content,
+                yes_point_q=np.asarray((0.21, 0.79), dtype=np.float64),
+                authority_certificate_hash="fresh-cert",
+            ),
         ),
     )
     with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
@@ -4847,12 +4921,14 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
             authority_certificate_hash=f"certificate-{version}",
             band_alpha=0.05,
             band_basis="test-band",
+            yes_point_q=np.mean(samples, axis=0),
             yes_q_samples=samples,
             captured_at_utc=decision_time,
         )
         witness = JointOutcomeProbabilityWitness(
             family_key=family_key,
             bindings=bindings,
+            yes_point_q=np.mean(samples, axis=0),
             yes_q_samples=samples,
             q_version=version,
             resolution_identity="resolution",
@@ -8455,12 +8531,14 @@ def test_global_book_cache_rebinds_fresh_q_without_refreshing_untouched_tokens()
             authority_certificate_hash=f"certificate-{version}",
             band_alpha=0.05,
             band_basis="test-band",
+            yes_point_q=np.mean(samples, axis=0),
             yes_q_samples=samples,
             captured_at_utc=captured_at,
         )
         return JointOutcomeProbabilityWitness(
             family_key="family",
             bindings=bindings,
+            yes_point_q=np.mean(samples, axis=0),
             yes_q_samples=samples,
             q_version=version,
             resolution_identity="resolution",
@@ -8709,6 +8787,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         authority_certificate_hash="authority-current",
         band_alpha=0.05,
         band_basis="CURRENT_EVIDENCE",
+        yes_point_q=np.asarray((1.0,), dtype=np.float64),
         sample_matrix_identity="samples-current",
         witness_identity="probability-current",
     )
@@ -8791,6 +8870,29 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     assert cert["global_actuation_identity"] == "actuation-current"
     assert captured["cost"] == 0.027666
     assert captured["current_candidate_cap"] == pytest.approx(0.42)
+
+    drifted_witness = SimpleNamespace(
+        **{
+            **vars(witness),
+            "yes_point_q": np.asarray((0.0,), dtype=np.float64),
+        }
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_PROBABILITY_REBIND_MISMATCH",
+    ):
+        era._global_actuation_selected_proof(
+            global_actuation=actuation,
+            prepared_global_family=SimpleNamespace(
+                probability_witness=drifted_witness,
+            ),
+            family=SimpleNamespace(family_id=family_key),
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            all_proofs=(proof,),
+            eligible_proofs=(proof,),
+            forecast_conn=object(),
+            decision_time=at,
+        )
 
     proof.missing_reason = None
     with pytest.raises(
@@ -12372,12 +12474,14 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         authority_certificate_hash=original.authority_certificate_hash,
         band_alpha=original.band_alpha,
         band_basis=original.band_basis,
+        yes_point_q=original.yes_point_q,
         yes_q_samples=original.yes_q_samples,
         captured_at_utc=original.captured_at_utc,
     )
     missing = JointOutcomeProbabilityWitness(
         family_key=original.family_key,
         bindings=missing_bindings,
+        yes_point_q=original.yes_point_q,
         yes_q_samples=original.yes_q_samples,
         q_version=original.q_version,
         resolution_identity=original.resolution_identity,

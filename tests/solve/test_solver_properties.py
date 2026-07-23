@@ -494,12 +494,14 @@ def _global_candidate(
         authority_certificate_hash=f"decision-certificate-{candidate_id}",
         band_alpha=ALPHA,
         band_basis="joint_q_band_samples",
+        yes_point_q=np.mean(samples, axis=0),
         yes_q_samples=samples,
         captured_at_utc=captured_at,
     )
     witness = S.JointOutcomeProbabilityWitness(
         family_key=family,
         bindings=bindings,
+        yes_point_q=np.mean(samples, axis=0),
         yes_q_samples=samples,
         q_version=q_version,
         resolution_identity=resolution_identity,
@@ -548,14 +550,44 @@ def _replace_global_q_samples(candidate, payoff_q_samples):
         authority_certificate_hash=prior.authority_certificate_hash,
         band_alpha=prior.band_alpha,
         band_basis=prior.band_basis,
+        yes_point_q=np.mean(samples, axis=0),
         yes_q_samples=samples,
         captured_at_utc=prior.captured_at_utc,
     )
     witness = replace(
         prior,
+        yes_point_q=np.mean(samples, axis=0),
         yes_q_samples=samples,
         witness_identity=identity,
     )
+    _GLOBAL_PROBABILITY_WITNESSES[identity] = witness
+    return replace(candidate, probability_witness_identity=identity)
+
+
+def _replace_global_point_q(candidate, payoff_q):
+    prior = _GLOBAL_PROBABILITY_WITNESSES[candidate.probability_witness_identity]
+    column = prior.bin_ids.index(candidate.bin_id)
+    point = np.array(prior.yes_point_q, copy=True)
+    yes_q = float(payoff_q) if candidate.side == "YES" else 1.0 - float(payoff_q)
+    point[column] = yes_q
+    other = 1 - column
+    point[other] = 1.0 - yes_q
+    identity = S.joint_probability_witness_identity(
+        family_key=prior.family_key,
+        bindings=prior.bindings,
+        q_version=prior.q_version,
+        resolution_identity=prior.resolution_identity,
+        topology_identity=prior.topology_identity,
+        posterior_identity_hash=prior.posterior_identity_hash,
+        source_truth_identity=prior.source_truth_identity,
+        authority_certificate_hash=prior.authority_certificate_hash,
+        band_alpha=prior.band_alpha,
+        band_basis=prior.band_basis,
+        yes_point_q=point,
+        yes_q_samples=prior.yes_q_samples,
+        captured_at_utc=prior.captured_at_utc,
+    )
+    witness = replace(prior, yes_point_q=point, witness_identity=identity)
     _GLOBAL_PROBABILITY_WITNESSES[identity] = witness
     return replace(candidate, probability_witness_identity=identity)
 
@@ -573,6 +605,7 @@ def _replace_global_band_alpha(candidate, alpha):
         authority_certificate_hash=prior.authority_certificate_hash,
         band_alpha=alpha,
         band_basis=prior.band_basis,
+        yes_point_q=prior.yes_point_q,
         yes_q_samples=prior.yes_q_samples,
         captured_at_utc=prior.captured_at_utc,
     )
@@ -594,6 +627,7 @@ def _replace_global_band_basis(candidate, basis):
         authority_certificate_hash=prior.authority_certificate_hash,
         band_alpha=prior.band_alpha,
         band_basis=basis,
+        yes_point_q=prior.yes_point_q,
         yes_q_samples=prior.yes_q_samples,
         captured_at_utc=prior.captured_at_utc,
     )
@@ -1122,6 +1156,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         "authority_certificate_hash": "certificate-joint",
         "band_alpha": ALPHA,
         "band_basis": "joint_q_band_samples",
+        "yes_point_q": np.mean(samples, axis=0),
         "yes_q_samples": samples,
         "captured_at_utc": captured_at,
     }
@@ -1961,6 +1996,73 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     assert buy_rejection.probe_robust_delta_log_wealth < 0
     assert buy_rejection.probe_robust_log_growth_per_hour == pytest.approx(
         buy_rejection.probe_robust_delta_log_wealth / 24.0
+    )
+
+
+def test_sell_point_counterfactual_is_identity_bound_and_cannot_change_live_action():
+    sell = _global_sell_candidate(
+        candidate_id="sell-point-counterfactual",
+        family="sell-point-counterfactual-family",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.30", "10"),),
+        shares="10",
+    )
+    held_q_samples = np.concatenate((np.full(380, 0.10), np.full(20, 0.90)))
+    sell = _replace_global_q_samples(sell, held_q_samples)
+    low_point = _replace_global_point_q(sell, 0.10)
+    high_point = _replace_global_point_q(sell, 0.90)
+
+    low_decision = _global_select((low_point,))
+    high_decision = _global_select((high_point,))
+
+    assert low_point.probability_witness_identity != high_point.probability_witness_identity
+    assert low_decision.candidate is None
+    assert high_decision.candidate is None
+    assert low_decision.rejection_reasons == high_decision.rejection_reasons == {
+        sell.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
+    }
+    low_evaluation = low_decision.candidate_evaluations[0]
+    high_evaluation = high_decision.candidate_evaluations[0]
+    assert low_evaluation.robust_delta_log_wealth == (
+        high_evaluation.robust_delta_log_wealth
+    )
+    assert low_evaluation.robust_ev_usd == high_evaluation.robust_ev_usd
+    assert low_evaluation.sell_point_counterfactual is not None
+    assert high_evaluation.sell_point_counterfactual is not None
+    assert low_evaluation.sell_point_counterfactual.status == "POSITIVE"
+    assert low_evaluation.sell_point_counterfactual.shares == Decimal("10.00")
+    assert low_evaluation.sell_point_counterfactual.expected_ev_usd > 0.0
+    assert high_evaluation.sell_point_counterfactual.status == "NON_POSITIVE"
+    assert high_evaluation.sell_point_counterfactual.expected_ev_usd < 0.0
+
+
+def test_sell_point_counterfactual_failure_cannot_block_profitable_live_sell(
+    monkeypatch,
+):
+    sell = _global_sell_candidate(
+        candidate_id="sell-point-diagnostic-fault",
+        family="sell-point-diagnostic-fault-family",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.50", "10"),),
+        shares="10",
+    )
+    monkeypatch.setattr(
+        S,
+        "_score_global_sell_point_counterfactual",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("diagnostic")),
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.robust_delta_log_wealth > 0.0
+    counterfactual = decision.candidate_evaluations[0].sell_point_counterfactual
+    assert counterfactual is not None
+    assert counterfactual.status == "UNAVAILABLE"
+    assert counterfactual.rejection_reason == (
+        "POINT_COUNTERFACTUAL_COMPUTATION_FAILED"
     )
 
 
@@ -3117,6 +3219,7 @@ def test_global_probability_simplex_keeps_nonexecuted_sibling_without_no_token()
         authority_certificate_hash=prior.authority_certificate_hash,
         band_alpha=prior.band_alpha,
         band_basis=prior.band_basis,
+        yes_point_q=prior.yes_point_q,
         yes_q_samples=prior.yes_q_samples,
         captured_at_utc=prior.captured_at_utc,
     )

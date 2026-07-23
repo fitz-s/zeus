@@ -446,12 +446,14 @@ def _prepare_global_family(
         authority_certificate_hash=decision.receipt_hash,
         band_alpha=decision.band.alpha,
         band_basis=decision.band.basis,
+        yes_point_q=decision.joint_q.q,
         yes_q_samples=decision.band.samples,
         captured_at_utc=captured_at_utc,
     )
     witness = JointOutcomeProbabilityWitness(
         family_key=decision.case.family_id,
         bindings=bindings,
+        yes_point_q=decision.joint_q.q,
         yes_q_samples=decision.band.samples,
         q_version=decision.joint_q.identity_hash,
         resolution_identity=resolution_identity,
