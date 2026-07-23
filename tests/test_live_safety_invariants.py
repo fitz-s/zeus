@@ -11858,7 +11858,7 @@ def test_wide_ci_position_holds_when_terminal_value_beats_sell_value():
         (10.0, True, "CI_OVERLAP_HOLD_VALUE_DOMINATES"),
     ],
 )
-def test_near_one_point_holds_when_current_q_ucb_value_beats_bid(
+def test_near_one_point_holds_when_current_value_beats_bid(
     monkeypatch,
     direction,
     hours_to_settlement,
@@ -11910,7 +11910,12 @@ def test_near_one_point_holds_when_current_q_ucb_value_beats_bid(
 
     assert decision.should_exit is False
     assert decision.trigger == expected_trigger
-    assert "hold_value_probability_basis:current_q_ucb" in decision.applied_validations
+    probability_basis = (
+        "hold_value_probability_basis:current_point_q"
+        if day0_active and hours_to_settlement >= 1.0
+        else "hold_value_probability_basis:current_q_ucb"
+    )
+    assert probability_basis in decision.applied_validations
     assert "hold_value_exit_costs_enabled" in decision.applied_validations
     assert "hold_value_correlation_crowding_applied" in decision.applied_validations
 
@@ -11973,6 +11978,49 @@ def test_missing_current_ci_holds_without_reusing_legacy_edge_count(
     second_robust = pos.evaluate_exit(robust_context)
     assert second_robust.should_exit is True
     assert second_robust.trigger == "EDGE_REVERSAL"
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_day0_overlap_uses_current_expected_value_not_optimistic_ucb(
+    monkeypatch,
+    direction,
+):
+    """Two fresh negative-value cuts exit before a wide UCB can strand the leg."""
+
+    pos = _make_position(
+        direction=direction,
+        p_posterior=0.11,
+        entry_price=0.11,
+        entry_ci_width=0.10,
+        shares=30.0,
+        cost_basis_usd=3.3,
+    )
+    monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 2)
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
+    context = ExitContext(
+        fresh_prob=0.10466666666666666,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.29,
+        current_market_price_is_fresh=True,
+        best_bid=0.29,
+        best_ask=0.30,
+        hours_to_settlement=10.0,
+        position_state="day0_window",
+        day0_active=True,
+        entry_posterior=0.11,
+        entry_ci=(0.08, 0.14),
+        current_ci=(0.05, 0.35),
+    )
+
+    first = pos.evaluate_exit(context)
+    assert first.should_exit is False
+    assert first.trigger == "DAY0_ROBUST_SELL_VALUE_AWAITS_CONFIRMATION"
+    assert "hold_value_probability_basis:current_point_q" in first.applied_validations
+
+    second = pos.evaluate_exit(context)
+    assert second.should_exit is True
+    assert second.trigger == "EDGE_REVERSAL"
+    assert "hold_value_probability_basis:current_point_q" in second.applied_validations
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])

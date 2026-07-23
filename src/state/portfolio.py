@@ -1022,6 +1022,7 @@ class Position:
             "hold_value_hours_unknown_time_cost_zero",
             "hold_value_correlation_crowding_applied",
             "hold_value_probability_basis:current_q_ucb",
+            "hold_value_probability_basis:current_point_q",
             "exit_fee_applied_to_sell_value",
             "hold_terminal_value_excludes_exit_fee",
             "current_held_ci_invalid",
@@ -1509,9 +1510,13 @@ class Position:
             # so the downstream maturity lock remains authoritative.
             if exit_context.day0_active:
                 applied.append("ci_overlap_nonterminal_day0")
-                applied.append("hold_value_probability_basis:current_q_ucb")
+                # A confidence upper bound is an uncertainty envelope, not the
+                # expected payoff of continuing to own the token.  Day0 keeps
+                # consecutive current-cut confirmation, so point-q value does
+                # not become a mechanical price stop.
+                applied.append("hold_value_probability_basis:current_point_q")
                 sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=current_hold_q_ucb,
+                    current_p_posterior=current_held,
                     best_bid=exit_context.best_bid,
                     hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,
