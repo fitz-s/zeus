@@ -32,8 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py --multi citation_grep_gate",
-            "description": "[workspace-routing S3] Edit/Write checks. pre_edit_architecture + pre_write_capability_gate DELETED (advisory-only, placement now owned by route_write). citation_grep_gate remains."
+            "command": "python3 .claude/hooks/dispatch.py --multi citation_grep_gate live_tree_write_guard",
+            "description": "Block agent writes to the live checkout; linked worktree edits remain allowed. citation_grep_gate remains advisory."
           }
         ]
       },
@@ -43,7 +43,7 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py --multi invariant_test secrets_scan pre_merge_contamination cotenant_staging_guard maintree_git_state_guard pre_checkout_uncommitted_overlap pr_create_loc_accumulation pre_merge_comment_check pr_thread_reply_waste monitor_arm_overdue_advisor",
-            "description": "[consolidated 2026-06-13] PreToolUse/Bash checks in ONE process \u2014 was 12 python spawns/Bash (~655ms), now 1 (~55ms). BLOCKING (exit 2): maintree_git_state_guard (branch-mutating git in main tree; bypass MAINTREE_GIT_BYPASS=1), cotenant_staging_guard (broad git add in main worktree; bypass COTENANT_GUARD_BYPASS=1), pr_create_loc_accumulation (tiny PR; bypass ZEUS_PR_ALLOW_TINY=1), pre_merge_comment_check (unsafe gh pr merge; bypass ZEUS_PR_MERGE_FORCE=1). maintenance_worker_dry_run_floor DELETED (advisory-only noise)."
+            "description": "[consolidated 2026-06-13] PreToolUse/Bash checks in ONE process. BLOCKING: maintree_git_state_guard rejects direct live Git mutation except verified cherry-pick; cotenant_staging_guard rejects broad staging in main; pr_create_loc_accumulation and pre_merge_comment_check protect the PR lane."
           }
         ]
       },

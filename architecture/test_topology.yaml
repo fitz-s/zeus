@@ -592,6 +592,7 @@ test_trust_policy:
     tests/test_dispatch_runtime_fire.py: {created: "2026-05-17", last_used: "2026-05-18"}
     tests/test_no_edge_rule1_guard.py: {created: "2026-07-08", last_used: "2026-07-08", note: "Stop-hook advisory guard antibody: Chinese and paraphrased 'no edge' conclusions must trigger RULE 1 while legitimate evidence-backed edge conclusions pass."}
     tests/test_citation_grep_gate.py: {created: "2026-05-18", last_used: "2026-05-18"}
+    tests/test_live_tree_write_guard.py: {created: "2026-07-22", last_used: "2026-07-22", note: "Live checkout agent-write boundary: direct and malformed Codex patches deny; linked worktree edits pass; cross-tree writes deny."}
     tests/test_no_synthetic_provenance_marker.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlements_physical_quantity_invariant.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlement_commands_schema.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -1483,6 +1484,7 @@ categories:
     - tests/test_dispatch_runtime_fire.py
     - tests/test_no_edge_rule1_guard.py
     - tests/test_citation_grep_gate.py
+    - tests/test_live_tree_write_guard.py
 
   # Midstream guardian panel — the 15 test files whose invariant-protection
   # role depends on current test-currency (dated provenance header + recent

@@ -7,6 +7,7 @@
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs invariant_test"},
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs secrets_scan"},
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs cotenant_staging_guard"},
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs maintree_git_state_guard"},
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_checkout_uncommitted_overlap"},
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pr_create_loc_accumulation"},
           {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_merge_contamination"},
@@ -17,8 +18,7 @@
       {
         "matcher": "apply_patch",
         "hooks": [
-          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_edit_architecture"},
-          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs pre_write_capability_gate"}
+          {"type": "command", "command": "node .codex/hooks/zeus-router.mjs live_tree_write_guard"}
         ]
       }
     ],

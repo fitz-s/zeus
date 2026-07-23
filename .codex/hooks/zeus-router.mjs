@@ -4,7 +4,7 @@
 // .claude/hooks/dispatch.py. Path discovery is router-relative so it works
 // from any clone path without per-operator setup.
 //
-// Exit codes: always 0 (advisory only; never blocks).
+// Exit codes remain 0; a blocking dispatch result becomes Codex permission denial.
 
 import {spawnSync} from 'node:child_process';
 import {readFileSync} from 'node:fs';
@@ -17,8 +17,7 @@ const DISPATCH = path.join(ZEUS_ROOT, '.claude/hooks/dispatch.py');
 const hookId = process.argv[2] || '';
 
 const EDIT_PATH_HOOKS = new Set([
-  'pre_edit_architecture',
-  'pre_write_capability_gate',
+  'live_tree_write_guard',
 ]);
 
 function readStdin() {
@@ -60,7 +59,7 @@ function extractPatchPaths(patchText) {
   if (typeof patchText !== 'string') return [];
   const paths = [];
   const seen = new Set();
-  const re = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
+  const re = /^\*\*\* (?:Add File|Update File|Delete File|Move from|Move to): (.+)$/gm;
   let match;
   while ((match = re.exec(patchText)) !== null) {
     const filePath = match[1].trim();
@@ -97,10 +96,13 @@ function runDispatch(payload) {
     process.stderr.write(result.stderr);
   }
 
-  if (result.error || result.status !== 0) {
-    return '';
+  if (result.status === 2) {
+    return {blocked: true, reason: result.stderr.trim() || 'live tree write is forbidden'};
   }
-  return (result.stdout || '').trim();
+  if (result.error || result.status !== 0) {
+    return {blocked: false, stdout: ''};
+  }
+  return {blocked: false, stdout: (result.stdout || '').trim()};
 }
 
 function contextFromDispatchStdout(stdout) {
@@ -144,6 +146,16 @@ function emitAdditionalContext(eventName, contexts) {
   }));
 }
 
+function emitDeny(eventName, reason) {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: eventName || 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    },
+  }));
+}
+
 function main() {
   if (!hookId) process.exit(0);
 
@@ -152,22 +164,32 @@ function main() {
 
   const eventName = payload.hook_event_name || 'PreToolUse';
   const contexts = [];
+  let blockReason = '';
+
+  function run(payloadForDispatch) {
+    const result = runDispatch(payloadForDispatch);
+    if (result.blocked) {
+      blockReason = blockReason || result.reason;
+      return;
+    }
+    contexts.push(contextFromDispatchStdout(result.stdout));
+  }
 
   if (EDIT_PATH_HOOKS.has(hookId) && payload.tool_name === 'apply_patch') {
     const paths = extractPatchPaths(payload.tool_input?.command);
     if (paths.length > 0) {
       for (const filePath of paths) {
-        contexts.push(contextFromDispatchStdout(
-          runDispatch(payloadForPath(payload, filePath, paths))
-        ));
+        run(payloadForPath(payload, filePath, paths));
       }
-      emitAdditionalContext(eventName, contexts);
+      if (blockReason) emitDeny(eventName, blockReason);
+      else emitAdditionalContext(eventName, contexts);
       process.exit(0);
     }
   }
 
-  contexts.push(contextFromDispatchStdout(runDispatch(payload)));
-  emitAdditionalContext(eventName, contexts);
+  run(payload);
+  if (blockReason) emitDeny(eventName, blockReason);
+  else emitAdditionalContext(eventName, contexts);
 }
 
 main();
