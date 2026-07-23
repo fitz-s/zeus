@@ -3341,6 +3341,7 @@ def test_resting_exit_order_blocks_when_phase_is_not_boot_recoverable(monkeypatc
     result = preflight._resting_venue_command_lifecycle_alignment_check()
 
     assert result.ok is False
+    assert result.restart_blocking is False
     assert result.evidence["risky"][0]["risk"] == "resting_exit_order_without_pending_exit_lifecycle"
 
 
@@ -3885,6 +3886,7 @@ def test_venue_point_order_truth_alignment_blocks_when_point_and_open_reads_fail
     result = preflight._venue_point_order_truth_alignment_check()
 
     assert result.ok is False
+    assert result.restart_blocking is False
     assert result.evidence["risky"][0]["risk"] == "venue_point_order_read_failed"
 
 
@@ -3910,6 +3912,7 @@ def test_venue_point_order_truth_alignment_blocks_unknown_point_status(
     result = preflight._venue_point_order_truth_alignment_check()
 
     assert result.ok is False
+    assert result.restart_blocking is False
     assert result.evidence["risky"][0]["risk"] == "venue_point_order_status_unknown"
 
 
@@ -4454,6 +4457,7 @@ def test_resting_terminal_short_fill_requires_exact_order_identity(
     result = preflight._resting_venue_command_lifecycle_alignment_check()
 
     assert result.ok is False
+    assert result.restart_blocking is False
     assert result.evidence["terminal_partial_non_resting_count"] == 0
     assert result.evidence["risky"]
 

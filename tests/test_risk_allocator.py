@@ -230,6 +230,72 @@ def test_current_entry_capacity_exposes_same_remaining_envelope_as_submit_gate()
         clear_global_allocator()
 
 
+def test_unconfigured_resolution_window_does_not_create_global_fixed_dollar_cap():
+    allocator = RiskAllocator(
+        CapPolicy(
+            max_per_market_micro=250_000_000,
+            max_per_event_micro=500_000_000,
+            max_per_resolution_window_micro={},
+            max_correlated_exposure_micro=1_000_000_000,
+        ),
+        [
+            ExposureLot(
+                f"market-{index}",
+                f"event-{index}",
+                "default",
+                f"token-{index}",
+                200_000_000,
+                "CONFIRMED_EXPOSURE",
+                correlation_key=f"family-{index}",
+            )
+            for index in range(4)
+        ],
+    )
+
+    capacity = allocator.auction_capacity(
+        market_id="new-market",
+        event_id="new-event",
+        resolution_window="default",
+        correlation_key="new-family",
+    )
+
+    assert capacity.allowed
+    assert capacity.available_capacity_micro == 250_000_000
+    assert capacity.remaining_resolution_capacity_micro == (1 << 63) - 1
+
+
+def test_explicit_resolution_window_cap_remains_blocking():
+    allocator = RiskAllocator(
+        CapPolicy(
+            max_per_market_micro=500_000_000,
+            max_per_event_micro=500_000_000,
+            max_per_resolution_window_micro={"day0": 150_000_000},
+            max_correlated_exposure_micro=500_000_000,
+        ),
+        [
+            ExposureLot(
+                "existing-market",
+                "existing-event",
+                "day0",
+                "existing-token",
+                150_000_000,
+                "CONFIRMED_EXPOSURE",
+                correlation_key="existing-family",
+            )
+        ],
+    )
+
+    capacity = allocator.auction_capacity(
+        market_id="new-market",
+        event_id="new-event",
+        resolution_window="day0",
+        correlation_key="new-family",
+    )
+
+    assert not capacity.allowed
+    assert capacity.reason == "per_resolution_window_cap_exceeded"
+
+
 def test_auction_capital_and_current_entry_exclude_resting_only_heartbeat_health():
     allocator = RiskAllocator(
         CapPolicy(max_per_market_micro=150_000_000),
@@ -1733,4 +1799,5 @@ def test_cap_policy_config_defaults_load():
     policy = load_cap_policy("config/risk_caps.yaml")
 
     assert policy.max_per_market_micro > 0
+    assert policy.max_per_resolution_window_micro == {}
     assert policy.optimistic_exposure_weight == 0.5

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -4859,7 +4860,7 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     assert outcome == "exit_blocked: no_executable_bid"
     assert position.state == "pending_exit"
     assert position.exit_state == "retry_pending"
-    assert position.exit_retry_count == 1
+    assert position.exit_retry_count == 0
     assert position.last_exit_error == "exit_no_executable_bid"
     event = conn.execute(
         """
@@ -4874,7 +4875,9 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     assert event["event_type"] == "EXIT_ORDER_REJECTED"
     assert event["phase_after"] == "pending_exit"
     assert event["venue_status"] == "retry_pending"
-    assert json.loads(event["payload_json"])["error"] == "exit_no_executable_bid"
+    payload = json.loads(event["payload_json"])
+    assert payload["error"] == "exit_no_executable_bid"
+    assert payload["status"] == "liquidity_wait"
     lifecycle_events = conn.execute(
         """
         SELECT event_type
@@ -4890,8 +4893,8 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     ]
 
 
-def test_exit_no_bid_classification_uses_snapshot_bid_truth():
-    from src.execution.exit_lifecycle import ExitIntent, _exit_no_executable_bid_error
+def test_exit_liquidity_classification_uses_snapshot_bid_truth():
+    from src.execution.exit_lifecycle import ExitIntent, _exit_sell_liquidity_error
 
     intent = ExitIntent(
         trade_id="pos-no-bid-snapshot",
@@ -4903,19 +4906,205 @@ def test_exit_no_bid_classification_uses_snapshot_bid_truth():
     )
 
     assert (
-        _exit_no_executable_bid_error(
+        _exit_sell_liquidity_error(
             intent,
             {"executable_snapshot_orderbook_top_bid": "ABSENT"},
         )
         == "exit_no_executable_bid"
     )
     assert (
-        _exit_no_executable_bid_error(
+        _exit_sell_liquidity_error(
             intent,
             {"executable_snapshot_orderbook_top_bid": "0.001"},
         )
+        == "exit_no_in_band_bid"
+    )
+    assert (
+        _exit_sell_liquidity_error(
+            intent,
+            {"executable_snapshot_orderbook_top_bid": "0.05"},
+        )
+        == "exit_no_in_band_bid"
+    )
+    in_band_intent = replace(intent, current_market_price=0.05, best_bid=0.05)
+    assert (
+        _exit_sell_liquidity_error(
+            in_band_intent,
+            {"executable_snapshot_orderbook_top_bid": "0.05"},
+        )
         == ""
     )
+
+
+def test_live_exit_sub_floor_bid_waits_without_submit_or_retry_budget(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    now = datetime.now(timezone.utc)
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-exit-sub-floor-bid",
+        captured_at=now,
+        freshness_deadline=now + timedelta(minutes=5),
+        orderbook_top_bid=Decimal("0.01"),
+        orderbook_top_ask=Decimal("0.011"),
+    )
+    position = Position(
+        trade_id="pos-exit-sub-floor-bid",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Manila",
+        cluster="asia",
+        target_date="2026-07-02",
+        bin_label="32C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.71,
+        size_usd=10.0,
+        shares=10.0,
+        cost_basis_usd=7.10,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("sub-floor liquidity wait must preempt collateral")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("sub-floor liquidity wait must not submit")
+        ),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        ExitContext(
+            exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+            current_market_price=0.01,
+            current_market_price_is_fresh=True,
+            best_bid=0.01,
+            day0_active=True,
+        ),
+        clob=None,
+        conn=conn,
+    )
+
+    assert outcome == "exit_blocked: no_in_band_bid"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+    assert position.exit_retry_count == 0
+    assert position.last_exit_error == "exit_no_in_band_bid"
+    payload = json.loads(
+        conn.execute(
+            """
+            SELECT payload_json FROM position_events
+             WHERE position_id = ? ORDER BY sequence_no DESC LIMIT 1
+            """,
+            (position.trade_id,),
+        ).fetchone()[0]
+    )
+    assert payload["status"] == "liquidity_wait"
+
+
+def test_historical_sub_floor_rejection_becomes_liquidity_wait(conn):
+    from src.execution.exit_lifecycle import _mark_exit_retry
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-historical-sub-floor-reject",
+        market_id="condition-test",
+        city="Seoul",
+        cluster="asia",
+        target_date="2026-07-22",
+        bin_label="28C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        entry_price=0.51,
+        size_usd=5.1,
+        shares=10.0,
+        cost_basis_usd=5.1,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="retry_pending",
+        exit_retry_count=4,
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    historical_error = (
+        "live order unit price outside absolute inclusive [0.05, 0.95] "
+        "submit band: price=0.001"
+    )
+
+    _mark_exit_retry(
+        position,
+        reason="EDGE_REVERSAL [SELL_ERROR]",
+        error=historical_error,
+        conn=conn,
+    )
+
+    assert position.exit_retry_count == 4
+    assert position.exit_state == "retry_pending"
+    assert position.last_exit_error == "exit_no_in_band_bid"
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id = ?",
+            (position.trade_id,),
+        ).fetchone()[0]
+    )
+    assert payload["status"] == "liquidity_wait"
+    assert payload["original_error"] == historical_error
+
+
+def test_backoff_exhausted_sub_floor_rejection_reenters_liquidity_wait(conn):
+    from src.execution.exit_lifecycle import check_pending_retries
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-backoff-sub-floor-recover",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Seoul",
+        cluster="asia",
+        target_date="2026-07-22",
+        bin_label="28C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.51,
+        size_usd=5.1,
+        shares=10.0,
+        cost_basis_usd=5.1,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_retry_count=5,
+        last_exit_error=(
+            "live order unit price outside absolute inclusive [0.05, 0.95] "
+            "submit band: price=0.001"
+        ),
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+
+    assert check_pending_retries(position, conn=conn) is False
+    assert position.exit_state == "retry_pending"
+    assert position.order_status == "retry_pending"
+    assert position.exit_retry_count == 5
+    assert position.last_exit_error == "exit_no_in_band_bid"
 
 
 def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):
@@ -6630,6 +6819,23 @@ def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
         orderbook_top_ask=Decimal("0.002"),
     )
 
+    assert check_pending_retries(position, conn=conn) is False
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-in-band-bid-liquidity-wake",
+        captured_at=now + timedelta(seconds=2),
+        freshness_deadline=now + timedelta(minutes=5),
+        orderbook_top_bid=Decimal("0.05"),
+        orderbook_top_ask=Decimal("0.051"),
+    )
+
     assert check_pending_retries(position, conn=conn) is True
     assert position.state == "day0_window"
     assert position.exit_state == ""
@@ -7283,10 +7489,22 @@ def test_check_pending_exits_recovers_adopted_open_sell_from_canonical_event(
     ).fetchone()[0] == 0
 
 
-def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn, monkeypatch):
+@pytest.mark.parametrize("authority_path", ["global", "hard_fact", "red"])
+def test_execute_exit_preserves_adopted_order_when_bid_is_sub_floor(
+    conn,
+    monkeypatch,
+    authority_path,
+):
     from src.execution import exit_lifecycle
     from src.execution.exit_lifecycle import execute_exit
+    from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    reason = {
+        "global": "GLOBAL_CAPITAL_OPTIMAL_SELL",
+        "hard_fact": "DAY0_HARD_FACT_BIN_DEAD",
+        "red": "RED_FORCE_EXIT",
+    }[authority_path]
 
     pos = Position(
         trade_id="pos-adopted-cancel",
@@ -7313,11 +7531,37 @@ def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn
         exit_state="retry_pending",
         order_status="retry_pending",
     )
+    hard_fact_authority = None
+    if authority_path == "hard_fact":
+        hard_fact_authority = object()
+        monkeypatch.setattr(
+            exit_lifecycle,
+            "_hard_fact_sell_authority_valid",
+            lambda *args, **kwargs: True,
+        )
+    elif authority_path == "red":
+        pos.exit_reason = "red_force_exit"
+        monkeypatch.setattr(
+            "src.riskguard.riskguard.get_current_level",
+            lambda: RiskLevel.RED,
+        )
+        monkeypatch.setattr(
+            "src.riskguard.riskguard.get_force_exit_review",
+            lambda: False,
+        )
 
     class FakeClob:
         def cancel_order(self, order_id):
+            raise AssertionError(f"valid resting exit must not be canceled: {order_id}")
+
+        def get_order_status(self, order_id):
             assert order_id == "ord-venue-open-exit"
-            return {"canceled": [order_id]}
+            return {
+                "status": "CONFIRMED",
+                "remaining_size": "0.00",
+                "matched_size": "9.70",
+                "avgPrice": "0.05",
+            }
 
     monkeypatch.setattr(
         exit_lifecycle,
@@ -7347,7 +7591,7 @@ def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn
     )
     exit_intent = exit_lifecycle.ExitIntent(
         trade_id=pos.trade_id,
-        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        reason=reason,
         token_id=YES_TOKEN,
         shares=pos.effective_shares,
         current_market_price=0.02,
@@ -7368,11 +7612,12 @@ def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn
         },
     )
 
+    portfolio = PortfolioState(positions=[pos])
     result = execute_exit(
-        PortfolioState(positions=[pos]),
+        portfolio,
         pos,
         ExitContext(
-            exit_reason="SELL_REPRICE_BID_MOVED_AWAY",
+            exit_reason=reason,
             current_market_price=0.02,
             current_market_price_is_fresh=True,
             best_bid=0.01,
@@ -7381,12 +7626,31 @@ def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn
         clob=FakeClob(),
         conn=conn,
         exit_intent=exit_intent,
+        hard_fact_authority=hard_fact_authority,
     )
 
-    assert result == "exit_retry: adopted_order_cancelled"
-    assert pos.last_exit_order_id == ""
-    assert pos.exit_state == "retry_pending"
-    assert pos.next_exit_retry_at is not None
+    assert result == "exit_blocked: no_in_band_bid"
+    assert pos.last_exit_order_id == "ord-venue-open-exit"
+    assert pos.exit_state == "sell_pending"
+    assert pos.order_status == "sell_pending_confirmation"
+    assert pos.exit_retry_count == 1
+    assert pos.last_exit_error == "exit_no_in_band_bid"
+    assert pos.next_exit_retry_at == ""
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id = ? "
+            "ORDER BY sequence_no DESC LIMIT 1",
+            (pos.trade_id,),
+        ).fetchone()[0]
+    )
+    assert payload["status"] == "resting_exit_liquidity_wait"
+    assert payload["resting_exit_order_preserved"] is True
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 1
+    assert pos.state == "economically_closed"
+    assert pos.exit_state == "sell_filled"
 
 
 def test_exit_active_order_lock_retry_does_not_consume_backoff_budget(conn):

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -354,12 +355,14 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
         authority_certificate_hash="certificate-current",
         band_alpha=0.05,
         band_basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        yes_point_q=np.mean(samples, axis=0),
         yes_q_samples=samples,
         captured_at_utc=decision_time,
     )
     witness = JointOutcomeProbabilityWitness(
         family_key=family_key,
         bindings=bindings,
+        yes_point_q=np.mean(samples, axis=0),
         yes_q_samples=samples,
         q_version="q-current",
         resolution_identity="resolution-current",
@@ -383,6 +386,34 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
     assert current is not None
     assert current.posterior_identity_hash == posterior_identity
 
+    changed_point_q = np.asarray((0.21, 0.79), dtype=np.float64)
+    changed_point_identity = joint_probability_witness_identity(
+        family_key=witness.family_key,
+        bindings=witness.bindings,
+        q_version=witness.q_version,
+        resolution_identity=witness.resolution_identity,
+        topology_identity=witness.topology_identity,
+        posterior_identity_hash=witness.posterior_identity_hash,
+        source_truth_identity=witness.source_truth_identity,
+        authority_certificate_hash=witness.authority_certificate_hash,
+        band_alpha=witness.band_alpha,
+        band_basis=witness.band_basis,
+        yes_point_q=changed_point_q,
+        yes_q_samples=witness.yes_q_samples,
+        captured_at_utc=witness.captured_at_utc,
+    )
+    changed_point_witness = replace(
+        witness,
+        yes_point_q=changed_point_q,
+        witness_identity=changed_point_identity,
+    )
+    assert adapter.current_global_probability_authority(
+        conn,
+        event,
+        changed_point_witness,
+        decision_time=decision_time,
+    ) is None
+
     # A provisional Day0 replacement witness has the ordinary current
     # settlement-simplex basis. It must re-read the canonical posterior here,
     # not take the hard-fact Day0 age-only shortcut.
@@ -398,12 +429,14 @@ def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refu
         authority_certificate_hash="certificate-current",
         band_alpha=0.05,
         band_basis=day0_basis,
+        yes_point_q=np.mean(samples, axis=0),
         yes_q_samples=samples,
         captured_at_utc=decision_time,
     )
     day0_witness = JointOutcomeProbabilityWitness(
         family_key=family_key,
         bindings=bindings,
+        yes_point_q=np.mean(samples, axis=0),
         yes_q_samples=samples,
         q_version="q-current",
         resolution_identity="resolution-current",

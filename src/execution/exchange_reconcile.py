@@ -4577,17 +4577,14 @@ def _ensure_entry_fill_position_event(
         and current_cost is not None
         and str(current.get("order_id") or "").strip() != venue_order_id
     )
-    chain_state_before = str(current.get("chain_state") or "").strip()
-    order_fact_source_name = str(order_fact_source or "").upper()
-    chain_state_after = current.get("chain_state") or "synced"
-    if chain_state_before in {"", "local_only"} and order_fact_source_name in {
-        "REST",
-        "WS_USER",
-        "WS_MARKET",
-        "DATA_API",
-        "CHAIN",
-    }:
-        chain_state_after = "synced"
+    chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+    chain_cost = _positive_decimal_or_none(current.get("chain_cost_basis_usd"))
+    chain_state_after = current.get("chain_state") or "unknown"
+    if chain_shares is None or chain_cost is None:
+        # A trade/order fact proves fill economics, not the wallet's current
+        # position balance.  Chain reconciliation alone may promote this to a
+        # current-money-risk state once it has complete position economics.
+        chain_state_after = "unknown"
     _ensure_entry_fill_order_fact(
         conn,
         command=command,
@@ -4653,7 +4650,6 @@ def _ensure_entry_fill_position_event(
         # only when it covers the entire command-derived aggregate; never
         # add a command fill to a mutable projection that may already
         # include that same fill.
-        chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
         if chain_shares is not None:
             chain_delta = chain_shares - projection_shares
             if abs(chain_delta) <= Decimal("0.000000001"):
@@ -4678,7 +4674,6 @@ def _ensure_entry_fill_position_event(
         projection_order_id = str(current.get("order_id") or venue_order_id)
         projection_order_status = str(current.get("order_status") or "filled")
         projection_size_usd = _decimal_text(projection_cost)
-        chain_state_after = current.get("chain_state") or "synced"
     position = SimpleNamespace(
         **{
             **current,

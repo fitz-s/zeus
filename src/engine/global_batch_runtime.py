@@ -1463,6 +1463,7 @@ def _store_global_auction_receipt(
             key: value
             for key, value in asdict(evaluation).items()
             if key != "buy_minimum_marketable_repair"
+            and not (key == "sell_point_counterfactual" and value is None)
         }
         for evaluation in evaluations
     )
@@ -1720,6 +1721,23 @@ def _store_global_auction_receipt(
         "candidate_input_count": candidate_input_count,
         "candidate_detailed_count": len(detailed_rows),
         "candidate_rejection_group_count": len(rejection_groups),
+        "sell_point_counterfactual_count": sum(
+            row.get("sell_point_counterfactual") is not None
+            for row in evaluation_rows
+            if row.get("action") == "SELL"
+        ),
+        "sell_point_counterfactual_positive_count": sum(
+            (row.get("sell_point_counterfactual") or {}).get("status")
+            == "POSITIVE"
+            for row in evaluation_rows
+            if row.get("action") == "SELL"
+        ),
+        "sell_point_counterfactual_unavailable_count": sum(
+            (row.get("sell_point_counterfactual") or {}).get("status")
+            == "UNAVAILABLE"
+            for row in evaluation_rows
+            if row.get("action") == "SELL"
+        ),
         "buy_rejection_economics_count": sum(
             int(group["economics_candidate_count"])
             for group in compact_evaluations["rejected_groups"]
@@ -1752,7 +1770,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v9",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v10",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),

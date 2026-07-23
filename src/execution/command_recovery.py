@@ -6956,6 +6956,142 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
     return candidates
 
 
+def _missing_filled_entry_execution_fact_repair_candidates(
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """Return confirmed entry fills whose command has no execution_fact."""
+
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "execution_fact",
+        "position_current",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return []
+    sql = (
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ",\n"
+        + _economic_trade_fact_cte()
+        + """,
+        entry_fill AS (
+            SELECT fact.command_id,
+                   SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
+                   SUM(CAST(fact.filled_size AS REAL) * CAST(fact.fill_price AS REAL))
+                       / SUM(CAST(fact.filled_size AS REAL)) AS fill_price,
+                   MAX(fact.observed_at) AS observed_at,
+                   MAX(fact.venue_timestamp) AS venue_timestamp,
+                   GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
+                   MAX(CASE WHEN fact.state = 'CONFIRMED' THEN 1 ELSE 0 END)
+                       AS has_confirmed_fill,
+                   MAX(fact.trade_fact_id) AS trade_fact_id
+              FROM economic_trade_fact fact
+             WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+             GROUP BY fact.command_id
+        )
+        SELECT cmd.command_id,
+               cmd.position_id,
+               cmd.decision_id,
+               cmd.intent_kind,
+               cmd.state AS cmd_state,
+               cmd.side,
+               cmd.market_id,
+               cmd.token_id,
+               cmd.size AS cmd_size,
+               cmd.price AS cmd_price,
+               cmd.created_at AS cmd_created_at,
+               cmd.venue_order_id,
+               NULL AS order_fact_matched_size,
+               NULL AS order_fact_remaining_size,
+               NULL AS order_fact_state,
+               entry_fill.trade_fact_id,
+               NULL AS trade_id,
+               entry_fill.fill_states AS trade_state,
+               entry_fill.has_confirmed_fill,
+               entry_fill.filled_size,
+               entry_fill.fill_price,
+               'REST' AS source,
+               entry_fill.observed_at,
+               entry_fill.venue_timestamp,
+               COALESCE(NULLIF(entry_fill.venue_timestamp, ''), entry_fill.observed_at)
+                   AS execution_filled_at
+          FROM venue_commands cmd
+          JOIN entry_fill
+            ON entry_fill.command_id = cmd.command_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state IN (
+               'ACKED', 'FILLED', 'PARTIAL', 'EXPIRED', 'REVIEW_REQUIRED', 'CANCELLED'
+           )
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM execution_fact ef
+                WHERE ef.position_id = cmd.position_id
+                  AND ef.order_role = 'entry'
+                  AND ef.command_id = cmd.command_id
+           )
+           AND (
+               cmd.state != 'CANCELLED'
+               OR (
+                   entry_fill.has_confirmed_fill = 1
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM execution_fact existing_entry_fact
+                        WHERE existing_entry_fact.position_id = cmd.position_id
+                          AND existing_entry_fact.order_role = 'entry'
+                   )
+                   AND EXISTS (
+                       SELECT 1
+                         FROM position_current current_position
+                        WHERE current_position.position_id = cmd.position_id
+                          AND current_position.phase IN (
+                              'active', 'day0_window', 'pending_exit'
+                          )
+                          AND current_position.chain_state = 'synced'
+                          AND current_position.fill_authority IN (
+                              'venue_confirmed_full',
+                              'cancelled_remainder',
+                              'venue_position_observed'
+                          )
+                          AND current_position.order_id = cmd.venue_order_id
+                          AND ABS(
+                              COALESCE(current_position.shares, 0)
+                              - entry_fill.filled_size
+                          ) <= 0.0001
+                          AND ABS(
+                              COALESCE(current_position.cost_basis_usd, 0)
+                              - (entry_fill.filled_size * entry_fill.fill_price)
+                          ) <= 0.0001
+                          AND ABS(
+                              COALESCE(current_position.chain_shares, 0)
+                              - entry_fill.filled_size
+                          ) <= 0.0001
+                          AND ABS(
+                              COALESCE(current_position.chain_cost_basis_usd, 0)
+                              - (entry_fill.filled_size * entry_fill.fill_price)
+                          ) <= 0.0001
+                   )
+               )
+           )
+         ORDER BY entry_fill.observed_at, entry_fill.trade_fact_id
+        """
+    )
+    candidates = []
+    for row in conn.execute(sql).fetchall():
+        candidate = _dict_row(row)
+        envelope_economics = _entry_submission_envelope_fill_economics(
+            conn,
+            candidate=candidate,
+        )
+        if envelope_economics is not None:
+            candidate["filled_size"], candidate["fill_price"] = envelope_economics
+        candidates.append(candidate)
+    return candidates
+
+
 def _log_filled_entry_trade_candidate_execution_fact(
     conn: sqlite3.Connection,
     *,
@@ -7092,11 +7228,12 @@ def _entry_execution_fact_venue_status(
     return "FILLED" if terminal_status == "filled" else "PARTIAL"
 
 
-def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> dict:
-    """Repair stale execution_fact rows when filled entry lot truth already exists."""
-
+def _reconcile_filled_entry_execution_fact_candidates(
+    conn: sqlite3.Connection,
+    candidates: list[dict],
+) -> dict:
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    for candidate in _filled_entry_execution_fact_repair_candidates(conn):
+    for candidate in candidates:
         summary["scanned"] += 1
         command_id = str(candidate.get("command_id") or "")
         fact_id = str(candidate.get("trade_fact_id") or "")
@@ -7147,6 +7284,26 @@ def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> d
             )
             summary["errors"] += 1
     return summary
+
+
+def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> dict:
+    """Repair stale execution_fact rows when filled entry lot truth already exists."""
+
+    return _reconcile_filled_entry_execution_fact_candidates(
+        conn,
+        _filled_entry_execution_fact_repair_candidates(conn),
+    )
+
+
+def reconcile_missing_filled_entry_execution_fact_repairs(
+    conn: sqlite3.Connection,
+) -> dict:
+    """Repair missing fill provenance without the full stale-economics sweep."""
+
+    return _reconcile_filled_entry_execution_fact_candidates(
+        conn,
+        _missing_filled_entry_execution_fact_repair_candidates(conn),
+    )
 
 
 def reconcile_terminal_entry_exposure_obligations(
@@ -19992,6 +20149,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                     max(0.0, boot_deadline - time.monotonic()),
                 )
 
+        # RiskGuard requires fill-grade portfolio rows to name their durable
+        # execution_fact provenance.  Repair that narrow, already-confirmed
+        # truth before broader maintenance can consume the boot budget; without
+        # it one partial fill can keep all new entries DATA_DEGRADED after a
+        # restart even though venue and position facts are already canonical.
+        _boot_db_pass(
+            "missing_filled_entry_execution_fact_repair",
+            reconcile_missing_filled_entry_execution_fact_repairs,
+            "missing_filled_entry_execution_fact_repair",
+        )
         _boot_db_pass(
             "completed_partial_order_facts",
             reconcile_completed_partial_order_facts,
@@ -20143,6 +20310,20 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         summary["deferred_full_sweep"] = True
         return
 
+    if scope == "live_tick":
+        _already_canceled_review_fast_pass()
+
+    if scope == "live_tick":
+        # This pass closes the narrow provenance gap that otherwise blocks the
+        # entire entry reactor.  Keep it ahead of authenticated-fill and broad
+        # maintenance queries so cumulative lock/budget deferral cannot starve
+        # a repair whose source facts are already durable in zeus_trades.
+        _db_pass(
+            "missing_filled_entry_execution_fact_repair",
+            reconcile_missing_filled_entry_execution_fact_repairs,
+            "missing_filled_entry_execution_fact_repair",
+        )
+
     _db_pass(
         "authenticated_entry_trade_fact",
         reconcile_authenticated_entry_trade_facts,
@@ -20155,9 +20336,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_terminal_order_facts,
             "terminal_order_facts",
         )
-
-    if scope == "live_tick":
-        _already_canceled_review_fast_pass()
 
     # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
     # narrowest capital truth: it resolves unknown exposure and can release the

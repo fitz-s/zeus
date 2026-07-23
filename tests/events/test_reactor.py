@@ -1953,10 +1953,27 @@ def test_superseded_global_target_gets_new_claim_carrier_identity():
 
 
 @pytest.mark.parametrize("venue_attempted", (False, True))
+@pytest.mark.parametrize(
+    "reason",
+    (
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_REJECTED:"
+            "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+        ),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "PreSubmitRevalidated live order unit price out of bounds: "
+            "live order unit price outside absolute inclusive [0.05, 0.95] "
+            "submit band: price=0.036"
+        ),
+    ),
+)
 def test_global_target_recovers_processed_refreshable_no_submit_carrier(
     venue_attempted,
+    reason,
 ):
-    """A mode-race carrier may re-run only when no venue attempt exists."""
+    """A pre-venue book-race carrier may re-run only without a venue attempt."""
 
     conn, store = _store()
     from src.engine.global_batch_runtime import _next_claim_carrier
@@ -1971,11 +1988,6 @@ def test_global_target_recovers_processed_refreshable_no_submit_carrier(
     store.insert_or_ignore(target)
     assert store.claim(target.event_id, claimed_at=_DT_VENUE_OPEN.isoformat())
     store.mark_processed(target.event_id, processed_at=_DT_VENUE_OPEN.isoformat())
-    reason = (
-        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
-        "EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_REJECTED:"
-        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
-    )
     conn.execute(
         "INSERT INTO no_trade_regret_events ("
         "regret_event_id,event_id,rejection_stage,rejection_reason,regret_bucket,"

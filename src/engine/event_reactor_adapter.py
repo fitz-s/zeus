@@ -11451,6 +11451,7 @@ def _global_preflight_block_status(reason: str) -> str:
         (
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",
             "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:",
+            "GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:",
         )
     ):
         return "CANDIDATE_BLOCKED"
@@ -11496,6 +11497,11 @@ def _global_preflight_block_status(reason: str) -> str:
                 "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
                 "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
                 "selected q_lcb does not match remaining-day transform:"
+            ),
+            (
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+                "remaining_day q_lcb is degenerate with q_live"
             ),
         )
     ):
@@ -11608,6 +11614,9 @@ def _global_preflight_entry_jit_receipt(
             current_candidate_override,
             checked_at_utc=checked_at_utc,
         )
+        fresh_best_bid: float | None = None
+        fresh_best_ask: float | None = None
+        mode_checked_at = checked_at_utc
         if current_candidate is None:
             raw_book: dict[str, object] = {}
 
@@ -11644,16 +11653,32 @@ def _global_preflight_entry_jit_receipt(
                 raw_book,
                 captured_at_utc=jit[3],
             )
-            mode_receipt = _global_preflight_candidate_mode_receipt(
-                event,
-                receipt,
-                current_candidate=current_candidate,
-                fresh_best_bid=jit[0],
-                fresh_best_ask=jit[1],
-                checked_at_utc=checked_at_utc or jit[3],
+            fresh_best_bid = jit[0]
+            fresh_best_ask = jit[1]
+            mode_checked_at = checked_at_utc or jit[3]
+        else:
+            curve = getattr(current_candidate, "executable_cost_curve", None)
+            asks = tuple(getattr(curve, "levels", ()) or ())
+            bids = tuple(getattr(current_candidate, "native_bid_levels", ()) or ())
+            fresh_best_ask = float(min(level.price for level in asks)) if asks else None
+            fresh_best_bid = float(max(level.price for level in bids)) if bids else None
+            mode_checked_at = checked_at_utc or getattr(
+                current_candidate,
+                "book_captured_at_utc",
+                None,
             )
-            if mode_receipt is not receipt:
-                return mode_receipt
+        if not isinstance(mode_checked_at, datetime) or mode_checked_at.tzinfo is None:
+            raise ValueError("GLOBAL_PREFLIGHT_MODE_CLOCK_REQUIRED")
+        mode_receipt = _global_preflight_candidate_mode_receipt(
+            event,
+            receipt,
+            current_candidate=current_candidate,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+            checked_at_utc=mode_checked_at,
+        )
+        if mode_receipt is not receipt:
+            return mode_receipt
         drift = _global_selected_order_economics_drift(
             decision=decision,
             current_candidate=current_candidate,
@@ -11708,10 +11733,10 @@ def _global_preflight_candidate_mode_receipt(
     fresh_best_ask: float | None,
     checked_at_utc: datetime,
 ) -> EventSubmissionReceipt:
-    """Reject a stale taker winner while the complete auction can fall through."""
+    """Reject a stale mode or unsubmitable maker price before winner binding."""
 
     proof_mode = str(receipt.execution_mode_intent or "").strip().upper()
-    if proof_mode != "TAKER":
+    if proof_mode not in {"MAKER", "TAKER"}:
         return receipt
     proof_bundle = receipt.decision_proof_bundle
     executable_snapshot = getattr(proof_bundle, "executable_snapshot", None)
@@ -11759,7 +11784,7 @@ def _global_preflight_candidate_mode_receipt(
             tick_size=float(curve.min_tick),
             decision_time=checked_at_utc,
         )
-        _validate_final_order_mode_or_abort(
+        order_mode = _validate_final_order_mode_or_abort(
             proof_mode=proof_mode,
             fresh_mode=fresh_mode,
             fresh_best_bid=fresh_best_bid,
@@ -11771,6 +11796,32 @@ def _global_preflight_candidate_mode_receipt(
             submitted=False,
             side_effect_status="NO_SUBMIT",
             reason=f"GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:{exc}",
+            proof_accepted=False,
+        )
+    if order_mode != "MAKER":
+        return receipt
+    try:
+        from src.decision_kernel.certificates.execution import (
+            _branch_limit_price,
+            _side_for_direction,
+        )
+
+        limit_price = _branch_limit_price(
+            side=_side_for_direction(str(receipt.direction or "")),
+            order_mode="MAKER",
+            reservation=float(receipt.c_fee_adjusted),
+            best_bid=fresh_best_bid,
+            best_ask=fresh_best_ask,
+            tick_size=float(curve.min_tick),
+            passive_maker_context=None,
+        )
+        assert_live_order_unit_price(limit_price)
+    except (TypeError, ValueError) as exc:
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=f"GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:{exc}",
             proof_accepted=False,
         )
     return receipt
@@ -12561,7 +12612,7 @@ def _global_actuation_selected_proof(
     if any(
         getattr(prepared_witness, field, None) != getattr(witness, field, None)
         for field in probability_fields
-    ):
+    ) or not _global_probability_point_q_matches(prepared_witness, witness):
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_REBIND_MISMATCH")
     if (
         str(getattr(family, "family_id", "") or "") != candidate.family_key
@@ -13002,9 +13053,9 @@ def _current_global_actuation_prepared_family(
         ),
     )
     current_witness = getattr(current, "probability_witness", None)
-    if current_witness is None or any(
-        getattr(current_witness, field, None) != getattr(selected, field, None)
-        for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
+    if current_witness is None or not _global_probability_witness_content_matches(
+        current_witness,
+        selected,
     ):
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
     if isinstance(selected, DeterministicBinPayoffWitness):
@@ -29172,6 +29223,38 @@ _GLOBAL_PROBABILITY_CONTENT_FIELDS = (
 )
 
 
+def _global_probability_witness_content_matches(
+    current: object,
+    selected: object,
+) -> bool:
+    """Compare submit-time probability content, including the point simplex."""
+
+    if any(
+        getattr(current, field, None) != getattr(selected, field, None)
+        for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
+    ):
+        return False
+    return _global_probability_point_q_matches(current, selected)
+
+
+def _global_probability_point_q_matches(left: object, right: object) -> bool:
+    """Compare optional point simplexes without ndarray truth-value coercion."""
+
+    left_point = getattr(left, "yes_point_q", None)
+    right_point = getattr(right, "yes_point_q", None)
+    if left_point is None or right_point is None:
+        return left_point is None and right_point is None
+    try:
+        left_array = np.asarray(left_point, dtype=np.float64)
+        right_array = np.asarray(right_point, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    return left_array.shape == right_array.shape and np.array_equal(
+        left_array,
+        right_array,
+    )
+
+
 def _global_day0_execution_payload(
     event: OpportunityEvent,
     *,
@@ -30920,12 +31003,14 @@ def _prepare_current_global_probability_family(
         authority_certificate_hash=authority_certificate_hash,
         band_alpha=alpha,
         band_basis=band_basis,
+        yes_point_q=point_q,
         yes_q_samples=samples,
         captured_at_utc=decision_time,
     )
     witness = JointOutcomeProbabilityWitness(
         family_key=family.family_id,
         bindings=bindings,
+        yes_point_q=point_q,
         yes_q_samples=samples,
         q_version=q_version,
         resolution_identity=resolution_identity,
@@ -30954,13 +31039,13 @@ def _prepare_current_global_probability_family(
     )
 
 
-def _current_global_probability_sample_matrix(
+def _current_global_probability_components(
     forecast_conn: sqlite3.Connection,
     event: OpportunityEvent,
     replacement_bundle: object,
     witness: object,
-) -> np.ndarray | None:
-    """Rebuild the witness matrix from the current canonical posterior row."""
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Rebuild point and sampled probability authority from the canonical row."""
 
     payload = _payload(event)
     try:
@@ -30976,7 +31061,7 @@ def _current_global_probability_sample_matrix(
         candidates=candidates,
         bindings=bindings,
     )
-    return components[0] if components is not None else None
+    return (components[0], components[1]) if components is not None else None
 
 
 def current_global_probability_authority(
@@ -31086,20 +31171,31 @@ def current_global_probability_authority(
         != str(getattr(witness, "posterior_identity_hash", ""))
     ):
         return None
-    current_samples = _current_global_probability_sample_matrix(
+    current_components = _current_global_probability_components(
         forecast_conn,
         event,
         result.bundle,
         witness,
     )
-    if current_samples is None:
+    if current_components is None:
         return None
+    current_samples, current_point_q = current_components
     try:
         current_sample_identity = probability_sample_matrix_identity(current_samples)
     except ValueError:
         return None
     if current_sample_identity != str(
         getattr(witness, "sample_matrix_identity", "")
+    ):
+        return None
+    witness_point_q = np.asarray(
+        getattr(witness, "yes_point_q", ()), dtype=np.float64
+    )
+    if (
+        witness_point_q.shape != current_point_q.shape
+        or not np.allclose(
+            witness_point_q, current_point_q, rtol=0.0, atol=1e-12
+        )
     ):
         return None
     return CurrentFamilyProbabilityAuthority.from_witness(witness)

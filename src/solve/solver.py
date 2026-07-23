@@ -401,6 +401,7 @@ def joint_probability_witness_identity(
     authority_certificate_hash: str,
     band_alpha: float,
     band_basis: str,
+    yes_point_q: np.ndarray,
     yes_q_samples: np.ndarray,
     captured_at_utc: datetime,
 ) -> str:
@@ -413,7 +414,17 @@ def joint_probability_witness_identity(
 
     if captured_at_utc.tzinfo is None:
         raise ValueError("captured_at_utc must be timezone-aware")
+    point = np.ascontiguousarray(np.asarray(yes_point_q, dtype=np.float64))
     samples = np.ascontiguousarray(np.asarray(yes_q_samples, dtype=np.float64))
+    if (
+        point.ndim != 1
+        or point.shape != (len(bindings),)
+        or not np.isfinite(point).all()
+        or np.any(point < 0.0)
+        or np.any(point > 1.0)
+        or not math.isclose(float(point.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
+    ):
+        raise ValueError("point probability must be a finite MECE simplex")
     digest = hashlib.sha256()
     for value in (
         family_key,
@@ -434,6 +445,7 @@ def joint_probability_witness_identity(
     ):
         digest.update(str(value).encode("utf-8"))
         digest.update(b"\x1f")
+    digest.update(point.astype("<f8", copy=False).tobytes(order="C"))
     digest.update(samples.astype("<f8", copy=False).tobytes(order="C"))
     return digest.hexdigest()
 
@@ -449,6 +461,7 @@ class JointOutcomeProbabilityWitness:
 
     family_key: str
     bindings: tuple[OutcomeTokenBinding, ...]
+    yes_point_q: np.ndarray
     yes_q_samples: np.ndarray
     q_version: str
     resolution_identity: str
@@ -480,9 +493,18 @@ class JointOutcomeProbabilityWitness:
         return probability_sample_matrix_identity(self.yes_q_samples)
 
     def __post_init__(self) -> None:
+        point = np.asarray(self.yes_point_q, dtype=np.float64)
         samples = np.asarray(self.yes_q_samples, dtype=np.float64)
         if (
-            samples.ndim != 2
+            point.ndim != 1
+            or point.shape != (len(self.bindings),)
+            or not np.isfinite(point).all()
+            or np.any(point < 0.0)
+            or np.any(point > 1.0)
+            or not math.isclose(
+                float(point.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9
+            )
+            or samples.ndim != 2
             or samples.shape[0] < 2
             or samples.shape[1] != len(self.bindings)
             or len(set(self.bin_ids)) != len(self.bindings)
@@ -524,11 +546,13 @@ class JointOutcomeProbabilityWitness:
             authority_certificate_hash=self.authority_certificate_hash,
             band_alpha=self.band_alpha,
             band_basis=self.band_basis,
+            yes_point_q=point,
             yes_q_samples=samples,
             captured_at_utc=self.captured_at_utc,
         )
         if self.witness_identity != expected:
             raise ValueError("probability witness identity does not bind its family simplex")
+        object.__setattr__(self, "yes_point_q", np.ascontiguousarray(point))
         object.__setattr__(self, "yes_q_samples", np.ascontiguousarray(samples))
 
 
@@ -725,6 +749,29 @@ def family_payoff_q_samples(
     return np.ascontiguousarray(yes if side == "YES" else 1.0 - yes)
 
 
+def family_payoff_point_q(
+    witness: FamilyPayoffWitness,
+    *,
+    bin_id: str,
+    side: Literal["YES", "NO"],
+) -> float | None:
+    """Project the frozen decision-time point probability for one native payoff."""
+
+    if side not in {"YES", "NO"}:
+        raise ValueError("unsupported native side")
+    if isinstance(witness, DeterministicBinPayoffWitness):
+        yes = witness.exact_yes_payoff(bin_id)
+        if yes is None:
+            return None
+        return float(yes if side == "YES" else 1 - yes)
+    try:
+        column = witness.bin_ids.index(str(bin_id))
+    except ValueError:
+        return None
+    yes = float(witness.yes_point_q[column])
+    return yes if side == "YES" else 1.0 - yes
+
+
 def rebind_family_payoff_witness(
     witness: FamilyPayoffWitness,
     *,
@@ -760,6 +807,7 @@ def rebind_family_payoff_witness(
         authority_certificate_hash=witness.authority_certificate_hash,
         band_alpha=witness.band_alpha,
         band_basis=witness.band_basis,
+        yes_point_q=witness.yes_point_q,
         yes_q_samples=witness.yes_q_samples,
         captured_at_utc=witness.captured_at_utc,
     )
@@ -801,6 +849,7 @@ def reissue_family_payoff_witness(
             authority_certificate_hash=authority_certificate_hash,
             band_alpha=witness.band_alpha,
             band_basis=witness.band_basis,
+            yes_point_q=witness.yes_point_q,
             yes_q_samples=witness.yes_q_samples,
             captured_at_utc=captured_at_utc,
         )
@@ -1721,6 +1770,131 @@ class GlobalBuyRejectionEconomics:
 
 
 @dataclass(frozen=True)
+class GlobalSellPointCounterfactual:
+    """Receipt-only exact partial-SELL optimum under frozen point probability."""
+
+    status: Literal["UNAVAILABLE", "INFEASIBLE", "NON_POSITIVE", "POSITIVE"]
+    point_held_payoff_q: float | None
+    probability_witness_identity: str
+    wealth_economic_identity: str
+    wealth_floor_usd: Decimal
+    wealth_ceiling_usd: Decimal
+    held_shares: Decimal
+    rejection_reason: str | None = None
+    shares: Decimal = Decimal("0")
+    loss_at_risk_usd: Decimal = Decimal("0")
+    cash_proceeds_usd: Decimal = Decimal("0")
+    expected_delta_log_wealth: float = 0.0
+    expected_ev_usd: float = 0.0
+    capital_efficiency: float = 0.0
+    limit_price: Decimal = Decimal("0")
+    expected_fill_price_before_fee: Decimal = Decimal("0")
+    terminal_wealth: BinaryTerminalWealthCertificate | None = None
+
+    def __post_init__(self) -> None:
+        q = (
+            None
+            if self.point_held_payoff_q is None
+            else float(self.point_held_payoff_q)
+        )
+        if (
+            self.status
+            not in {"UNAVAILABLE", "INFEASIBLE", "NON_POSITIVE", "POSITIVE"}
+            or (
+                q is not None
+                and (not math.isfinite(q) or not 0.0 <= q <= 1.0)
+            )
+            or (self.status != "UNAVAILABLE" and q is None)
+            or not str(self.probability_witness_identity).strip()
+            or not str(self.wealth_economic_identity).strip()
+            or not Decimal(self.wealth_floor_usd).is_finite()
+            or not Decimal(self.wealth_ceiling_usd).is_finite()
+            or self.wealth_floor_usd <= 0
+            or self.wealth_ceiling_usd <= 0
+            or not Decimal(self.held_shares).is_finite()
+            or self.held_shares <= 0
+        ):
+            raise ValueError("SELL point counterfactual authority is incoherent")
+        if self.status in {"UNAVAILABLE", "INFEASIBLE"}:
+            if (
+                not str(self.rejection_reason or "").strip()
+                or self.shares != 0
+                or self.loss_at_risk_usd != 0
+                or self.cash_proceeds_usd != 0
+                or self.expected_delta_log_wealth != 0.0
+                or self.expected_ev_usd != 0.0
+                or self.capital_efficiency != 0.0
+                or self.limit_price != 0
+                or self.expected_fill_price_before_fee != 0
+                or self.terminal_wealth is not None
+            ):
+                raise ValueError("unscored SELL point counterfactual carries economics")
+            return
+        terminal = self.terminal_wealth
+        if q is None:
+            raise ValueError("scored SELL point counterfactual requires point q")
+        if (
+            self.shares <= 0
+            or self.loss_at_risk_usd <= 0
+            or self.cash_proceeds_usd <= 0
+            or self.cash_proceeds_usd != self.shares - self.loss_at_risk_usd
+            or not math.isfinite(self.expected_delta_log_wealth)
+            or not math.isfinite(self.expected_ev_usd)
+            or not math.isfinite(self.capital_efficiency)
+            or self.limit_price <= 0
+            or self.expected_fill_price_before_fee < self.limit_price
+            or terminal is None
+            or terminal.loss_payoff_usd != -self.loss_at_risk_usd
+            or terminal.win_payoff_usd != self.cash_proceeds_usd
+            or not math.isclose(
+                terminal.win_probability_lcb,
+                1.0 - q,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or not math.isclose(
+                terminal.loss_probability_ucb,
+                q,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or terminal.wealth_after_loss_usd
+            != self.wealth_floor_usd
+            + self.held_shares
+            - self.shares
+            + self.cash_proceeds_usd
+            or terminal.wealth_after_win_usd
+            != self.wealth_ceiling_usd + self.cash_proceeds_usd
+            or not math.isclose(
+                terminal.expected_value_diagnostic_usd,
+                self.expected_ev_usd,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError("SELL point counterfactual economics are incoherent")
+        positive = (
+            self.expected_delta_log_wealth > 0.0
+            and self.expected_ev_usd > _ROBUST_EV_EPS_USD
+        )
+        if (
+            self.status == "POSITIVE"
+            and (self.rejection_reason is not None or not positive)
+        ) or (
+            self.status == "NON_POSITIVE"
+            and (
+                str(self.rejection_reason or "")
+                not in {
+                    "NON_POSITIVE_POINT_OBJECTIVE",
+                    "NON_POSITIVE_POINT_FILL_PREFIX",
+                }
+                or positive
+            )
+        ):
+            raise ValueError("SELL point counterfactual status disagrees with economics")
+
+
+@dataclass(frozen=True)
 class GlobalSingleOrderCandidateEvaluation:
     """One candidate's complete result inside the current global auction."""
 
@@ -1762,6 +1936,7 @@ class GlobalSingleOrderCandidateEvaluation:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
+    sell_point_counterfactual: GlobalSellPointCounterfactual | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
     buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
 
@@ -1785,6 +1960,13 @@ class GlobalSingleOrderCandidateEvaluation:
             self.position_id is not None or self.held_shares != 0
         ):
             raise ValueError("BUY evaluation cannot carry a held-position binding")
+        if self.sell_point_counterfactual is not None and self.action != "SELL":
+            raise ValueError("only SELL evaluations may carry point counterfactuals")
+        if (
+            self.sell_point_counterfactual is not None
+            and self.sell_point_counterfactual.held_shares != self.held_shares
+        ):
+            raise ValueError("SELL point counterfactual held shares disagree")
         if self.action == "SELL" and (
             not str(self.position_id or "").strip()
             or not Decimal(self.held_shares).is_finite()
@@ -2281,6 +2463,9 @@ def _global_candidate_evaluations(
     buy_rejection_economics: Mapping[
         str, GlobalBuyRejectionEconomics
     ] | None = None,
+    sell_point_counterfactuals: Mapping[
+        str, GlobalSellPointCounterfactual
+    ] | None = None,
     winner_id: str | None = None,
     default_rejection: str | None = None,
 ) -> tuple[GlobalSingleOrderCandidateEvaluation, ...]:
@@ -2292,6 +2477,7 @@ def _global_candidate_evaluations(
         if score.candidate is not None
     }
     rejected_buy_by_id = dict(buy_rejection_economics or {})
+    sell_point_by_id = dict(sell_point_counterfactuals or {})
     evaluations: list[GlobalSingleOrderCandidateEvaluation] = []
     for candidate in candidates:
         is_sell = isinstance(candidate, GlobalSingleOrderSellCandidate)
@@ -2318,6 +2504,9 @@ def _global_candidate_evaluations(
                     position_id=position_id,
                     held_shares=held_shares,
                     rejection_reason=reason,
+                    sell_point_counterfactual=sell_point_by_id.get(
+                        candidate.candidate_id
+                    ),
                     buy_rejection_economics=rejected_buy_by_id.get(
                         candidate.candidate_id
                     ),
@@ -2367,6 +2556,9 @@ def _global_candidate_evaluations(
                     score.fractional_kelly_target_shares
                 ),
                 terminal_wealth=score.terminal_wealth,
+                sell_point_counterfactual=sell_point_by_id.get(
+                    candidate.candidate_id
+                ),
                 buy_sizing_mode=score.buy_sizing_mode,
                 buy_minimum_marketable_repair=(
                     score.buy_minimum_marketable_repair
@@ -3433,7 +3625,10 @@ def _score_global_single_order(
             )
         except ValueError:
             continue
-        if not _live_unit_price_in_band(limit_price):
+        if not (
+            _live_unit_price_in_band(limit_price)
+            and _live_unit_price_in_band(expected_fill_price)
+        ):
             full_price_band_rejected = True
             continue
         if max_spend > optimization_limit:
@@ -3600,7 +3795,10 @@ def _score_global_single_order(
             )
         except ValueError:
             continue
-        if not _live_unit_price_in_band(limit_price):
+        if not (
+            _live_unit_price_in_band(limit_price)
+            and _live_unit_price_in_band(expected_fill_price)
+        ):
             projected_price_band_rejected = True
             continue
         if max_spend > spend_limit:
@@ -4073,6 +4271,69 @@ def _score_global_single_order_sell(
     return scored
 
 
+def _score_global_sell_point_counterfactual(
+    candidate: GlobalSingleOrderSellCandidate,
+    *,
+    point_held_payoff_q: float,
+    probability_witness_identity: str,
+    wealth_witness: PortfolioWealthWitness,
+    sample_count: int,
+    band_alpha: float,
+) -> GlobalSellPointCounterfactual:
+    """Replay-complete point-q diagnostic; never participates in order selection."""
+
+    point_q = float(point_held_payoff_q)
+    if not math.isfinite(point_q) or not 0.0 <= point_q <= 1.0:
+        raise ValueError("SELL point probability must lie in [0, 1]")
+    score = _score_global_single_order_sell(
+        candidate,
+        held_payoff_q_samples=np.full(sample_count, point_q, dtype=np.float64),
+        band_alpha=band_alpha,
+        wealth_floor_usd=wealth_witness.wealth_floor_usd,
+        wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+    )
+    common = {
+        "point_held_payoff_q": point_q,
+        "probability_witness_identity": probability_witness_identity,
+        "wealth_economic_identity": wealth_witness.economic_identity,
+        "wealth_floor_usd": wealth_witness.wealth_floor_usd,
+        "wealth_ceiling_usd": wealth_witness.wealth_ceiling_usd,
+        "held_shares": candidate.held_shares,
+    }
+    if score.candidate is None:
+        return GlobalSellPointCounterfactual(
+            status="INFEASIBLE",
+            rejection_reason=(
+                score.rejection_reasons.get(candidate.candidate_id)
+                or score.no_trade_reason
+                or "POINT_COUNTERFACTUAL_UNAVAILABLE"
+            ),
+            **common,
+        )
+    robust_reason = score.rejection_reasons.get(candidate.candidate_id)
+    point_reason = {
+        "NON_POSITIVE_ROBUST_OBJECTIVE": "NON_POSITIVE_POINT_OBJECTIVE",
+        "NON_POSITIVE_ROBUST_FILL_PREFIX": "NON_POSITIVE_POINT_FILL_PREFIX",
+    }.get(robust_reason)
+    status: Literal["NON_POSITIVE", "POSITIVE"] = (
+        "NON_POSITIVE" if point_reason is not None else "POSITIVE"
+    )
+    return GlobalSellPointCounterfactual(
+        status=status,
+        rejection_reason=point_reason,
+        shares=score.shares,
+        loss_at_risk_usd=score.cost_usd,
+        cash_proceeds_usd=score.cash_proceeds_usd,
+        expected_delta_log_wealth=score.robust_delta_log_wealth,
+        expected_ev_usd=score.robust_ev_usd,
+        capital_efficiency=score.capital_efficiency,
+        limit_price=score.limit_price,
+        expected_fill_price_before_fee=score.expected_fill_price_before_fee,
+        terminal_wealth=score.terminal_wealth,
+        **common,
+    )
+
+
 def _probability_witness_rejection_reason(
     candidate: GlobalSingleOrderAnyCandidate,
     witness: FamilyPayoffWitness | None,
@@ -4275,6 +4536,9 @@ def select_global_single_order(
     rejected_buy_economics_by_id: dict[
         str, GlobalBuyRejectionEconomics
     ] = {}
+    sell_point_counterfactuals_by_id: dict[
+        str, GlobalSellPointCounterfactual
+    ] = {}
     buy_capital_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
     buy_payoff_q_lcbs: dict[str, float | None] = {}
@@ -4308,6 +4572,7 @@ def select_global_single_order(
             candidate_evaluations=_global_candidate_evaluations(
                 candidates,
                 rejections=cancelled_rejections,
+                sell_point_counterfactuals=sell_point_counterfactuals_by_id,
                 default_rejection=reason,
             ),
             candidate_input_count=len(candidates),
@@ -4332,6 +4597,7 @@ def select_global_single_order(
                 rejections=failure_rejections,
                 scores=scored,
                 buy_rejection_economics=rejected_buy_economics_by_id,
+                sell_point_counterfactuals=sell_point_counterfactuals_by_id,
                 default_rejection="GLOBAL_EPOCH_SUPERSEDED",
             ),
             candidate_input_count=len(candidates),
@@ -4511,6 +4777,53 @@ def select_global_single_order(
         if selection_cancelled():
             return cancelled_decision()
         if isinstance(candidate, GlobalSingleOrderSellCandidate):
+            probability_witness = probability_witnesses[candidate.family_key]
+            point_q = family_payoff_point_q(
+                probability_witness,
+                bin_id=candidate.bin_id,
+                side=candidate.side,
+            )
+            if point_q is None:
+                point_counterfactual = GlobalSellPointCounterfactual(
+                    status="UNAVAILABLE",
+                    point_held_payoff_q=None,
+                    probability_witness_identity=(
+                        probability_witness.witness_identity
+                    ),
+                    wealth_economic_identity=wealth_witness.economic_identity,
+                    wealth_floor_usd=wealth_witness.wealth_floor_usd,
+                    wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+                    held_shares=candidate.held_shares,
+                    rejection_reason="POINT_PROBABILITY_UNAVAILABLE",
+                )
+            else:
+                try:
+                    point_counterfactual = _score_global_sell_point_counterfactual(
+                        candidate,
+                        point_held_payoff_q=point_q,
+                        probability_witness_identity=(
+                            probability_witness.witness_identity
+                        ),
+                        wealth_witness=wealth_witness,
+                        sample_count=q_samples.size,
+                        band_alpha=band_alpha,
+                    )
+                except Exception:  # noqa: BLE001 - diagnostics cannot alter live action
+                    point_counterfactual = GlobalSellPointCounterfactual(
+                        status="UNAVAILABLE",
+                        point_held_payoff_q=point_q,
+                        probability_witness_identity=(
+                            probability_witness.witness_identity
+                        ),
+                        wealth_economic_identity=wealth_witness.economic_identity,
+                        wealth_floor_usd=wealth_witness.wealth_floor_usd,
+                        wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+                        held_shares=candidate.held_shares,
+                        rejection_reason="POINT_COUNTERFACTUAL_COMPUTATION_FAILED",
+                    )
+            sell_point_counterfactuals_by_id[candidate.candidate_id] = (
+                point_counterfactual
+            )
             score = _score_global_single_order_sell(
                 candidate,
                 held_payoff_q_samples=q_samples,
@@ -4587,6 +4900,9 @@ def select_global_single_order(
                         rejections=failure_rejections,
                         scores=scored,
                         buy_rejection_economics=rejected_buy_economics_by_id,
+                        sell_point_counterfactuals=(
+                            sell_point_counterfactuals_by_id
+                        ),
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -4849,6 +5165,7 @@ def select_global_single_order(
                 rejections=rejections,
                 scores=scored,
                 buy_rejection_economics=rejected_buy_economics_by_id,
+                sell_point_counterfactuals=sell_point_counterfactuals_by_id,
             ),
             candidate_input_count=len(candidates),
         )
@@ -4902,6 +5219,7 @@ def select_global_single_order(
             rejections=rejections,
             scores=scored,
             buy_rejection_economics=rejected_buy_economics_by_id,
+            sell_point_counterfactuals=sell_point_counterfactuals_by_id,
             winner_id=winner_id,
         ),
         candidate_input_count=len(candidates),

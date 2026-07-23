@@ -2138,7 +2138,7 @@ def _venue_point_order_boot_recoverable(item: dict[str, Any]) -> dict[str, Any] 
 
 
 def _venue_point_order_truth_alignment_check() -> CheckResult:
-    """Classify authenticated venue point truth vs local restart order facts."""
+    """Classify venue/local drift without stopping the recovery runtime."""
 
     commands = _restart_relevant_entry_commands_for_venue_audit()
     evidence: dict[str, Any] = {
@@ -2397,6 +2397,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
         if not risky
         else "authenticated venue point-order truth conflicts with local restart-relevant order facts",
         evidence,
+        restart_blocking=False,
     )
 
 
@@ -2972,7 +2973,7 @@ def _day0_canonical_observation_evidence(
 
 
 def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
-    """Block restart when a live venue order is attached to the wrong lifecycle phase."""
+    """Block entries when a resting order lacks aligned lifecycle truth."""
 
     evidence: dict[str, Any] = {
         "trade_db": str(TRADE_DB),
@@ -3226,6 +3227,7 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
         if not risky
         else "resting venue commands conflict with position lifecycle or terminal venue facts",
         evidence,
+        restart_blocking=False,
     )
 
 
