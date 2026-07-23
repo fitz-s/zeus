@@ -3655,29 +3655,34 @@ def _buy_rejection_economics(
     minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
         candidate.executable_cost_curve.levels[0].price
     )
-    return GlobalBuyRejectionEconomics(
-        candidate_id=candidate.candidate_id,
-        rejection_reason=reason,
-        robust_q_lcb=float(robust_q),
-        minimum_all_in_unit_cost=minimum_unit_cost,
-        current_token_shares=Decimal(current_token_shares),
-        full_kelly_target_shares=Decimal(full_kelly_target_shares),
-        fractional_kelly_target_shares=Decimal(
-            fractional_kelly_target_shares
-        ),
-        remaining_fractional_target_shares=(
-            Decimal(fractional_kelly_target_shares)
-            - Decimal(current_token_shares)
-        ),
-        probe_kind=probe_kind,
-        probe_shares=Decimal(probe_shares),
-        probe_cost_usd=cost,
-        probe_robust_delta_log_wealth=robust_du,
-        probe_robust_ev_usd=robust_ev,
-        probe_capital_efficiency=efficiency,
-        probe_limit_price=limit_price,
-        probe_expected_fill_price_before_fee=expected_fill_price,
-    )
+    try:
+        return GlobalBuyRejectionEconomics(
+            candidate_id=candidate.candidate_id,
+            rejection_reason=reason,
+            robust_q_lcb=float(robust_q),
+            minimum_all_in_unit_cost=minimum_unit_cost,
+            current_token_shares=Decimal(current_token_shares),
+            full_kelly_target_shares=Decimal(full_kelly_target_shares),
+            fractional_kelly_target_shares=Decimal(
+                fractional_kelly_target_shares
+            ),
+            remaining_fractional_target_shares=(
+                Decimal(fractional_kelly_target_shares)
+                - Decimal(current_token_shares)
+            ),
+            probe_kind=probe_kind,
+            probe_shares=Decimal(probe_shares),
+            probe_cost_usd=cost,
+            probe_robust_delta_log_wealth=robust_du,
+            probe_robust_ev_usd=robust_ev,
+            probe_capital_efficiency=efficiency,
+            probe_limit_price=limit_price,
+            probe_expected_fill_price_before_fee=expected_fill_price,
+        )
+    except ValueError:
+        # This certificate is diagnostic-only: the candidate is already rejected.
+        # A non-representable counterfactual must not abort the whole auction.
+        return None
 
 
 def _score_global_single_order(

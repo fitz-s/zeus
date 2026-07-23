@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-21
-# Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and complete auction receipts
+# Last reused/audited: 2026-07-23
+# Authority basis: W3 SOLVE design packet, global Kelly/envelope, and fail-isolated diagnostic receipts
 """W3 SOLVE math-core acceptance — the property anchors (design packet §4, consult REV-2).
 
 (a) solver ≥ top-1 picker in the SAME feasible set (post-repair) on EVERY fixture;
@@ -1618,6 +1618,29 @@ def _global_select(
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
         cancelled=cancelled,
     )
+
+
+def test_global_rejected_buy_diagnostic_failure_does_not_abort_auction(monkeypatch):
+    candidate = _global_candidate(
+        candidate_id="global-rejected-diagnostic",
+        family="diagnostic-family",
+        side="YES",
+        q=0.10,
+        levels=(("0.50", "100"),),
+    )
+
+    def reject_diagnostic(**_kwargs):
+        raise ValueError("diagnostic shape unavailable")
+
+    monkeypatch.setattr(S, "GlobalBuyRejectionEconomics", reject_diagnostic)
+
+    decision = _global_select((candidate,))
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "NON_POSITIVE_ROBUST_OBJECTIVE"
+    )
+    assert decision.candidate_evaluations[0].buy_rejection_economics is None
 
 
 def test_global_selector_rejects_buy_that_harms_current_portfolio_compounding():
