@@ -1480,7 +1480,11 @@ def _store_global_auction_receipt(
     ] = {}
     detailed_rows: list[dict] = []
     for row in evaluation_rows:
-        if row.get("status") == "REJECTED" and row.get("action") == "BUY":
+        if (
+            row.get("status") == "REJECTED"
+            and row.get("action") == "BUY"
+            and row.get("portfolio_envelope_certificate") is None
+        ):
             key = (
                 str(row["action"]),
                 str(row["side"]),
@@ -1643,6 +1647,9 @@ def _store_global_auction_receipt(
         row for row in evaluation_rows if row.get("status") == "SELECTED"
     )
     winner = getattr(decision, "candidate", None)
+    envelope_certificate = getattr(
+        decision, "portfolio_envelope_certificate", None
+    )
     winner_id = str(getattr(winner, "candidate_id", "") or "")
     candidate_input_count = getattr(decision, "candidate_input_count", None)
     condition_index_complete = all(condition_ids) and all(
@@ -1716,6 +1723,27 @@ def _store_global_auction_receipt(
             "selected": winner is None,
         },
         "winner_candidate_id": winner_id or None,
+        "portfolio_envelope_identity": (
+            getattr(envelope_certificate, "envelope_identity", None)
+        ),
+        "portfolio_effective_delta_log_wealth": (
+            getattr(envelope_certificate, "effective_delta_log_wealth", None)
+        ),
+        "portfolio_effective_ev_usd": (
+            getattr(envelope_certificate, "effective_ev_usd", None)
+        ),
+        "portfolio_effective_log_growth_per_hour": (
+            getattr(
+                envelope_certificate,
+                "effective_log_growth_per_hour",
+                None,
+            )
+        ),
+        "portfolio_envelope_certificate_count": sum(
+            row.get("portfolio_envelope_certificate") is not None
+            for row in evaluation_rows
+            if row.get("action") == "BUY"
+        ),
         "no_trade_reason": getattr(decision, "no_trade_reason", None),
         "candidate_evaluation_count": len(evaluation_rows),
         "candidate_input_count": candidate_input_count,

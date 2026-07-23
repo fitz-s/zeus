@@ -534,6 +534,137 @@ def _global_candidate(
     )
 
 
+def test_comonotone_portfolio_metrics_are_yes_no_symmetric():
+    yes = _global_candidate(
+        candidate_id="envelope-yes", family="family-envelope", side="YES", q=0.6
+    )
+    no = _global_candidate(
+        candidate_id="envelope-no", family="family-envelope", side="NO", q=0.6
+    )
+    yes_envelope = S.ComonotonePortfolioEnvelope(
+        spendable_cash_usd=Decimal("100"),
+        ledger_snapshot_id="ledger-current",
+        families=(
+            S.ComonotoneFamilyEndowment(
+                family_key="family-envelope",
+                bin_ids=("bin", "other"),
+                point_q=(0.6, 0.4),
+                payout_by_bin_usd=(Decimal("10"), Decimal("20")),
+            ),
+        ),
+    )
+    no_envelope = S.ComonotonePortfolioEnvelope(
+        spendable_cash_usd=Decimal("100"),
+        ledger_snapshot_id="ledger-current",
+        families=(
+            S.ComonotoneFamilyEndowment(
+                family_key="family-envelope",
+                bin_ids=("bin", "other"),
+                point_q=(0.4, 0.6),
+                payout_by_bin_usd=(Decimal("20"), Decimal("10")),
+            ),
+        ),
+    )
+
+    yes_metrics = S.comonotone_portfolio_buy_metrics(
+        yes_envelope, yes, shares=Decimal("20"), cost_usd=Decimal("8")
+    )
+    no_metrics = S.comonotone_portfolio_buy_metrics(
+        no_envelope, no, shares=Decimal("20"), cost_usd=Decimal("8")
+    )
+
+    assert yes_metrics == pytest.approx(no_metrics, abs=1e-15)
+
+
+def test_comonotone_zero_endowment_ties_are_yes_no_symmetric():
+    yes = _global_candidate(
+        candidate_id="empty-envelope-yes",
+        family="empty-candidate-family",
+        side="YES",
+        q=0.6,
+    )
+    no = _global_candidate(
+        candidate_id="empty-envelope-no",
+        family="empty-candidate-family",
+        side="NO",
+        q=0.6,
+    )
+
+    def envelope(point_q):
+        return S.ComonotonePortfolioEnvelope(
+            spendable_cash_usd=Decimal("100"),
+            ledger_snapshot_id="ledger-current",
+            families=(
+                S.ComonotoneFamilyEndowment(
+                    family_key="empty-candidate-family",
+                    bin_ids=("bin", "other"),
+                    point_q=point_q,
+                    payout_by_bin_usd=(Decimal("0"), Decimal("0")),
+                ),
+                S.ComonotoneFamilyEndowment(
+                    family_key="held-family",
+                    bin_ids=("low", "high"),
+                    point_q=(0.4, 0.6),
+                    payout_by_bin_usd=(Decimal("0"), Decimal("100")),
+                ),
+            ),
+        )
+
+    yes_metrics = S.comonotone_portfolio_buy_metrics(
+        envelope((0.6, 0.4)), yes, shares=Decimal("20"), cost_usd=Decimal("8")
+    )
+    no_metrics = S.comonotone_portfolio_buy_metrics(
+        envelope((0.4, 0.6)), no, shares=Decimal("20"), cost_usd=Decimal("8")
+    )
+
+    assert yes_metrics == pytest.approx(no_metrics, abs=1e-15)
+
+
+def test_comonotone_portfolio_metrics_reject_positive_ev_that_harms_compounding():
+    candidate = _global_candidate(
+        candidate_id="envelope-correlated",
+        family="candidate-family",
+        side="YES",
+        q=0.5,
+    )
+    candidate_family = S.ComonotoneFamilyEndowment(
+        family_key="candidate-family",
+        bin_ids=("bin", "other"),
+        point_q=(0.5, 0.5),
+        payout_by_bin_usd=(Decimal("100"), Decimal("0")),
+    )
+    standalone = S.ComonotonePortfolioEnvelope(
+        spendable_cash_usd=Decimal("100"),
+        ledger_snapshot_id="ledger-current",
+        families=(candidate_family,),
+    )
+    correlated = S.ComonotonePortfolioEnvelope(
+        spendable_cash_usd=Decimal("100"),
+        ledger_snapshot_id="ledger-current",
+        families=(
+            candidate_family,
+            S.ComonotoneFamilyEndowment(
+                family_key="other-family",
+                bin_ids=("low", "high"),
+                point_q=(0.5, 0.5),
+                payout_by_bin_usd=(Decimal("100"), Decimal("0")),
+            ),
+        ),
+    )
+
+    standalone_dlog, standalone_ev = S.comonotone_portfolio_buy_metrics(
+        standalone, candidate, shares=Decimal("60"), cost_usd=Decimal("15")
+    )
+    correlated_dlog, correlated_ev = S.comonotone_portfolio_buy_metrics(
+        correlated, candidate, shares=Decimal("60"), cost_usd=Decimal("15")
+    )
+
+    assert standalone_ev == pytest.approx(15.0)
+    assert correlated_ev == pytest.approx(15.0)
+    assert standalone_dlog > 0.0
+    assert correlated_dlog < 0.0
+
+
 def _replace_global_q_samples(candidate, payoff_q_samples):
     payoff_q = np.ascontiguousarray(np.asarray(payoff_q_samples, dtype=np.float64))
     yes_q = payoff_q if candidate.side == "YES" else 1.0 - payoff_q
@@ -1422,6 +1553,7 @@ def _global_select(
     candidate_capital_limit_resolver=None,
     candidate_portfolio_endowment_resolver=None,
     family_portfolio_endowment_resolver=None,
+    portfolio_envelope=None,
     candidate_policy_rejection_resolver=None,
     fractional_kelly_multiplier="1",
     resolution_hours_by_family=None,
@@ -1482,9 +1614,56 @@ def _global_select(
             candidate_portfolio_endowment_resolver
         ),
         family_portfolio_endowment_resolver=family_portfolio_endowment_resolver,
+        portfolio_envelope=portfolio_envelope,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
         cancelled=cancelled,
     )
+
+
+def test_global_selector_rejects_buy_that_harms_current_portfolio_compounding():
+    candidate = _global_candidate(
+        candidate_id="global-envelope-correlated",
+        family="candidate-family",
+        side="YES",
+        q=0.5,
+        levels=(("0.25", "100"),),
+    )
+    envelope = S.ComonotonePortfolioEnvelope(
+        spendable_cash_usd=Decimal("100"),
+        ledger_snapshot_id="ledger-current",
+        families=(
+            S.ComonotoneFamilyEndowment(
+                family_key="candidate-family",
+                bin_ids=("bin", "other"),
+                point_q=(0.5, 0.5),
+                payout_by_bin_usd=(Decimal("100"), Decimal("0")),
+            ),
+            S.ComonotoneFamilyEndowment(
+                family_key="other-family",
+                bin_ids=("low", "high"),
+                point_q=(0.5, 0.5),
+                payout_by_bin_usd=(Decimal("100"), Decimal("0")),
+            ),
+        ),
+    )
+
+    decision = _global_select(
+        (candidate,),
+        cap="15",
+        portfolio_envelope=envelope,
+    )
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "NON_POSITIVE_PORTFOLIO_ENVELOPE"
+    )
+    evaluation = decision.candidate_evaluations[0]
+    certificate = evaluation.portfolio_envelope_certificate
+    assert certificate is not None
+    assert certificate.status == "NON_POSITIVE"
+    assert certificate.standalone_robust_delta_log_wealth > 0.0
+    assert certificate.standalone_robust_ev_usd > 0.0
+    assert certificate.effective_delta_log_wealth < 0.0
 
 
 def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling():

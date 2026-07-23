@@ -206,6 +206,7 @@ GlobalEligibilityReason = Literal[
     "FRACTIONAL_KELLY_TARGET_REACHED",
     "LIVE_UNIT_PRICE_OUT_OF_BOUNDS",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
+    "NON_POSITIVE_PORTFOLIO_ENVELOPE",
 ]
 
 
@@ -1246,6 +1247,202 @@ class FamilyPortfolioEndowment:
 
 
 @dataclass(frozen=True)
+class ComonotoneFamilyEndowment:
+    """One current family inside the conservative cross-family wealth envelope."""
+
+    family_key: str
+    bin_ids: tuple[str, ...]
+    point_q: tuple[float, ...]
+    payout_by_bin_usd: tuple[Decimal, ...]
+
+    def __post_init__(self) -> None:
+        q = np.asarray(self.point_q, dtype=np.float64)
+        payouts = tuple(Decimal(value) for value in self.payout_by_bin_usd)
+        if (
+            not self.family_key.strip()
+            or len(self.bin_ids) < 2
+            or len(set(self.bin_ids)) != len(self.bin_ids)
+            or q.shape != (len(self.bin_ids),)
+            or len(payouts) != len(self.bin_ids)
+            or not np.isfinite(q).all()
+            or np.any(q < 0.0)
+            or not math.isclose(float(q.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
+            or any(not value.is_finite() or value < 0 for value in payouts)
+        ):
+            raise ValueError("comonotone family endowment is invalid")
+        object.__setattr__(self, "point_q", tuple(float(value) for value in q))
+        object.__setattr__(self, "payout_by_bin_usd", payouts)
+
+
+@dataclass(frozen=True)
+class ComonotonePortfolioEnvelope:
+    """Current cash plus exact family claims under one adverse quantile coupling."""
+
+    spendable_cash_usd: Decimal
+    ledger_snapshot_id: str
+    families: tuple[ComonotoneFamilyEndowment, ...]
+
+    def __post_init__(self) -> None:
+        cash = Decimal(self.spendable_cash_usd)
+        families = tuple(sorted(self.families, key=lambda row: row.family_key))
+        if (
+            not cash.is_finite()
+            or cash <= 0
+            or not self.ledger_snapshot_id.strip()
+            or len({row.family_key for row in families}) != len(families)
+        ):
+            raise ValueError("comonotone portfolio envelope is invalid")
+        object.__setattr__(self, "spendable_cash_usd", cash)
+        object.__setattr__(self, "families", families)
+
+    @property
+    def envelope_identity(self) -> str:
+        return _hash(
+            "comonotone_portfolio_envelope_v1",
+            self.ledger_snapshot_id,
+            str(self.spendable_cash_usd),
+            *(
+                repr(
+                    (
+                        row.family_key,
+                        row.bin_ids,
+                        row.point_q,
+                        tuple(str(value) for value in row.payout_by_bin_usd),
+                    )
+                )
+                for row in self.families
+            ),
+        )
+
+
+def comonotone_portfolio_buy_metrics(
+    envelope: ComonotonePortfolioEnvelope,
+    candidate: "GlobalSingleOrderCandidate",
+    *,
+    shares: Decimal,
+    cost_usd: Decimal,
+) -> tuple[float, float]:
+    """Exact point-belief BUY delta under the conservative family coupling."""
+
+    units = Decimal(shares)
+    cost = Decimal(cost_usd)
+    if (
+        not units.is_finite()
+        or units <= 0
+        or not cost.is_finite()
+        or cost <= 0
+        or candidate.ledger_snapshot_id != envelope.ledger_snapshot_id
+    ):
+        raise ValueError("comonotone BUY inputs are invalid")
+    family_by_key = {row.family_key: row for row in envelope.families}
+    candidate_family = family_by_key.get(candidate.family_key)
+    if candidate_family is None or candidate.bin_id not in candidate_family.bin_ids:
+        raise ValueError("candidate is absent from the portfolio envelope")
+
+    ordered: list[
+        tuple[ComonotoneFamilyEndowment, np.ndarray, np.ndarray, np.ndarray]
+    ] = []
+    breaks = {0.0, 1.0}
+    for family in envelope.families:
+        raw_payouts = np.asarray(
+            [float(value) for value in family.payout_by_bin_usd],
+            dtype=np.float64,
+        )
+        if family.family_key == candidate.family_key:
+            own = np.asarray(
+                [bin_id == candidate.bin_id for bin_id in family.bin_ids],
+                dtype=bool,
+            )
+            wins = own if candidate.side == "YES" else ~own
+            order = np.lexsort((wins.astype(np.int8), raw_payouts))
+        else:
+            order = np.argsort(raw_payouts, kind="stable")
+        q = np.asarray(family.point_q, dtype=np.float64)[order]
+        payouts = raw_payouts[order]
+        bins = np.asarray([family.bin_ids[index] for index in order], dtype=object)
+        cdf = np.cumsum(q)
+        cdf[-1] = 1.0
+        breaks.update(float(value) for value in cdf[:-1] if 0.0 < value < 1.0)
+        ordered.append((family, cdf, payouts, bins))
+
+    edges = np.asarray(sorted(breaks), dtype=np.float64)
+    weights = np.diff(edges)
+    mids = edges[:-1] + weights / 2.0
+    base = np.full(mids.shape, float(envelope.spendable_cash_usd), dtype=np.float64)
+    candidate_win = np.zeros(mids.shape, dtype=bool)
+    for family, cdf, payouts, bins in ordered:
+        index = np.searchsorted(cdf, mids, side="left")
+        base += payouts[index]
+        if family.family_key == candidate.family_key:
+            own_bin = bins[index] == candidate.bin_id
+            candidate_win = own_bin if candidate.side == "YES" else ~own_bin
+    after = base - float(cost) + float(units) * candidate_win.astype(np.float64)
+    payoff = after - base
+    expected_payoff = float(np.dot(weights, payoff))
+    if np.any(base <= 0.0) or np.any(after <= 0.0):
+        return -float(np.finfo(np.float64).max), expected_payoff
+    delta = np.log(after) - np.log(base)
+    return float(np.dot(weights, delta)), expected_payoff
+
+
+@dataclass(frozen=True)
+class GlobalPortfolioEnvelopeCertificate:
+    """Candidate economics after current cross-family endowment correlation."""
+
+    candidate_id: str
+    envelope_identity: str
+    standalone_robust_delta_log_wealth: float
+    standalone_robust_ev_usd: float
+    point_comonotone_delta_log_wealth: float
+    point_comonotone_ev_usd: float
+    effective_delta_log_wealth: float
+    effective_ev_usd: float
+    effective_log_growth_per_hour: float
+    status: Literal["POSITIVE", "NON_POSITIVE"]
+
+    def __post_init__(self) -> None:
+        values = (
+            self.standalone_robust_delta_log_wealth,
+            self.standalone_robust_ev_usd,
+            self.point_comonotone_delta_log_wealth,
+            self.point_comonotone_ev_usd,
+            self.effective_delta_log_wealth,
+            self.effective_ev_usd,
+            self.effective_log_growth_per_hour,
+        )
+        positive = (
+            self.effective_delta_log_wealth > 0.0
+            and self.effective_ev_usd > _ROBUST_EV_EPS_USD
+            and self.effective_log_growth_per_hour > 0.0
+        )
+        if (
+            not self.candidate_id.strip()
+            or not self.envelope_identity.strip()
+            or any(not math.isfinite(value) for value in values)
+            or self.standalone_robust_delta_log_wealth <= 0.0
+            or self.standalone_robust_ev_usd <= _ROBUST_EV_EPS_USD
+            or self.status not in {"POSITIVE", "NON_POSITIVE"}
+            or not math.isclose(
+                self.effective_delta_log_wealth,
+                min(
+                    self.standalone_robust_delta_log_wealth,
+                    self.point_comonotone_delta_log_wealth,
+                ),
+                rel_tol=0.0,
+                abs_tol=1e-15,
+            )
+            or not math.isclose(
+                self.effective_ev_usd,
+                min(self.standalone_robust_ev_usd, self.point_comonotone_ev_usd),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or (self.status == "POSITIVE") != positive
+        ):
+            raise ValueError("global portfolio envelope certificate is incoherent")
+
+
+@dataclass(frozen=True)
 class FamilyJointBuyTarget:
     """One native BUY target from the family-wide full-Kelly solution."""
 
@@ -1939,6 +2136,7 @@ class GlobalSingleOrderCandidateEvaluation:
     sell_point_counterfactual: GlobalSellPointCounterfactual | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
     buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
+    portfolio_envelope_certificate: GlobalPortfolioEnvelopeCertificate | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1960,6 +2158,11 @@ class GlobalSingleOrderCandidateEvaluation:
             self.position_id is not None or self.held_shares != 0
         ):
             raise ValueError("BUY evaluation cannot carry a held-position binding")
+        envelope = self.portfolio_envelope_certificate
+        if envelope is not None and (
+            self.action != "BUY" or envelope.candidate_id != self.candidate_id
+        ):
+            raise ValueError("portfolio envelope certificate binding disagrees")
         if self.sell_point_counterfactual is not None and self.action != "SELL":
             raise ValueError("only SELL evaluations may carry point counterfactuals")
         if (
@@ -1993,6 +2196,11 @@ class GlobalSingleOrderCandidateEvaluation:
             )
             if not reason:
                 raise ValueError("rejected candidate evaluation cannot carry economics")
+            if envelope is not None and (
+                reason != "NON_POSITIVE_PORTFOLIO_ENVELOPE"
+                or envelope.status != "NON_POSITIVE"
+            ):
+                raise ValueError("rejected BUY envelope status disagrees")
             if rejection_economics is not None and (
                 self.action != "BUY"
                 or rejection_economics.candidate_id != self.candidate_id
@@ -2083,6 +2291,8 @@ class GlobalSingleOrderCandidateEvaluation:
             return
         if self.buy_rejection_economics is not None:
             raise ValueError("non-rejected candidate cannot carry rejection economics")
+        if envelope is not None and envelope.status != "POSITIVE":
+            raise ValueError("scored BUY envelope must be positive")
         expected_action_mode = (
             "SETTLEMENT_LOCKED_BUY"
             if self.action == "BUY"
@@ -2211,6 +2421,7 @@ class GlobalSingleOrderDecision:
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
     buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
+    portfolio_envelope_certificate: GlobalPortfolioEnvelopeCertificate | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
     candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
     candidate_input_count: int | None = None
@@ -2267,6 +2478,8 @@ class GlobalSingleOrderDecision:
                     or winner.buy_minimum_marketable_repair
                     != self.buy_minimum_marketable_repair
                     or winner.buy_sizing_mode != self.buy_sizing_mode
+                    or winner.portfolio_envelope_certificate
+                    != self.portfolio_envelope_certificate
                 ):
                     raise ValueError("selected candidate evaluation disagrees with decision")
         if self.candidate is None:
@@ -2274,6 +2487,8 @@ class GlobalSingleOrderDecision:
                 raise ValueError("global no-trade decision requires a reason")
             if self.buy_minimum_marketable_repair is not None:
                 raise ValueError("global no-trade decision cannot carry a BUY repair")
+            if self.portfolio_envelope_certificate is not None:
+                raise ValueError("global no-trade decision cannot carry an envelope")
             rejection_economics = self.buy_rejection_economics
             if rejection_economics is not None and (
                 not internal_score
@@ -2308,6 +2523,13 @@ class GlobalSingleOrderDecision:
             return
         if self.buy_rejection_economics is not None:
             raise ValueError("selected global order cannot carry rejection economics")
+        envelope = self.portfolio_envelope_certificate
+        if envelope is not None and (
+            getattr(self.candidate, "action", "BUY") != "BUY"
+            or envelope.candidate_id != self.candidate.candidate_id
+            or envelope.status != "POSITIVE"
+        ):
+            raise ValueError("selected portfolio envelope certificate disagrees")
         if getattr(self.candidate, "action", "BUY") == "SELL":
             if (
                 self.no_trade_reason is not None
@@ -2466,6 +2688,9 @@ def _global_candidate_evaluations(
     sell_point_counterfactuals: Mapping[
         str, GlobalSellPointCounterfactual
     ] | None = None,
+    portfolio_envelope_certificates: Mapping[
+        str, GlobalPortfolioEnvelopeCertificate
+    ] | None = None,
     winner_id: str | None = None,
     default_rejection: str | None = None,
 ) -> tuple[GlobalSingleOrderCandidateEvaluation, ...]:
@@ -2478,6 +2703,7 @@ def _global_candidate_evaluations(
     }
     rejected_buy_by_id = dict(buy_rejection_economics or {})
     sell_point_by_id = dict(sell_point_counterfactuals or {})
+    envelope_by_id = dict(portfolio_envelope_certificates or {})
     evaluations: list[GlobalSingleOrderCandidateEvaluation] = []
     for candidate in candidates:
         is_sell = isinstance(candidate, GlobalSingleOrderSellCandidate)
@@ -2508,6 +2734,9 @@ def _global_candidate_evaluations(
                         candidate.candidate_id
                     ),
                     buy_rejection_economics=rejected_buy_by_id.get(
+                        candidate.candidate_id
+                    ),
+                    portfolio_envelope_certificate=envelope_by_id.get(
                         candidate.candidate_id
                     ),
                 )
@@ -2560,6 +2789,10 @@ def _global_candidate_evaluations(
                     candidate.candidate_id
                 ),
                 buy_sizing_mode=score.buy_sizing_mode,
+                portfolio_envelope_certificate=(
+                    score.portfolio_envelope_certificate
+                    or envelope_by_id.get(candidate.candidate_id)
+                ),
                 buy_minimum_marketable_repair=(
                     score.buy_minimum_marketable_repair
                 ),
@@ -4417,6 +4650,7 @@ def select_global_single_order(
         [str], FamilyPortfolioEndowment
     ]
     | None = None,
+    portfolio_envelope: ComonotonePortfolioEnvelope | None = None,
     candidate_payoff_q_lcb_resolver: Callable[
         [GlobalSingleOrderAnyCandidate], float | None
     ]
@@ -4525,6 +4759,12 @@ def select_global_single_order(
             ),
             candidate_input_count=len(candidates),
         )
+    if portfolio_envelope is not None and (
+        portfolio_envelope.ledger_snapshot_id != wealth_witness.ledger_snapshot_id
+        or portfolio_envelope.spendable_cash_usd
+        != wealth_witness.spendable_cash_usd
+    ):
+        raise ValueError("portfolio envelope is not bound to current wealth")
     if capital_limit_usd < 0:
         raise ValueError("capital limit must be non-negative")
     multiplier = Decimal(fractional_kelly_multiplier)
@@ -4538,6 +4778,9 @@ def select_global_single_order(
     ] = {}
     sell_point_counterfactuals_by_id: dict[
         str, GlobalSellPointCounterfactual
+    ] = {}
+    portfolio_envelope_certificates_by_id: dict[
+        str, GlobalPortfolioEnvelopeCertificate
     ] = {}
     buy_capital_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
@@ -5136,6 +5379,53 @@ def select_global_single_order(
                 )
             )
 
+    if portfolio_envelope is not None:
+        envelope_scored: list[GlobalSingleOrderDecision] = []
+        for score in scored:
+            candidate = score.candidate
+            if candidate is None or isinstance(
+                candidate, GlobalSingleOrderSellCandidate
+            ):
+                envelope_scored.append(score)
+                continue
+            if score.capital_lock_hours is None or score.capital_lock_hours <= 0.0:
+                raise ValueError("portfolio envelope score lacks a capital horizon")
+            point_dlog, point_ev = comonotone_portfolio_buy_metrics(
+                portfolio_envelope,
+                candidate,
+                shares=score.shares,
+                cost_usd=score.cost_usd,
+            )
+            effective_dlog = min(score.robust_delta_log_wealth, point_dlog)
+            effective_ev = min(score.robust_ev_usd, point_ev)
+            positive = (
+                effective_dlog > 0.0 and effective_ev > _ROBUST_EV_EPS_USD
+            )
+            certificate = GlobalPortfolioEnvelopeCertificate(
+                candidate_id=candidate.candidate_id,
+                envelope_identity=portfolio_envelope.envelope_identity,
+                standalone_robust_delta_log_wealth=score.robust_delta_log_wealth,
+                standalone_robust_ev_usd=score.robust_ev_usd,
+                point_comonotone_delta_log_wealth=point_dlog,
+                point_comonotone_ev_usd=point_ev,
+                effective_delta_log_wealth=effective_dlog,
+                effective_ev_usd=effective_ev,
+                effective_log_growth_per_hour=(
+                    effective_dlog / score.capital_lock_hours
+                ),
+                status="POSITIVE" if positive else "NON_POSITIVE",
+            )
+            portfolio_envelope_certificates_by_id[candidate.candidate_id] = certificate
+            if not positive:
+                rejections[candidate.candidate_id] = (
+                    "NON_POSITIVE_PORTFOLIO_ENVELOPE"
+                )
+                continue
+            envelope_scored.append(
+                replace(score, portfolio_envelope_certificate=certificate)
+            )
+        scored = envelope_scored
+
     positive_scored = tuple(
         score
         for score in scored
@@ -5166,6 +5456,9 @@ def select_global_single_order(
                 scores=scored,
                 buy_rejection_economics=rejected_buy_economics_by_id,
                 sell_point_counterfactuals=sell_point_counterfactuals_by_id,
+                portfolio_envelope_certificates=(
+                    portfolio_envelope_certificates_by_id
+                ),
             ),
             candidate_input_count=len(candidates),
         )
@@ -5173,14 +5466,23 @@ def select_global_single_order(
     # BUY and SELL are alternative one-order changes to the current endowment.
     # Execution direction does not change the objective: compare each certified
     # terminal improvement over its authority-bound family-resolution horizon.
+    def effective_rate(score: GlobalSingleOrderDecision) -> float:
+        certificate = score.portfolio_envelope_certificate
+        if certificate is not None:
+            return certificate.effective_log_growth_per_hour
+        return float(score.robust_log_growth_per_hour or 0.0)
+
+    def effective_dlog(score: GlobalSingleOrderDecision) -> float:
+        certificate = score.portfolio_envelope_certificate
+        if certificate is not None:
+            return certificate.effective_delta_log_wealth
+        return score.robust_delta_log_wealth
+
     winner = min(
         positive_scored,
         key=lambda score: (
-            -round(
-                float(score.robust_log_growth_per_hour or 0.0),
-                15,
-            ),
-            -round(score.robust_delta_log_wealth, 15),
+            -round(effective_rate(score), 15),
+            -round(effective_dlog(score), 15),
             -round(score.capital_efficiency, 15),
             score.cost_usd,
             score.candidate.candidate_id if score.candidate is not None else "",
@@ -5213,6 +5515,7 @@ def select_global_single_order(
         buy_minimum_marketable_repair=(
             winner.buy_minimum_marketable_repair
         ),
+        portfolio_envelope_certificate=winner.portfolio_envelope_certificate,
         rejection_reasons=rejections,
         candidate_evaluations=_global_candidate_evaluations(
             candidates,
@@ -5220,6 +5523,9 @@ def select_global_single_order(
             scores=scored,
             buy_rejection_economics=rejected_buy_economics_by_id,
             sell_point_counterfactuals=sell_point_counterfactuals_by_id,
+            portfolio_envelope_certificates=(
+                portfolio_envelope_certificates_by_id
+            ),
             winner_id=winner_id,
         ),
         candidate_input_count=len(candidates),
