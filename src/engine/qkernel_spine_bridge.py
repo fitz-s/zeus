@@ -359,6 +359,7 @@ class PreparedGlobalFamily:
     candidate_payoff_q_lcb_caps: tuple[
         tuple[str, str, str, str, float], ...
     ] = ()
+    day0_payoff_truth_by_bin_side: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -500,6 +501,19 @@ def _prepare_global_family(
         holdings_snapshot=holdings_snapshot,
         solution_plan=solution_plan,
         solution_projection=solution_projection,
+        day0_payoff_truth_by_bin_side=tuple(
+            (
+                str(bin_id),
+                str(side),
+                truth,
+            )
+            for (bin_id, side), proof in sorted(proofs_by_bin_side.items())
+            if (
+                truth := str(
+                    getattr(proof, "day0_payoff_truth", "") or ""
+                ).strip()
+            )
+        ),
     )
 
 

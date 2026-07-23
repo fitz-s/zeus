@@ -4,6 +4,40 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-23 loss-to-zero causality correction
+
+The 72-hour loss census and decision-time reconstruction found three defects that
+sit upstream of any exit-price floor: `src.main` remained launchd-running while
+its recurring monitor and daemon heartbeat stopped for roughly 9h45m, and Day0
+`buy_no` was classified as `settlement_capture` from direction alone even when
+the observed extreme had not crossed the selected finite bin. In the same stall,
+WU/OGIMET and the HKO fallback fetch path captured possession timestamps before
+their network requests; when execution resumed, later source facts were persisted
+as if held hours earlier. The first froze q(t) while the book moved; the second
+gave forecast-dependent positions the wrong strategy identity, alpha clock,
+policy cohort, and attribution; the third violated point-in-time causality.
+
+This hot-fix extends the existing venue-heartbeat watchdog, under its existing
+deploy restart lock and fresh-sidecar prerequisites, to restart a running but
+heartbeat-stale live daemon. It also introduces one selected-payoff truth
+contract for HIGH/LOW x YES/NO: only a side physically locked by the monotone
+observed extreme is `settlement_capture`; unresolved or unavailable truth is
+`day0_nowcast_entry`. Command recovery defaults missing legacy truth to nowcast.
+
+Authority surfaces touched: `architecture/strategy_profile_registry.yaml` and
+`architecture/source_rationale.yaml`. This harmonizes the registry's existing
+"observation itself" versus "forecast-upside" theses; it supersedes the
+direction-only aliases in evaluator/event/command-recovery code. INV-05, INV-06,
+INV-41, and INV-43 remain binding: risk policy still actuates, point-in-time
+truth is preserved, selected-side evidence remains mandatory, and no live price
+band is weakened.
+
+The observation repair records possession only after each fetch returns and adds
+a typed-writer boundary that rejects any `imported_at` earlier than the hourly
+bucket or its raw extrema print. Historical false timestamps remain evidence to
+reconstruct or quarantine through sanctioned learning paths; this hot-fix does
+not rewrite canonical history out of band.
+
 ## 2026-07-15 current-evidence coherence correction
 
 A current 150-family source-clock census found 72 families where the absolute

@@ -422,7 +422,7 @@ def test_forecast_presubmit_revalidation_still_requires_qkernel_economics():
         _validate_pre_submit_revalidation_payload(payload)
 
 
-def test_day0_strategy_fallback_preserves_buy_yes_nowcast_semantics():
+def test_day0_strategy_fallback_requires_locked_selected_payoff_for_capture():
     from src.execution.command_recovery import _event_bound_strategy_key_from_payload
 
     assert (
@@ -433,9 +433,19 @@ def test_day0_strategy_fallback_preserves_buy_yes_nowcast_semantics():
     )
     assert (
         _event_bound_strategy_key_from_payload(
-            {"event_type": "DAY0_EXTREME_UPDATED", "direction": "buy_no"}
+            {
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "direction": "buy_no",
+                "day0_payoff_truth": "locked",
+            }
         )
         == "settlement_capture"
+    )
+    assert (
+        _event_bound_strategy_key_from_payload(
+            {"event_type": "DAY0_EXTREME_UPDATED", "direction": "buy_no"}
+        )
+        == "day0_nowcast_entry"
     )
 
 

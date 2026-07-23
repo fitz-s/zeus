@@ -1,5 +1,6 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-07-13
+# Lifecycle: created=2026-06-01; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused or audited: 2026-07-23
 # Authority basis: DEFECT-1 capital-recoverability bridge. An EDLI FILL_CONFIRMED
 #   must materialise a canonical position_current row (the seam audited as
 #   missing), idempotently, chain-reconcilable by token, summing partial fills.
@@ -1566,7 +1567,7 @@ def test_durable_fill_bridge_repairs_command_linked_short_position_projection(co
     assert repaired["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
 
 
-def test_bridge_resolves_day0_buy_no_to_settlement_capture(conn):
+def test_bridge_resolves_locked_day0_buy_no_to_settlement_capture(conn):
     aggregate_id = "agg-edli-day0-buyno-1"
     pre_submit = {
         "event_id": EVENT_ID,
@@ -1584,6 +1585,7 @@ def test_bridge_resolves_day0_buy_no_to_settlement_capture(conn):
         "metric": "high",
         "unit": "C",
         "q_live": 0.55,
+        "day0_payoff_truth": "locked",
         "executable_snapshot_id": "exec-snap-1",
     }
     _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit)
@@ -1617,6 +1619,19 @@ def test_bridge_resolves_day0_buy_no_to_settlement_capture(conn):
     row = _position_current_rows(conn)[0]
     assert row["strategy_key"] == "settlement_capture"
     assert row["direction"] == "buy_no"
+
+
+def test_bridge_defaults_legacy_day0_buy_no_without_payoff_truth_to_nowcast():
+    from src.events.edli_position_bridge import _resolve_strategy_key_from_pre_submit
+
+    assert (
+        _resolve_strategy_key_from_pre_submit(
+            {"event_type": "DAY0_EXTREME_UPDATED"},
+            direction="buy_no",
+            metric="low",
+        )
+        == "day0_nowcast_entry"
+    )
 
 
 def test_bridge_resolves_day0_buy_yes_to_day0_nowcast_entry(conn):

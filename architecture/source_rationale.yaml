@@ -503,6 +503,13 @@ files:
     downstream:
     - src/engine/evaluator.py
     - src/strategy/market_fusion.py
+  src/contracts/day0_payoff_truth.py:
+    zone: K0_frozen_kernel
+    authority_role: day0_selected_payoff_truth_contract
+    why: Classifies whether a monotone running HIGH/LOW extreme has locked, refuted, or left unresolved the selected YES/NO payoff; prevents direction-only strategy identity from promoting forecast-dependent Day0 positions to settlement capture.
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/event_reactor_adapter.py
   src/contracts/decision_evidence.py:
     zone: K0_frozen_kernel
     authority_role: typed_decision_contract
@@ -848,7 +855,7 @@ files:
   src/control/heartbeat_supervisor.py:
     zone: K1_governance
     authority_role: heartbeat_runtime_guard
-    why: R3 Z3 venue heartbeat supervisor that blocks resting live orders when venue heartbeat health is not HEALTHY and may restore a missing live-trading launchd process from fresh sidecar liveness; code identity is deployment evidence, not market authority.
+    why: R3 Z3 venue heartbeat supervisor that blocks resting live orders when venue heartbeat health is not HEALTHY and may restore a missing or heartbeat-stale live-trading launchd process from fresh sidecar liveness; code identity is deployment evidence, not market authority.
     hazards:
     - VENUS_CONTROL_ONLY
     write_routes:
@@ -1450,7 +1457,8 @@ files:
     zone: K2_runtime
     authority_role: observation_instants_v2_typed_writer
     why: Typed writer enforcing plan v3 antibodies A1 (non-default authority/data_version/provenance_json), A2 (per-city expected
-      source), and A6 (HK must route hko_hourly_accumulator, never VHHH) before every observation_instants INSERT.
+      source), A6 (HK must route hko_hourly_accumulator, never VHHH), and possession causality (imported_at cannot precede
+      the observation bucket or raw source print) before every observation_instants INSERT.
   src/data/meteostat_bulk_client.py:
     zone: K2_runtime
     authority_role: meteostat_bulk_boundary
@@ -1903,7 +1911,7 @@ files:
   src/events/edli_position_bridge.py:
     zone: K2_runtime
     authority_role: edli_fill_position_projection
-    why: Materializes confirmed EDLI fills into canonical position_current rows, including deterministic 68-char position ids and guarded recovery of qkernel posterior authority from certificates or EDLI event payloads.
+    why: Materializes confirmed EDLI fills into canonical position_current rows, including deterministic 68-char position ids, selected-payoff-truth strategy recovery, and guarded recovery of qkernel posterior authority from certificates or EDLI event payloads.
     downstream:
     - src/state/projection.py
   src/events/event_store.py:

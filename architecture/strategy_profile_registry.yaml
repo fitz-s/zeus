@@ -155,7 +155,7 @@ day0_nowcast_entry:
   allowed_market_phases: [settlement_day]
   allowed_discovery_modes: [day0_capture]
   cycle_axis_dispatch_mode: null
-  allowed_directions: [buy_yes]
+  allowed_directions: [buy_yes, buy_no]
   allowed_bin_topology: [point, finite_range]
   metric_support:
     high: live

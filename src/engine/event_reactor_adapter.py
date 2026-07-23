@@ -174,6 +174,10 @@ _GLOBAL_BOOK_PROJECTION_HINT_IN_FLIGHT = False
 _ProjectionHintT = TypeVar("_ProjectionHintT")
 
 from src.contracts.day0_observation_context import BoundClassification, classify_bound
+from src.contracts.day0_payoff_truth import (
+    Day0PayoffTruth,
+    classify_day0_payoff_truth,
+)
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
@@ -2965,6 +2969,7 @@ class _CandidateProof:
     # fix). Carried to the receipt so 06-05+ settlement can attribute EMOS-cells
     # vs maze-cells per city (the PROMOTE evidence).
     q_source: str | None = None
+    day0_payoff_truth: str | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
     # Twin-authority reconciliation #7 (2026-06-11; selected-leg repair 2026-06-30):
@@ -5072,9 +5077,10 @@ def _event_bound_strategy_key(
     event_type: str,
     direction: str | None,
     metric: str | None,
+    day0_payoff_truth: str | None = None,
     require_metric_live: bool = False,
 ) -> str:
-    """Classify the EDLI event-bound entry strategy without mixing live lanes."""
+    """Classify strategy from selected-side truth, never direction alone."""
 
     direction_value = getattr(direction, "value", direction)
     normalized_direction = str(direction_value or "").strip().lower()
@@ -5084,12 +5090,12 @@ def _event_bound_strategy_key(
         normalized_direction = "buy_no"
     normalized_metric = str(metric or "").strip().lower()
     if event_type == "DAY0_EXTREME_UPDATED":
-        if normalized_direction == "buy_no":
-            strategy = "settlement_capture"
-        elif normalized_direction == "buy_yes":
-            strategy = "day0_nowcast_entry"
-        else:
+        if normalized_direction not in {"buy_yes", "buy_no"}:
             raise ValueError(f"EDLI_STRATEGY_DIRECTION_UNKNOWN:{event_type}:{normalized_direction}")
+        if str(day0_payoff_truth or "").strip().lower() == Day0PayoffTruth.LOCKED.value:
+            strategy = "settlement_capture"
+        else:
+            strategy = "day0_nowcast_entry"
     elif event_type in _FORECAST_DECISION_EVENT_TYPES:
         if normalized_direction not in {"buy_yes", "buy_no"}:
             raise ValueError(f"EDLI_STRATEGY_DIRECTION_UNKNOWN:{event_type}:{normalized_direction}")
@@ -5173,6 +5179,9 @@ def _event_bound_effective_live_quality_floors(
                 event_type=event_type,
                 direction=str(actionable_payload.get("direction") or ""),
                 metric=str(actionable_payload.get("metric") or ""),
+                day0_payoff_truth=str(
+                    actionable_payload.get("day0_payoff_truth") or ""
+                ),
             )
         except Exception:  # noqa: BLE001
             strategy_key = ""
@@ -6853,7 +6862,10 @@ def event_bound_live_adapter_from_trade_conn(
     # True on the submit result.  Exposed on the adapter callable for main.py.
     _live_ack_count: list[int] = [0]
     _consumed_global_preflight_tokens: dict[str, datetime] = {}
-    _global_entry_policy_by_family: dict[str, tuple[str, str]] = {}
+    _global_entry_policy_by_family: dict[
+        str,
+        tuple[str, str, dict[tuple[str, str], str | None]],
+    ] = {}
     from src.runtime.reactor_wake import (
         reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
@@ -6930,6 +6942,12 @@ def event_bound_live_adapter_from_trade_conn(
     ) -> EventSubmissionReceipt:
         payload = _payload(event)
         family_key = str(prepared.probability_witness.family_key)
+        day0_truth_by_bin_side = {
+            (str(bin_id), str(side).upper()): str(truth)
+            for bin_id, side, truth in tuple(
+                getattr(prepared, "day0_payoff_truth_by_bin_side", ()) or ()
+            )
+        }
         _global_entry_policy_by_family[family_key] = (
             str(
                 payload.get("event_type")
@@ -6941,6 +6959,7 @@ def event_bound_live_adapter_from_trade_conn(
                 or payload.get("temperature_metric")
                 or ""
             ).strip(),
+            day0_truth_by_bin_side,
         )
         return EventSubmissionReceipt(
             False,
@@ -9363,12 +9382,14 @@ def event_bound_live_adapter_from_trade_conn(
             side = str(getattr(candidate, "side", "") or "").strip().upper()
             if owner is None or side not in {"YES", "NO"}:
                 return "GLOBAL_ENTRY_FEASIBILITY_OWNER_MISSING"
-            event_type, metric = owner
+            event_type, metric, day0_truth_by_bin_side = owner
+            bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,
                     direction=f"buy_{side.lower()}",
                     metric=metric,
+                    day0_payoff_truth=day0_truth_by_bin_side.get((bin_id, side)),
                     require_metric_live=True,
                 )
             except ValueError as exc:
@@ -10094,6 +10115,9 @@ def _record_qkernel_selection_family_facts(
     event: OpportunityEvent,
     decision_time: datetime,
     decision_snapshot_id: str | None,
+    day0_payoff_truth_by_bin_side: Mapping[
+        tuple[str, str], str | None
+    ] | None = None,
 ) -> dict[str, Any]:
     """Persist qkernel family-selection facts to canonical world DB only.
 
@@ -10143,12 +10167,18 @@ def _record_qkernel_selection_family_facts(
             continue
         payload = dict(economics_by_key.get((bin_id, side), {}) or {})
         direction = "buy_yes" if side == "YES" else "buy_no"
+        day0_payoff_truth = (
+            day0_payoff_truth_by_bin_side.get((bin_id, side))
+            if day0_payoff_truth_by_bin_side is not None
+            else None
+        )
         strategy_key = ""
         try:
             strategy_key = _event_bound_strategy_key(
                 event_type=str(getattr(event, "event_type", "") or ""),
                 direction=direction,
                 metric=str(getattr(family, "metric", "") or ""),
+                day0_payoff_truth=day0_payoff_truth,
             )
         except Exception:
             strategy_key = ""
@@ -10221,6 +10251,7 @@ def _record_qkernel_selection_family_facts(
                     "side": side,
                     "bin_id": bin_id,
                     "strategy_key": strategy_key,
+                    "day0_payoff_truth": day0_payoff_truth,
                     "qkernel_execution_economics": payload,
                 },
             }
@@ -12481,6 +12512,11 @@ def _global_deterministic_actuation_proofs(
             p_live_vector_hash=probability_identity,
             missing_reason=missing_reason,
             q_source="day0_deterministic_bin_payoff",
+            day0_payoff_truth=(
+                Day0PayoffTruth.LOCKED.value
+                if q_point == 1.0
+                else Day0PayoffTruth.REFUTED.value
+            ),
             same_bin_yes_posterior=float(yes_payoff),
             probability_authority="day0_deterministic_bin_payoff_v1",
             execution_mode_intent=proof_mode,
@@ -13879,6 +13915,18 @@ def _build_event_bound_no_submit_receipt_core(
                     event=event,
                     decision_time=decision_time,
                     decision_snapshot_id=event.causal_snapshot_id,
+                    day0_payoff_truth_by_bin_side={
+                        (
+                            _candidate_bin_id(candidate_proof),
+                            str(
+                                _native_curve_side_for_direction(
+                                    candidate_proof.direction
+                                )
+                                or ""
+                            ),
+                        ): getattr(candidate_proof, "day0_payoff_truth", None)
+                        for candidate_proof in _active_spine_entry_proofs
+                    },
                 )
             if proof is not None and _selection_fact_result.get("status") not in {
                 "written",
@@ -14059,6 +14107,7 @@ def _build_event_bound_no_submit_receipt_core(
         forecast_conn=source_conn,
         topology_conn=topology_authority_conn,
         decision_time=decision_time,
+        day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
         coverage_cache=provenance_capture.setdefault("_coverage_hierarchy_cache", {}),
     )
     _coverage_hierarchy_receipt_kwargs: dict[str, Any] = (
@@ -14317,6 +14366,7 @@ def _build_event_bound_no_submit_receipt_core(
         forecast_conn=source_conn,
         topology_conn=topology_authority_conn,
         decision_time=decision_time,
+        day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
         coverage_cache=provenance_capture.setdefault("_coverage_hierarchy_cache", {}),
     )
     _coverage_hierarchy_receipt_kwargs = (
@@ -15585,6 +15635,7 @@ def _build_event_bound_no_submit_receipt_core(
         event_type=event.event_type,
         direction=direction,
         metric=family.metric,
+        day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
     )
     live_quality_floors = _event_bound_strategy_live_quality_floors(strategy_key)
     raw_receipt.update(
@@ -15593,6 +15644,7 @@ def _build_event_bound_no_submit_receipt_core(
             "target_date": family.target_date,
             "metric": family.metric,
             "strategy_key": strategy_key,
+            "day0_payoff_truth": getattr(proof, "day0_payoff_truth", None),
             "bin_label": candidate.bin.label,
             "unit": getattr(candidate.bin, "unit", None),
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
@@ -23997,6 +24049,7 @@ def _strategy_policy_selection_rejection_reason(
                 or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
                 or ""
             ),
+            day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
             require_metric_live=False,
         )
         policy_now = decision_time
@@ -24057,6 +24110,7 @@ def _proof_strategy_key_for_quality(
                 )
                 or ""
             ),
+            day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
             require_metric_live=False,
         )
     except Exception:  # noqa: BLE001 - quality gate falls back to ordinary binary floor.
@@ -24231,6 +24285,7 @@ def _qkernel_final_submit_floor_rejection_reason(
                 or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
                 or ""
             ),
+            day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
             require_metric_live=False,
         )
     except Exception as exc:  # noqa: BLE001
@@ -24432,6 +24487,7 @@ def _qkernel_actual_submit_quality_rejection_reason(
                     or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
                     or ""
                 ),
+                day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
                 require_metric_live=False,
             )
         except Exception as exc:  # noqa: BLE001
@@ -24463,6 +24519,7 @@ def _qkernel_actual_submit_quality_rejection_reason(
                 or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
                 or ""
             ),
+            day0_payoff_truth=getattr(proof, "day0_payoff_truth", None),
             require_metric_live=False,
         )
     except Exception as exc:  # noqa: BLE001
@@ -25278,6 +25335,11 @@ def _generate_candidate_proofs(
     if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
         _day0_metric = str(payload.get("metric") or payload.get("temperature_metric") or getattr(family, "metric", "") or "")
         _day0_observed_extreme = _observed_day0_extreme_native(payload, _day0_metric)
+        _day0_settled_extreme = _settled_day0_extreme(
+            payload,
+            family=family,
+            metric=_day0_metric,
+        )
         if _day0_observed_extreme is not None:
             payload["_edli_spine_day0_observed_extreme_native"] = float(_day0_observed_extreme)
     # P1 BELIEF CAPTURE (continuous re-decision resurrection 2026-06-12). Buffer this family's
@@ -25967,6 +26029,17 @@ def _generate_candidate_proofs(
                     # ONE-CALIBRATOR SEAM (era.py:3772 emos / 3774 maze). Same
                     # payload instance (#149 fix), so this is the actual q_source.
                     q_source=payload.get("_edli_q_source"),
+                    day0_payoff_truth=(
+                        classify_day0_payoff_truth(
+                            metric=str(getattr(family, "metric", "") or ""),
+                            direction=direction,
+                            observed_extreme=_day0_settled_extreme,
+                            bin_low=getattr(candidate.bin, "low", None),
+                            bin_high=getattr(candidate.bin, "high", None),
+                        ).value
+                        if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED"
+                        else None
+                    ),
                     same_bin_yes_posterior=yes_q,
                     settlement_coverage_status=settlement_coverage_status,
                     replacement_calibration_credential=replacement_calibration_credential,
@@ -30859,6 +30932,13 @@ def _prepare_current_global_probability_family(
                     ),
                     probability_witness=witness,
                     candidate_seeds=(),
+                    day0_payoff_truth_by_bin_side=(
+                        _day0_payoff_truth_rows(
+                            event_type=event.event_type,
+                            payload=payload,
+                            family=family,
+                        )
+                    ),
                 )
             if components is None:
                 components = _day0_remaining_global_probability_components(
@@ -31071,6 +31151,11 @@ def _prepare_current_global_probability_family(
         posterior_id=(int(bundle.posterior_id) if bundle is not None else None),
         probability_authority=("replacement_0_1" if bundle is not None else None),
         candidate_payoff_q_lcb_caps=candidate_payoff_q_lcb_caps,
+        day0_payoff_truth_by_bin_side=_day0_payoff_truth_rows(
+            event_type=event.event_type,
+            payload=payload,
+            family=family,
+        ),
     )
 
 
@@ -35371,6 +35456,7 @@ def _settlement_coverage_hierarchy_executable_pair(
     forecast_conn: sqlite3.Connection,
     topology_conn: sqlite3.Connection,
     decision_time: datetime,
+    day0_payoff_truth: str | None = None,
     coverage_cache: dict | None = None,
 ) -> Any:
     """F1 money-path choke point: the executable (q_exec, q_lcb_exec) pair.
@@ -35410,7 +35496,10 @@ def _settlement_coverage_hierarchy_executable_pair(
 
     try:
         strategy_key = _event_bound_strategy_key(
-            event_type=event_type, direction=direction, metric=metric,
+            event_type=event_type,
+            direction=direction,
+            metric=metric,
+            day0_payoff_truth=day0_payoff_truth,
         )
     except Exception:
         strategy_key = None
@@ -35751,6 +35840,52 @@ def _observed_day0_extreme_native(payload: dict[str, object], metric: str) -> fl
     if value is not None:
         return value
     return _optional_float(payload.get("rounded_value"))
+
+
+def _settled_day0_extreme(
+    payload: dict[str, object],
+    *,
+    family,
+    metric: str,
+) -> float | None:
+    """Round the running extreme through the market's settlement contract."""
+
+    observed = _observed_day0_extreme_native(payload, metric)
+    city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
+    if observed is None or city is None:
+        return None
+    try:
+        return SettlementSemantics.for_city(city).round_single(observed)
+    except (TypeError, ValueError):
+        return None
+
+
+def _day0_payoff_truth_rows(
+    *,
+    event_type: str,
+    payload: dict[str, object],
+    family,
+) -> tuple[tuple[str, str, str], ...]:
+    """Freeze selected-side Day0 truth into a prepared global family."""
+
+    if event_type != "DAY0_EXTREME_UPDATED":
+        return ()
+    metric = str(getattr(family, "metric", "") or "").strip().lower()
+    observed = _settled_day0_extreme(payload, family=family, metric=metric)
+    rows: list[tuple[str, str, str]] = []
+    for candidate in tuple(getattr(family, "candidates", ()) or ()):
+        bin_id = _candidate_bin_id_from_topology(candidate)
+        bin_obj = getattr(candidate, "bin", None)
+        for side in ("YES", "NO"):
+            truth = classify_day0_payoff_truth(
+                metric=metric,
+                direction=f"buy_{side.lower()}",
+                observed_extreme=observed,
+                bin_low=getattr(bin_obj, "low", None),
+                bin_high=getattr(bin_obj, "high", None),
+            )
+            rows.append((bin_id, side, truth.value))
+    return tuple(sorted(rows))
 
 
 def _record_day0_remaining_day_exit_authority(

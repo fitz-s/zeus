@@ -1,8 +1,9 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-25
+# Lifecycle: created=2026-04-21; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused/audited: 2026-07-23
 # Authority basis: plan v3 antibodies A1/A2/A6 (.omc/plans/observation-
 #                  instants-migration-iter3.md L119-124); step2 Phase 0 file #3.
-"""Typed writer for observation_instants with A1/A2/A6 enforcement.
+"""Typed writer for observation_instants with A1/A2/A6 and causality enforcement.
 
 This module is the single entry point for any row that will be written
 to ``observation_instants`` going forward (pilot, fleet, HK accumulator).
@@ -48,7 +49,7 @@ import math
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from src.data.tier_resolver import (
@@ -257,6 +258,7 @@ class ObsV2Row:
             )
 
         self._validate_local_time_identity()
+        self._validate_possession_causality(parsed)
 
         # B4 antibody (2026-04-26): physical bounds on temp_current /
         # running_max / running_min. Skip None inputs (nullable per schema).
@@ -291,6 +293,27 @@ class ObsV2Row:
                 f"utc_timestamp={self.utc_timestamp!r} must be ISO 8601 "
                 "(YYYY-MM-DDTHH:MM:SS[+TZ] or with 'Z')"
             )
+
+    def _validate_possession_causality(self, provenance: dict[str, Any]) -> None:
+        """A persisted observation cannot predate possession of its source fact."""
+        imported = _parse_aware_utc(self.imported_at, field="imported_at")
+        observed = _parse_aware_utc(self.utc_timestamp, field="utc_timestamp")
+        if imported < observed:
+            raise InvalidObsV2RowError(
+                f"causality violation (city={self.city}): imported_at={self.imported_at!r} "
+                f"precedes utc_timestamp={self.utc_timestamp!r}. A live observation "
+                "cannot be usable before it was observed."
+            )
+        for key in ("hour_max_raw_ts", "hour_min_raw_ts"):
+            value = provenance.get(key)
+            if value in (None, ""):
+                continue
+            raw_observed = _parse_aware_utc(value, field=f"provenance_json.{key}")
+            if imported < raw_observed:
+                raise InvalidObsV2RowError(
+                    f"causality violation (city={self.city}): imported_at={self.imported_at!r} "
+                    f"precedes {key}={value!r}. The source print was not yet possessed."
+                )
 
     def _validate_local_time_identity(self) -> None:
         """Require an explicit, self-consistent local-hour identity.
@@ -358,6 +381,16 @@ def _looks_like_iso_datetime(s: str) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+
+def _parse_aware_utc(value: Any, *, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise InvalidObsV2RowError(f"{field}={value!r} is not parseable ISO 8601: {exc}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise InvalidObsV2RowError(f"{field}={value!r} must include a timezone offset.")
+    return parsed.astimezone(timezone.utc)
 
 
 def _has_non_empty_text(value: Any) -> bool:

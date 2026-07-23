@@ -3895,10 +3895,13 @@ def _event_bound_strategy_key_from_payload(payload: dict) -> str:
             return "forecast_qkernel_entry"
         return ""
     if event_type == "DAY0_EXTREME_UPDATED":
-        if direction == "buy_no":
-            return "settlement_capture"
-        if direction == "buy_yes":
-            return "day0_nowcast_entry"
+        if direction in {"buy_yes", "buy_no"}:
+            return (
+                "settlement_capture"
+                if str(payload.get("day0_payoff_truth") or "").strip().lower()
+                == "locked"
+                else "day0_nowcast_entry"
+            )
     return ""
 
 

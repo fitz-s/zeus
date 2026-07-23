@@ -1,6 +1,6 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-22
-# Lifecycle: created=2026-05-02; last_reviewed=2026-05-21; last_reused=2026-05-22
+# Last reused/audited: 2026-07-23
+# Lifecycle: created=2026-05-02; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Lock durable strategy_key classification and fail-closed behavior across evaluator/runtime persistence boundaries.
 # Reuse: Run before changing evaluator strategy_key mapping, discovery-mode classification, or strategy_key DB persistence.
 # Authority basis: PR44 review comment 3177316079 / 3177317099 strategy_key unclassified fail-closed contract;
@@ -12,6 +12,8 @@ import ast
 import json
 import sqlite3
 from pathlib import Path
+
+import pytest
 
 from src.config import City
 from src.engine.discovery_mode import DiscoveryMode
@@ -140,6 +142,12 @@ def _finite_buy_yes_edge(low: float, high: float) -> BinEdge:
         vwmp=0.04,
         support_index=1,
     )
+
+
+def _finite_buy_no_edge(low: float, high: float) -> BinEdge:
+    edge = _finite_buy_yes_edge(low, high)
+    edge.direction = "buy_no"
+    return edge
 
 
 def _hypothesis(*, direction: str, is_shoulder: bool) -> FullFamilyHypothesis:
@@ -275,6 +283,59 @@ def test_any_settlement_day_forecast_upside_does_not_masquerade_as_settlement_ca
 
     assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"
     assert _strategy_key_for(candidate, edge) == "day0_nowcast_entry"
+
+
+def test_day0_buy_no_stays_nowcast_until_observation_crosses_finite_high_bin() -> None:
+    edge = _finite_buy_no_edge(36.0, 37.0)
+
+    unresolved = _day0_candidate_with_observed_high(34.0)
+    assert _edge_source_for(unresolved, edge) == "day0_nowcast_entry"
+    assert _strategy_key_for(unresolved, edge) == "day0_nowcast_entry"
+
+    locked = _day0_candidate_with_observed_high(38.0)
+    assert _edge_source_for(locked, edge) == "settlement_capture"
+    assert _strategy_key_for(locked, edge) == "settlement_capture"
+
+
+def test_day0_low_buy_no_stays_nowcast_until_running_low_crosses_finite_bin() -> None:
+    edge = _finite_buy_no_edge(26.0, 27.0)
+    unresolved = _day0_candidate_with_observed_high(30.0)
+    unresolved.temperature_metric = "low"
+    unresolved.observation = {"low_so_far": 30.0, "current_temp": 30.0}
+    assert _strategy_key_for(unresolved, edge) == "day0_nowcast_entry"
+
+    locked = _day0_candidate_with_observed_high(25.0)
+    locked.temperature_metric = "low"
+    locked.observation = {"low_so_far": 25.0, "current_temp": 25.0}
+    assert _strategy_key_for(locked, edge) == "settlement_capture"
+
+
+@pytest.mark.parametrize(
+    ("metric", "direction", "observed", "low", "high", "expected"),
+    [
+        ("high", "buy_yes", 38.0, 38.0, None, "locked"),
+        ("high", "buy_no", 38.0, 38.0, None, "refuted"),
+        ("high", "buy_no", 38.0, 36.0, 37.0, "locked"),
+        ("low", "buy_yes", 20.0, None, 20.0, "locked"),
+        ("low", "buy_no", 20.0, None, 20.0, "refuted"),
+        ("low", "buy_no", 25.0, 26.0, 27.0, "locked"),
+    ],
+)
+def test_day0_payoff_truth_covers_metric_side_quadrants(
+    metric, direction, observed, low, high, expected
+) -> None:
+    from src.contracts.day0_payoff_truth import classify_day0_payoff_truth
+
+    assert (
+        classify_day0_payoff_truth(
+            metric=metric,
+            direction=direction,
+            observed_extreme=observed,
+            bin_low=low,
+            bin_high=high,
+        ).value
+        == expected
+    )
 
 
 def test_day0_nowcast_selection_facts_preserve_strategy_identity() -> None:

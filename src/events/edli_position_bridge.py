@@ -1,5 +1,6 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-07-09
+# Lifecycle: created=2026-06-01; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused or audited: 2026-07-23
 # Authority basis: DEFECT-1 capital-recoverability bridge — EDLI fill → canonical
 #   position_current. Audit: an EDLI FILL_CONFIRMED writes only
 #   edli_live_order_events + edli_live_profit_audit and NEVER a position_current
@@ -647,14 +648,16 @@ def _resolve_strategy_key_from_pre_submit(
     if not strategy_key:
         event_type = str(pre_submit.get("event_type") or "").strip()
         if event_type == "DAY0_EXTREME_UPDATED":
-            if direction == "buy_no":
-                strategy_key = "settlement_capture"
-            elif direction == "buy_yes":
-                strategy_key = "day0_nowcast_entry"
-            else:
+            if direction not in {"buy_yes", "buy_no"}:
                 raise EdliPositionBridgeError(
                     f"EDLI_BRIDGE_STRATEGY_DIRECTION_UNKNOWN:{event_type}:direction={direction}"
                 )
+            strategy_key = (
+                "settlement_capture"
+                if str(pre_submit.get("day0_payoff_truth") or "").strip().lower()
+                == "locked"
+                else "day0_nowcast_entry"
+            )
         elif event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
             if direction in {"buy_yes", "buy_no"}:
                 strategy_key = "forecast_qkernel_entry"

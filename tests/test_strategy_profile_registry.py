@@ -1,5 +1,6 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-23
+# Lifecycle: created=2026-05-04; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 (StrategyProfile registry + 4-site cutover invariants).
 """StrategyProfile registry regression antibodies.
 
@@ -488,6 +489,7 @@ def test_schema_load_rejects_missing_required_field(tmp_path: Path):
         ("settlement_capture", "buy_yes", "point",         "settlement_day",      True),
         ("settlement_capture", "buy_yes", "finite_range",  "settlement_day",      True),
         ("settlement_capture", "buy_no",  "point",         "settlement_day",      True),
+        ("day0_nowcast_entry", "buy_no", "point",         "settlement_day",      True),
         ("settlement_capture", "buy_yes", "open_shoulder", "settlement_day",      False),  # wrong topology
         ("settlement_capture", "buy_yes", "point",         "post_trading",        False),  # wrong phase
         ("center_buy",         "buy_yes", "finite_range",  "pre_settlement_day",  True),

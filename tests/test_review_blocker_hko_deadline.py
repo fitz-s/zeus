@@ -1,5 +1,6 @@
 # Created: 2026-07-20
-# Last reused/audited: 2026-07-20
+# Lifecycle: created=2026-07-20; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused/audited: 2026-07-23
 # Authority basis: read-only ingest review pass 2026-07-20, two verified
 #   findings against p2 HEAD (~17fd8fb67):
 #   FINDING 1 (REAL-DEFECT): HkoExtremaPoller.prefetch() had no absolute
@@ -77,6 +78,43 @@ def test_hko_prefetch_bounds_total_duration_against_hanging_peer():
     # advanced by an explicit post-commit acknowledge()) stay untouched.
     assert poller._etag is None
     assert poller._last_modified is None
+
+
+def test_hko_fallback_fetch_stamps_possession_after_response(monkeypatch):
+    """The non-poller HKO path must not reuse a clock captured before GET."""
+    import scripts.hko_ingest_tick as hko_tick
+
+    response_returned = False
+    payload = (
+        "Automatic Weather Station,Date time,"
+        "Maximum Air Temperature Since Midnight(degree Celsius),"
+        "Minimum Air Temperature Since Midnight(degree Celsius)\n"
+        "HK Observatory,202607240300,29.3,28.7\n"
+    )
+
+    class Response:
+        text = payload
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    def fake_get(*_args, **_kwargs):
+        nonlocal response_returned
+        response_returned = True
+        return Response()
+
+    def possession_time(_captured):
+        assert response_returned, "possession clock was captured before HKO GET returned"
+        return "2026-07-23T19:01:00+00:00"
+
+    monkeypatch.setattr(hko_tick.httpx, "get", fake_get)
+    monkeypatch.setattr(hko_tick, "proof_of_possession_available_at", possession_time)
+
+    snapshot = hko_tick._fetch_hko_extrema()
+
+    assert snapshot.fetched_at_utc == "2026-07-23T19:01:00+00:00"
+    assert snapshot.observed_at_utc == "2026-07-23T19:00:00+00:00"
 
 
 def test_bridge_committed_day0_events_seeds_sibling_after_one_family_raises(

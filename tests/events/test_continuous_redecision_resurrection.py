@@ -1,5 +1,6 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-07-23
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -1844,7 +1845,40 @@ def test_strategy_classifier_keeps_day0_out_of_forecast_entry_lanes():
     )
 
     assert day0_yes == "day0_nowcast_entry"
-    assert day0_no == "settlement_capture"
+    assert day0_no == "day0_nowcast_entry"
+    assert (
+        _event_bound_strategy_key(
+            event_type="DAY0_EXTREME_UPDATED",
+            direction="buy_no",
+            metric="high",
+            day0_payoff_truth="locked",
+        )
+        == "settlement_capture"
+    )
+
+
+def test_day0_selected_payoff_truth_uses_settlement_rounding():
+    from types import SimpleNamespace
+
+    from src.engine.event_reactor_adapter import _settled_day0_extreme
+
+    family = SimpleNamespace(city="Tokyo")
+    assert (
+        _settled_day0_extreme(
+            {"high_so_far": 25.4},
+            family=family,
+            metric="high",
+        )
+        == 25.0
+    )
+    assert (
+        _settled_day0_extreme(
+            {"high_so_far": 25.6},
+            family=family,
+            metric="high",
+        )
+        == 26.0
+    )
 
 
 def test_timeliness_floor_applies_to_redecision_type():

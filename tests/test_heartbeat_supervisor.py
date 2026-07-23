@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-23
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -99,6 +99,25 @@ def _write_sidecar_heartbeats(state_root: Path, *, sha: str, at: datetime) -> No
         (state_root / name).write_text(json.dumps(payload))
 
 
+def _write_live_trading_heartbeat(
+    state_root: Path,
+    *,
+    at: datetime,
+    pid: int,
+) -> None:
+    (state_root / "daemon-heartbeat.json").write_text(
+        json.dumps(
+            {
+                "alive": True,
+                "timestamp": at.isoformat(),
+                "mode": "live",
+                "pid": pid,
+                "process": "src.main",
+            }
+        )
+    )
+
+
 def test_live_trading_launchd_watchdog_bootstraps_when_sidecars_are_fresh(
     tmp_path,
     monkeypatch,
@@ -151,6 +170,222 @@ def test_live_trading_launchd_watchdog_bootstraps_when_sidecars_are_fresh(
     assert result["action"] == "bootstrapped"
     assert calls[-1] == ["launchctl", "bootstrap", "gui/501", str(plist)]
     assert json.loads(status_path.read_text())["action"] == "bootstrapped"
+
+
+def test_live_trading_watchdog_restarts_running_service_with_stale_daemon_heartbeat(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """launchd process state is not proof that the recurring money path advances."""
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    now = datetime(2026, 7, 23, 19, 52, tzinfo=timezone.utc)
+    sha = "a" * 40
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    _write_sidecar_heartbeats(state_root, sha=sha, at=now)
+    _write_live_trading_heartbeat(
+        state_root,
+        at=now - timedelta(hours=9, minutes=45),
+        pid=123,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="state = running\nactive count = 1\npid = 123\n",
+                stderr="",
+            )
+        if cmd[:2] == ["ps", "-p"]:
+            return SimpleNamespace(returncode=0, stdout="09:46:00\n", stderr="")
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=f"{sha}\n", stderr="")
+        if cmd[:3] == ["launchctl", "kickstart", "-k"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=fake_run,
+        repo_root=tmp_path,
+        state_root=state_root,
+        status_path=tmp_path / "watchdog.json",
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "restarted"
+    assert result["reason"] == "daemon_heartbeat_unhealthy"
+    assert result["daemon_heartbeat"]["reason"] == "stale"
+    assert calls[-1] == [
+        "launchctl",
+        "kickstart",
+        "-k",
+        "gui/501/com.zeus.live-trading",
+    ]
+
+
+def test_live_trading_watchdog_does_not_restart_fresh_pid_transition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    now = datetime(2026, 7, 23, 19, 52, tzinfo=timezone.utc)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    _write_live_trading_heartbeat(state_root, at=now, pid=122)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="state = running\nactive count = 1\npid = 123\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=fake_run,
+        state_root=state_root,
+        status_path=tmp_path / "watchdog.json",
+    )
+
+    assert result["action"] == "none"
+    assert result["reason"] == "service_running_heartbeat_fresh"
+    assert result["daemon_heartbeat"]["reason"] == "fresh_pid_transition"
+    assert calls == [["launchctl", "print", "gui/501/com.zeus.live-trading"]]
+
+
+def test_live_trading_watchdog_gives_new_process_missing_heartbeat_startup_grace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="state = running\nactive count = 1\npid = 123\n",
+                stderr="",
+            )
+        if cmd[:2] == ["ps", "-p"]:
+            return SimpleNamespace(returncode=0, stdout="00:42\n", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=datetime(2026, 7, 23, 19, 52, tzinfo=timezone.utc),
+        run_cmd=fake_run,
+        state_root=state_root,
+        status_path=tmp_path / "watchdog.json",
+    )
+
+    assert result["action"] == "none"
+    assert result["reason"] == "daemon_heartbeat_startup_grace"
+    assert result["process_elapsed_seconds"] == 42.0
+    assert not any(call[:3] == ["launchctl", "kickstart", "-k"] for call in calls)
+
+
+def test_live_trading_watchdog_gives_reused_pid_stale_heartbeat_startup_grace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    now = datetime(2026, 7, 23, 19, 52, tzinfo=timezone.utc)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    _write_live_trading_heartbeat(
+        state_root,
+        at=now - timedelta(hours=9),
+        pid=123,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="state = running\nactive count = 1\npid = 123\n",
+                stderr="",
+            )
+        if cmd[:2] == ["ps", "-p"]:
+            return SimpleNamespace(returncode=0, stdout="00:42\n", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=fake_run,
+        state_root=state_root,
+        status_path=tmp_path / "watchdog.json",
+    )
+
+    assert result["action"] == "none"
+    assert result["reason"] == "daemon_heartbeat_startup_grace"
+    assert result["daemon_heartbeat"]["reason"] == "stale"
+    assert not any(call[:3] == ["launchctl", "kickstart", "-k"] for call in calls)
+
+
+def test_live_trading_watchdog_blocks_stale_daemon_restart_when_sidecars_are_stale(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    now = datetime(2026, 7, 23, 19, 52, tzinfo=timezone.utc)
+    sha = "a" * 40
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    _write_sidecar_heartbeats(
+        state_root,
+        sha=sha,
+        at=now - timedelta(minutes=10),
+    )
+    _write_live_trading_heartbeat(
+        state_root,
+        at=now - timedelta(hours=9, minutes=45),
+        pid=123,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="state = running\nactive count = 1\npid = 123\n",
+                stderr="",
+            )
+        if cmd[:2] == ["ps", "-p"]:
+            return SimpleNamespace(returncode=0, stdout="09:46:00\n", stderr="")
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=f"{sha}\n", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=fake_run,
+        repo_root=tmp_path,
+        state_root=state_root,
+        status_path=tmp_path / "watchdog.json",
+    )
+
+    assert result["action"] == "blocked"
+    assert result["reason"] == "sidecars_not_ready"
+    assert not any(call[:3] == ["launchctl", "kickstart", "-k"] for call in calls)
 
 
 def test_live_trading_watchdog_yields_to_deploy_restart_lock(

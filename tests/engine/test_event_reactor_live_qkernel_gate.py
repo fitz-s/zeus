@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-23
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -1518,6 +1518,117 @@ def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_pat
     ).fetchone()
     assert json.loads(hypothesis_row["meta_json"])["strategy_key"] == "forecast_qkernel_entry"
     conn.close()
+
+
+@pytest.mark.parametrize(
+    ("day0_truth", "expected_strategy"),
+    (
+        ("locked", "settlement_capture"),
+        ("unresolved", "day0_nowcast_entry"),
+    ),
+)
+def test_qkernel_selection_facts_keep_candidate_day0_payoff_truth(
+    tmp_path,
+    day0_truth,
+    expected_strategy,
+):
+    from src.state.db import init_schema
+
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(world_path)
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    world.close()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    result = _record_qkernel_selection_family_facts(
+        conn,
+        family=_fake_family(),
+        decision=_fake_qkernel_decision(),
+        event=_fake_day0_event(),
+        decision_time=datetime(2026, 6, 30, 12, tzinfo=timezone.utc),
+        decision_snapshot_id="snapshot-day0-selection",
+        day0_payoff_truth_by_bin_side={("bin-1", "YES"): day0_truth},
+    )
+
+    assert result["status"] == "written"
+    family_row = conn.execute(
+        "SELECT strategy_key FROM world.selection_family_fact"
+    ).fetchone()
+    assert family_row["strategy_key"] == expected_strategy
+    hypothesis_row = conn.execute(
+        "SELECT meta_json FROM world.selection_hypothesis_fact"
+    ).fetchone()
+    meta = json.loads(hypothesis_row["meta_json"])
+    assert meta["strategy_key"] == expected_strategy
+    assert meta["day0_payoff_truth"] == day0_truth
+    conn.close()
+
+
+def test_prepared_global_day0_truth_is_candidate_and_side_specific():
+    candidate = MarketTopologyCandidate(
+        city="Shanghai",
+        target_date="2026-06-30",
+        metric="high",
+        condition_id="condition-30c",
+        yes_token_id="yes-30c",
+        no_token_id="no-30c",
+        bin=Bin(low=30, high=30, unit="C", label="30°C"),
+    )
+    family = SimpleNamespace(
+        city="Shanghai",
+        metric="high",
+        candidates=(candidate,),
+    )
+    bin_id = _candidate_bin_id_from_topology(candidate)
+
+    rows = dict(
+        ((row_bin_id, side), truth)
+        for row_bin_id, side, truth in era._day0_payoff_truth_rows(
+            event_type="DAY0_EXTREME_UPDATED",
+            payload={"rounded_value": 31},
+            family=family,
+        )
+    )
+
+    assert rows[(bin_id, "YES")] == "refuted"
+    assert rows[(bin_id, "NO")] == "locked"
+
+
+@pytest.mark.parametrize(
+    ("day0_truth", "expected_strategy"),
+    (("locked", "settlement_capture"), ("unresolved", "day0_nowcast_entry")),
+)
+def test_final_quality_floor_fallback_keeps_day0_payoff_truth(
+    monkeypatch,
+    day0_truth,
+    expected_strategy,
+):
+    seen = []
+
+    def _floors(strategy_key):
+        seen.append(strategy_key)
+        return {
+            "min_entry_price": 0.05,
+            "min_expected_profit_usd": 0.05,
+            "min_submit_edge_density": 0.02,
+        }
+
+    monkeypatch.setattr(era, "_event_bound_strategy_live_quality_floors", _floors)
+    era._event_bound_effective_live_quality_floors(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "direction": "buy_no",
+            "metric": "high",
+            "day0_payoff_truth": day0_truth,
+        }
+    )
+
+    assert seen == [expected_strategy]
 
 
 def test_qkernel_prefilter_rejection_uses_stable_stage_and_meta_detail(tmp_path):

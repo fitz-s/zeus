@@ -1,6 +1,6 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-05-20; last_reused=2026-05-20
-# Last reused/audited: 2026-05-20
+# Lifecycle: created=2026-04-21; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused/audited: 2026-07-23
 # Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet;
 #                  2026-05-20 live tick payload hash material-extrema repair.
 # Purpose: Pin observation_instants writer provenance and source-role semantics.
@@ -126,6 +126,22 @@ def test_local_hour_must_match_local_timestamp_hour():
 def test_target_date_must_match_local_timestamp_local_date():
     with pytest.raises(InvalidObsV2RowError, match="must match local_timestamp local date"):
         _make_row(target_date="2024-01-16")
+
+
+def test_writer_rejects_imported_at_before_observation_bucket():
+    with pytest.raises(InvalidObsV2RowError, match="causality violation.*utc_timestamp"):
+        _make_row(imported_at="2024-01-15T13:59:59+00:00")
+
+
+def test_writer_rejects_imported_at_before_raw_source_print():
+    with pytest.raises(InvalidObsV2RowError, match="causality violation.*hour_max_raw_ts"):
+        _make_row(
+            imported_at="2024-01-15T14:10:00+00:00",
+            provenance_json=_valid_provenance(
+                hour_max_raw_ts="2024-01-15T14:30:00+00:00",
+                hour_min_raw_ts="2024-01-15T14:00:00+00:00",
+            ),
+        )
 
 
 # ----------------------------------------------------------------------

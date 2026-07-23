@@ -56,8 +56,10 @@ HEARTBEAT_KEEPER_STATUS_FILENAME = "venue-heartbeat-keeper.json"
 LIVE_TRADING_WATCHDOG_STATUS_FILENAME = "live-trading-launchd-watchdog.json"
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
 LIVE_RESTART_LOCK_FILENAME = "deploy-live-restart.lock"
+LIVE_TRADING_DAEMON_HEARTBEAT_FILENAME = "daemon-heartbeat.json"
 DEFAULT_LIVE_TRADING_WATCHDOG_CHECK_SECONDS = 60
 DEFAULT_LIVE_TRADING_WATCHDOG_COOLDOWN_SECONDS = 300
+DEFAULT_LIVE_TRADING_DAEMON_HEARTBEAT_MAX_AGE_SECONDS = 300
 _RESTING_ORDER_TYPES = {"GTC", "GTD"}
 _IMMEDIATE_ORDER_TYPES = {"FOK", "FAK"}
 _LIVE_TRADING_REQUIRED_SIDECAR_HEARTBEATS = (
@@ -398,12 +400,11 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def live_trading_launchd_watchdog_enabled() -> bool:
-    """Return whether the venue-heartbeat sidecar should heal missing src.main.
+    """Return whether the venue-heartbeat sidecar should heal failed src.main.
 
     The watchdog is a narrow launchd-liveness bridge. It never submits, cancels,
-    reconciles, or writes DB truth; it only bootstraps the active live-trading
-    plist when launchd has no loaded service and all required sidecars already
-    prove same-HEAD freshness.
+    reconciles, or writes DB truth; it bootstraps a missing service or restarts a
+    heartbeat-stalled one only when required sidecars prove current freshness.
     """
 
     default_enabled = str(os.environ.get("ZEUS_MODE") or "").lower() == "live"
@@ -429,6 +430,25 @@ def _live_trading_watchdog_cooldown_seconds() -> float:
         raise ValueError("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_COOLDOWN_SECONDS must be numeric") from exc
     if value < 0:
         raise ValueError("ZEUS_LIVE_TRADING_LAUNCHD_WATCHDOG_COOLDOWN_SECONDS must be non-negative")
+    return value
+
+
+def _live_trading_daemon_heartbeat_max_age_seconds() -> float:
+    raw = os.environ.get("ZEUS_LIVE_TRADING_DAEMON_HEARTBEAT_MAX_AGE_SECONDS")
+    try:
+        value = (
+            float(raw)
+            if raw not in (None, "")
+            else DEFAULT_LIVE_TRADING_DAEMON_HEARTBEAT_MAX_AGE_SECONDS
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "ZEUS_LIVE_TRADING_DAEMON_HEARTBEAT_MAX_AGE_SECONDS must be numeric"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            "ZEUS_LIVE_TRADING_DAEMON_HEARTBEAT_MAX_AGE_SECONDS must be positive"
+        )
     return value
 
 
@@ -643,6 +663,99 @@ def _live_trading_sidecars_ready(
     return not failures, failures, identity_observations
 
 
+def _live_trading_daemon_heartbeat(
+    *,
+    state_root: Path,
+    now: datetime,
+    launchd_pid: int | None,
+) -> dict[str, Any]:
+    path = state_root / LIVE_TRADING_DAEMON_HEARTBEAT_FILENAME
+    try:
+        payload = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {"fresh": False, "reason": "missing", "path": str(path)}
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "fresh": False,
+            "reason": "unreadable",
+            "detail": f"{type(exc).__name__}: {exc}",
+            "path": str(path),
+        }
+
+    heartbeat_at = _parse_utc(
+        payload.get("timestamp") or payload.get("alive_at") or payload.get("written_at")
+    )
+    heartbeat_pid = payload.get("pid")
+    if heartbeat_at is None:
+        return {
+            "fresh": False,
+            "reason": "timestamp_invalid",
+            "heartbeat_pid": heartbeat_pid,
+            "path": str(path),
+        }
+    age_seconds = (now - heartbeat_at).total_seconds()
+    max_age_seconds = _live_trading_daemon_heartbeat_max_age_seconds()
+    fresh = -5.0 <= age_seconds <= max_age_seconds
+    pid_matches = not (
+        isinstance(launchd_pid, int)
+        and launchd_pid > 0
+        and isinstance(heartbeat_pid, int)
+        and heartbeat_pid > 0
+        and heartbeat_pid != launchd_pid
+    )
+    return {
+        "fresh": bool(fresh and payload.get("alive") is not False),
+        "reason": (
+            "reported_not_alive"
+            if payload.get("alive") is False
+            else "fresh"
+            if fresh and pid_matches
+            else "fresh_pid_transition"
+            if fresh
+            else "stale"
+            if pid_matches
+            else "stale_pid_transition"
+        ),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "heartbeat_pid": heartbeat_pid,
+        "launchd_pid": launchd_pid,
+        "path": str(path),
+    }
+
+
+def _process_elapsed_seconds(pid: int, *, run_cmd: Any) -> float | None:
+    """Return macOS ``ps etime`` for startup grace, or None when unproven."""
+    try:
+        res = run_cmd(
+            ["ps", "-p", str(pid), "-o", "etime="],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if getattr(res, "returncode", 1) != 0:
+        return None
+    raw = str(getattr(res, "stdout", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        day_parts = raw.split("-", 1)
+        days = int(day_parts[0]) if len(day_parts) == 2 else 0
+        clock = day_parts[-1].split(":")
+        if len(clock) == 3:
+            hours, minutes, seconds = map(int, clock)
+        elif len(clock) == 2:
+            hours = 0
+            minutes, seconds = map(int, clock)
+        else:
+            return None
+    except ValueError:
+        return None
+    return float(days * 86400 + hours * 3600 + minutes * 60 + seconds)
+
+
 def recover_missing_live_trading_launchd_if_needed(
     *,
     now: datetime | None = None,
@@ -704,7 +817,7 @@ def _recover_missing_live_trading_launchd_under_restart_lock(
     plist_path: Path | None = None,
     status_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Bootstrap missing live-trading only when its liveness prerequisites are proven.
+    """Recover missing or heartbeat-stalled live trading after proof gates.
 
     This is intentionally narrower than ``scripts/deploy_live.py restart`` so it
     can run inside the venue-heartbeat sidecar without restarting that sidecar
@@ -717,67 +830,109 @@ def _recover_missing_live_trading_launchd_under_restart_lock(
             {"ok": True, "action": "none", "reason": "watchdog_disabled"},
             status_path=status_path,
         )
+    resolved_state_root = state_root or _state_root_from_config()
     launchd_status = _launchd_service_status(LIVE_TRADING_LABEL, run_cmd=run_cmd)
+    stale_running_heartbeat: dict[str, Any] | None = None
     if launchd_status.get("loaded"):
-        if launchd_status.get("running"):
+        if not launchd_status.get("running"):
+            return _live_trading_watchdog_write_status(
+                {
+                    "ok": False,
+                    "action": "blocked",
+                    "reason": "service_loaded_not_running",
+                    "launchd_state": launchd_status.get("state"),
+                    "pid": launchd_status.get("pid"),
+                    "active_count": launchd_status.get("active_count"),
+                    "last_exit_status": launchd_status.get("last_exit_status"),
+                },
+                status_path=status_path,
+            )
+        heartbeat = _live_trading_daemon_heartbeat(
+            state_root=resolved_state_root,
+            now=checked_at,
+            launchd_pid=launchd_status.get("pid"),
+        )
+        if heartbeat["fresh"]:
             return _live_trading_watchdog_write_status(
                 {
                     "ok": True,
                     "action": "none",
-                    "reason": "service_running",
+                    "reason": "service_running_heartbeat_fresh",
                     "launchd_state": launchd_status.get("state"),
                     "pid": launchd_status.get("pid"),
                     "active_count": launchd_status.get("active_count"),
+                    "daemon_heartbeat": heartbeat,
                 },
                 status_path=status_path,
             )
-        return _live_trading_watchdog_write_status(
-            {
-                "ok": False,
-                "action": "blocked",
-                "reason": "service_loaded_not_running",
-                "launchd_state": launchd_status.get("state"),
-                "pid": launchd_status.get("pid"),
-                "active_count": launchd_status.get("active_count"),
-                "last_exit_status": launchd_status.get("last_exit_status"),
-            },
-            status_path=status_path,
-        )
+        stale_running_heartbeat = heartbeat
 
-    disabled, disabled_detail = _launchd_service_disabled(LIVE_TRADING_LABEL, run_cmd=run_cmd)
-    if disabled is True:
-        return _live_trading_watchdog_write_status(
-            {"ok": False, "action": "blocked", "reason": "service_disabled"},
-            status_path=status_path,
+        pid = launchd_status.get("pid")
+        elapsed = (
+            _process_elapsed_seconds(pid, run_cmd=run_cmd)
+            if isinstance(pid, int) and pid > 0
+            else None
         )
-    if disabled is None:
-        return _live_trading_watchdog_write_status(
-            {
-                "ok": False,
-                "action": "blocked",
-                "reason": "disabled_state_unproven",
-                "detail": disabled_detail,
-            },
-            status_path=status_path,
-        )
+        if elapsed is None:
+            return _live_trading_watchdog_write_status(
+                {
+                    "ok": False,
+                    "action": "blocked",
+                    "reason": "daemon_start_age_unproven",
+                    "daemon_heartbeat": heartbeat,
+                    "pid": pid,
+                },
+                status_path=status_path,
+            )
+        if elapsed <= _live_trading_daemon_heartbeat_max_age_seconds():
+            return _live_trading_watchdog_write_status(
+                {
+                    "ok": True,
+                    "action": "none",
+                    "reason": "daemon_heartbeat_startup_grace",
+                    "daemon_heartbeat": heartbeat,
+                    "pid": pid,
+                    "process_elapsed_seconds": elapsed,
+                },
+                status_path=status_path,
+            )
 
     active_plist = plist_path or _live_trading_plist_path()
-    if not active_plist.exists():
-        return _live_trading_watchdog_write_status(
-            {
-                "ok": False,
-                "action": "blocked",
-                "reason": "active_plist_missing",
-                "plist": str(active_plist),
-            },
-            status_path=status_path,
+    if stale_running_heartbeat is None:
+        disabled, disabled_detail = _launchd_service_disabled(
+            LIVE_TRADING_LABEL, run_cmd=run_cmd
         )
+        if disabled is True:
+            return _live_trading_watchdog_write_status(
+                {"ok": False, "action": "blocked", "reason": "service_disabled"},
+                status_path=status_path,
+            )
+        if disabled is None:
+            return _live_trading_watchdog_write_status(
+                {
+                    "ok": False,
+                    "action": "blocked",
+                    "reason": "disabled_state_unproven",
+                    "detail": disabled_detail,
+                },
+                status_path=status_path,
+            )
+        if not active_plist.exists():
+            return _live_trading_watchdog_write_status(
+                {
+                    "ok": False,
+                    "action": "blocked",
+                    "reason": "active_plist_missing",
+                    "plist": str(active_plist),
+                },
+                status_path=status_path,
+            )
 
     root = repo_root or _repo_root_from_config()
     expected_sha, git_error = _current_git_head(root, run_cmd=run_cmd)
     sidecars_ok, sidecar_failures, identity_observations = _live_trading_sidecars_ready(
         expected_sha=expected_sha,
-        state_root=state_root or _state_root_from_config(),
+        state_root=resolved_state_root,
         now=checked_at,
     )
     if not sidecars_ok:
@@ -793,8 +948,13 @@ def _recover_missing_live_trading_launchd_under_restart_lock(
             status_path=status_path,
         )
 
+    command = (
+        ["launchctl", "kickstart", "-k", f"{_launchd_gui_domain()}/{LIVE_TRADING_LABEL}"]
+        if stale_running_heartbeat is not None
+        else ["launchctl", "bootstrap", _launchd_gui_domain(), str(active_plist)]
+    )
     res = run_cmd(
-        ["launchctl", "bootstrap", _launchd_gui_domain(), str(active_plist)],
+        command,
         capture_output=True,
         text=True,
         timeout=20.0,
@@ -805,6 +965,20 @@ def _recover_missing_live_trading_launchd_under_restart_lock(
         if piece and piece.strip()
     )
     if getattr(res, "returncode", 1) == 0:
+        if stale_running_heartbeat is not None:
+            return _live_trading_watchdog_write_status(
+                {
+                    "ok": True,
+                    "action": "restarted",
+                    "reason": "daemon_heartbeat_unhealthy",
+                    "expected_sha": expected_sha,
+                    "identity_observations": identity_observations,
+                    "git_identity_error": git_error,
+                    "daemon_heartbeat": stale_running_heartbeat,
+                    "previous_pid": launchd_status.get("pid"),
+                },
+                status_path=status_path,
+            )
         return _live_trading_watchdog_write_status(
             {
                 "ok": True,
@@ -832,11 +1006,16 @@ def _recover_missing_live_trading_launchd_under_restart_lock(
     return _live_trading_watchdog_write_status(
         {
             "ok": False,
-            "action": "bootstrap_failed",
-            "reason": "launchctl_bootstrap_failed",
+            "action": "restart_failed" if stale_running_heartbeat is not None else "bootstrap_failed",
+            "reason": (
+                "launchctl_kickstart_failed"
+                if stale_running_heartbeat is not None
+                else "launchctl_bootstrap_failed"
+            ),
             "expected_sha": expected_sha,
             "identity_observations": identity_observations,
             "git_identity_error": git_error,
+            "daemon_heartbeat": stale_running_heartbeat,
             "returncode": getattr(res, "returncode", None),
             "detail": output,
         },
@@ -863,19 +1042,34 @@ def maybe_recover_missing_live_trading_launchd(
         _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC
         and monotonic_now - _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC
         < _live_trading_watchdog_cooldown_seconds()
-        and not _launchd_service_loaded(LIVE_TRADING_LABEL, run_cmd=run_cmd)
     ):
-        return _live_trading_watchdog_write_status(
-            {"ok": False, "action": "blocked", "reason": "cooldown"},
-            status_path=status_path,
-        )
+        launchd_status = _launchd_service_status(LIVE_TRADING_LABEL, run_cmd=run_cmd)
+        heartbeat_fresh = False
+        if launchd_status.get("running"):
+            heartbeat_fresh = bool(
+                _live_trading_daemon_heartbeat(
+                    state_root=_state_root_from_config(),
+                    now=(now or datetime.now(timezone.utc)).astimezone(timezone.utc),
+                    launchd_pid=launchd_status.get("pid"),
+                )["fresh"]
+            )
+        if not launchd_status.get("loaded") or not heartbeat_fresh:
+            return _live_trading_watchdog_write_status(
+                {"ok": False, "action": "blocked", "reason": "cooldown"},
+                status_path=status_path,
+            )
 
     result = recover_missing_live_trading_launchd_if_needed(
         now=now,
         run_cmd=run_cmd,
         status_path=status_path,
     )
-    if result.get("action") in {"bootstrapped", "bootstrap_failed"}:
+    if result.get("action") in {
+        "bootstrapped",
+        "bootstrap_failed",
+        "restarted",
+        "restart_failed",
+    }:
         _LIVE_TRADING_WATCHDOG_LAST_ATTEMPT_MONOTONIC = monotonic_now
     return result
 
