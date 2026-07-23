@@ -26,12 +26,13 @@ _DEFAULT_FILL_PRICE = object()
 @pytest.fixture
 def conn():
     from src.state.collateral_ledger import init_collateral_schema
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     # Single-connection fixture plays both DB roles; world init_schema no
     # longer creates trade-class collateral tables (K1 split, 1b51db387).
     init_collateral_schema(c)
@@ -1571,9 +1572,10 @@ def test_local_RESTING_absent_at_exchange_with_no_trade_marks_canceled_or_wiped_
         local = sqlite3.connect(":memory:")
         local.row_factory = sqlite3.Row
         from src.state.collateral_ledger import init_collateral_schema
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
 
         init_schema(local)
+        init_schema_trade_only(local)
         init_collateral_schema(local)
         seed_command(local)
         append_resting_order_fact(local)
@@ -7406,12 +7408,13 @@ def test_ws_gap_m5_sweep_does_not_clear_latch_when_durable_commit_fails():
     from src.control import ws_gap_guard
     from src.execution.exchange_reconcile import run_ws_gap_reconcile_and_clear
     from src.state.collateral_ledger import init_collateral_schema
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     conn = sqlite3.connect(":memory:", factory=FailingCommitConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     init_schema(conn)
+    init_schema_trade_only(conn)
     init_collateral_schema(conn)
     seed_command(conn, size=5)
     append_resting_order_fact(conn)

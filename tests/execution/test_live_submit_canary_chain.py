@@ -43,8 +43,9 @@ _COMMAND_PREFIX = "canary-cmd-"
 def _init_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.commit()
     return conn
 

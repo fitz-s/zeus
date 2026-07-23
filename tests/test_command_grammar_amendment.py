@@ -16,7 +16,7 @@ import yaml
 
 from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import append_event, get_command, insert_command, insert_submission_envelope
 
@@ -33,6 +33,7 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
+    init_schema_trade_only(c)
     insert_snapshot(c, _snapshot())
     insert_submission_envelope(c, _envelope(), envelope_id="env-m1")
     yield c

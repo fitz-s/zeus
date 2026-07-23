@@ -54,12 +54,13 @@ def _mem_conn(monkeypatch):
     when no explicit conn is provided. Supply an in-memory DB with schema so
     unit tests don't depend on on-disk DB state.
     """
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     mem = sqlite3.connect(":memory:")
     mem.row_factory = sqlite3.Row
     mem.execute("PRAGMA foreign_keys=ON")
     init_schema(mem)
+    init_schema_trade_only(mem)
     global _TEST_CONN
     _TEST_CONN = mem
     monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem, raising=False)
@@ -382,7 +383,7 @@ class TestPortfolio:
         assert remove_position(state, "nonexistent") is None
 
     def test_save_load_roundtrip(self, tmp_path):
-        from src.state.db import get_connection, init_schema
+        from src.state.db import get_connection, init_schema, init_schema_trade_only
 
         path = tmp_path / "positions.json"
         state = PortfolioState(bankroll=200.0)
@@ -400,6 +401,7 @@ class TestPortfolio:
         # Seed zeus.db (fallback path) with the same position so roundtrip works.
         db = get_connection(tmp_path / "zeus.db")
         init_schema(db)
+        init_schema_trade_only(db)
         db.execute(
             """
             INSERT INTO position_current
@@ -1270,7 +1272,7 @@ class TestExecutor:
         self,
         monkeypatch,
     ):
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
 
         final_intent = _final_execution_intent(
             token_id="yes-token-submit-drift-final",
@@ -1280,6 +1282,7 @@ class TestExecutor:
         submit_conn = sqlite3.connect(":memory:")
         submit_conn.row_factory = sqlite3.Row
         init_schema(submit_conn)
+        init_schema_trade_only(submit_conn)
         _ensure_snapshot(
             submit_conn,
             token_id="yes-token-submit-drift-final",

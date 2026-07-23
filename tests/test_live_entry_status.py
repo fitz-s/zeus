@@ -14,7 +14,7 @@ from src.config import EntryForecastRolloutMode, entry_forecast_config
 from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_VERSION
 from src.data.live_entry_status import build_live_entry_forecast_status
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.schema.v2_schema import apply_canonical_schema
 
 UTC = timezone.utc
@@ -24,6 +24,7 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    init_schema_trade_only(conn)
     apply_canonical_schema(conn)
     return conn
 

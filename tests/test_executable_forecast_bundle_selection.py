@@ -28,7 +28,7 @@ from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_
 from src.data.executable_forecast_reader import read_executable_forecast
 from src.data.forecast_target_contract import build_forecast_target_scope
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.readiness_repo import write_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.source_run_coverage_repo import write_source_run_coverage
@@ -54,6 +54,7 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    init_schema_trade_only(conn)
     apply_canonical_schema(conn)
     return conn
 

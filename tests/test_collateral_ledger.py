@@ -983,9 +983,10 @@ def test_v2_collateral_payload_uses_data_api_positions_and_conditional_micro_bal
 def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypatch):
     from src.execution.executor import _live_order
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=9_000_000, ctf={YES_TOKEN: 100}))
     configure_global_ledger(ledger)
@@ -1049,9 +1050,10 @@ def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypa
 def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypatch):
     from src.execution.executor import execute_final_intent
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     # target_size_usd is exactly 10 pUSD, but BUY quantization at 0.50 submits
     # 20.02 shares, i.e. 10.01 pUSD. A target-sized balance must fail closed.
@@ -1131,9 +1133,10 @@ def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeyp
     from src.execution import executor as executor_module
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 0}))
     configure_global_ledger(ledger)
@@ -1173,9 +1176,10 @@ def test_executor_exit_refreshes_ctf_snapshot_before_sell_preflight(conn, monkey
     from src.execution import executor as executor_module
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={YES_TOKEN: 0}))
     configure_global_ledger(ledger)
@@ -1227,9 +1231,10 @@ def test_executor_exit_refreshes_ctf_snapshot_before_sell_preflight(conn, monkey
 def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
     from src.execution.executor import _live_order
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=100_000_000, ctf={YES_TOKEN: 100}))
     configure_global_ledger(ledger)
@@ -1303,9 +1308,10 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
 def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
     from src.execution.executor import execute_final_intent
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=100_000_000, ctf={YES_TOKEN: 100}))
     configure_global_ledger(ledger)
@@ -1380,9 +1386,10 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
     from src.execution.executor import _live_order
     from src.state import venue_command_repo
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=100_000_000, ctf={YES_TOKEN: 100}))
     configure_global_ledger(ledger)
@@ -1489,9 +1496,10 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
 def test_executor_ack_reserves_ctf_tokens_until_terminal_release(conn, monkeypatch):
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=100_000_000, ctf={YES_TOKEN: 5}))
     configure_global_ledger(ledger)
@@ -1532,9 +1540,10 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state import venue_command_repo
     from src.state.collateral_ledger import configure_global_ledger
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     ledger = CollateralLedger(conn)
     ledger.set_snapshot(_snapshot(pusd=100_000_000, ctf={YES_TOKEN: 5}))
     configure_global_ledger(ledger)
@@ -1936,10 +1945,11 @@ def test_convert_reservation_on_fill_converts_filled_portion_and_releases_remain
     """PUSD_BUY FILLED with a partial cumulative fill: the filled fraction
     converts to an unsettled OUTGOING_DEDUCTION row; the remainder releases.
     Derivation uses MAX(matched_size) over the fact stream (critic ruling 1)."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.venue_command_repo import append_event, append_order_fact
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     command_id = "cmd-convert-fill"
     _insert_test_command(conn, command_id, size=10.0, price=0.5)
     ledger = CollateralLedger(conn)
@@ -1998,10 +2008,11 @@ def test_convert_reservation_on_fill_converts_filled_portion_and_releases_remain
 
 def test_convert_reservation_on_fill_uses_authenticated_trade_fact_without_order_fact(conn):
     from src.state.collateral_ledger import convert_reservation_on_fill
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.venue_command_repo import append_trade_fact
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     command_id = "cmd-trade-fact-fill"
     _insert_test_command(conn, command_id, size=10.0, price=0.5)
     ledger = CollateralLedger(conn)
@@ -2031,10 +2042,11 @@ def test_convert_reservation_on_fill_uses_authenticated_trade_fact_without_order
 
 def test_convert_reservation_on_fill_deduplicates_trade_fact_alias(conn):
     from src.state.collateral_ledger import convert_reservation_on_fill
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.venue_command_repo import append_trade_fact
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     command_id = "cmd-trade-fact-alias"
     tx_hash = "0x" + "2" * 64
     _insert_test_command(conn, command_id, size=10.0, price=0.5)
@@ -2069,11 +2081,12 @@ def test_convert_reservation_on_fill_idempotent_on_replayed_terminal_event(conn)
     """Single idempotent terminal write guarded by WHERE released_at IS NULL:
     a re-delivered terminal dispatch call is a safe no-op, never double-inserts
     into collateral_unsettled_proceeds."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import convert_reservation_on_fill
     from src.state.venue_command_repo import append_order_fact
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     command_id = "cmd-idempotent-terminal"
     _insert_test_command(conn, command_id, size=10.0, price=0.5)
     ledger = CollateralLedger(conn)
@@ -2113,10 +2126,11 @@ def test_partial_then_cancel_converts_filled_releases_remainder(conn):
     """tests_required: partial-then-cancel — matched>0 then CANCELLED: the
     filled-notional portion converts, the unfilled remainder releases, ONE
     idempotent terminal write."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.venue_command_repo import append_event, append_order_fact
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     command_id = "cmd-partial-cancel"
     _insert_test_command(conn, command_id, size=10.0, price=0.5)
     ledger = CollateralLedger(conn)
@@ -2166,10 +2180,11 @@ def test_type_aware_identity_ctf_sell_proceeds_never_reduce_spendable_pusd(conn)
     """CTF_SELL proceeds are INCOMING, recorded as INCOMING_PROCEEDS, and
     tracked for the identity but never part of spendable_pusd while unsettled
     — never uniform subtraction."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.venue_command_repo import append_event, append_order_fact
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     command_id = "cmd-sell-fill"
     _insert_test_command(
         conn, command_id, intent_kind="EXIT", side="SELL", size=10.0, price=0.6, token_id=YES_TOKEN
@@ -2317,11 +2332,12 @@ def test_idempotent_derivation_replay_duplicate_partial_fact_stream(conn):
     """tests_required: replay the same PARTIALLY_MATCHED fact stream (WS +
     reconcile + recovery duplicates) — derived live remaining invariant under
     replay; ZERO ledger writes on partial facts."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import _max_matched_size
     from src.state.venue_command_repo import append_order_fact
 
     init_schema(conn)
+    init_schema_trade_only(conn)
     command_id = "cmd-replay-partial"
     _insert_test_command(conn, command_id, size=10.0, price=0.5)
     ledger = CollateralLedger(conn)
@@ -2365,12 +2381,13 @@ def test_cas_concurrent_reserve_stress_zero_overreserve(tmp_path):
     """
     import threading
 
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     db_path = tmp_path / "cas_stress.db"
     setup_conn = sqlite3.connect(db_path)
     setup_conn.row_factory = sqlite3.Row
     init_schema(setup_conn)
+    init_schema_trade_only(setup_conn)
     init_collateral_schema(setup_conn)
     setup_conn.commit()
     setup_conn.close()
@@ -2477,7 +2494,7 @@ def test_cas_concurrent_reserve_fill_cancel_settle_holds_a4_identity(tmp_path):
     import random
     import threading
 
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import (
         convert_reservation_on_fill,
         release_reservation_for_command_state,
@@ -2487,6 +2504,7 @@ def test_cas_concurrent_reserve_fill_cancel_settle_holds_a4_identity(tmp_path):
     setup_conn = sqlite3.connect(db_path)
     setup_conn.row_factory = sqlite3.Row
     init_schema(setup_conn)
+    init_schema_trade_only(setup_conn)
     init_collateral_schema(setup_conn)
     setup_conn.commit()
     setup_conn.close()

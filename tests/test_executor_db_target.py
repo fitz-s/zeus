@@ -189,7 +189,7 @@ class TestExecutorDbTarget:
         to tmp_path. Asserts the command row appears in zeus_trades.db and NOT
         in zeus.db.
         """
-        from src.state.db import init_schema, get_trade_connection_with_world
+        from src.state.db import init_schema, init_schema_trade_only, get_trade_connection_with_world
 
         # Initialise both databases in tmp_path
         trades_db_path = tmp_path / "zeus_trades.db"
@@ -199,12 +199,14 @@ class TestExecutorDbTarget:
         trades_conn.row_factory = sqlite3.Row
         trades_conn.execute("PRAGMA foreign_keys=ON")
         init_schema(trades_conn)
+        init_schema_trade_only(trades_conn)
         trades_conn.commit()
 
         zeus_conn = sqlite3.connect(str(zeus_db_path))
         zeus_conn.row_factory = sqlite3.Row
         zeus_conn.execute("PRAGMA foreign_keys=ON")
         init_schema(zeus_conn)
+        init_schema_trade_only(zeus_conn)
         zeus_conn.commit()
 
         # Patch get_trade_connection_with_world to return the trades DB
@@ -259,7 +261,7 @@ class TestExecutorDbTarget:
 
     def test_exit_order_writes_command_to_trades_db(self, tmp_path, monkeypatch):
         """execute_exit_order(conn=None) writes venue_commands row to zeus_trades.db."""
-        from src.state.db import init_schema
+        from src.state.db import init_schema, init_schema_trade_only
 
         trades_db_path = tmp_path / "zeus_trades.db"
         zeus_db_path = tmp_path / "zeus.db"
@@ -268,12 +270,14 @@ class TestExecutorDbTarget:
         trades_conn.row_factory = sqlite3.Row
         trades_conn.execute("PRAGMA foreign_keys=ON")
         init_schema(trades_conn)
+        init_schema_trade_only(trades_conn)
         trades_conn.commit()
 
         zeus_conn = sqlite3.connect(str(zeus_db_path))
         zeus_conn.row_factory = sqlite3.Row
         zeus_conn.execute("PRAGMA foreign_keys=ON")
         init_schema(zeus_conn)
+        init_schema_trade_only(zeus_conn)
         zeus_conn.commit()
 
         monkeypatch.setattr(

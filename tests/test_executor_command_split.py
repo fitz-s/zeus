@@ -128,13 +128,14 @@ def test_executor_refuses_client_without_signed_identity_binder():
 @pytest.fixture
 def mem_conn():
     """In-memory DB with full schema (venue_commands + venue_command_events)."""
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     init_schema(c)
+    init_schema_trade_only(c)
     init_collateral_schema(c)
     yield c
     c.close()
@@ -2235,12 +2236,13 @@ class TestLiveOrderCommandSplit:
         """Own-connection live entry must make command/envelope durable before SDK contact."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
-        from src.state.db import get_connection, init_schema
+        from src.state.db import get_connection, init_schema, init_schema_trade_only
 
         token_id = "tok-" + "2" * 36
         db_path = tmp_path / "entry-pre-submit-durable.db"
         setup_conn = get_connection(db_path)
         init_schema(setup_conn)
+        init_schema_trade_only(setup_conn)
         init_collateral_schema(setup_conn)
         intent = _make_entry_intent(setup_conn, token_id=token_id)
         setup_conn.commit()
@@ -2249,6 +2251,7 @@ class TestLiveOrderCommandSplit:
         def _trade_conn():
             conn = get_connection(db_path)
             init_schema(conn)
+            init_schema_trade_only(conn)
             init_collateral_schema(conn)
             return conn
 
@@ -2276,6 +2279,7 @@ class TestLiveOrderCommandSplit:
             def place_limit_order(self, **kwargs):
                 read_conn = get_connection(db_path)
                 init_schema(read_conn)
+                init_schema_trade_only(read_conn)
                 init_collateral_schema(read_conn)
                 try:
                     command_rows = read_conn.execute(
@@ -2335,13 +2339,14 @@ class TestLiveOrderCommandSplit:
         """Caller-owned entry conn must not hold write locks across CLOB preflight."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
-        from src.state.db import get_connection, init_schema
+        from src.state.db import get_connection, init_schema, init_schema_trade_only
 
         monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "100")
         token_id = "tok-" + "8" * 36
         db_path = tmp_path / "entry-caller-conn-durable.db"
         setup_conn = get_connection(db_path)
         init_schema(setup_conn)
+        init_schema_trade_only(setup_conn)
         init_collateral_schema(setup_conn)
         intent = _make_entry_intent(setup_conn, token_id=token_id)
         setup_conn.commit()
@@ -2349,6 +2354,7 @@ class TestLiveOrderCommandSplit:
 
         submit_conn = get_connection(db_path)
         init_schema(submit_conn)
+        init_schema_trade_only(submit_conn)
         init_collateral_schema(submit_conn)
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
@@ -2365,6 +2371,7 @@ class TestLiveOrderCommandSplit:
             def v2_preflight(self):
                 read_conn = get_connection(db_path)
                 init_schema(read_conn)
+                init_schema_trade_only(read_conn)
                 init_collateral_schema(read_conn)
                 try:
                     command_rows = read_conn.execute(
@@ -3985,12 +3992,13 @@ class TestExitOrderCommandSplit:
         """Caller-owned exit conn must not hold write locks across SDK contact."""
         import src.execution.executor as executor_module
         from src.execution.executor import execute_exit_order
-        from src.state.db import get_connection, init_schema
+        from src.state.db import get_connection, init_schema, init_schema_trade_only
 
         token_id = "tok-" + "7" * 36
         db_path = tmp_path / "exit-caller-conn-durable.db"
         setup_conn = get_connection(db_path)
         init_schema(setup_conn)
+        init_schema_trade_only(setup_conn)
         init_collateral_schema(setup_conn)
         intent = _make_exit_intent(
             setup_conn,
@@ -4002,6 +4010,7 @@ class TestExitOrderCommandSplit:
 
         submit_conn = get_connection(db_path)
         init_schema(submit_conn)
+        init_schema_trade_only(submit_conn)
         init_collateral_schema(submit_conn)
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
@@ -4020,6 +4029,7 @@ class TestExitOrderCommandSplit:
             def place_limit_order(self, **kwargs):
                 read_conn = get_connection(db_path)
                 init_schema(read_conn)
+                init_schema_trade_only(read_conn)
                 init_collateral_schema(read_conn)
                 try:
                     command_rows = read_conn.execute(
@@ -4069,6 +4079,7 @@ class TestExitOrderCommandSplit:
 
             read_conn = get_connection(db_path)
             init_schema(read_conn)
+            init_schema_trade_only(read_conn)
             init_collateral_schema(read_conn)
             try:
                 command = read_conn.execute(

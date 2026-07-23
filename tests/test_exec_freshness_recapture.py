@@ -25,7 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.snapshot_repo import get_snapshot, insert_snapshot
 from src.contracts.executable_market_snapshot import (
     ExecutableMarketSnapshot,
@@ -176,6 +176,7 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
+    init_schema_trade_only(c)
     yield c
     c.close()
 

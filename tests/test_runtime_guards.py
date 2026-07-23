@@ -63,7 +63,7 @@ from src.execution.executor import OrderResult, create_execution_intent
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
 import src.state.db as db_module
-from src.state.db import get_connection, init_schema, query_position_events
+from src.state.db import get_connection, init_schema, init_schema_trade_only, query_position_events
 from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
@@ -603,6 +603,7 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
 
     conn = get_connection(tmp_path / "local-monitor-depth.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     from src.state.snapshot_repo import init_snapshot_schema
 
     init_snapshot_schema(conn)
@@ -806,6 +807,7 @@ def test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch(monkeyp
 
     conn = get_connection(tmp_path / "monitor-quote-split.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
     monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
 
@@ -1579,6 +1581,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.execute(
         """
         INSERT INTO position_current (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label, direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior, entry_method, strategy_key, edge_source, discovery_mode, chain_state, order_id, order_status, updated_at, temperature_metric)
@@ -1646,6 +1649,7 @@ def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_p
     shared_db = tmp_path / "zeus-world.db"
     conn = get_connection(trade_db)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
 
     shared_conn = sqlite3.connect(str(shared_db))
@@ -1706,6 +1710,7 @@ def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):
     portfolio_path = tmp_path / "positions.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-orphan",
@@ -1913,6 +1918,7 @@ def test_stale_order_cleanup_blocks_without_command_journal():
 def test_stale_order_cleanup_blocks_without_matching_command(tmp_path):
     conn = get_connection(tmp_path / "orphan-no-command.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     cancelled: list[str] = []
 
     class DummyClob:
@@ -1938,6 +1944,7 @@ def test_stale_order_cleanup_blocks_without_matching_command(tmp_path):
 def test_stale_order_cleanup_quarantines_position_current_owned_order(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "command-backed-order.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.execute(
         """
         INSERT INTO position_current (
@@ -2102,6 +2109,7 @@ def _seed_order_fact(
 def test_same_token_pending_entry_live_order_still_blocks_duplicate_submit(tmp_path):
     conn = get_connection(tmp_path / "pending-entry-live-blocks.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _seed_pending_entry_command(conn)
 
     try:
@@ -2113,6 +2121,7 @@ def test_same_token_pending_entry_live_order_still_blocks_duplicate_submit(tmp_p
 def test_same_token_terminal_no_fill_entry_does_not_block_reentry_after_cancel_ack(tmp_path):
     conn = get_connection(tmp_path / "terminal-no-fill-entry-unblocks.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _seed_pending_entry_command(
         conn,
         command_state="CANCELLED",
@@ -2129,6 +2138,7 @@ def test_same_token_terminal_no_fill_entry_does_not_block_reentry_after_cancel_a
 def test_same_token_terminal_command_without_terminal_order_fact_still_blocks_reentry(tmp_path):
     conn = get_connection(tmp_path / "terminal-command-without-order-fact-blocks.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _seed_pending_entry_command(
         conn,
         command_state="CANCELLED",
@@ -2144,6 +2154,7 @@ def test_same_token_terminal_command_without_terminal_order_fact_still_blocks_re
 def test_same_token_terminal_no_fill_entry_keeps_block_when_projection_has_exposure(tmp_path):
     conn = get_connection(tmp_path / "terminal-no-fill-entry-position-exposure-blocks.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _seed_pending_entry_command(
         conn,
         command_state="CANCELLED",
@@ -2162,6 +2173,7 @@ def test_same_token_terminal_no_fill_entry_keeps_block_when_projection_has_expos
 def test_same_token_terminal_no_fill_entry_keeps_block_when_position_has_fill_fact(tmp_path):
     conn = get_connection(tmp_path / "terminal-no-fill-entry-positive-fact-blocks.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _seed_pending_entry_command(
         conn,
         command_id="cmd-terminal",
@@ -2209,6 +2221,7 @@ def test_same_token_terminal_no_fill_entry_keeps_block_when_position_has_fill_fa
 def test_stale_entry_order_cleanup_cancels_off_touch_no_fill_order(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "stale-entry-order.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-entry",
@@ -2278,6 +2291,7 @@ def test_stale_entry_order_cleanup_cancels_off_touch_no_fill_order(monkeypatch, 
 def test_entry_order_cleanup_cancels_recent_same_token_exit_rest(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "recent-exit-resting-entry.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-entry",
@@ -2354,6 +2368,7 @@ def test_entry_order_cleanup_cancels_recent_same_token_exit_rest(monkeypatch, tm
 def test_entry_order_cleanup_recent_same_token_exit_cooldown_expires(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "old-exit-resting-entry.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-entry",
@@ -2416,6 +2431,7 @@ def test_entry_order_cleanup_recent_same_token_exit_cooldown_expires(monkeypatch
 def test_entry_order_cleanup_cancels_same_price_terminal_no_fill_repost(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "same-price-terminal-no-fill-repost.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-entry",
@@ -2502,6 +2518,7 @@ def test_entry_order_cleanup_cancels_same_price_terminal_no_fill_repost(monkeypa
 def test_stale_entry_order_cleanup_skips_when_fresh_book_no_longer_improves(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "stale-entry-book-reverted.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-entry",
@@ -2548,6 +2565,7 @@ def test_stale_entry_order_cleanup_skips_when_fresh_book_no_longer_improves(monk
 def test_stale_entry_order_cleanup_skips_snapshot_older_than_command(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "stale-entry-old-snapshot.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-entry-old",
@@ -2594,6 +2612,7 @@ def test_stale_entry_order_cleanup_skips_snapshot_older_than_command(monkeypatch
 def test_stale_entry_order_cleanup_skips_when_order_fact_has_matched_size(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "stale-entry-order-fact-matched.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-entry",
@@ -2641,6 +2660,7 @@ def test_stale_entry_order_cleanup_skips_when_order_fact_has_matched_size(monkey
 def test_stale_entry_order_cleanup_skips_partial_entry_order(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "partial-entry-order.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-entry",
@@ -2703,6 +2723,7 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
     db_path = Path(tempfile.mkdtemp()) / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     pending = _position(
         trade_id="pending-fill-1",
         state="pending_tracked",
@@ -2779,6 +2800,7 @@ def test_reconcile_pending_partial_fill_updates_fill_authority_without_finality(
     db_path = Path(tempfile.mkdtemp()) / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
 
     portfolio = PortfolioState(positions=[_position(
@@ -2833,6 +2855,7 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
     # Use a future target_date so monitoring doesn't exit the position before
     # the exposure gate is evaluated.
@@ -2984,6 +3007,7 @@ def test_forward_price_linkage_non_success_statuses_degrade_cycle(status):
 def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-1",
@@ -3079,6 +3103,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
 def test_buy_entry_ask_only_snapshot_reprices_without_bid_midpoint(tmp_path):
     conn = get_connection(tmp_path / "ask-only-snapshot-reprice.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-ask-only-buy",
@@ -3145,6 +3170,7 @@ def test_buy_entry_ask_only_snapshot_reprices_without_bid_midpoint(tmp_path):
 def test_ask_only_book_never_builds_passive_maker_vwmp_intent(tmp_path):
     conn = get_connection(tmp_path / "ask-only-passive-reject.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-ask-only-passive",
@@ -3304,6 +3330,7 @@ def test_source_quality_tail_order_uses_per_scope_complete_coverage(monkeypatch)
 def test_live_passive_reprice_requires_fill_probability_context(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-live-passive-no-fill.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-live-passive-no-fill",
@@ -3343,6 +3370,7 @@ def test_live_passive_reprice_requires_fill_probability_context(tmp_path):
 def test_live_passive_reprice_records_fill_probability_context(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-live-passive-fill.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-live-passive-fill",
@@ -3389,6 +3417,7 @@ def test_live_passive_reprice_records_fill_probability_context(tmp_path):
 def test_live_passive_reprice_estimates_fill_context_from_trade_facts(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-live-passive-estimated-fill.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-live-passive-estimated-fill",
@@ -3478,6 +3507,7 @@ def test_live_passive_reprice_estimates_fill_context_from_trade_facts(tmp_path):
 def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_bid(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-passive-top-bid.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-passive-top-bid",
@@ -3525,6 +3555,7 @@ def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_
 def test_executable_snapshot_repricing_tick_aligns_raw_passive_limit_before_final_intent(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-raw-tick.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-raw-tick",
@@ -3573,6 +3604,7 @@ def test_executable_snapshot_repricing_tick_aligns_raw_passive_limit_before_fina
 def test_executable_snapshot_repricing_rejects_stale_snapshot(tmp_path):
     conn = get_connection(tmp_path / "snapshot-stale.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-stale",
@@ -3606,6 +3638,7 @@ def test_executable_snapshot_repricing_rejects_stale_snapshot(tmp_path):
 def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-tight-ask.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-tight-ask",
@@ -3672,6 +3705,7 @@ def test_executable_snapshot_repricing_falls_back_to_maker_when_taker_quality_fa
     """RELATIONSHIP: crossing entry falls back to maker when taker proof fails."""
     conn = get_connection(tmp_path / "snapshot-reprice-tight-ask-upgrade.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-tight-ask-upgrade",
@@ -3733,6 +3767,7 @@ def test_executable_snapshot_repricing_fok_without_taker_edge_becomes_maker(tmp_
     """RELATIONSHIP: immediate order selection cannot bypass taker-quality proof."""
     conn = get_connection(tmp_path / "snapshot-reprice-fok-no-taker-edge.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-fok-no-taker-edge",
@@ -3801,6 +3836,7 @@ def test_executable_snapshot_repricing_keeps_low_notional_marketable_buy_passive
 
     conn = get_connection(tmp_path / "snapshot-reprice-low-notional-marketable-buy.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-low-notional-marketable-buy",
@@ -3879,6 +3915,7 @@ def test_executable_snapshot_repricing_rejects_low_notional_marketable_buy_witho
 
     conn = get_connection(tmp_path / "snapshot-reprice-low-notional-no-passive.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-low-notional-no-passive",
@@ -3939,6 +3976,7 @@ def test_executable_snapshot_repricing_allows_low_kelly_when_min_shares_clear_ma
     """RELATIONSHIP: marketable BUY floor uses actual submitted notional."""
     conn = get_connection(tmp_path / "snapshot-reprice-min-shares-clears-floor.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-min-shares-clears-floor",
@@ -3994,6 +4032,7 @@ def test_executable_snapshot_repricing_crosses_positive_ev_ask_outside_flat_slip
 
     conn = get_connection(tmp_path / "snapshot-reprice-edge-aware-wide-ask.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-edge-aware-wide-ask",
@@ -4064,6 +4103,7 @@ def test_corrected_pricing_quantizes_immediate_buy_to_venue_amount_precision(tmp
 
     conn = get_connection(tmp_path / "snapshot-reprice-venue-amount-precision.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-venue-amount-precision",
@@ -4120,6 +4160,7 @@ def test_corrected_pricing_raises_positive_edge_fok_to_venue_minimum_shares(tmp_
 
     conn = get_connection(tmp_path / "snapshot-reprice-venue-min-shares.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-venue-min-shares",
@@ -4176,6 +4217,7 @@ def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path)
 
     conn = get_connection(tmp_path / "snapshot-reprice-deeper-ask.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-deeper-ask",
@@ -4259,6 +4301,7 @@ def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_pa
 
     conn = get_connection(tmp_path / "snapshot-reprice-no.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-no-1",
@@ -4323,6 +4366,7 @@ def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_pa
 def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-thin-depth.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-reprice-thin-depth",
@@ -4421,6 +4465,7 @@ def test_executable_snapshot_requires_explicit_accepting_orders():
 def _trace_status_for_evaluator_decision(tmp_path, candidate, monkeypatch=None):
     conn = get_connection(tmp_path / "trace-early.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     world_db = tmp_path / "trace-early-world.db"
     world_conn = get_connection(world_db)
     init_schema(world_conn)
@@ -6318,6 +6363,7 @@ def test_evaluator_buffers_microstructure_without_opening_quote_loop_transaction
     )
     conn = get_connection(tmp_path / "quote-boundary.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     class BoundaryClob:
         def __init__(self):
@@ -6928,6 +6974,7 @@ def test_elevated_risk_still_runs_monitoring_and_reports_block_reason(monkeypatc
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
     portfolio = PortfolioState(positions=[_position()])
 
@@ -6997,6 +7044,7 @@ def test_force_exit_review_scope_is_entry_block_only(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
     portfolio = PortfolioState(positions=[_position(target_date="2026-12-01")])
 
@@ -7066,6 +7114,7 @@ def test_entries_paused_reports_block_reason(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
     portfolio = PortfolioState(positions=[_position(size_usd=0.0, cost_basis_usd=0.0, target_date="2026-12-01")])
 
@@ -7144,6 +7193,7 @@ def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_toke
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to seed a
     # phase='quarantined' row to exercise the chain-only dedup path — the
     # dedup keys off token_id membership in `represented_tokens`, not off the
@@ -7268,6 +7318,7 @@ def test_unknown_direction_positions_are_not_monitored(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
     portfolio = PortfolioState(positions=[_position(direction="unknown", chain_state="synced")])
 
@@ -7827,6 +7878,7 @@ def test_runtime_open_portfolio_prunes_terminal_rows_before_hydration_and_preser
 
     conn = get_connection(tmp_path / "runtime-open-portfolio.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     def persist_position(
         position_id: str,
@@ -8068,6 +8120,7 @@ def test_runtime_open_portfolio_rejects_malformed_chain_exposure(tmp_path):
 
     conn = get_connection(tmp_path / "malformed-chain-exposure.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="malformed-chain-exposure",
         state="holding",
@@ -8097,6 +8150,7 @@ def test_runtime_open_portfolio_rejects_missing_identity_value(tmp_path):
 
     conn = get_connection(tmp_path / "missing-runtime-identity.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(trade_id="missing-runtime-identity")
     upsert_position_current(conn, build_position_current_projection(position))
     conn.execute(
@@ -8118,6 +8172,7 @@ def test_runtime_open_portfolio_rejects_chain_economics_with_nonrisk_state(tmp_p
 
     conn = get_connection(tmp_path / "contradictory-runtime-authority.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="contradictory-runtime-authority",
         state="holding",
@@ -8143,6 +8198,7 @@ def test_runtime_open_portfolio_rejects_unconsumable_chain_economics(tmp_path):
 
     conn = get_connection(tmp_path / "unconsumable-runtime-authority.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="unconsumable-runtime-authority",
         state="entered",
@@ -8172,6 +8228,7 @@ def test_runtime_open_portfolio_rejects_partial_fill_without_economics(tmp_path)
 
     conn = get_connection(tmp_path / "incomplete-partial-fill.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="incomplete-partial-fill",
         state="pending_tracked",
@@ -8197,6 +8254,7 @@ def test_runtime_open_portfolio_rejects_partial_fill_with_inconsistent_cost(tmp_
 
     conn = get_connection(tmp_path / "inconsistent-partial-fill.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="inconsistent-partial-fill",
         state="pending_tracked",
@@ -8226,6 +8284,7 @@ def test_runtime_open_portfolio_rejects_terminal_authority_in_pending_phase(
 
     conn = get_connection(tmp_path / f"pending-{fill_authority}.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id=f"pending-{fill_authority}",
         state="pending_tracked",
@@ -8258,6 +8317,7 @@ def test_runtime_open_portfolio_rejects_settled_authority_in_open_phase(
     position_id = f"settled-authority-{state}-{has_fill_hint}"
     conn = get_connection(tmp_path / f"{position_id}.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id=position_id,
         state=state,
@@ -8294,6 +8354,7 @@ def test_runtime_open_portfolio_accepts_cancelled_remainder_pending_exposure(tmp
 
     conn = get_connection(tmp_path / "pending-cancelled-remainder.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="pending-cancelled-remainder",
         state="pending_tracked",
@@ -8320,6 +8381,7 @@ def test_runtime_open_portfolio_rejects_hydrated_full_fill_in_pending_phase(tmp_
 
     conn = get_connection(tmp_path / "pending-hydrated-full-fill.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="pending-hydrated-full-fill",
         state="pending_tracked",
@@ -8354,6 +8416,7 @@ def test_full_portfolio_loader_does_not_promote_pending_fill_projection(tmp_path
 
     conn = get_connection(tmp_path / "full-loader-pending-fill.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="full-loader-pending-fill",
         state="pending_tracked",
@@ -8386,6 +8449,7 @@ def test_runtime_open_portfolio_rejects_malformed_confirmed_fill(tmp_path):
 
     conn = get_connection(tmp_path / "malformed-execution-fill.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(trade_id="malformed-execution-fill")
     upsert_position_current(conn, build_position_current_projection(position))
     conn.execute(
@@ -8447,6 +8511,7 @@ def test_runtime_open_portfolio_uses_one_sqlite_snapshot_across_hydration(
     db_path = tmp_path / "runtime-open-read-snapshot.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     position = _position(
         trade_id="runtime-open-read-snapshot",
         state="entered",
@@ -8582,6 +8647,7 @@ def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path, mo
     sibling_db = tmp_path / "zeus-live.db"
     conn = get_connection(sibling_db)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
 
     monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(sibling_db))
@@ -8621,6 +8687,7 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     conn.execute(
         """
@@ -8690,6 +8757,7 @@ def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, mon
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     conn.execute(
         """
@@ -8744,6 +8812,7 @@ def test_load_portfolio_reads_ignored_tokens_from_canonical_suppression(tmp_path
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.execute(
         """
         INSERT INTO position_current (
@@ -8795,6 +8864,7 @@ def test_load_portfolio_reads_canonical_suppression_when_projection_empty(tmp_pa
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.execute(
         """
         INSERT INTO token_suppression (
@@ -8830,6 +8900,7 @@ def test_load_portfolio_preserves_canonical_suppression_when_projection_degraded
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.execute(
         """
         INSERT INTO token_suppression (
@@ -8891,6 +8962,7 @@ def test_load_portfolio_ignores_deprecated_json_when_projection_authoritative(tm
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.execute(
         """
         INSERT INTO position_current (
@@ -8927,6 +8999,7 @@ def test_load_portfolio_ignores_corrupt_json_when_projection_authoritative(tmp_p
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.execute(
         """
         INSERT INTO position_current (
@@ -9007,6 +9080,7 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     payload = {
         "contract_version": "position_settled.v1",
         "winning_bin": "39-40°F",
@@ -9142,6 +9216,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_empty(tmp_path, mon
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     conn.close()
 
@@ -9175,6 +9250,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json
     path = tmp_path / "positions-live.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     monkeypatch.setattr("src.state.db.get_trade_connection_with_world", lambda *_, **__: get_connection(db_path))
     conn.commit()
     conn.close()
@@ -10737,6 +10813,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     apply_canonical_schema(conn)
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
@@ -10860,6 +10937,7 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     snapshot_id = _seed_p_raw_snapshot(conn)
     topology = _support_topology_payload()
@@ -10928,6 +11006,7 @@ def test_store_snapshot_p_raw_rejects_invalid_support_topology(tmp_path, mutate)
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     snapshot_id = _seed_p_raw_snapshot(conn)
     topology = _support_topology_payload()
     mutate(topology)
@@ -10952,6 +11031,7 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     world_db = tmp_path / "zeus-world.db"
     trade_conn = get_connection(trade_db)
     init_schema(trade_conn)
+    init_schema_trade_only(trade_conn)
     apply_canonical_schema(trade_conn)
     trade_conn.close()
     world_conn = get_connection(world_db)
@@ -11035,6 +11115,7 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     apply_canonical_schema(conn)
     # Legacy table still exists (DROP migration is operator-invoked); pre-populate
     # an unrelated row to confirm the writer doesn't touch or break it.
@@ -11107,6 +11188,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     apply_canonical_schema(conn)
     issue_time = "2026-01-14T00:00:00+00:00"
     conn.execute(
@@ -11205,6 +11287,7 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     test_city = City(
         name="NYC",
@@ -12097,6 +12180,7 @@ def test_run_cycle_clears_ensemble_cache_each_cycle(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
 
     class DummyClob:
@@ -12126,6 +12210,7 @@ def test_run_cycle_closes_polymarket_client_after_cycle(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     conn.close()
 
     closed = []
@@ -12454,6 +12539,7 @@ def test_pending_exit_retry_snapshot_identity_seed_uses_current_clob_quote(tmp_p
 
     conn = get_connection(tmp_path / "pending-exit-snapshot-identity.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     _insert_executable_snapshot(
         conn,
         snapshot_id="snap-stale-exit-identity",
@@ -12881,6 +12967,7 @@ def test_d4_gate_blocks_asymmetric_statistical_exit_before_execution(monkeypatch
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     pos = _position(
         trade_id="d4-asymmetry",
         state="holding",
@@ -12942,6 +13029,7 @@ def test_d4_gate_blocks_statistical_exit_without_entry_evidence(monkeypatch, tmp
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_trade_only(conn)
     pos = _position(
         trade_id="d4-missing-entry",
         state="holding",
@@ -13080,6 +13168,7 @@ def test_exit_dual_write_backfills_missing_entry_history_after_day0_only_canonic
     """
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
     from src.state.db import append_many_and_project
@@ -13151,6 +13240,7 @@ def test_day0_existing_canonical_event_repairs_position_current_projection(tmp_p
     """Existing Day0 event is enough canonical truth to repair stale projection."""
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
     from src.state.db import append_many_and_project
@@ -13217,6 +13307,7 @@ def test_day0_existing_canonical_event_repairs_after_active_chain_correction(tmp
     """A no-op chain correction must not hide established Day0 truth."""
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     from src.engine.lifecycle_events import (
         build_chain_size_corrected_canonical_write,
@@ -13296,6 +13387,7 @@ def test_day0_existing_canonical_event_does_not_repair_when_later_absorbing_even
     """Older Day0 history must not overwrite newer economic-close truth."""
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
     from src.state.db import append_many_and_project
@@ -13380,6 +13472,7 @@ def test_exit_dual_write_backfills_only_missing_entry_events_for_partial_history
     """Partial canonical entry history must not be duplicated during backfill."""
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     from src.engine.lifecycle_events import (
         build_day0_window_entered_canonical_write,
@@ -13850,6 +13943,7 @@ def test_monitor_refresh_has_no_alternate_price_branch():
 def test_learning_summary_separates_no_data_from_no_edge(tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-03T00:00:00Z", completed_at="2026-04-03T00:05:00Z")
     artifact.add_no_trade(
@@ -14256,6 +14350,7 @@ def test_check_pending_exits_restores_pre_exit_state_after_bare_exit_intent_rele
 def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     pos = _position(
         trade_id="pre-exit-state-release-preflight-1",
         state="pending_exit",
@@ -14301,6 +14396,7 @@ def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
 def test_pending_exit_without_order_release_persists_pre_exit_state_restore(tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     pos = _position(
         trade_id="pre-exit-state-release-1",
         state="pending_exit",
@@ -14349,6 +14445,7 @@ def test_check_pending_exits_releases_loaded_pre_exit_state_bare_exit_intent_wit
 
     conn = get_connection(tmp_path / "loaded-pre-exit-state-exit-intent.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
     pos = _position(
         trade_id="loaded-pre-exit-state-exit-intent-1",
         state="pending_exit",
@@ -14456,6 +14553,7 @@ def test_check_pending_exits_releases_loaded_pre_exit_state_bare_exit_intent_wit
 def test_check_pending_exits_emits_void_semantics_for_rejected_sell(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
+    init_schema_trade_only(conn)
 
     pos = _position(state="day0_window")
     pos.exit_state = "sell_pending"
