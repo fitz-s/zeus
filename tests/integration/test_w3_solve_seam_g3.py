@@ -8905,6 +8905,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "BLOCKED",
         ),
         (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+            "remaining_day q_lcb is degenerate with q_live",
+            "BLOCKED",
+        ),
+        (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:locked:input=22:"
             "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=22",
@@ -16992,6 +16998,11 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         (
             "LIVE_INFERENCE_INPUTS_MISSING:"
             "DAY0_ORACLE_ANOMALY_PAUSED:Dallas:2026-07-22"
+        ),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+            "remaining_day q_lcb is degenerate with q_live"
         ),
     ),
 )

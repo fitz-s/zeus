@@ -11498,6 +11498,11 @@ def _global_preflight_block_status(reason: str) -> str:
                 "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
                 "selected q_lcb does not match remaining-day transform:"
             ),
+            (
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+                "remaining_day q_lcb is degenerate with q_live"
+            ),
         )
     ):
         return "BLOCKED"
