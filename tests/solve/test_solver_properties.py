@@ -2066,6 +2066,30 @@ def test_sell_point_counterfactual_failure_cannot_block_profitable_live_sell(
     )
 
 
+def test_missing_sell_point_probability_cannot_block_profitable_live_sell(
+    monkeypatch,
+):
+    sell = _global_sell_candidate(
+        candidate_id="sell-point-missing",
+        family="sell-point-missing-family",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.50", "10"),),
+        shares="10",
+    )
+    monkeypatch.setattr(S, "family_payoff_point_q", lambda *args, **kwargs: None)
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.robust_delta_log_wealth > 0.0
+    counterfactual = decision.candidate_evaluations[0].sell_point_counterfactual
+    assert counterfactual is not None
+    assert counterfactual.status == "UNAVAILABLE"
+    assert counterfactual.point_held_payoff_q is None
+    assert counterfactual.rejection_reason == "POINT_PROBABILITY_UNAVAILABLE"
+
+
 def test_global_single_order_capital_authority_failure_preserves_sell_and_stops_retries():
     sell = _global_sell_candidate(
         candidate_id="sell-before-cap-failure",

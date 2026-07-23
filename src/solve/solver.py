@@ -1774,7 +1774,7 @@ class GlobalSellPointCounterfactual:
     """Receipt-only exact partial-SELL optimum under frozen point probability."""
 
     status: Literal["UNAVAILABLE", "INFEASIBLE", "NON_POSITIVE", "POSITIVE"]
-    point_held_payoff_q: float
+    point_held_payoff_q: float | None
     probability_witness_identity: str
     wealth_economic_identity: str
     wealth_floor_usd: Decimal
@@ -1792,12 +1792,19 @@ class GlobalSellPointCounterfactual:
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
 
     def __post_init__(self) -> None:
-        q = float(self.point_held_payoff_q)
+        q = (
+            None
+            if self.point_held_payoff_q is None
+            else float(self.point_held_payoff_q)
+        )
         if (
             self.status
             not in {"UNAVAILABLE", "INFEASIBLE", "NON_POSITIVE", "POSITIVE"}
-            or not math.isfinite(q)
-            or not 0.0 <= q <= 1.0
+            or (
+                q is not None
+                and (not math.isfinite(q) or not 0.0 <= q <= 1.0)
+            )
+            or (self.status != "UNAVAILABLE" and q is None)
             or not str(self.probability_witness_identity).strip()
             or not str(self.wealth_economic_identity).strip()
             or not Decimal(self.wealth_floor_usd).is_finite()
@@ -1824,6 +1831,8 @@ class GlobalSellPointCounterfactual:
                 raise ValueError("unscored SELL point counterfactual carries economics")
             return
         terminal = self.terminal_wealth
+        if q is None:
+            raise ValueError("scored SELL point counterfactual requires point q")
         if (
             self.shares <= 0
             or self.loss_at_risk_usd <= 0
@@ -4774,22 +4783,10 @@ def select_global_single_order(
                 bin_id=candidate.bin_id,
                 side=candidate.side,
             )
-            assert point_q is not None
-            try:
-                point_counterfactual = _score_global_sell_point_counterfactual(
-                    candidate,
-                    point_held_payoff_q=point_q,
-                    probability_witness_identity=(
-                        probability_witness.witness_identity
-                    ),
-                    wealth_witness=wealth_witness,
-                    sample_count=q_samples.size,
-                    band_alpha=band_alpha,
-                )
-            except Exception:  # noqa: BLE001 - diagnostics cannot alter live action
+            if point_q is None:
                 point_counterfactual = GlobalSellPointCounterfactual(
                     status="UNAVAILABLE",
-                    point_held_payoff_q=point_q,
+                    point_held_payoff_q=None,
                     probability_witness_identity=(
                         probability_witness.witness_identity
                     ),
@@ -4797,8 +4794,33 @@ def select_global_single_order(
                     wealth_floor_usd=wealth_witness.wealth_floor_usd,
                     wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
                     held_shares=candidate.held_shares,
-                    rejection_reason="POINT_COUNTERFACTUAL_COMPUTATION_FAILED",
+                    rejection_reason="POINT_PROBABILITY_UNAVAILABLE",
                 )
+            else:
+                try:
+                    point_counterfactual = _score_global_sell_point_counterfactual(
+                        candidate,
+                        point_held_payoff_q=point_q,
+                        probability_witness_identity=(
+                            probability_witness.witness_identity
+                        ),
+                        wealth_witness=wealth_witness,
+                        sample_count=q_samples.size,
+                        band_alpha=band_alpha,
+                    )
+                except Exception:  # noqa: BLE001 - diagnostics cannot alter live action
+                    point_counterfactual = GlobalSellPointCounterfactual(
+                        status="UNAVAILABLE",
+                        point_held_payoff_q=point_q,
+                        probability_witness_identity=(
+                            probability_witness.witness_identity
+                        ),
+                        wealth_economic_identity=wealth_witness.economic_identity,
+                        wealth_floor_usd=wealth_witness.wealth_floor_usd,
+                        wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+                        held_shares=candidate.held_shares,
+                        rejection_reason="POINT_COUNTERFACTUAL_COMPUTATION_FAILED",
+                    )
             sell_point_counterfactuals_by_id[candidate.candidate_id] = (
                 point_counterfactual
             )
