@@ -11122,6 +11122,72 @@ class TestRecoveryResolutionTable:
         finally:
             verified.close()
 
+    def test_live_tick_prioritizes_terminal_point_order_before_general_budget(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_client,
+    ):
+        """A zero DB budget cannot strand collateral after a venue terminal no-fill."""
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.collateral_ledger import init_collateral_schema
+        from src.state.db import init_schema, init_schema_trade_only
+
+        db_path = tmp_path / "priority-terminal-point.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        _insert(seed, size=7.0, price=0.52)
+        _advance_to_acked(seed, venue_order_id="ord-terminal-no-fill")
+        _seed_pending_entry_projection(seed, order_id="ord-terminal-no-fill")
+        _append_order_fact(seed, state="LIVE", matched_size="0", remaining_size="7")
+        seed.commit()
+        seed.close()
+
+        def _conn_factory(**_kwargs):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-terminal-no-fill",
+            "status": "CANCELED",
+            "original_size": "7",
+            "size_matched": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=mock_client,
+            scope="live_tick",
+        )
+
+        assert summary["terminal_point_recovery_fast"]["scanned"] == 1
+        assert summary["terminal_point_recovery_fast"]["advanced"] >= 2
+        verified = _conn_factory()
+        try:
+            assert _get_state(verified, "cmd-001") == "EXPIRED"
+            current = verified.execute(
+                "SELECT phase, shares, cost_basis_usd FROM position_current "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()
+            assert dict(current) == {
+                "phase": "voided",
+                "shares": 0.0,
+                "cost_basis_usd": 0.0,
+            }
+        finally:
+            verified.close()
+
     def test_filled_entry_repair_without_trade_case_stays_non_error(
         self,
         conn,

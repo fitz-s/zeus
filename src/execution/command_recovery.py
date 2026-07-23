@@ -20235,8 +20235,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             ),
         )
 
-    def _cancel_recovery_fast_pass():
-        """Resolve capital-blocking pending/review cancels before maintenance.
+    def _capital_recovery_fast_pass():
+        """Resolve capital-blocking terminal orders before maintenance.
 
         The general live-tick sweep has a deliberately tiny cumulative DB
         budget.  A large maintenance query must not repeatedly consume that
@@ -20247,18 +20247,21 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
         with open_tracked(
             read_conn_factory,
-            label="recovery.cancel_recovery_fast:snapshot",
+            label="recovery.capital_recovery_fast:snapshot",
         ) as conn:
-            candidates = _capital_blocking_cancel_commands(conn)
-        if not candidates:
+            cancel_candidates = _capital_blocking_cancel_commands(conn)
+            terminal_candidates = _terminal_point_order_candidates(conn)
+        if not cancel_candidates and not terminal_candidates:
             return None
-        command_ids = {str(row.get("command_id") or "") for row in candidates}
+        cancel_command_ids = {
+            str(row.get("command_id") or "") for row in cancel_candidates
+        }
         order_ids = {
             str(row.get("venue_order_id") or "")
-            for row in candidates
+            for row in cancel_candidates + terminal_candidates
             if str(row.get("venue_order_id") or "")
         }
-        assert_no_open_connection("recovery.cancel_recovery_fast")
+        assert_no_open_connection("recovery.capital_recovery_fast")
         snapshot = capture_venue_read_snapshot(
             client,
             order_ids=order_ids,
@@ -20278,7 +20281,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 str(row.get("command_id") or ""): row
                 for row in _capital_blocking_cancel_commands(conn)
             }
-            for command_id in sorted(command_ids):
+            for command_id in sorted(cancel_command_ids):
                 row = current.get(command_id)
                 if row is None:
                     continue
@@ -20304,17 +20307,23 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 else:
                     ps["errors"] += 1
             _accumulate(summary, "cancel_recovery_fast", ps)
+
+            terminal_ps = reconcile_restart_preflight_terminal_point_orders(
+                conn,
+                snap_client,
+            )
+            _accumulate(summary, "terminal_point_recovery_fast", terminal_ps)
             return ps
 
         return _run_recovery_pass_with_lock_policy(
-            "cancel_recovery_fast",
+            "capital_recovery_fast",
             lambda: run_three_phase(
                 lambda conn: None,
                 lambda _snap: snapshot,
                 _apply,
                 conn_factory=fast_conn_factory,
                 snapshot_conn_factory=read_conn_factory,
-                label="recovery.cancel_recovery_fast",
+                label="recovery.capital_recovery_fast",
             ),
             scope="live_tick",
             summary=summary,
@@ -20596,7 +20605,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         return
 
     if scope == "live_tick":
-        _cancel_recovery_fast_pass()
+        _capital_recovery_fast_pass()
 
     _db_pass(
         "authenticated_entry_trade_fact",
