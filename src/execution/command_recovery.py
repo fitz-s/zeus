@@ -57,6 +57,10 @@ from src.execution.command_bus import (
 )
 from src.execution.exit_safety import reconcile_review_required_exit_mutex_releases
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
+)
 from src.state.fact_revocation import (
     is_certificate_revoked as _certificate_is_revoked,
 )
@@ -16287,9 +16291,13 @@ def _fill_price_respects_limit(fill_price, limit_price, *, side: object) -> bool
     tolerance = Decimal("0.000001")
     normalized_side = str(side or "").upper()
     if normalized_side == "BUY":
-        return fill <= limit + tolerance
+        if fill <= limit:
+            return True
+        return fill <= limit + tolerance and fill <= LIVE_ORDER_MAX_UNIT_PRICE
     if normalized_side == "SELL":
-        return fill + tolerance >= limit
+        if fill >= limit:
+            return True
+        return fill + tolerance >= limit and fill >= LIVE_ORDER_MIN_UNIT_PRICE
     return False
 
 
