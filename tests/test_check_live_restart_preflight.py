@@ -7942,6 +7942,53 @@ def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recov
     ] == "MARKET_CLOSED_AWAITING_SETTLEMENT"
 
 
+def test_monitor_cadence_accepts_backoff_exhausted_min_order_dust_recovery(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    now = datetime.now(timezone.utc)
+    target_date = (now + timedelta(days=1)).date().isoformat()
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            'dust-pos', 'pending_exit', 'Wuhan', ?, 'high',
+            'Will the highest temperature in Wuhan be 32°C on July 23?',
+            'buy_yes', 3.1125, 3.1125, 'backoff_exhausted',
+            'DAY0_HARD_FACT_BIN_DEAD [DUST: executable_snapshot_gate: '
+            || 'size 3.1125 is below snapshot min_order_size 5]',
+            0, NULL, 0.0, 1, 0.0, 1, ?
+        )
+        """,
+        (target_date, now.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.evidence["stale_or_missing_position_count"] == 0
+    assert result.evidence["settlement_recoverable_position_count"] == 1
+    recovered = result.evidence["settlement_recoverable_positions"][0]
+    assert recovered["position_id"] == "dust-pos"
+    assert recovered["closed_market_validation"] == "snapshot_min_order_dust"
+
+
 def test_monitor_cadence_restart_evidence_reports_voided_chain_risk_as_reconciliation_risk(
     monkeypatch, tmp_path
 ):

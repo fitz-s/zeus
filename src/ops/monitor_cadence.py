@@ -7,8 +7,10 @@ events; it does not use projection timestamps and never writes runtime state.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from src.contracts.position_truth import (
@@ -75,6 +77,19 @@ def collect_monitor_cadence_evidence(
     review_managed: list[dict[str, Any]] = []
     fresh_count = 0
     for position in monitored_rows:
+        if _position_is_min_order_dust_held_to_settlement(position):
+            settlement_recoverable.append(
+                {
+                    "position_id": position["position_id"],
+                    "phase": position["phase"],
+                    "chain_state": position["chain_state"],
+                    "cadence_source": "EXIT_ORDER_REJECTED",
+                    "closed_market_validation": "snapshot_min_order_dust",
+                    "restart_resolution": "settlement_harvester_or_chain_size_change",
+                }
+            )
+            fresh_count += 1
+            continue
         monitor_event = _latest_monitor_refreshed_event(
             conn,
             str(position["position_id"]),
@@ -272,9 +287,42 @@ def _monitor_cadence_position_rows(
                     "chain_state": chain_state,
                     "order_status": str(row["order_status"] or "").strip().lower(),
                     "exit_reason": str(row["exit_reason"] or "").strip(),
+                    "shares": shares,
+                    "chain_shares": chain_shares,
                 }
             )
     return monitored
+
+
+_MIN_ORDER_DUST_RE = re.compile(
+    r"\[DUST:\s*executable_snapshot_gate:\s*size\s+"
+    r"(?P<size>[0-9]+(?:\.[0-9]+)?)\s+is below snapshot min_order_size\s+"
+    r"(?P<minimum>[0-9]+(?:\.[0-9]+)?)\s*\]"
+)
+
+
+def _position_is_min_order_dust_held_to_settlement(position: dict[str, object]) -> bool:
+    """Recognize the exact exit-lifecycle proof that no venue SELL is feasible."""
+
+    if str(position.get("phase") or "") != "pending_exit":
+        return False
+    if str(position.get("order_status") or "") != "backoff_exhausted":
+        return False
+    match = _MIN_ORDER_DUST_RE.search(str(position.get("exit_reason") or ""))
+    if match is None:
+        return False
+    exposure = max(
+        Decimal(str(position.get("shares") or 0)),
+        Decimal(str(position.get("chain_shares") or 0)),
+    )
+    cited_size = Decimal(match.group("size"))
+    minimum = Decimal(match.group("minimum"))
+    return (
+        exposure > 0
+        and minimum > 0
+        and abs(exposure - cited_size) <= Decimal("0.000001")
+        and cited_size < minimum
+    )
 
 
 def _position_requires_monitor_cadence(
