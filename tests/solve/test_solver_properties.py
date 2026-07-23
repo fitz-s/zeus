@@ -1256,13 +1256,19 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
     )
 
     assert plan.no_trade_reason is None
-    assert plan.primary_candidate_id == "candidate-33-YES"
-    assert Decimal("45") < plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
-    assert plan.robust_delta_log_wealth > 0.06
+    assert plan.primary_candidate_id is not None
+    assert Decimal("0") < plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
+    assert plan.full_kelly_cost_usd > plan.fractional_target_cost_usd
+    assert plan.robust_delta_log_wealth > 0
+    for target in plan.targets:
+        assert target.fractional_kelly_target_shares == (
+            target.full_kelly_target_shares * Decimal("0.03125")
+        )
+        assert target.shares <= target.fractional_kelly_target_shares
     target_by_id = {target.candidate_id: target.shares for target in plan.targets}
-    assert Decimal("500") <= target_by_id["candidate-33-YES"] <= Decimal("505")
-    assert "candidate-35-NO" not in target_by_id
-    assert "candidate-36-NO" not in target_by_id
+    assert "candidate-33-YES" not in target_by_id
+    assert "candidate-35-NO" in target_by_id
+    assert "candidate-36-NO" in target_by_id
     assert optimize_calls == 1
 
     payout = {bin_id: Decimal("0") for bin_id in witness.bin_ids}
@@ -1327,7 +1333,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         (row.candidate_id, row.status, row.rejection_reason)
         for row in decision.candidate_evaluations
     )
-    assert decision.candidate.candidate_id == "candidate-33-YES", tuple(
+    assert decision.candidate.candidate_id == plan.primary_candidate_id, tuple(
         (
             row.candidate_id,
             row.status,
@@ -1339,6 +1345,57 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
     )
     assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
     assert optimizer_shapes == [5, 4]
+
+
+def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target():
+    candidate = _global_candidate(
+        candidate_id="family-joint-weak-edge",
+        family="family-joint-weak-edge",
+        side="NO",
+        q=0.8125733672356523,
+        levels=(("0.78", "57.5"),),
+        fee="0.05",
+        min_order="5",
+    )
+    witness = _global_probability_witness(candidate)
+    endowment = S.FamilyPortfolioEndowment(
+        family_key=candidate.family_key,
+        payout_by_bin_usd=tuple(
+            (bin_id, Decimal("0")) for bin_id in witness.bin_ids
+        ),
+        current_token_shares=(),
+        wealth_floor_usd=Decimal("465.531417"),
+        spendable_cash_usd=Decimal("465.531417"),
+        portfolio_capital_usd=Decimal("1450"),
+        committed_capital_usd=Decimal("0"),
+        ledger_snapshot_id="ledger-current",
+    )
+
+    full = S.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={candidate.candidate_id: Decimal("1450")},
+        fractional_kelly_multiplier=Decimal("1"),
+    )
+    fractional = S.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=endowment,
+        capital_limit_by_candidate={candidate.candidate_id: Decimal("1450")},
+        fractional_kelly_multiplier=Decimal("0.03125"),
+    )
+
+    assert full.primary_candidate_id == candidate.candidate_id
+    assert full.targets[0].shares > Decimal("55")
+    assert full.targets[0].full_kelly_target_shares == full.targets[0].shares
+    assert (
+        full.targets[0].full_kelly_target_shares * Decimal("0.03125")
+        < Decimal("5")
+    )
+    assert fractional.primary_candidate_id is None
+    assert fractional.targets == ()
+    assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 
 
 def _global_witness(

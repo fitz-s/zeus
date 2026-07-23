@@ -3000,13 +3000,12 @@ def plan_family_joint_buy_targets(
     capital_limit_by_candidate: Mapping[str, Decimal],
     fractional_kelly_multiplier: Decimal,
 ) -> FamilyJointBuyPlan:
-    """Maximize one MECE family directly inside its cumulative Fractional-Kelly budget.
+    """Project one MECE family's full-Kelly vector onto its cumulative fraction.
 
-    Scaling a full-bankroll optimum preserves low-efficiency sibling legs that are not
-    optimal when capital is scarce.  The executable solve therefore owns one family-wide
-    budget ``κ * portfolio capital - already committed family capital`` and optimizes
-    inside that bound.  Existing holdings and unresolved entry commitments consume the
-    same budget, so a later auction epoch cannot mint another κ allocation.
+    Fractional Kelly scales the full log-optimal final holding; it is not a fixed
+    ``κ * capital`` spending allowance.  Existing holdings and unresolved entry
+    commitments consume the same final target and cash budget, so later epochs
+    cannot mint another allocation.
     """
 
     family = str(probability_witness.family_key)
@@ -3040,11 +3039,11 @@ def plan_family_joint_buy_targets(
     if not np.isfinite(w0).all() or np.any(w0 <= 0.0):
         return empty
 
-    fractional_budget = (
+    remaining_fractional_budget = (
         multiplier * Decimal(endowment.portfolio_capital_usd)
         - Decimal(endowment.committed_capital_usd)
     )
-    if fractional_budget <= 0:
+    if remaining_fractional_budget <= 0:
         return replace(
             empty,
             no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
@@ -3069,7 +3068,6 @@ def plan_family_joint_buy_targets(
                 cost_limit_usd=min(
                     limit,
                     endowment.spendable_cash_usd,
-                    fractional_budget,
                 ),
             )
         except ValueError:
@@ -3112,7 +3110,6 @@ def plan_family_joint_buy_targets(
     direct_cash = min(
         endowment.spendable_cash_usd,
         allocator_budget,
-        fractional_budget,
     )
     if direct_cash <= 0:
         return replace(
@@ -3132,7 +3129,9 @@ def plan_family_joint_buy_targets(
             )
         except ValueError:
             continue
-    if minimum_costs and direct_cash < min(minimum_costs):
+    if minimum_costs and min(direct_cash, remaining_fractional_budget) < min(
+        minimum_costs
+    ):
         return replace(
             empty,
             no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
@@ -3153,20 +3152,38 @@ def plan_family_joint_buy_targets(
     except Exception:  # noqa: BLE001 - optimizer failure is a family no-trade
         return empty
 
-    direct_by_candidate = [Decimal("0") for _ in candidates]
+    full_by_candidate = [Decimal("0") for _ in candidates]
     for index, units in enumerate(direct):
-        direct_by_candidate[tranche_owner[index]] += Decimal(str(float(units)))
+        full_by_candidate[tranche_owner[index]] += Decimal(str(float(units)))
     held_by_token = dict(endowment.current_token_shares)
     desired: list[tuple[int, Decimal]] = []
+    target_by_index: dict[int, tuple[Decimal, Decimal]] = {}
+    full_pairs: list[tuple[int, Decimal]] = []
     for index, candidate in enumerate(candidates):
-        additional = direct_by_candidate[index]
-        if additional <= 0:
+        full_additional = full_by_candidate[index]
+        if full_additional <= 0:
             continue
-        additional = min(additional, candidate_caps[index])
-        legal = _single_order_venue_legal_neighbor(
+        full_additional = min(full_additional, candidate_caps[index])
+        legal_full = _single_order_venue_legal_neighbor(
             candidate,
-            additional,
+            full_additional,
             at_most=True,
+        )
+        if legal_full is None or legal_full <= 0:
+            continue
+        full_pairs.append((index, legal_full))
+        held = held_by_token.get(candidate.token_id, Decimal("0"))
+        full_target = held + legal_full
+        fractional_target = full_target * multiplier
+        additional = fractional_target - held
+        legal = (
+            _single_order_venue_legal_neighbor(
+                candidate,
+                additional,
+                at_most=True,
+            )
+            if additional > 0
+            else None
         )
         raw_min = _single_order_min_marketable_shares(
             candidate.executable_cost_curve
@@ -3188,8 +3205,22 @@ def plan_family_joint_buy_targets(
         ):
             continue
         desired.append((index, legal))
+        target_by_index[index] = (full_target, fractional_target)
     if not desired:
         return empty
+
+    fractional_cost = sum(
+        (
+            _single_order_cost(candidates[index].executable_cost_curve, shares)
+            for index, shares in desired
+        ),
+        Decimal("0"),
+    )
+    if fractional_cost > remaining_fractional_budget:
+        return replace(
+            empty,
+            no_trade_reason="FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED",
+        )
 
     def exact_delta(pairs: Sequence[tuple[int, Decimal]]) -> float:
         w_end = w0.copy()
@@ -3236,24 +3267,17 @@ def plan_family_joint_buy_targets(
                 candidates[index].token_id,
                 Decimal("0"),
             ),
-            full_kelly_target_shares=(
-                held_by_token.get(candidates[index].token_id, Decimal("0"))
-                + shares
-            ),
-            fractional_kelly_target_shares=(
-                held_by_token.get(
-                    candidates[index].token_id,
-                    Decimal("0"),
-                )
-                + shares
-            ),
+            full_kelly_target_shares=target_by_index[index][0],
+            fractional_kelly_target_shares=target_by_index[index][1],
             standalone_robust_delta_log_wealth=standalone[index],
         )
         for index, shares in ranked
     )
-    target_cost = sum(
-        (_single_order_cost(candidates[index].executable_cost_curve, shares)
-         for index, shares in desired),
+    full_cost = sum(
+        (
+            _single_order_cost(candidates[index].executable_cost_curve, shares)
+            for index, shares in full_pairs
+        ),
         Decimal("0"),
     )
     return FamilyJointBuyPlan(
@@ -3261,8 +3285,8 @@ def plan_family_joint_buy_targets(
         targets=targets,
         primary_candidate_id=targets[0].candidate_id,
         robust_delta_log_wealth=float(joint_du),
-        full_kelly_cost_usd=target_cost,
-        fractional_target_cost_usd=target_cost,
+        full_kelly_cost_usd=full_cost,
+        fractional_target_cost_usd=fractional_cost,
         no_trade_reason=None,
     )
 
