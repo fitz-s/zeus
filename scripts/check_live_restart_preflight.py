@@ -27,7 +27,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -2525,6 +2525,12 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
 
         reconciled_projection_exclusion = ""
         events_schema = "world" if events_table.startswith("world.") else "main"
+        projection_table = (
+            "world.edli_live_order_projection"
+            if events_schema == "world"
+            else "edli_live_order_projection"
+        )
+        evidence["projection_table"] = projection_table
         if _table_exists(conn, events_schema, "edli_live_order_projection"):
             projection_columns = _table_columns(
                 conn, events_schema, "edli_live_order_projection"
@@ -2534,8 +2540,7 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                 "current_state",
                 "pending_reconcile",
             }.issubset(projection_columns):
-                projection_table = f"{events_schema}.edli_live_order_projection"
-                reconciled_projection_exclusion = """
+                reconciled_projection_exclusion = f"""
                            AND NOT EXISTS (
                                  SELECT 1
                                    FROM {projection_table} projection
@@ -2543,7 +2548,7 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                                     AND projection.current_state = 'RECONCILED'
                                     AND COALESCE(projection.pending_reconcile, 0) = 0
                                )
-                """.format(projection_table=projection_table)
+                """
         evidence["terminal_reconciled_projection_excluded"] = bool(
             reconciled_projection_exclusion
         )
@@ -5250,6 +5255,7 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     stranded_intent_recoverable = _stranded_exit_intent_recoverable_by_position()
     phantom_sell_releaseable = _phantom_pending_exit_sell_projection_releaseable_by_position()
     active_exit_monitorable = _pending_exit_active_command_monitorable_by_position()
+    snapshot_min_order_dust_holds = _snapshot_min_order_dust_holds_by_position()
     for row in rows:
         if row["phase"] != "pending_exit":
             continue
@@ -5308,22 +5314,16 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
                 "repair_evidence": _active_evidence,
             }
             tolerated.append(item)
-        elif (
-            order_status == "backoff_exhausted"
-            and _min_order_dust_is_non_executable(reason=reason, shares=shares)
-        ):
+        elif str(row["position_id"] or "") in snapshot_min_order_dust_holds:
+            _dust_evidence = snapshot_min_order_dust_holds[
+                str(row["position_id"] or "")
+            ]
             item = {
                 **item,
-                "restart_resolution": "monitor_redecision_or_settlement",
-                "risk": "venue_min_order_dust_non_executable",
+                "restart_resolution": "exit_lifecycle_snapshot_min_order_dust_hold",
+                "repair_evidence": _dust_evidence,
             }
             tolerated.append(item)
-        elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
-            tolerated.append(item)
-            if order_status != "backoff_exhausted":
-                item = dict(item)
-                item["risk"] = "dust_projection_needs_backoff_exhausted_reload_repair"
-                risky.append(item)
         else:
             risky.append(item)
     return CheckResult(
@@ -5334,27 +5334,219 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     )
 
 
-_MIN_ORDER_DUST_RE = re.compile(
-    r"\[DUST:\s*executable_snapshot_gate:\s*size\s+"
-    r"(?P<size>[0-9]+(?:\.[0-9]+)?)\s+is below snapshot min_order_size\s+"
-    r"(?P<minimum>[0-9]+(?:\.[0-9]+)?)\s*\]"
-)
+def _snapshot_min_order_dust_holds_by_position() -> dict[str, dict[str, Any]]:
+    """Return canonical non-submittable dust holds that reload deterministically."""
+
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "position_events")
+        ):
+            return {}
+        event_columns = _table_columns(conn, "main", "position_events")
+        position_columns = _table_columns(conn, "main", "position_current")
+        required = {
+            "event_id",
+            "position_id",
+            "sequence_no",
+            "event_type",
+            "occurred_at",
+            "venue_status",
+            "source_module",
+            "payload_json",
+        }
+        required_position = {
+            "position_id",
+            "phase",
+            "shares",
+            "chain_shares",
+            "order_status",
+            "exit_reason",
+            "updated_at",
+        }
+        if not (
+            required.issubset(event_columns)
+            and required_position.issubset(position_columns)
+        ):
+            return {}
+        rows = conn.execute(
+            """
+            WITH latest_rejection AS (
+                SELECT pe.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pe.position_id
+                           ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
+                       ) AS rejection_rank
+                  FROM position_events pe
+                 WHERE pe.event_type = 'EXIT_ORDER_REJECTED'
+                   AND typeof(pe.sequence_no) = 'integer'
+            )
+            SELECT pc.position_id,
+                   pc.exit_reason,
+                   pc.order_status,
+                   pc.updated_at,
+                   COALESCE(pc.chain_shares, pc.shares) AS held_shares,
+                   latest.event_id,
+                   latest.sequence_no,
+                   latest.event_type,
+                   latest.occurred_at,
+                   latest.venue_status,
+                   latest.source_module,
+                   latest.payload_json
+              FROM position_current pc
+              JOIN latest_rejection latest
+                ON latest.position_id = pc.position_id
+               AND latest.rejection_rank = 1
+             WHERE pc.phase = 'pending_exit'
+               AND pc.order_status = 'backoff_exhausted'
+               AND latest.venue_status = 'backoff_exhausted'
+               AND latest.source_module = 'src.execution.exit_lifecycle'
+            """
+        ).fetchall()
+        later_by_position: dict[str, list[sqlite3.Row]] = {}
+        position_ids = [str(row["position_id"]) for row in rows]
+        if position_ids:
+            placeholders = ",".join("?" for _ in position_ids)
+            for event in conn.execute(
+                f"""
+                SELECT position_id,
+                       event_id,
+                       sequence_no,
+                       event_type,
+                       occurred_at,
+                       venue_status,
+                       source_module,
+                       typeof(sequence_no) AS sequence_no_type,
+                       payload_json
+                  FROM position_events
+                 WHERE position_id IN ({placeholders})
+                 ORDER BY position_id, sequence_no, datetime(occurred_at)
+                """,
+                position_ids,
+            ).fetchall():
+                later_by_position.setdefault(str(event["position_id"]), []).append(
+                    event
+                )
+    holds: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        payload = _strict_json_object(row["payload_json"])
+        if payload is None:
+            continue
+        snapshot_min = _strict_positive_json_decimal(
+            payload.get("snapshot_min_order_size")
+        )
+        try:
+            held = Decimal(str(row["held_shares"]))
+        except (InvalidOperation, ValueError):
+            continue
+        event_error = payload.get("error")
+        if not (
+            payload.get("status") == "backoff_exhausted"
+            and payload.get("exit_reason") == row["exit_reason"]
+            and isinstance(event_error, str)
+            and "min_order_size" in event_error
+            and payload.get("exit_block_class") == "snapshot_min_order_dust"
+            and payload.get("held_to_settlement_unless_aggregate_exit_available")
+            is True
+            and payload.get("exit_order_submitted") is False
+            and snapshot_min is not None
+            and held.is_finite()
+            and held > 0
+            and held < snapshot_min
+        ):
+            continue
+        position_events = later_by_position.get(str(row["position_id"]), [])
+        if any(
+            event["sequence_no_type"] != "integer" for event in position_events
+        ):
+            continue
+        later_events = [
+            event
+            for event in position_events
+            if event["sequence_no"] > row["sequence_no"]
+        ]
+        if any(
+            not _dust_hold_preserving_chain_event(event, held)
+            for event in later_events
+        ):
+            continue
+        current_event = later_events[-1] if later_events else row
+        if str(row["updated_at"] or "") != str(current_event["occurred_at"] or ""):
+            continue
+        holds[str(row["position_id"])] = {
+            "event_id": row["event_id"],
+            "sequence_no": row["sequence_no"],
+            "event_occurred_at": row["occurred_at"],
+            "event_status": payload["status"],
+            "event_error": event_error,
+            "exit_block_class": payload["exit_block_class"],
+            "held_shares": row["held_shares"],
+            "exit_order_submitted": False,
+            "held_to_settlement_unless_aggregate_exit_available": True,
+            "snapshot_min_order_size": str(snapshot_min),
+            "revalidation_event_count": len(later_events),
+            "latest_event_id": current_event["event_id"],
+            "latest_event_type": current_event["event_type"],
+        }
+    return holds
 
 
-def _min_order_dust_is_non_executable(*, reason: str, shares: float) -> bool:
-    """Prove a pending exit is below the venue minimum, not merely labelled dust."""
+def _reject_nonfinite_json_number(raw: str) -> None:
+    raise ValueError(f"non-finite JSON number is not canonical evidence: {raw}")
 
-    match = _MIN_ORDER_DUST_RE.search(reason)
-    if match is None:
+
+def _strict_json_object(raw: Any) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(
+            str(raw),
+            parse_float=Decimal,
+            parse_constant=_reject_nonfinite_json_number,
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _strict_positive_json_decimal(value: Any) -> Decimal | None:
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            parsed = Decimal(value)
+        elif isinstance(value, Decimal):
+            parsed = value
+        elif isinstance(value, str) and re.fullmatch(
+            r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?",
+            value,
+        ):
+            parsed = Decimal(value)
+        else:
+            return None
+        return parsed if parsed.is_finite() and parsed > 0 else None
+    except InvalidOperation:
+        return None
+
+
+def _dust_hold_preserving_chain_event(event: sqlite3.Row, held: Decimal) -> bool:
+    if (
+        event["event_type"] != "CHAIN_SIZE_CORRECTED"
+        or event["venue_status"] is not None
+        or event["source_module"] != "src.state.chain_reconciliation"
+    ):
         return False
-    projected = Decimal(str(shares))
-    cited_size = Decimal(match.group("size"))
-    minimum = Decimal(match.group("minimum"))
-    return (
-        projected > 0
-        and minimum > 0
-        and abs(projected - cited_size) <= Decimal("0.000001")
-        and cited_size < minimum
+    payload = _strict_json_object(event["payload_json"])
+    if payload is None:
+        return False
+    before = _strict_positive_json_decimal(payload.get("chain_shares_before"))
+    after = _strict_positive_json_decimal(payload.get("chain_shares_after"))
+    projected = _strict_positive_json_decimal(payload.get("shares_after"))
+    return bool(
+        payload.get("source") == "chain_reconciliation"
+        and payload.get("chain_state") == "synced"
+        and payload.get("shares_unchanged") is True
+        and before == held
+        and after == held
+        and projected == held
     )
 
 

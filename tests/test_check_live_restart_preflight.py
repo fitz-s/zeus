@@ -5314,10 +5314,348 @@ def test_preflight_blocks_dust_projection_that_would_reload_as_pending_exit(monk
     assert result["ok"] is False
     pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
     assert pending["ok"] is False
-    assert pending["evidence"]["risky"][0]["risk"] == "dust_projection_needs_backoff_exhausted_reload_repair"
+    assert pending["evidence"]["tolerated"] == []
+    assert pending["evidence"]["risky"][0]["position_id"] == "dust-pos"
 
 
-def test_preflight_tolerates_backoff_exhausted_venue_min_order_dust(
+def test_preflight_blocks_legacy_dust_without_canonical_exit_event(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'legacy-dust-pos', 'pending_exit', 'Qingdao', '2026-06-19', 'high',
+            'Will the highest temperature in Qingdao be 24°C on June 19?',
+            'buy_no', 0.01, 0.01, 'backoff_exhausted', 'EXIT_CHAIN_DUST_STILL_HELD',
+            7, NULL, 0.54, 0, 0.73, 0, '2026-06-18T11:14:04+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is False
+    assert check.evidence["tolerated"] == []
+    assert check.evidence["risky"][0]["position_id"] == "legacy-dust-pos"
+
+
+def _insert_snapshot_min_order_dust_hold(
+    conn: sqlite3.Connection,
+    *,
+    add_later_event: bool = False,
+    add_later_chain_revalidation: bool = False,
+    payload_overrides: dict[str, object] | None = None,
+) -> None:
+    reason = (
+        "DAY0 hard fact bin dead; "
+        "[DUST: executable_snapshot_gate: size 3.1125 is below snapshot min_order_size 5]"
+    )
+    payload = {
+        "status": "backoff_exhausted",
+        "exit_reason": reason,
+        "error": "size 3.1125 is below snapshot min_order_size 5",
+        "exit_block_class": "snapshot_min_order_dust",
+        "held_to_settlement_unless_aggregate_exit_available": True,
+        "exit_order_submitted": False,
+        "snapshot_min_order_size": 5,
+    }
+    payload.update(payload_overrides or {})
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'snapshot-dust-pos', 'pending_exit', 'Wuhan', '2026-07-23', 'high',
+            'Will the highest temperature in Wuhan be 32°C on July 23?',
+            'buy_yes', 3.1125, 3.1125, 'backoff_exhausted', ?,
+            5, NULL, 0.0, 1, 0.01, 1, '2026-07-23T03:10:00+00:00'
+        )
+        """,
+        (reason,),
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            venue_status TEXT,
+            source_module TEXT NOT NULL,
+            payload_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'evt-snapshot-dust', 'snapshot-dust-pos', 1, 'EXIT_ORDER_REJECTED',
+            '2026-07-23T03:10:00+00:00', 'backoff_exhausted',
+            'src.execution.exit_lifecycle', ?
+        )
+        """,
+        (json.dumps(payload),),
+    )
+    if add_later_event:
+        conn.execute(
+            """
+            INSERT INTO position_events VALUES (
+                'evt-after-snapshot-dust', 'snapshot-dust-pos', 2, 'MONITOR_REFRESHED',
+                '2026-07-23T03:11:00+00:00', NULL,
+                'src.engine.monitor_refresh', '{}'
+            )
+            """
+        )
+    if add_later_chain_revalidation:
+        conn.execute(
+            """
+            INSERT INTO position_events VALUES (
+                'evt-chain-revalidation', 'snapshot-dust-pos', 2,
+                'CHAIN_SIZE_CORRECTED', '2026-07-23T03:11:00+00:00', NULL,
+                'src.state.chain_reconciliation', ?
+            )
+            """,
+            (
+                json.dumps(
+                    {
+                        "source": "chain_reconciliation",
+                        "chain_state": "synced",
+                        "shares_unchanged": True,
+                        "chain_shares_before": 3.1125,
+                        "chain_shares_after": 3.1125,
+                        "shares_after": 3.1125,
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET updated_at = '2026-07-23T03:11:00+00:00'
+             WHERE position_id = 'snapshot-dust-pos'
+            """
+        )
+    conn.commit()
+
+
+def test_pending_exit_tolerates_latest_snapshot_min_order_dust_hold(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(trade)
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is True
+    assert check.evidence["risky"] == []
+    tolerated = check.evidence["tolerated"][0]
+    assert tolerated["restart_resolution"] == "exit_lifecycle_snapshot_min_order_dust_hold"
+    proof = tolerated["repair_evidence"]
+    assert proof["held_shares"] == pytest.approx(3.1125)
+    assert proof["snapshot_min_order_size"] == "5"
+    assert proof["exit_order_submitted"] is False
+    assert proof["held_to_settlement_unless_aggregate_exit_available"] is True
+
+
+def test_pending_exit_rejects_stale_snapshot_min_order_dust_event(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(trade, add_later_event=True)
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is False
+    assert check.evidence["tolerated"] == []
+    assert check.evidence["risky"][0]["position_id"] == "snapshot-dust-pos"
+
+
+def test_pending_exit_accepts_exact_chain_revalidation_after_snapshot_dust(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(
+        trade,
+        add_later_chain_revalidation=True,
+    )
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is True
+    proof = check.evidence["tolerated"][0]["repair_evidence"]
+    assert proof["revalidation_event_count"] == 1
+    assert proof["latest_event_type"] == "CHAIN_SIZE_CORRECTED"
+    assert proof["latest_event_id"] == "evt-chain-revalidation"
+
+
+@pytest.mark.parametrize(
+    "mutation_sql",
+    [
+        (
+            "UPDATE position_events SET source_module='src.execution.exit_lifecycle' "
+            "WHERE event_id='evt-chain-revalidation'"
+        ),
+        (
+            "UPDATE position_events SET venue_status='' "
+            "WHERE event_id='evt-chain-revalidation'"
+        ),
+        (
+            "UPDATE position_current SET updated_at='2026-07-23T03:12:00+00:00' "
+            "WHERE position_id='snapshot-dust-pos'"
+        ),
+        (
+            "UPDATE position_events SET payload_json=json_set("
+            "payload_json, '$.chain_shares_after', 3.0) "
+            "WHERE event_id='evt-chain-revalidation'"
+        ),
+        (
+            "UPDATE position_events SET source_module='src.state.chain_reconciliation' "
+            "WHERE event_id='evt-snapshot-dust'"
+        ),
+        (
+            "UPDATE position_events SET sequence_no=2.5 "
+            "WHERE event_id='evt-chain-revalidation'"
+        ),
+        (
+            "UPDATE position_events SET sequence_no=1.5 "
+            "WHERE event_id='evt-snapshot-dust'"
+        ),
+    ],
+    ids=[
+        "wrong-chain-writer",
+        "non-null-venue-status",
+        "projection-time-mismatch",
+        "chain-shares-mismatch",
+        "wrong-rejection-writer",
+        "fractional-chain-sequence",
+        "fractional-rejection-sequence",
+    ],
+)
+def test_pending_exit_rejects_noncanonical_chain_revalidation(
+    monkeypatch,
+    tmp_path,
+    mutation_sql,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(
+        trade,
+        add_later_chain_revalidation=True,
+    )
+    trade.execute(mutation_sql)
+    trade.commit()
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is False
+    assert check.evidence["tolerated"] == []
+    assert check.evidence["risky"][0]["position_id"] == "snapshot-dust-pos"
+
+
+def test_pending_exit_rejects_snapshot_dust_when_current_size_is_executable(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(trade)
+    trade.execute(
+        """
+        UPDATE position_current
+           SET shares = 5.1,
+               chain_shares = 5.1
+         WHERE position_id = 'snapshot-dust-pos'
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is False
+    assert check.evidence["tolerated"] == []
+    assert check.evidence["risky"][0]["position_id"] == "snapshot-dust-pos"
+
+
+@pytest.mark.parametrize(
+    "payload_overrides",
+    [
+        {"snapshot_min_order_size": "5junk"},
+        {"snapshot_min_order_size": float("nan")},
+        {"held_to_settlement_unless_aggregate_exit_available": 1},
+        {"exit_order_submitted": 0},
+    ],
+    ids=["malformed-min", "nonfinite-min", "numeric-true", "numeric-false"],
+)
+def test_pending_exit_rejects_noncanonical_snapshot_dust_evidence(
+    monkeypatch,
+    tmp_path,
+    payload_overrides,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(
+        trade,
+        payload_overrides=payload_overrides,
+    )
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is False
+    assert check.evidence["tolerated"] == []
+    assert check.evidence["risky"][0]["position_id"] == "snapshot-dust-pos"
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "1e999999999999999999999999",
+        '"1e999999999999999999999999"',
+    ],
+    ids=["json-number", "numeric-string"],
+)
+def test_pending_exit_rejects_unrepresentable_decimal_evidence(
+    monkeypatch,
+    tmp_path,
+    replacement,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    _insert_snapshot_min_order_dust_hold(trade)
+    raw = trade.execute(
+        "SELECT payload_json FROM position_events WHERE event_id='evt-snapshot-dust'"
+    ).fetchone()[0]
+    marker = '"snapshot_min_order_size": 5'
+    assert marker in raw
+    trade.execute(
+        "UPDATE position_events SET payload_json=? WHERE event_id='evt-snapshot-dust'",
+        (raw.replace(marker, f'"snapshot_min_order_size": {replacement}'),),
+    )
+    trade.commit()
+    trade.close()
+
+    check = preflight._pending_exit_check(preflight._open_positions())
+
+    assert check.ok is False
+    assert check.evidence["tolerated"] == []
+    assert check.evidence["risky"][0]["position_id"] == "snapshot-dust-pos"
+
+
+def test_preflight_blocks_reason_only_backoff_exhausted_venue_min_order_dust(
     monkeypatch,
     tmp_path,
 ):
@@ -5342,10 +5680,9 @@ def test_preflight_tolerates_backoff_exhausted_venue_min_order_dust(
     result = preflight.evaluate()
 
     pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
-    assert pending["ok"] is True
-    tolerated = pending["evidence"]["tolerated"][0]
-    assert tolerated["risk"] == "venue_min_order_dust_non_executable"
-    assert tolerated["restart_resolution"] == "monitor_redecision_or_settlement"
+    assert pending["ok"] is False
+    assert pending["evidence"]["tolerated"] == []
+    assert pending["evidence"]["risky"][0]["position_id"] == "venue-dust-pos"
 
 
 def test_preflight_tolerates_pending_exit_with_full_exit_fill_repair_evidence(monkeypatch, tmp_path):
@@ -5652,6 +5989,114 @@ def test_confirmed_fill_bridge_coverage_ignores_terminal_reconciled_rest_fill(
     assert check.evidence["terminal_reconciled_projection_excluded"] is True
     assert check.evidence["missing_confirmed_fill_count"] == 0
     assert check.evidence["missing_rest_filled_orphan_count"] == 0
+
+def test_confirmed_fill_bridge_coverage_uses_projection_from_selected_event_schema(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_forecast_db(forecast_db).close()
+    trade = _init_confirmed_fill_bridge_gap_db(trade_db)
+    trade.execute("DELETE FROM venue_trade_facts")
+    trade.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-1', 'ord-1', 'trade-rest-world-reconciled', 'REST', 'MATCHED',
+            '10.5', '0.54', '2026-06-29T20:00:10+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE edli_live_order_projection (
+            aggregate_id TEXT PRIMARY KEY,
+            current_state TEXT NOT NULL,
+            pending_reconcile INTEGER NOT NULL
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    world = sqlite3.connect(tmp_path / "zeus-world.db")
+    world.execute(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    world.execute(
+        """
+        CREATE TABLE edli_live_order_projection (
+            aggregate_id TEXT PRIMARY KEY,
+            current_state TEXT NOT NULL,
+            pending_reconcile INTEGER NOT NULL
+        )
+        """
+    )
+    world.execute(
+        """
+        INSERT INTO edli_live_order_events VALUES (
+            'agg-1', 'ExecutionCommandCreated', ?, '2026-07-23T20:00:00+00:00'
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "event_id": "event-1",
+                    "final_intent_id": "intent-1",
+                    "execution_command_id": "exec-1",
+                }
+            ),
+        ),
+    )
+    world.execute(
+        """
+        INSERT INTO edli_live_order_events VALUES (
+            'agg-1', 'VenueSubmitAcknowledged', ?, '2026-07-23T20:00:05+00:00'
+        )
+        """,
+        (json.dumps({"venue_order_id": "ord-1"}),),
+    )
+    world.execute(
+        "INSERT INTO edli_live_order_projection VALUES ('agg-1', 'RECONCILED', 0)"
+    )
+    world.commit()
+    world.close()
+
+    check = preflight._edli_confirmed_fill_bridge_coverage_check()
+
+    assert check.ok is True
+    assert check.evidence["events_table"] == "world.edli_live_order_events"
+    assert check.evidence["projection_table"] == "world.edli_live_order_projection"
+    assert check.evidence["terminal_reconciled_projection_excluded"] is True
+    assert check.evidence["missing_confirmed_fill_count"] == 0
+    assert check.evidence["missing_rest_filled_orphan_count"] == 0
+
+    main = sqlite3.connect(trade_db)
+    main.execute(
+        "INSERT INTO edli_live_order_projection VALUES ('agg-1', 'RECONCILED', 0)"
+    )
+    main.commit()
+    main.close()
+    world = sqlite3.connect(tmp_path / "zeus-world.db")
+    world.execute(
+        "UPDATE edli_live_order_projection SET current_state='SUBMIT_UNKNOWN', "
+        "pending_reconcile=1 WHERE aggregate_id='agg-1'"
+    )
+    world.commit()
+    world.close()
+
+    mismatch = preflight._edli_confirmed_fill_bridge_coverage_check()
+
+    assert mismatch.ok is False
+    assert mismatch.evidence["events_table"] == "world.edli_live_order_events"
+    assert mismatch.evidence["projection_table"] == "world.edli_live_order_projection"
+    assert mismatch.evidence["missing_rest_filled_orphan_count"] == 1
 
 
 def test_confirmed_fill_bridge_coverage_uses_world_projection_schema(
