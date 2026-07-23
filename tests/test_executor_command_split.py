@@ -79,7 +79,61 @@ def test_pre_post_signed_identity_helper_commits_before_return(monkeypatch):
     assert receipt.order_id == "0xorder"
 
 
-def test_pre_post_signed_identity_helper_rolls_back_and_refuses_post(monkeypatch):
+def test_pre_post_signed_identity_helper_retries_transient_lock_before_post(monkeypatch):
+    import src.execution.executor as executor
+    import src.state.venue_command_repo as command_repo
+
+    calls = []
+
+    class Conn:
+        def commit(self):
+            calls.append("commit")
+
+        def rollback(self):
+            calls.append("rollback")
+
+        def execute(self, query, params):
+            assert "commit" in calls
+
+            class Cursor:
+                @staticmethod
+                def fetchone():
+                    return (
+                        "command-1",
+                        "signed-envelope-id",
+                        "0xorder",
+                        "a" * 64,
+                        "b" * 64,
+                        "c" * 64,
+                    )
+
+            return Cursor()
+
+    attempts = 0
+
+    def _bind(conn, *, command_id, envelope):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return "signed-envelope-id"
+
+    monkeypatch.setattr(executor.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(command_repo, "bind_signed_submission_identity", _bind)
+
+    receipt = executor._persist_signed_submission_identity_before_post(
+        Conn(),
+        "signed-envelope",
+        command_id="command-1",
+    )
+
+    assert attempts == 2
+    assert calls == ["rollback", "commit"]
+    assert receipt.command_id == "command-1"
+    assert receipt.order_id == "0xorder"
+
+
+def test_pre_post_signed_identity_helper_refuses_post_after_persistent_lock(monkeypatch):
     import src.execution.executor as executor
     import src.state.venue_command_repo as command_repo
 
@@ -95,6 +149,7 @@ def test_pre_post_signed_identity_helper_rolls_back_and_refuses_post(monkeypatch
     def _fail(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
 
+    monkeypatch.setattr(executor.time, "sleep", lambda *_args: None)
     monkeypatch.setattr(command_repo, "bind_signed_submission_identity", _fail)
 
     with pytest.raises(sqlite3.OperationalError, match="database is locked"):
@@ -104,7 +159,7 @@ def test_pre_post_signed_identity_helper_rolls_back_and_refuses_post(monkeypatch
             command_id="command-1",
         )
 
-    assert calls == ["rollback"]
+    assert calls == ["rollback", "rollback", "rollback", "rollback"]
 
 
 def test_executor_refuses_client_without_signed_identity_binder():

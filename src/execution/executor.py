@@ -4174,21 +4174,37 @@ def _persist_signed_submission_identity_before_post(
         _issue_signed_identity_persistence_receipt,
     )
 
-    try:
+    receipt = None
+
+    def _persist_once() -> None:
+        nonlocal receipt
         envelope_id = bind_signed_submission_identity(
             conn,
             command_id=command_id,
             envelope=envelope,
         )
         conn.commit()
-        return _issue_signed_identity_persistence_receipt(
+        receipt = _issue_signed_identity_persistence_receipt(
             conn,
             command_id=command_id,
             envelope_id=envelope_id,
         )
+
+    try:
+        # This is still strictly pre-POST. Retrying only the local durable bind
+        # cannot duplicate a venue order, while treating a transient writer lock
+        # as a terminal submit rejection drops otherwise executable orders.
+        _retry_persist_on_db_lock(
+            conn,
+            _persist_once,
+            what="signed_identity_before_post",
+        )
     except BaseException:
         conn.rollback()
         raise
+    if receipt is None:
+        raise RuntimeError("signed identity persistence returned no receipt")
+    return receipt
 
 
 def _bind_signed_identity_persister(
