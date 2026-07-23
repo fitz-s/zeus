@@ -65,10 +65,12 @@ probability-authority discontinuity: the monitor switched from a fresh
 replacement posterior to mandatory Day0 observation at local midnight, before
 EGLC had published the target day's first same-station observation. This made
 one held position probability-stale and froze every otherwise-independent
-global entry. The repair may use the fresh replacement posterior only inside
-the existing local-day-start coverage grace while no Day0 observation is
-available. Once an observation exists, after the grace expires, or when the
-replacement posterior is stale, the Day0 lane remains fail-closed.
+global entry. Local midnight is not physical evidence: when canonical truth
+positively proves that the target day still has zero observations, a held
+position keeps the fresh replacement posterior until the first causal Day0
+observation arrives. Generic observation faults do not prove an empty prefix;
+they retain the bounded grace and then fail closed. Entry authority remains
+grace-limited, and a stale replacement posterior is never promoted.
 
 The same live proof window exposed an execution-truth discontinuity after a
 reduce-only YES exit: a positive but partial MATCHED order fact was promoted to
@@ -132,9 +134,10 @@ authority surface.
 - Make held-position probability refresh order explicit: release TRADE, write
   the current Day0 WORLD fact, then write TRADE quote/monitor evidence.
 - Preserve probability continuity before the first target-day observation:
-  inside the existing coverage grace, a fresh replacement posterior remains
-  monitor authority; this is not permission to use stale forecast belief or to
-  ignore any available Day0 observation.
+  a typed canonical zero-observation result keeps a fresh replacement posterior
+  as held-position monitor authority even after the coverage grace; this is not
+  permission to add risk, use stale forecast belief, treat a generic source
+  failure as zero observations, or ignore any available Day0 observation.
 - Require cumulative canonical EXIT fill quantity to cover the command and the
   current position before lifecycle alignment may emit `FILL_CONFIRMED` or
   economic close; cumulative order facts never stack on existing trade facts,
@@ -211,9 +214,10 @@ authority surface.
   required separately from tests.
 - POSIX WAL-byte evidence shows no simultaneous opposite-order WORLD/TRADE
   writer hold after restart; reactor cycles progress beyond claim bounces.
-- A deterministic local-midnight antibody proves fresh replacement belief is
-  admitted only during the pre-observation coverage grace, with stale belief
-  and post-grace absence still rejected.
+- A deterministic local-midnight antibody proves fresh replacement belief stays
+  continuous for held-position redecision while canonical truth proves zero
+  observations; entry remains grace-limited, and stale belief or a generic
+  post-grace observation failure is still rejected.
 - A partial MATCHED EXIT antibody proves the command remains PARTIAL and the
   position remains pending exit; the full-size sibling still closes exactly
   once.

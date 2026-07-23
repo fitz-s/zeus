@@ -23,6 +23,14 @@ A consumer that cannot use THE authority is either (a) in the other domain (day0
 (b) evidence the authority's coverage must be COMPLETED (positive direction), never a
 license to resurrect a retired era.
 
+Local midnight alone does not move a held position into the observation domain:
+it carries no new evidence. Until canonical truth contains the first causal
+target-day observation, a fresh replacement posterior remains the held-position
+probability authority, including after the source-coverage grace. This continuity
+is reduce-only redecision authority, not entry authority. Once an observation
+exists, Day0 observation authority dominates; a generic observation failure does
+not prove an empty prefix, and a stale replacement posterior remains fail-closed.
+
 2026-07-11 clarification: a missing current target-specific ENS shape is degraded
 evidence, not permission to substitute the older residual/floor regime. The source-clock
 posterior is non-live until that current carrier exists and passes causality/provenance

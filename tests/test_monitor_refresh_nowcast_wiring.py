@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-23
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-07-22; last_reused=2026-07-22
+# Lifecycle: created=2026-05-20; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -18,6 +18,7 @@ Gate conditions tested:
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 from dataclasses import replace
@@ -630,6 +631,11 @@ def test_unobserved_prefix_monitor_uses_global_sample_mean_not_scalar_point() ->
     assert receipt["probability_authority"] == (
         "replacement_unobserved_day0_prefix_global_probability_v1"
     )
+    assert (
+        "day0_unobserved_prefix_zero_observation_proven:"
+        "replacement_global_probability_authority"
+        in refreshed.applied_validations
+    )
     assert receipt["remaining_window"] is None
 
 
@@ -1154,7 +1160,7 @@ def test_identified_day0_monitor_fails_closed_without_global_probability(
     ("direction", "expected_probability"),
     [("buy_yes", 0.27), ("buy_no", 0.73)],
 )
-def test_identified_day0_monitor_uses_fresh_belief_before_first_observation(
+def test_identified_day0_monitor_keeps_fresh_belief_after_grace_before_first_observation(
     monkeypatch,
     direction: str,
     expected_probability: float,
@@ -1187,7 +1193,7 @@ def test_identified_day0_monitor_uses_fresh_belief_before_first_observation(
     monkeypatch.setattr(
         monitor_refresh_module,
         "_within_day0_observation_start_grace",
-        lambda *args, **kwargs: True,
+        lambda *args, **kwargs: False,
     )
     monkeypatch.setattr(
         position_belief,
@@ -1206,8 +1212,13 @@ def test_identified_day0_monitor_uses_fresh_belief_before_first_observation(
     assert fresh is True
     assert refreshed.selected_method == "replacement_posterior"
     assert (
-        "day0_unobserved_prefix_within_start_grace:replacement_posterior_authority"
+        "day0_unobserved_prefix_zero_observation_proven:"
+        "replacement_posterior_authority"
         in refreshed.applied_validations
+    )
+    assert all(
+        "within_start_grace" not in validation
+        for validation in refreshed.applied_validations
     )
 
 
@@ -1300,6 +1311,11 @@ def test_unobserved_prefix_authority_is_shared_across_family_cache(
     )
     monkeypatch.setattr(
         monitor_refresh_module,
+        "_target_day_has_canonical_observation_now",
+        lambda position: False,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
         "_within_day0_observation_start_grace",
         lambda *args, **kwargs: True,
     )
@@ -1333,6 +1349,231 @@ def test_unobserved_prefix_authority_is_shared_across_family_cache(
     )
     assert [fresh for _, _, fresh in results] == [True, True]
     assert len(builds) == 1
+
+
+def test_cached_zero_observation_failure_is_rebuilt_after_observation_arrives(
+    monkeypatch,
+) -> None:
+    """A point-in-time zero proof cannot survive the first canonical observation."""
+    from src.engine import position_belief
+
+    builds = []
+    replacement_calls = []
+
+    def build(position, **kwargs):
+        builds.append(position.condition_id)
+        if len(builds) == 1:
+            raise monitor_refresh_module._Day0UnobservedPrefixUnavailable(
+                "zero target-date canonical observations"
+            )
+        raise ValueError("canonical observation arrived during monitor cycle")
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_build_current_global_day0_family_snapshot",
+        build,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_target_day_has_canonical_observation_now",
+        lambda position: True,
+    )
+
+    def replacement(**kwargs):
+        replacement_calls.append(kwargs["direction"])
+        return _replacement_belief(direction=kwargs["direction"])
+
+    monkeypatch.setattr(position_belief, "load_replacement_belief", replacement)
+
+    cache = monitor_refresh_module._CurrentGlobalDay0FamilyCache()
+    first = _make_position()
+    first.city = "London"
+    first.target_date = "2026-07-20"
+    first.entry_method = "day0_observation"
+    first.condition_id = "0x" + "61" * 32
+    first_result = monitor_refresh_module.monitor_probability_refresh(
+        first,
+        conn=object(),
+        city=SimpleNamespace(name="London", timezone="Europe/London"),
+        target_d=date(2026, 7, 20),
+        day0_family_cache=cache,
+    )
+
+    second = _make_position()
+    second.city = "London"
+    second.target_date = "2026-07-20"
+    second.entry_method = "day0_observation"
+    second.condition_id = "0x" + "62" * 32
+    second_result = monitor_refresh_module.monitor_probability_refresh(
+        second,
+        conn=object(),
+        city=SimpleNamespace(name="London", timezone="Europe/London"),
+        target_d=date(2026, 7, 20),
+        day0_family_cache=cache,
+    )
+
+    assert first_result[2] is True
+    assert second_result[2] is False
+    assert builds == [first.condition_id, second.condition_id]
+    assert replacement_calls == ["buy_yes"]
+
+
+def test_cached_unobserved_snapshot_is_rebuilt_after_observation_arrives(
+    monkeypatch,
+) -> None:
+    unobserved = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=object(),
+        token_pairs=(),
+        deterministic_condition_ids=frozenset(),
+        day0_payload={},
+        metric="high",
+        probability_authority=(
+            "replacement_unobserved_day0_prefix_global_probability_v1"
+        ),
+    )
+    observed = replace(
+        unobserved,
+        probability_authority="day0_remaining_day_global_probability_v1",
+    )
+    pos = _make_position()
+    pos.city = "London"
+    pos.target_date = "2026-07-20"
+    pos.condition_id = "0x" + "63" * 32
+    family_key = ("London", "2026-07-20", "high")
+    cache = monitor_refresh_module._CurrentGlobalDay0FamilyCache(
+        snapshots={family_key: [unobserved]}
+    )
+    builds = []
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_family_snapshot_covers_condition",
+        lambda snapshot, condition_id: True,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_target_day_has_canonical_observation_now",
+        lambda position: True,
+    )
+
+    def build(position, **kwargs):
+        builds.append(tuple(kwargs["cached_snapshots"]))
+        return observed
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_build_current_global_day0_family_snapshot",
+        build,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_materialize_current_global_day0_probability",
+        lambda position, snapshot: (
+            0.91 if snapshot is observed else 0.27,
+            position,
+            True,
+        ),
+    )
+
+    probability, _, fresh = monitor_refresh_module._refresh_current_global_day0_probability(
+        pos,
+        trade_conn=object(),
+        family_cache=cache,
+    )
+
+    assert probability == pytest.approx(0.91)
+    assert fresh is True
+    assert builds == [()]
+    assert cache.snapshots[family_key] == [observed]
+
+
+@pytest.mark.parametrize("cache_kind", ["failure", "snapshot"])
+def test_cached_zero_observation_revalidation_db_error_fails_closed(
+    monkeypatch,
+    cache_kind: str,
+) -> None:
+    from src.engine import position_belief
+
+    pos = _make_position()
+    pos.city = "London"
+    pos.target_date = "2026-07-20"
+    pos.entry_method = "day0_observation"
+    pos.condition_id = "0x" + "64" * 32
+    family_key = ("London", "2026-07-20", "high")
+    cache = monitor_refresh_module._CurrentGlobalDay0FamilyCache()
+    if cache_kind == "failure":
+        cache.failures[family_key] = (
+            monitor_refresh_module._Day0UnobservedPrefixUnavailable,
+            "zero target-date canonical observations",
+        )
+    else:
+        cache.snapshots[family_key] = [
+            monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+                witness=object(),
+                token_pairs=(),
+                deterministic_condition_ids=frozenset(),
+                day0_payload={},
+                metric="high",
+                probability_authority=(
+                    "replacement_unobserved_day0_prefix_global_probability_v1"
+                ),
+            )
+        ]
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_family_snapshot_covers_condition",
+        lambda snapshot, condition_id: True,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_target_day_has_canonical_observation_now",
+        lambda position: (_ for _ in ()).throw(sqlite3.OperationalError("busy")),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_build_current_global_day0_family_snapshot",
+        lambda *args, **kwargs: pytest.fail("must not rebuild without DB truth"),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_materialize_current_global_day0_probability",
+        lambda *args, **kwargs: pytest.fail("must not reuse an unvalidated snapshot"),
+    )
+    replacement_calls = []
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: replacement_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kwargs: None,
+    )
+
+    probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
+        pos,
+        conn=object(),
+        city=SimpleNamespace(name="London", timezone="Europe/London"),
+        target_d=date(2026, 7, 20),
+        day0_family_cache=cache,
+    )
+
+    assert probability == pytest.approx(pos.p_posterior)
+    assert fresh is False
+    assert replacement_calls == []
+    assert any("OperationalError:busy" in value for value in refreshed.applied_validations)
 
 
 def test_post_local_day_waits_for_final_observation_without_reseed(

@@ -30360,22 +30360,31 @@ def _prepare_current_global_probability_family(
                 and not has_target_observation
                 and local_now.date() == local_target
             ):
-                from src.data.observation_client import (
-                    _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
-                )
-
-                local_midnight = local_now.replace(
-                    hour=0,
-                    minute=0,
-                    second=0,
-                    microsecond=0,
-                    fold=0,
-                )
-                use_unobserved_day0_replacement = (
-                    timedelta(0) <= local_now - local_midnight <= timedelta(
-                        hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
+                # Local midnight is not new physical evidence.  A held position
+                # therefore keeps the fresh full-day replacement distribution
+                # until the first causal target-day observation exists.  Entry
+                # authority retains the bounded coverage grace: this widening is
+                # reduce-only redecision continuity, not permission to add risk
+                # while the expected Day0 source is absent.
+                if not entry_authority:
+                    use_unobserved_day0_replacement = True
+                else:
+                    from src.data.observation_client import (
+                        _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
                     )
-                )
+
+                    local_midnight = local_now.replace(
+                        hour=0,
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                        fold=0,
+                    )
+                    use_unobserved_day0_replacement = (
+                        timedelta(0) <= local_now - local_midnight <= timedelta(
+                            hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
+                        )
+                    )
         local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
         if use_unobserved_day0_replacement or provisional_day0_observation:
             readiness = _latest_replacement_readiness(
