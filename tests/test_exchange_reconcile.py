@@ -594,6 +594,25 @@ def test_init_schema_creates_exchange_reconcile_findings(conn):
     } <= cols
 
 
+def test_record_finding_does_not_destroy_outer_savepoint(conn):
+    from src.execution.exchange_reconcile import record_finding
+
+    conn.execute("SAVEPOINT outer_reconcile_test")
+    record_finding(
+        conn,
+        kind="position_drift",
+        subject_id="savepoint-subject",
+        context="periodic",
+        evidence={"reason": "savepoint_test"},
+        recorded_at=NOW,
+    )
+    conn.execute("ROLLBACK TO SAVEPOINT outer_reconcile_test")
+    conn.execute("RELEASE SAVEPOINT outer_reconcile_test")
+    assert conn.execute(
+        "SELECT 1 FROM exchange_reconcile_findings WHERE subject_id='savepoint-subject'"
+    ).fetchone() is None
+
+
 def test_day0_chain_confirmed_holding_clears_position_drift_without_journal(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -2023,7 +2042,9 @@ def test_partial_fak_increment_projects_known_fill_and_keeps_remainder_obligatio
     ).fetchone()[0] == "OPEN"
 
 
-def test_maker_fill_materializes_missing_position_projection_after_cancel(conn):
+def test_maker_fill_materializes_missing_position_projection_after_cancel(
+    monkeypatch, conn
+):
     """A cancel terminalizes the remainder, not the already-filled shares."""
 
     from src.execution.exchange_reconcile import run_reconcile_sweep
@@ -2045,7 +2066,9 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(conn):
         envelope_yes_token_id=yes_token,
         envelope_no_token_id=no_token,
     )
-    conn.execute(
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.execute(
         """
         CREATE TABLE market_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2059,7 +2082,7 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(conn):
         )
         """
     )
-    conn.execute(
+    forecasts.execute(
         """
         INSERT INTO market_events (
             market_slug, city, target_date, condition_id, token_id, range_label, outcome
@@ -2074,6 +2097,10 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(conn):
             "Will the highest temperature in Istanbul be 29°C on June 29?",
             "Yes",
         ),
+    )
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        lambda: forecasts,
     )
     conn.execute(
         """
@@ -2151,7 +2178,385 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(conn):
     ).fetchone()["state"] == "CANCELLED"
 
 
-def test_live_tick_repairs_recorded_fill_when_position_projection_is_missing(conn):
+def test_fill_recovery_reads_exact_bin_from_canonical_forecasts(monkeypatch, conn):
+    """The event slug is family identity, never the settlement outcome key."""
+
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(
+        conn,
+        command_id="cmd-canonical-bin",
+        venue_order_id="ord-canonical-bin",
+        position_id="pos-canonical-bin",
+        token_id=YES_TOKEN,
+        state="FILLED",
+    )
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            event_id INTEGER PRIMARY KEY, market_slug TEXT, city TEXT,
+            target_date TEXT, temperature_metric TEXT, condition_id TEXT,
+            token_id TEXT, range_label TEXT, outcome TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO market_events VALUES (
+            1, 'highest-temperature-in-singapore-on-july-24-2026',
+            'Singapore', '2026-07-24', 'high', 'condition-m5', ?, ?, ?
+        )
+        """,
+        (
+            YES_TOKEN,
+            "Will the highest temperature in Singapore be 31°C on July 24?",
+            "Will the highest temperature in Singapore be 31°C on July 24?",
+        ),
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            event_id INTEGER PRIMARY KEY,
+            market_slug TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            outcome TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        INSERT INTO market_events (
+            event_id, market_slug, city, target_date, temperature_metric,
+            condition_id, token_id, range_label, outcome
+        ) VALUES (1, ?, ?, ?, 'high', 'condition-m5', ?, ?, ?)
+        """,
+        (
+            "highest-temperature-in-singapore-on-july-24-2026",
+            "Singapore",
+            "2026-07-24",
+            YES_TOKEN,
+            "Will the highest temperature in Singapore be 30°C on July 24?",
+            "Will the highest temperature in Singapore be 30°C on July 24?",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        lambda: forecasts,
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-canonical-bin",
+                    order_id="ord-canonical-bin",
+                    size="10",
+                    price="0.50",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    projection = conn.execute(
+        "SELECT bin_label FROM position_current WHERE position_id='pos-canonical-bin'"
+    ).fetchone()
+    assert projection["bin_label"] == (
+        "Will the highest temperature in Singapore be 30°C on July 24?"
+    )
+
+
+def test_fill_recovery_rejects_condition_match_with_wrong_yes_token(monkeypatch, conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(
+        conn,
+        command_id="cmd-wrong-market-token",
+        venue_order_id="ord-wrong-market-token",
+        position_id="pos-wrong-market-token",
+        token_id=YES_TOKEN,
+        state="FILLED",
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            event_id INTEGER PRIMARY KEY, market_slug TEXT, city TEXT,
+            target_date TEXT, temperature_metric TEXT, condition_id TEXT,
+            token_id TEXT, range_label TEXT, outcome TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        INSERT INTO market_events VALUES (
+            1, 'highest-temperature-in-singapore-on-july-24-2026',
+            'Singapore', '2026-07-24', 'high', 'condition-m5',
+            'different-yes-token', ?, ?
+        )
+        """,
+        (
+            "Will the highest temperature in Singapore be 30°C on July 24?",
+            "Will the highest temperature in Singapore be 30°C on July 24?",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        lambda: forecasts,
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-wrong-market-token",
+                    order_id="ord-wrong-market-token",
+                    size="10",
+                    price="0.50",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert conn.execute(
+        "SELECT 1 FROM position_current WHERE position_id='pos-wrong-market-token'"
+    ).fetchone() is None
+
+
+def test_entry_identity_db_error_persists_finding_and_programming_error_escapes(
+    monkeypatch, conn
+):
+    from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
+
+    seed_command(
+        conn,
+        command_id="cmd-identity-read-error",
+        venue_order_id="ord-identity-read-error",
+        position_id="pos-identity-read-error",
+        token_id=YES_TOKEN,
+        state="FILLED",
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id='cmd-identity-read-error'"
+        ).fetchone()
+    )
+
+    def db_error():
+        raise sqlite3.OperationalError("forecast identity unavailable")
+
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        db_error,
+    )
+    _ensure_entry_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id="ord-identity-read-error",
+        filled_size="10",
+        fill_price="0.50",
+        observed_at=NOW,
+        context="ws_gap",
+    )
+    finding = conn.execute(
+        """
+        SELECT evidence_json
+          FROM exchange_reconcile_findings
+         WHERE kind='position_drift'
+           AND subject_id='entry_identity:cmd-identity-read-error'
+           AND context='ws_gap'
+           AND resolved_at IS NULL
+        """
+    ).fetchone()
+    assert json.loads(finding["evidence_json"])["reason"] == (
+        "canonical_entry_identity_read_error"
+    )
+    assert conn.execute(
+        "SELECT 1 FROM position_current WHERE position_id='pos-identity-read-error'"
+    ).fetchone() is None
+
+    def programming_error():
+        raise RuntimeError("unexpected identity bug")
+
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        programming_error,
+    )
+    with pytest.raises(RuntimeError, match="unexpected identity bug"):
+        _ensure_entry_fill_position_event(
+            conn,
+            command=command,
+            venue_order_id="ord-identity-read-error",
+            filled_size="10",
+            fill_price="0.50",
+            observed_at=NOW,
+            context="ws_gap",
+        )
+
+
+def test_fill_reconcile_repairs_slug_projection_without_touching_economics(
+    monkeypatch, conn
+):
+    """A recovered slug projection regains the posterior key on next reconcile."""
+
+    from src.execution.exchange_reconcile import (
+        _ensure_entry_fill_position_event,
+        run_reconcile_sweep,
+    )
+
+    seed_command(conn, state="FILLED")
+    seed_position_baseline(conn)
+    append_trade_fact(conn, trade_id="trade-bin-repair")
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id='cmd-m5'"
+        ).fetchone()
+    )
+    _ensure_entry_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id="ord-m5",
+        filled_size="10",
+        fill_price="0.50",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET city='Singapore', cluster='Singapore', target_date='2026-07-24',
+               bin_label='highest-temperature-in-singapore-on-july-24-2026',
+               condition_id='condition-m5', market_id='condition-m5',
+               temperature_metric='high', token_id=?, no_token_id=?,
+               strategy_key='forecast_qkernel_entry', entry_method='qkernel_spine',
+               last_monitor_prob=0.31, last_monitor_edge=0.23,
+               last_monitor_market_price=0.08, last_monitor_prob_is_fresh=1,
+               exit_reason='TEST_HOLD'
+         WHERE position_id='pos-m5'
+        """,
+        (YES_TOKEN, f"{YES_TOKEN}-no"),
+    )
+    canonical_label = "Will the highest temperature in Singapore be 30°C on July 24?"
+    def forecasts_connection():
+        forecasts = sqlite3.connect(":memory:")
+        forecasts.row_factory = sqlite3.Row
+        forecasts.execute(
+            """
+            CREATE TABLE market_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, market_slug TEXT,
+                city TEXT, target_date TEXT, temperature_metric TEXT,
+                condition_id TEXT, token_id TEXT, range_label TEXT, outcome TEXT
+            )
+            """
+        )
+        forecasts.execute(
+            """
+            INSERT INTO market_events (
+                market_slug, city, target_date, temperature_metric, condition_id,
+                token_id, range_label, outcome
+            ) VALUES (?, 'Singapore', '2026-07-24', 'high', 'condition-m5', ?, ?, ?)
+            """,
+            (
+                "highest-temperature-in-singapore-on-july-24-2026",
+                YES_TOKEN,
+                canonical_label,
+                canonical_label,
+            ),
+        )
+        return forecasts
+
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        forecasts_connection,
+    )
+    adapter = FakeM5Adapter(
+        trades=[
+            trade(
+                trade_id="trade-bin-repair",
+                order_id="ord-m5",
+                size="10",
+                price="0.50",
+                status="CONFIRMED",
+            )
+        ]
+    )
+    preserved_columns = (
+        "shares, cost_basis_usd, entry_price, phase, order_status, "
+        "last_monitor_prob, last_monitor_edge, last_monitor_market_price, "
+        "last_monitor_prob_is_fresh, exit_reason"
+    )
+    before = dict(
+        conn.execute(
+            f"SELECT {preserved_columns} FROM position_current WHERE position_id='pos-m5'"
+        ).fetchone()
+    )
+
+    run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+
+    projection = conn.execute(
+        f"SELECT bin_label, {preserved_columns} FROM position_current "
+        "WHERE position_id='pos-m5'"
+    ).fetchone()
+    assert projection["bin_label"] == canonical_label
+    assert {column: projection[column] for column in before} == before
+    repair = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id='pos-m5'
+           AND event_type='MANUAL_OVERRIDE_APPLIED'
+           AND source_module='src.execution.exchange_reconcile'
+        """
+    ).fetchone()
+    assert json.loads(repair["payload_json"]) == {
+        "condition_id": "condition-m5",
+        "market_metadata_authority": "canonical_forecast_market_events",
+        "new_bin_label": canonical_label,
+        "old_bin_label": "highest-temperature-in-singapore-on-july-24-2026",
+        "reason": "entry_bin_identity_projection_repair",
+        "token_id": YES_TOKEN,
+    }
+    first_sequence = conn.execute(
+        "SELECT MAX(sequence_no) FROM position_events WHERE position_id='pos-m5'"
+    ).fetchone()[0]
+    run_reconcile_sweep(
+        adapter,
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id='pos-m5'
+           AND event_type='MANUAL_OVERRIDE_APPLIED'
+           AND source_module='src.execution.exchange_reconcile'
+        """
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT MAX(sequence_no) FROM position_events WHERE position_id='pos-m5'"
+    ).fetchone()[0] == first_sequence
+
+
+def test_live_tick_repairs_recorded_fill_when_position_projection_is_missing(
+    monkeypatch, conn
+):
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
     from src.state.venue_command_repo import append_trade_fact as append
 
@@ -2172,7 +2577,9 @@ def test_live_tick_repairs_recorded_fill_when_position_projection_is_missing(con
         envelope_yes_token_id=yes_token,
         envelope_no_token_id=no_token,
     )
-    conn.execute(
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.execute(
         """
         CREATE TABLE market_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2186,7 +2593,7 @@ def test_live_tick_repairs_recorded_fill_when_position_projection_is_missing(con
         )
         """
     )
-    conn.execute(
+    forecasts.execute(
         """
         INSERT INTO market_events (
             market_slug, city, target_date, condition_id, token_id, range_label, outcome
@@ -2201,6 +2608,10 @@ def test_live_tick_repairs_recorded_fill_when_position_projection_is_missing(con
             "Will the highest temperature in Istanbul be 29°C on June 29?",
             "Yes",
         ),
+    )
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        lambda: forecasts,
     )
     conn.execute(
         """
@@ -2267,7 +2678,9 @@ def test_live_tick_repairs_recorded_fill_when_position_projection_is_missing(con
     assert projection["order_status"] == "partial"
 
 
-def test_live_tick_maker_fill_repair_is_bounded_to_missing_entry_projection(conn):
+def test_live_tick_maker_fill_repair_is_bounded_to_missing_entry_projection(
+    monkeypatch, conn
+):
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
     from src.state.venue_command_repo import append_trade_fact as append
 
@@ -2357,7 +2770,9 @@ def test_live_tick_maker_fill_repair_is_bounded_to_missing_entry_projection(conn
         envelope_yes_token_id=yes_token,
         envelope_no_token_id=no_token,
     )
-    conn.execute(
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.execute(
         """
         CREATE TABLE market_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2371,7 +2786,7 @@ def test_live_tick_maker_fill_repair_is_bounded_to_missing_entry_projection(conn
         )
         """
     )
-    conn.execute(
+    forecasts.execute(
         """
         INSERT INTO market_events (
             market_slug, city, target_date, condition_id, token_id, range_label, outcome
@@ -2386,6 +2801,10 @@ def test_live_tick_maker_fill_repair_is_bounded_to_missing_entry_projection(conn
             "Will the highest temperature in Istanbul be 29°C on June 29?",
             "Yes",
         ),
+    )
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        lambda: forecasts,
     )
     append_maker_fact(
         command_id="cmd-live-bounded-missing",
@@ -7414,6 +7833,7 @@ def test_ws_gap_m5_sweep_does_not_clear_latch_when_durable_commit_fails():
     init_schema(conn)
     init_collateral_schema(conn)
     seed_command(conn, size=5)
+    seed_position_baseline(conn)
     append_resting_order_fact(conn)
     conn.commit()
     configure_subscribed_m5_latch()

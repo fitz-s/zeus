@@ -17602,6 +17602,11 @@ def _reconcile_authenticated_entry_trade_fact(
         projection_command, snapshot_market_identity = (
             _immutable_snapshot_identity_for_missing_entry_projection(conn, command)
         )
+    from src.execution.exchange_reconcile import (
+        EntryIdentityProjectionBlocked,
+        _ensure_entry_fill_position_event,
+        _record_entry_identity_finding,
+    )
 
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
     sp_name = f"sp_authenticated_entry_fill_{safe_command_id}"
@@ -17655,8 +17660,6 @@ def _reconcile_authenticated_entry_trade_fact(
             occurred_at=observed_at,
             payload=fill_event_payload,
         )
-        from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
-
         _ensure_entry_fill_position_event(
             conn,
             command=projection_command,
@@ -17667,6 +17670,7 @@ def _reconcile_authenticated_entry_trade_fact(
             command_event=event_type,
             order_fact_source=source,
             authoritative_market_metadata=snapshot_market_identity,
+            defer_identity_finding_until_rollback=True,
         )
         expected_state = (
             CommandState.FILLED.value if complete else CommandState.PARTIAL.value
@@ -17712,6 +17716,18 @@ def _reconcile_authenticated_entry_trade_fact(
                 f"execution_fact={execution_fact is not None}"
             )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except EntryIdentityProjectionBlocked as exc:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        _record_entry_identity_finding(
+            conn,
+            command=exc.command,
+            context=exc.context,
+            observed_at=exc.observed_at,
+            reason=exc.reason,
+            error=exc.error,
+        )
+        raise
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")

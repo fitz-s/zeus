@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -120,6 +121,10 @@ _TERMINAL_ENTRY_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED", "FILLED"}
 )
 _CHAIN_CONFIRMED_HELD_PHASES = frozenset({"active", "day0_window"})
+_TEMPERATURE_BIN_LABEL_RE = re.compile(
+    r"-?\d+(?:\.\d+)?\s*(?:[-–]\s*-?\d+(?:\.\d+)?\s*)?°[FfCc]"
+    r"(?:\s+or\s+(?:below|lower|higher|above|more)|\s+on\b|$)"
+)
 # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
 # from LifecyclePhase; the T5 schema migration has run and the DB CHECK no
 # longer admits the literal, so it is no longer a member of this set.
@@ -187,6 +192,26 @@ class ReconcileFinding:
     recorded_at: datetime
 
 
+class EntryIdentityProjectionBlocked(RuntimeError):
+    """Typed signal for callers that must persist a finding after rollback."""
+
+    def __init__(
+        self,
+        *,
+        command: Mapping[str, Any],
+        context: ReconcileContext,
+        observed_at: datetime,
+        reason: str,
+        error: sqlite3.Error | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.command = dict(command)
+        self.context = context
+        self.observed_at = observed_at
+        self.reason = reason
+        self.error = error
+
+
 @dataclass(frozen=True)
 class FreshReconcileSnapshot:
     adapter: Any
@@ -197,6 +222,12 @@ class FreshReconcileSnapshot:
 def init_exchange_reconcile_schema(conn: sqlite3.Connection) -> None:
     """Create the M5 findings table if absent."""
 
+    if _table_exists(conn, "exchange_reconcile_findings"):
+        return
+    if conn.in_transaction:
+        raise sqlite3.OperationalError(
+            "exchange reconcile schema must be initialized before transaction"
+        )
     conn.executescript(_SCHEMA)
 
 
@@ -4046,6 +4077,7 @@ def _append_linkable_trade_fact_if_missing(
                 observed_at=observed_at,
                 command_event=existing_event,
                 order_fact_source=str(latest_fact.get("source") or "REST"),
+                context=context,
             )
             _ensure_exit_fill_position_event(
                 conn,
@@ -4179,6 +4211,7 @@ def _append_linkable_trade_fact_if_missing(
             observed_at=observed_at,
             command_event=None,
             order_fact_source="REST",
+            context=context,
         )
         return finality_finding
     try:
@@ -4209,6 +4242,7 @@ def _append_linkable_trade_fact_if_missing(
         observed_at=observed_at,
         command_event=event,
         order_fact_source="REST",
+        context=context,
     )
     _ensure_exit_fill_position_event(
         conn,
@@ -4325,21 +4359,260 @@ def _market_event_metadata_for_entry_fill(
             "THEN 'low' ELSE 'high' END"
         )
     )
+    identity_clause = "NULLIF(condition_id, '') = NULLIF(?, '')"
+    identity_values: tuple[object, ...] = (condition_id,)
+    if condition_id and token_id:
+        identity_clause += " AND NULLIF(token_id, '') = NULLIF(?, '')"
+        identity_values = (condition_id, token_id)
+    elif not condition_id:
+        identity_clause = "NULLIF(token_id, '') = NULLIF(?, '')"
+        identity_values = (token_id,)
     row = conn.execute(
         f"""
         SELECT city, target_date, {metric_expr} AS temperature_metric,
-               market_slug, range_label, token_id, condition_id
+               market_slug, range_label, outcome, token_id, condition_id
           FROM market_events
-         WHERE (
-                NULLIF(condition_id, '') = NULLIF(?, '')
-             OR NULLIF(token_id, '') = NULLIF(?, '')
-         )
-         ORDER BY CASE WHEN token_id = ? THEN 0 ELSE 1 END, id DESC
+         WHERE {identity_clause}
+         ORDER BY rowid DESC
          LIMIT 1
         """,
-        (condition_id, token_id, token_id),
+        identity_values,
     ).fetchone()
     return dict(row) if row is not None else None
+
+
+def _is_parseable_temperature_bin_label(label: object) -> bool:
+    return bool(_TEMPERATURE_BIN_LABEL_RE.search(str(label or "").strip()))
+
+
+def _canonical_market_event_metadata_for_entry_fill(
+    *,
+    token_id: str,
+    condition_id: str,
+) -> dict[str, Any] | None:
+    """Read exact outcome identity from the canonical forecasts DB only."""
+
+    def _canonical(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        label = str(row.get("range_label") or row.get("outcome") or "").strip()
+        if not _is_parseable_temperature_bin_label(label):
+            return None
+        observed_condition = str(row.get("condition_id") or "").strip()
+        if condition_id and observed_condition != condition_id:
+            return None
+        result = dict(row)
+        result["bin_label"] = label
+        result["range_label"] = label
+        result["market_metadata_authority"] = "canonical_forecast_market_events"
+        return result
+
+    from src.state.db import get_forecasts_connection_read_only
+
+    forecasts = get_forecasts_connection_read_only()
+    try:
+        return _canonical(
+            _market_event_metadata_for_entry_fill(
+                forecasts,
+                token_id=token_id,
+                condition_id=condition_id,
+            )
+        )
+    finally:
+        forecasts.close()
+
+
+def _entry_identity_finding_subject(command: Mapping[str, Any]) -> str:
+    identity = str(
+        command.get("command_id") or command.get("position_id") or "unknown"
+    ).strip()
+    return f"entry_identity:{identity}"
+
+
+def _record_entry_identity_finding(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    context: ReconcileContext,
+    observed_at: datetime,
+    reason: str,
+    error: sqlite3.Error | None = None,
+) -> None:
+    evidence: dict[str, Any] = {
+        "reason": reason,
+        "command_id": command.get("command_id"),
+        "position_id": command.get("position_id"),
+        "token_id": command.get("token_id"),
+        "action": "retry_canonical_forecast_identity_before_monitor_projection",
+    }
+    if error is not None:
+        evidence["error_type"] = type(error).__name__
+        evidence["error"] = str(error)
+    record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=_entry_identity_finding_subject(command),
+        context=context,
+        evidence=evidence,
+        recorded_at=observed_at,
+    )
+
+
+def _block_or_record_entry_identity(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    context: ReconcileContext,
+    observed_at: datetime,
+    reason: str,
+    error: sqlite3.Error | None,
+    defer_finding_until_rollback: bool,
+) -> None:
+    if defer_finding_until_rollback:
+        raise EntryIdentityProjectionBlocked(
+            command=command,
+            context=context,
+            observed_at=observed_at,
+            reason=reason,
+            error=error,
+        )
+    _record_entry_identity_finding(
+        conn,
+        command=command,
+        context=context,
+        observed_at=observed_at,
+        reason=reason,
+        error=error,
+    )
+
+
+def _resolve_entry_identity_findings(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    observed_at: datetime,
+) -> None:
+    if not _table_exists(conn, "exchange_reconcile_findings"):
+        return
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+        """,
+        (_entry_identity_finding_subject(command),),
+    ).fetchall()
+    for row in rows:
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution="canonical_entry_identity_restored",
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=observed_at,
+        )
+
+
+def _repair_entry_bin_label_projection(
+    conn: sqlite3.Connection,
+    *,
+    current: Mapping[str, Any],
+    market_event: Mapping[str, Any] | None,
+    command: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Repair only a malformed outcome label from exact market identity."""
+
+    projection = dict(current)
+    old_label = str(projection.get("bin_label") or "").strip()
+    if (
+        str(projection.get("strategy_key") or "").strip()
+        != "forecast_qkernel_entry"
+        or _is_parseable_temperature_bin_label(old_label)
+        or market_event is None
+    ):
+        return projection
+    new_label = str(
+        market_event.get("bin_label") or market_event.get("range_label") or ""
+    ).strip()
+    if not _is_parseable_temperature_bin_label(new_label):
+        return projection
+    for field in ("condition_id", "city", "target_date", "temperature_metric"):
+        expected = str(projection.get(field) or "").strip()
+        observed = str(market_event.get(field) or "").strip()
+        if not expected or not observed or expected != observed:
+            return projection
+
+    position_id = str(projection.get("position_id") or "").strip()
+    phase = str(projection.get("phase") or "").strip()
+    if not position_id or phase not in _ENTRY_FILL_PROJECTION_PHASES:
+        return projection
+    latest = conn.execute(
+        """
+        SELECT sequence_no, env, decision_id, snapshot_id
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if latest is None:
+        return projection
+    now_iso = datetime.now(timezone.utc).isoformat()
+    proof_hash = sha256(
+        f"{position_id}|{projection.get('condition_id')}|{old_label}|{new_label}".encode()
+    ).hexdigest()
+    event_id = f"{position_id}:entry_market_identity:{proof_hash[:24]}"
+    projection["bin_label"] = new_label
+    projection["updated_at"] = now_iso
+    existing = conn.execute(
+        "SELECT 1 FROM position_events WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()
+    if existing is not None:
+        from src.state.projection import upsert_position_current
+
+        upsert_position_current(conn, projection)
+        return projection
+
+    from src.state.ledger import append_many_and_project
+
+    event = {
+        "event_id": event_id,
+        "position_id": position_id,
+        "event_version": 1,
+        "sequence_no": int(latest["sequence_no"]) + 1,
+        "event_type": "MANUAL_OVERRIDE_APPLIED",
+        "occurred_at": now_iso,
+        "phase_before": phase,
+        "phase_after": phase,
+        "strategy_key": str(projection.get("strategy_key") or ""),
+        "decision_id": latest["decision_id"],
+        "snapshot_id": latest["snapshot_id"],
+        "order_id": projection.get("order_id"),
+        "command_id": command.get("command_id"),
+        "caused_by": f"forecast_market_events:{projection.get('condition_id')}",
+        "idempotency_key": event_id,
+        "venue_status": None,
+        "source_module": "src.execution.exchange_reconcile",
+        "env": str(latest["env"] or "live"),
+        "payload_json": json.dumps(
+            {
+                "reason": "entry_bin_identity_projection_repair",
+                "old_bin_label": old_label,
+                "new_bin_label": new_label,
+                "condition_id": projection.get("condition_id"),
+                "token_id": projection.get("token_id"),
+                "market_metadata_authority": market_event.get(
+                    "market_metadata_authority"
+                ),
+            },
+            sort_keys=True,
+        ),
+    }
+    append_many_and_project(conn, [event], projection)
+    return projection
 
 
 def _same_token_position_metadata_for_entry_fill(
@@ -4405,11 +4678,6 @@ def _missing_entry_projection_from_linked_fill(
         token_id=token_id,
         condition_id=condition_id,
     )
-    market_event = _market_event_metadata_for_entry_fill(
-        conn,
-        token_id=token_id,
-        condition_id=condition_id,
-    )
     yes_token = str(snapshot.get("yes_token_id") or "").strip()
     no_token = str(snapshot.get("no_token_id") or "").strip()
     if metadata_row is not None:
@@ -4420,6 +4688,10 @@ def _missing_entry_projection_from_linked_fill(
         yes_token = "" if direction == "buy_no" else token_id
     if not no_token and direction == "buy_no":
         no_token = token_id
+    market_event = _canonical_market_event_metadata_for_entry_fill(
+        token_id=yes_token or token_id,
+        condition_id=condition_id,
+    )
 
     def _meta(field: str, default: object = "") -> object:
         if (
@@ -4437,10 +4709,16 @@ def _missing_entry_projection_from_linked_fill(
     target_date = str(_meta("target_date", "") or "").strip()
     temperature_metric = str(_meta("temperature_metric", "high") or "high").strip()
     bin_label = str(
-        _meta("bin_label", _meta("range_label", snapshot.get("event_slug") or condition_id))
+        (market_event or {}).get("bin_label")
+        or (market_event or {}).get("range_label")
         or ""
     ).strip()
-    if not city or not target_date or temperature_metric not in {"high", "low"}:
+    if (
+        not city
+        or not target_date
+        or temperature_metric not in {"high", "low"}
+        or not _is_parseable_temperature_bin_label(bin_label)
+    ):
         logger.warning(
             "exchange_reconcile: cannot materialize filled entry without market metadata "
             "position_id=%s command_id=%s token=%s condition_id=%s",
@@ -4505,6 +4783,8 @@ def _ensure_entry_fill_position_event(
     command_event: str | None = None,
     order_fact_source: str = "REST",
     authoritative_market_metadata: Mapping[str, Any] | None = None,
+    context: ReconcileContext = "periodic",
+    defer_identity_finding_until_rollback: bool = False,
 ) -> None:
     if str(command.get("intent_kind") or "").upper() != "ENTRY":
         return
@@ -4524,19 +4804,84 @@ def _ensure_entry_fill_position_event(
         (position_id, venue_order_id),
     ).fetchone()
     missing_projection = False
-    if row is None:
-        current = _missing_entry_projection_from_linked_fill(
+    try:
+        if row is None:
+            current = _missing_entry_projection_from_linked_fill(
+                conn,
+                command=command,
+                venue_order_id=venue_order_id,
+                observed_at=observed_at,
+                authoritative_market_metadata=authoritative_market_metadata,
+            )
+            if current is None:
+                _block_or_record_entry_identity(
+                    conn,
+                    command=command,
+                    context=context,
+                    observed_at=observed_at,
+                    reason="entry_fill_missing_canonical_market_identity",
+                    error=None,
+                    defer_finding_until_rollback=(
+                        defer_identity_finding_until_rollback
+                    ),
+                )
+                return
+            missing_projection = True
+        else:
+            current = dict(row)
+            if (
+                str(current.get("strategy_key") or "").strip()
+                == "forecast_qkernel_entry"
+                and not _is_parseable_temperature_bin_label(current.get("bin_label"))
+            ):
+                condition_id = str(current.get("condition_id") or "").strip()
+                yes_token_id = str(current.get("token_id") or "").strip()
+                market_event = _canonical_market_event_metadata_for_entry_fill(
+                    token_id=yes_token_id,
+                    condition_id=condition_id,
+                )
+                if market_event is None:
+                    _block_or_record_entry_identity(
+                        conn,
+                        command=command,
+                        context=context,
+                        observed_at=observed_at,
+                        reason="entry_fill_missing_canonical_market_identity",
+                        error=None,
+                        defer_finding_until_rollback=(
+                            defer_identity_finding_until_rollback
+                        ),
+                    )
+                    return
+                current = _repair_entry_bin_label_projection(
+                    conn,
+                    current=current,
+                    market_event=market_event,
+                    command=command,
+                )
+    except sqlite3.Error as exc:
+        logger.warning(
+            "exchange_reconcile: canonical entry identity read failed "
+            "command_id=%s position_id=%s",
+            command.get("command_id"),
+            command.get("position_id"),
+            exc_info=True,
+        )
+        _block_or_record_entry_identity(
             conn,
             command=command,
-            venue_order_id=venue_order_id,
+            context=context,
             observed_at=observed_at,
-            authoritative_market_metadata=authoritative_market_metadata,
+            reason="canonical_entry_identity_read_error",
+            error=exc,
+            defer_finding_until_rollback=defer_identity_finding_until_rollback,
         )
-        if current is None:
-            return
-        missing_projection = True
-    else:
-        current = dict(row)
+        return
+    _resolve_entry_identity_findings(
+        conn,
+        command=command,
+        observed_at=observed_at,
+    )
     projection_position_id = str(current.get("position_id") or position_id).strip()
     if projection_position_id:
         position_id = projection_position_id

@@ -2783,7 +2783,9 @@ class TestAuthenticatedEntryTradeFactProjection:
             (position_id, order_id),
         ).fetchone()[0] == 1
 
-    def test_price_improved_fak_overfill_bootstraps_missing_position(self, conn):
+    def test_price_improved_fak_overfill_bootstraps_missing_position(
+        self, conn, monkeypatch
+    ):
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,
         )
@@ -2832,8 +2834,45 @@ class TestAuthenticatedEntryTradeFactProjection:
                 "low",
                 "condition-test",
                 token_id,
-                "spoof mutable metadata",
+                "Will the highest temperature in Singapore be 31°C on July 24?",
             ),
+        )
+        canonical_label = (
+            "Will the highest temperature in Singapore be 30°C on July 24?"
+        )
+
+        def forecasts_connection():
+            forecasts = sqlite3.connect(":memory:")
+            forecasts.row_factory = sqlite3.Row
+            forecasts.execute(
+                """
+                CREATE TABLE market_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, market_slug TEXT,
+                    city TEXT, target_date TEXT, temperature_metric TEXT,
+                    condition_id TEXT, token_id TEXT, range_label TEXT, outcome TEXT
+                )
+                """
+            )
+            forecasts.execute(
+                """
+                INSERT INTO market_events (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, outcome
+                ) VALUES (?, 'Singapore', '2026-07-24', 'high',
+                          'condition-test', ?, ?, ?)
+                """,
+                (
+                    "highest-temperature-in-singapore-on-july-24-2026",
+                    token_id,
+                    canonical_label,
+                    canonical_label,
+                ),
+            )
+            return forecasts
+
+        monkeypatch.setattr(
+            "src.state.db.get_forecasts_connection_read_only",
+            forecasts_connection,
         )
         _append_confirmed_trade_fact(
             conn,
@@ -2853,7 +2892,7 @@ class TestAuthenticatedEntryTradeFactProjection:
         assert _get_state(conn, command_id) == "FILLED"
         position = conn.execute(
             """
-            SELECT phase, city, target_date, temperature_metric, unit, token_id,
+            SELECT phase, city, target_date, temperature_metric, unit, bin_label, token_id,
                    shares, cost_basis_usd, entry_price, order_id, order_status
               FROM position_current
              WHERE position_id = ?
@@ -2866,6 +2905,7 @@ class TestAuthenticatedEntryTradeFactProjection:
             "target_date": "2026-07-24",
             "temperature_metric": "high",
             "unit": "C",
+            "bin_label": canonical_label,
             "token_id": token_id,
             "shares": 189.77,
             "cost_basis_usd": 15.1816,
@@ -2973,12 +3013,11 @@ class TestAuthenticatedEntryTradeFactProjection:
                 (command_id if table != "position_current" else position_id,),
             ).fetchone()[0] == 0
 
-    def test_missing_position_projection_failure_rolls_back_fill_fold(
+    def test_missing_canonical_identity_rolls_back_fill_fold_and_persists_finding(
         self,
         conn,
         monkeypatch,
     ):
-        from src.execution import exchange_reconcile
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,
         )
@@ -3007,13 +3046,12 @@ class TestAuthenticatedEntryTradeFactProjection:
             fill_price="0.08",
         )
 
-        def _fail_projection(*_args, **_kwargs):
-            raise RuntimeError("injected projection failure")
+        def unavailable_forecasts():
+            raise sqlite3.OperationalError("injected canonical identity failure")
 
         monkeypatch.setattr(
-            exchange_reconcile,
-            "_ensure_entry_fill_position_event",
-            _fail_projection,
+            "src.state.db.get_forecasts_connection_read_only",
+            unavailable_forecasts,
         )
         assert reconcile_authenticated_entry_trade_facts(
             conn,
@@ -3037,6 +3075,19 @@ class TestAuthenticatedEntryTradeFactProjection:
             "SELECT COUNT(*) FROM execution_fact WHERE command_id = ?",
             (command_id,),
         ).fetchone()[0] == 0
+        finding = conn.execute(
+            """
+            SELECT evidence_json
+              FROM exchange_reconcile_findings
+             WHERE kind = 'position_drift'
+               AND subject_id = ?
+               AND resolved_at IS NULL
+            """,
+            (f"entry_identity:{command_id}",),
+        ).fetchone()
+        assert json.loads(finding["evidence_json"])["reason"] == (
+            "canonical_entry_identity_read_error"
+        )
 
     @pytest.mark.parametrize(
         ("order_type", "filled_size", "fill_price"),
