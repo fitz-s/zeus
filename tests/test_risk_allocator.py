@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-19
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Last reused/audited: 2026-07-23
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: Lock INV-NEW-R RiskAllocator / PortfolioGovernor cap and kill-switch behavior.
 # Reuse: Run for A2 allocator/governor, executor pre-submit, and live-readiness gate changes.
@@ -1046,7 +1046,8 @@ def test_polymarket_client_threads_selected_order_type_to_v2_adapter():
     )
 
     class FakeAdapter:
-        def submit(self, bound_envelope):
+        def submit(self, bound_envelope, *, before_post=None):
+            assert before_post is not None
             captured["envelope"] = bound_envelope
             return SimpleNamespace(
                 status="accepted",
@@ -1061,6 +1062,7 @@ def test_polymarket_client_threads_selected_order_type_to_v2_adapter():
     client = PolymarketClient()
     client._v2_adapter = FakeAdapter()
     client.bind_submission_envelope(envelope)
+    client.bind_signed_submission_identity_persister(lambda signed_envelope: None)
 
     result = client.place_limit_order(
         token_id="yes-token",

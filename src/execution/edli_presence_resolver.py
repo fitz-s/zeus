@@ -1,5 +1,5 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-06-16
+# Last reused or audited: 2026-07-23
 # Authority basis: boot crash-loop incident 2026-06-16 (#122 db-lock orphaned a
 #   FILLED maker order into UNRESOLVED_SUBMIT_UNKNOWN; the absence resolver
 #   correctly REFUSES because real exposure exists, but there was no PRESENCE
@@ -37,7 +37,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 from src.events.live_cap import LiveCapLedger
@@ -48,6 +49,7 @@ from src.events.live_order_reconcile import (
     append_reconciled,
 )
 from src.state.db import (
+    get_trade_connection_read_only,
     get_world_connection,
     get_world_connection_read_only,
     world_write_lock,
@@ -65,6 +67,8 @@ from src.execution.edli_absence_resolver import (
 logger = logging.getLogger(__name__)
 
 PRESENCE_RESOLUTION_REASON = "AUTHENTICATED_CLOB_CONFIRMED_FILL_OWNED_BY_FUNDER"
+_MATCH_TIME_SKEW = timedelta(seconds=5)
+_MATCH_TIME_LAG = timedelta(seconds=30)
 
 
 def _f(value: object) -> float | None:
@@ -74,6 +78,93 @@ def _f(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _d(value: object, field: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise RuntimeError(f"{field} is not a decimal") from None
+    if not parsed.is_finite():
+        raise RuntimeError(f"{field} is not finite")
+    return parsed
+
+
+def _utc(value: object) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)) or str(value).strip().replace(".", "", 1).isdigit():
+        epoch = float(value)
+        if epoch > 10_000_000_000:
+            epoch /= 1000.0
+        parsed = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _latest_event_time(conn: Any, aggregate_id: str, event_type: str) -> datetime:
+    row = conn.execute(
+        """
+        SELECT occurred_at
+        FROM edli_live_order_events
+        WHERE aggregate_id = ? AND event_type = ?
+        ORDER BY event_sequence DESC
+        LIMIT 1
+        """,
+        (aggregate_id, event_type),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"{event_type} event time is missing")
+    try:
+        value = row["occurred_at"]
+    except (IndexError, TypeError):
+        value = row[0]
+    return _utc(value)
+
+
+def _venue_command_for_decision_id(decision_id: str) -> dict[str, Any]:
+    conn = get_trade_connection_read_only()
+    try:
+        rows = conn.execute(
+            """
+            SELECT command.command_id,
+                   command.decision_id,
+                   command.intent_kind,
+                   command.token_id,
+                   command.side,
+                   command.size,
+                   command.price,
+                   command.state,
+                   command.created_at,
+                   command.venue_order_id,
+                   envelope.size AS envelope_size,
+                   envelope.price AS envelope_price,
+                   envelope.order_type AS envelope_order_type
+            FROM venue_commands command
+            LEFT JOIN venue_submission_envelopes envelope
+              ON envelope.envelope_id = command.envelope_id
+            WHERE command.decision_id = ?
+            """,
+            (decision_id,),
+        ).fetchall()
+        if len(rows) != 1:
+            raise RuntimeError(
+                f"expected exactly one canonical venue command for decision_id; found {len(rows)}"
+            )
+        exact = rows[0]
+        if not exact["envelope_size"] or not exact["envelope_price"] or not exact["envelope_order_type"]:
+            raise RuntimeError("canonical venue command is missing its pre-submit envelope economics")
+    finally:
+        conn.close()
+    return {key: exact[key] for key in exact.keys()}
+
+
+def _normalized_order_type(value: object) -> str:
+    text = str(value or "").strip().upper()
+    return text.removesuffix("_LIMIT")
 
 
 def _our_fill_legs(
@@ -97,14 +188,21 @@ def _our_fill_legs(
         str(trade.get("asset_id") or "") == tok
         and str(trade.get("maker_address") or "").lower() == funder
     ):
+        price = _d(trade.get("price"), "taker fill price")
+        size = _d(trade.get("size"), "taker fill size")
         legs.append(
             {
                 "role": "TAKER",
                 "trade_id": trade_id,
                 "venue_order_id": str(trade.get("taker_order_id") or ""),
-                "price": _f(trade.get("price")),
-                "size": _f(trade.get("size")),
+                "price": float(price),
+                "size": float(size),
+                "price_decimal": format(price, "f"),
+                "size_decimal": format(size, "f"),
                 "fees": _f(trade.get("fees")) or 0.0,
+                "match_time": trade.get("match_time"),
+                "side": str(trade.get("side") or "").upper(),
+                "trader_side": str(trade.get("trader_side") or "").upper(),
             }
         )
     # Maker leg(s).
@@ -113,17 +211,24 @@ def _our_fill_legs(
             str(mk.get("asset_id") or "") == tok
             and str(mk.get("maker_address") or "").lower() == funder
         ):
+            price = _d(mk.get("price"), "maker fill price")
+            size = _d(mk.get("matched_amount"), "maker fill size")
             legs.append(
                 {
                     "role": "MAKER",
                     "trade_id": trade_id,
                     "venue_order_id": str(mk.get("order_id") or ""),
-                    "price": _f(mk.get("price")),
-                    "size": _f(mk.get("matched_amount")),
+                    "price": float(price),
+                    "size": float(size),
+                    "price_decimal": format(price, "f"),
+                    "size_decimal": format(size, "f"),
                     "fees": _f(mk.get("fee_rate_bps")) and 0.0 or 0.0,
+                    "match_time": trade.get("match_time"),
+                    "side": str(mk.get("side") or "").upper(),
+                    "trader_side": str(trade.get("trader_side") or "").upper(),
                 }
             )
-    return [leg for leg in legs if leg["price"] is not None and leg["size"] and leg["size"] > 0]
+    return [leg for leg in legs if _d(leg["price_decimal"], "fill price") > 0 and _d(leg["size_decimal"], "fill size") > 0]
 
 
 def build_presence_proof(
@@ -142,7 +247,52 @@ def build_presence_proof(
     token_id = str(plan.get("token_id") or "")
     if not token_id:
         raise RuntimeError("SubmitPlanBuilt missing token_id")
+    if str(plan.get("direction") or "") not in {"buy_yes", "buy_no"}:
+        raise RuntimeError("SubmitPlanBuilt direction is not a token BUY")
     order_size = _f(plan.get("size")) or 0.0
+    limit_price = _f(plan.get("limit_price"))
+    order_type = str(plan.get("order_type") or "").strip().upper()
+    is_fak = order_type in {"FAK", "FAK_LIMIT"}
+    if order_size <= 0 or limit_price is None or limit_price <= 0:
+        raise RuntimeError("SubmitPlanBuilt missing positive size/limit_price")
+    attempted_at = _latest_event_time(conn, aggregate_id, "VenueSubmitAttempted")
+    unknown_at = _latest_event_time(conn, aggregate_id, "SubmitUnknown")
+    execution_command_id = str(submit_unknown.get("execution_command_id") or "")
+    if not execution_command_id:
+        raise RuntimeError("SubmitUnknown missing execution_command_id")
+    command = _venue_command_for_decision_id(execution_command_id)
+    command_size = _d(command.get("envelope_size") or command.get("size"), "command size")
+    command_price = _d(command.get("envelope_price") or command.get("price"), "command price")
+    if str(command.get("decision_id") or "") != execution_command_id:
+        raise RuntimeError("canonical venue command decision identity mismatch")
+    if str(command.get("intent_kind") or "").upper() != "ENTRY":
+        raise RuntimeError("canonical venue command is not an ENTRY")
+    if str(command.get("token_id") or "") != token_id:
+        raise RuntimeError("canonical venue command token mismatch")
+    if str(command.get("side") or "").upper() != "BUY":
+        raise RuntimeError("canonical venue command side is not BUY")
+    if str(command.get("state") or "").upper() not in {
+        "SUBMITTING",
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "REVIEW_REQUIRED",
+    }:
+        raise RuntimeError("canonical venue command is not in an unresolved submit state")
+    command_venue_order_id = str(command.get("venue_order_id") or "").strip()
+    if not command_venue_order_id:
+        raise RuntimeError(
+            "canonical venue command has no pre-persisted venue_order_id; exact causal binding is unavailable"
+        )
+    if command_size != _d(plan.get("size"), "plan size"):
+        raise RuntimeError("canonical venue command size mismatch")
+    if command_price != _d(plan.get("limit_price"), "plan limit_price"):
+        raise RuntimeError("canonical venue command price mismatch")
+    command_order_type = _normalized_order_type(command.get("envelope_order_type") or order_type)
+    if command_order_type != _normalized_order_type(order_type):
+        raise RuntimeError("canonical venue command order_type mismatch")
+    command_created_at = _utc(command.get("created_at"))
+    if command_created_at < attempted_at - _MATCH_TIME_SKEW or command_created_at > unknown_at + _MATCH_TIME_LAG:
+        raise RuntimeError("canonical venue command is outside this submit attempt window")
 
     # Collect every leg of every confirmed trade attributable to us on this token.
     legs: list[dict[str, Any]] = []
@@ -163,26 +313,75 @@ def build_presence_proof(
             "(absence resolver or quarantine applies)"
         )
 
-    total_size = sum(float(leg["size"]) for leg in unique_legs)
-    total_notional = sum(float(leg["size"]) * float(leg["price"]) for leg in unique_legs)
+    venue_order_ids = {str(leg["venue_order_id"] or "") for leg in unique_legs}
+    if "" in venue_order_ids or len(venue_order_ids) != 1:
+        raise RuntimeError(
+            "presence legs do not bind to exactly one venue order; refusing possible cross-order attribution"
+        )
+    venue_order_id = next(iter(venue_order_ids))
+    if venue_order_id != command_venue_order_id:
+        raise RuntimeError(
+            "authenticated presence order id does not match the canonical venue command"
+        )
+    if is_fak and (
+        len(unique_legs) != 1
+        or unique_legs[0]["role"] != "TAKER"
+        or unique_legs[0]["trader_side"] != "TAKER"
+        or unique_legs[0]["side"] != "BUY"
+    ):
+        raise RuntimeError("FAK presence must be one authenticated BUY taker leg")
+    if any(leg["side"] != "BUY" for leg in unique_legs):
+        raise RuntimeError("presence leg side is missing or not BUY")
+    for leg in unique_legs:
+        match_time = _utc(leg.get("match_time"))
+        if match_time < attempted_at - _MATCH_TIME_SKEW or (
+            is_fak and match_time > unknown_at + _MATCH_TIME_LAG
+        ):
+            raise RuntimeError(
+                "presence leg match_time is outside this submit attempt window; refusing historical attribution"
+            )
+        leg_price = _d(leg["price_decimal"], "fill price")
+        if leg_price <= 0:
+            raise RuntimeError("presence leg price is not positive")
+        if leg_price > command_price:
+            raise RuntimeError("presence leg price exceeds the submitted BUY limit")
+
+    total_size_decimal = sum(
+        (_d(leg["size_decimal"], "fill size") for leg in unique_legs), Decimal(0)
+    )
+    total_notional_decimal = sum(
+        (
+            _d(leg["size_decimal"], "fill size")
+            * _d(leg["price_decimal"], "fill price")
+            for leg in unique_legs
+        ),
+        Decimal(0),
+    )
+    total_size = float(total_size_decimal)
+    total_notional = float(total_notional_decimal)
     total_fees = sum(float(leg["fees"]) for leg in unique_legs)
     if total_size <= 0:
         raise RuntimeError("presence legs sum to non-positive size")
-    # Double-count antibody (defense-in-depth): our matched fill can never exceed
-    # the order's intended size (modulo venue rounding). If leg attribution ever
-    # over-counts — e.g. a trade-schema surprise that lets both a maker and a
-    # taker leg of the SAME order qualify — REFUSE rather than record an inflated
-    # position with a blended cost basis. Fail-closed beats a wrong live position.
-    if order_size and total_size > order_size * 1.02 + 1e-6:
+    # BUY FAK price improvement can return more outcome shares than the target
+    # share count while preserving the approved capital bound (live CLOB truth:
+    # original_size=173 @ 0.09, matched=189.77 @ 0.08). Shares are therefore not
+    # the capital invariant. Exactly one order, its causal submit window, the BUY
+    # limit, and total quote notional are. Multiple-order attribution and any
+    # spend above the persisted limit-size budget still fail closed.
+    material_share_overfill = total_size > order_size * 1.02 + 1e-6
+    if material_share_overfill and not is_fak:
         raise RuntimeError(
-            f"presence legs sum {total_size} exceed order size {order_size} "
-            f"(>2% over); refusing as possible mis-attribution / double-count"
+            f"non-FAK presence legs sum {total_size} exceed order size {order_size}; "
+            "refusing possible mis-attribution / double-count"
         )
-    avg_price = total_notional / total_size
-    # All legs of one order share the same venue_order_id; take the first.
-    venue_order_id = unique_legs[0]["venue_order_id"]
-    if not venue_order_id:
-        raise RuntimeError("matched leg carries no venue order id")
+    max_notional_decimal = command_size * command_price
+    max_notional = float(max_notional_decimal)
+    if total_notional_decimal > max_notional_decimal:
+        raise RuntimeError(
+            f"presence fill notional {total_notional} exceeds submitted bound {max_notional}; "
+            "refusing possible mis-attribution / overspend"
+        )
+    avg_price = float(total_notional_decimal / total_size_decimal)
     # Fully-vs-partially filled relative to the order's intended size (truthful
     # venue command state for the recovered-fill proof chain).
     venue_command_state = "FILLED" if (order_size and total_size + 1e-9 >= order_size) else "PARTIAL"
@@ -196,14 +395,24 @@ def build_presence_proof(
         "event_id": str(plan.get("event_id") or ""),
         "final_intent_id": str(plan.get("final_intent_id") or ""),
         "execution_command_id": str(submit_unknown.get("execution_command_id") or ""),
+        "venue_command_id": str(command.get("command_id") or ""),
         "token_id": token_id,
         "condition_id": str(plan.get("condition_id") or ""),
         "direction": str(plan.get("direction") or ""),
         "funder_address": str(funder_address),
         "order_size": order_size,
+        "limit_price": limit_price,
+        "order_type": order_type,
         "venue_order_id": venue_order_id,
         "venue_command_state": venue_command_state,
         "filled_size": total_size,
+        "filled_notional": total_notional,
+        "max_submitted_notional": max_notional,
+        "fill_bound_semantics": (
+            "PRICE_IMPROVED_NOTIONAL_BOUNDED"
+            if material_share_overfill
+            else "SHARE_AND_NOTIONAL_BOUNDED"
+        ),
         "avg_fill_price": avg_price,
         "fees": total_fees,
         "matched_legs": unique_legs,

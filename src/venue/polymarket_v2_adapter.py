@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-12
+# Last reused/audited: 2026-07-23
 # Authority basis (2026-06-12): operator law 2026-06-10 ABSOLUTE — redeem submission
 #   FORBIDDEN. redeem() now raises REDEEM_SUBMISSION_FORBIDDEN unconditionally; the
 #   autonomous web3 broadcast body (eth_sendRawTransaction EOA path) was DELETED.
@@ -10,6 +10,7 @@
 #                    (get_order/get_open_orders/get_trades/get_positions) and the
 #                    on-chain _json_rpc_call assert assert_no_world_mutex_held_for_io
 #                    so blocking I/O under the world write lock fails loud, not wedges.
+#                  + 2026-07-23 pre-POST deterministic signed-order identity callback.
 """Polymarket CLOB V2 adapter.
 
 This module is the only R3 Z2 surface that may import py_clob_client_v2. It
@@ -25,6 +26,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -242,6 +244,78 @@ class SubmitResult:
     error_message: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class SignedIdentityPersistenceReceipt:
+    """Canonical read-back returned only after the signed identity commit."""
+
+    command_id: str
+    envelope_id: str
+    order_id: str
+    signed_order_hash: str
+    canonical_pre_sign_payload_hash: str
+    raw_request_hash: str
+
+
+_SIGNED_IDENTITY_RECEIPT_LOCK = threading.Lock()
+_SIGNED_IDENTITY_RECEIPTS: dict[int, SignedIdentityPersistenceReceipt] = {}
+
+
+def _issue_signed_identity_persistence_receipt(
+    conn,
+    *,
+    command_id: str,
+    envelope_id: str,
+) -> SignedIdentityPersistenceReceipt:
+    """Issue a one-shot POST capability only from a canonical SQLite read-back."""
+
+    row = conn.execute(
+        """
+        SELECT command.command_id,
+               signed.envelope_id,
+               signed.order_id,
+               signed.signed_order_hash,
+               signed.canonical_pre_sign_payload_hash,
+               signed.raw_request_hash
+          FROM venue_commands command
+          JOIN venue_submission_envelopes signed
+            ON signed.envelope_id = ?
+           AND signed.order_id = command.venue_order_id
+         WHERE command.command_id = ?
+           AND command.state = 'SUBMITTING'
+        """,
+        (envelope_id, command_id),
+    ).fetchone()
+    if row is None:
+        raise V2AdapterError(
+            "committed signed identity failed canonical read-back"
+        )
+    receipt = SignedIdentityPersistenceReceipt(
+        command_id=str(row[0] or ""),
+        envelope_id=str(row[1] or ""),
+        order_id=str(row[2] or ""),
+        signed_order_hash=str(row[3] or ""),
+        canonical_pre_sign_payload_hash=str(row[4] or ""),
+        raw_request_hash=str(row[5] or ""),
+    )
+    with _SIGNED_IDENTITY_RECEIPT_LOCK:
+        _SIGNED_IDENTITY_RECEIPTS[id(receipt)] = receipt
+    return receipt
+
+
+def _consume_signed_identity_persistence_receipt(
+    receipt: object,
+) -> SignedIdentityPersistenceReceipt:
+    """Atomically consume an issuer-registered receipt; public copies are inert."""
+
+    with _SIGNED_IDENTITY_RECEIPT_LOCK:
+        issued = _SIGNED_IDENTITY_RECEIPTS.pop(id(receipt), None)
+    if issued is not receipt:
+        raise V2AdapterError(
+            "signed identity receipt was not issued by canonical read-back gateway"
+        )
+    return issued
+
+
 class AmbiguousSubmitError(RuntimeError):
     """POST crossed the venue boundary without a trustworthy acknowledgement."""
 
@@ -319,7 +393,15 @@ class PolymarketV2AdapterProtocol(Protocol):
         post_only: bool = False,
     ) -> VenueSubmissionEnvelope: ...
 
-    def submit(self, envelope: VenueSubmissionEnvelope) -> SubmitResult: ...
+    def submit(
+        self,
+        envelope: VenueSubmissionEnvelope,
+        *,
+        before_post: Callable[
+            [VenueSubmissionEnvelope], SignedIdentityPersistenceReceipt
+        ]
+        | None = None,
+    ) -> SubmitResult: ...
 
     def cancel(self, order_id: str) -> CancelResult: ...
 
@@ -694,7 +776,15 @@ class PolymarketV2Adapter:
             chain_id=self.chain_id,
         )
 
-    def submit(self, envelope: VenueSubmissionEnvelope) -> SubmitResult:
+    def submit(
+        self,
+        envelope: VenueSubmissionEnvelope,
+        *,
+        before_post: Callable[
+            [VenueSubmissionEnvelope], SignedIdentityPersistenceReceipt
+        ]
+        | None = None,
+    ) -> SubmitResult:
         # T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK: reject placeholder envelopes
         # before any SDK call.  Mirror: src/data/polymarket_client.py:407-424.
         try:
@@ -710,6 +800,15 @@ class PolymarketV2Adapter:
                 envelope,
                 error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
                 error_message=str(exc),
+            )
+        if not callable(before_post):
+            return _rejected_submit_result(
+                envelope,
+                error_code="SIGNED_IDENTITY_PERSISTER_REQUIRED",
+                error_message=(
+                    "live submission requires durable signed order identity "
+                    "persistence before venue POST"
+                ),
             )
         try:
             preflight = self.preflight()
@@ -766,6 +865,45 @@ class PolymarketV2Adapter:
                     neg_risk=envelope.neg_risk,
                 )
                 _assert_final_fok_depth_bound(active_client, envelope)
+                if not expected_order_id:
+                    raise V2AdapterError(
+                        "signed order has no deterministic venue order id"
+                    )
+                signed_envelope = envelope.with_updates(
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                    order_id=expected_order_id,
+                    captured_at=datetime.now(timezone.utc).isoformat(),
+                )
+                receipt = before_post(signed_envelope)
+                if not isinstance(receipt, SignedIdentityPersistenceReceipt):
+                    raise V2AdapterError(
+                        "signed identity persister returned no canonical read-back receipt"
+                    )
+                receipt = _consume_signed_identity_persistence_receipt(receipt)
+                receipt_values = (
+                    receipt.command_id,
+                    receipt.envelope_id,
+                    receipt.order_id,
+                    receipt.signed_order_hash,
+                    receipt.canonical_pre_sign_payload_hash,
+                    receipt.raw_request_hash,
+                )
+                if not all(str(value or "").strip() for value in receipt_values):
+                    raise V2AdapterError(
+                        "signed identity persistence receipt is incomplete"
+                    )
+                if (
+                    receipt.order_id != signed_envelope.order_id
+                    or receipt.signed_order_hash
+                    != signed_envelope.signed_order_hash
+                    or receipt.canonical_pre_sign_payload_hash
+                    != signed_envelope.canonical_pre_sign_payload_hash
+                    or receipt.raw_request_hash != signed_envelope.raw_request_hash
+                ):
+                    raise V2AdapterError(
+                        "signed identity persistence receipt does not match signed order"
+                    )
                 post_started = True
                 return post_order(
                     local_signed_order,
@@ -775,18 +913,8 @@ class PolymarketV2Adapter:
                 )
             create_and_post = getattr(active_client, "create_and_post_order", None)
             if callable(create_and_post):
-                if str(envelope.order_type).upper() == "FOK":
-                    raise ValueError(
-                        "SUBMIT_ABORTED_PRICE_MOVED:"
-                        "FOK_FINAL_DEPTH_TWO_STEP_SUBMIT_REQUIRED"
-                    )
-                post_started = True
-                return create_and_post(
-                    order_args,
-                    options=options,
-                    order_type=envelope.order_type,
-                    post_only=envelope.post_only,
-                    defer_exec=False,
+                raise V2AdapterError(
+                    "pre-POST signed identity persistence requires two-step SDK submit"
                 )
             raise V2AdapterError(
                 "SDK client exposes neither two-step nor one-step order submission"

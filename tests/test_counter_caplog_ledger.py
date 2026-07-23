@@ -1,5 +1,5 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-05
+# Last reused or audited: 2026-07-23
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/phase.json
 """Caplog ledger: asserts every T1 counter event name fires both the typed sink AND legacy log.
 
@@ -128,6 +128,13 @@ def _build_adapter(tmp_path: Path):
     )
 
 
+def _submit(adapter, envelope):
+    def _unexpected_signed_order(_signed_envelope):
+        raise AssertionError("placeholder rejection must precede local signing")
+
+    return adapter.submit(envelope, before_post=_unexpected_signed_order)
+
+
 def _make_city(name: str = "testcity"):
     from src.config import City
     return City(
@@ -211,7 +218,7 @@ class TestPlaceholderEnvelopeBlockedTotal:
         adapter = _build_adapter(tmp_path)
         envelope = _make_placeholder_envelope()
 
-        adapter.submit(envelope)
+        _submit(adapter, envelope)
 
         assert read("placeholder_envelope_blocked_total") == 1
 
@@ -221,7 +228,7 @@ class TestPlaceholderEnvelopeBlockedTotal:
         envelope = _make_placeholder_envelope()
 
         with caplog.at_level(logging.WARNING, logger="src.venue.polymarket_v2_adapter"):
-            adapter.submit(envelope)
+            _submit(adapter, envelope)
 
         assert any(
             "telemetry_counter event=placeholder_envelope_blocked_total" in r.message

@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused or audited: 2026-05-04
+# Last reused or audited: 2026-07-23
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json
 """T1F-PLACEHOLDER-ENVELOPE-FAKE-SDK-COUNT-ZERO and T1F-COMPAT-SUBMIT-LIMIT-ORDER-REJECTS-OR-FAKE.
 
@@ -106,6 +106,13 @@ def _build_adapter(tmp_path: Path, fake_client):
     )
 
 
+def _submit(adapter, envelope):
+    def _unexpected_signed_order(_signed_envelope):
+        raise AssertionError("placeholder rejection must precede local signing")
+
+    return adapter.submit(envelope, before_post=_unexpected_signed_order)
+
+
 class _FakePreflightClient:
     """Minimal client that satisfies preflight (get_ok) but tracks SDK order calls."""
 
@@ -155,7 +162,7 @@ def test_submit_placeholder_envelope_sdk_call_count_zero(tmp_path, condition_id,
     envelope = _make_placeholder_envelope(condition_id=condition_id, question_id=question_id)
     assert envelope.is_compatibility_placeholder is True
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-22; last_reused=2026-07-22
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
@@ -24,6 +24,101 @@ import json
 import pytest
 
 _NOW = datetime(2026, 4, 27, tzinfo=timezone.utc)
+
+
+def test_pre_post_signed_identity_helper_commits_before_return(monkeypatch):
+    import src.execution.executor as executor
+    import src.state.venue_command_repo as command_repo
+
+    calls = []
+
+    class Conn:
+        def commit(self):
+            calls.append("commit")
+
+        def rollback(self):
+            calls.append("rollback")
+
+        def execute(self, query, params):
+            assert "commit" in calls
+            calls.append(("readback", params))
+
+            class Cursor:
+                @staticmethod
+                def fetchone():
+                    return (
+                        "command-1",
+                        "signed-envelope-id",
+                        "0xorder",
+                        "a" * 64,
+                        "b" * 64,
+                        "c" * 64,
+                    )
+
+            return Cursor()
+
+    def _bind(conn, *, command_id, envelope):
+        calls.append(("bind", command_id, envelope))
+        return "signed-envelope-id"
+
+    monkeypatch.setattr(command_repo, "bind_signed_submission_identity", _bind)
+
+    receipt = executor._persist_signed_submission_identity_before_post(
+        Conn(),
+        "signed-envelope",
+        command_id="command-1",
+    )
+
+    assert calls == [
+        ("bind", "command-1", "signed-envelope"),
+        "commit",
+        ("readback", ("signed-envelope-id", "command-1")),
+    ]
+    assert receipt.command_id == "command-1"
+    assert receipt.envelope_id == "signed-envelope-id"
+    assert receipt.order_id == "0xorder"
+
+
+def test_pre_post_signed_identity_helper_rolls_back_and_refuses_post(monkeypatch):
+    import src.execution.executor as executor
+    import src.state.venue_command_repo as command_repo
+
+    calls = []
+
+    class Conn:
+        def commit(self):
+            calls.append("commit")
+
+        def rollback(self):
+            calls.append("rollback")
+
+    def _fail(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(command_repo, "bind_signed_submission_identity", _fail)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        executor._persist_signed_submission_identity_before_post(
+            Conn(),
+            "signed-envelope",
+            command_id="command-1",
+        )
+
+    assert calls == ["rollback"]
+
+
+def test_executor_refuses_client_without_signed_identity_binder():
+    import src.execution.executor as executor
+
+    with pytest.raises(
+        executor.PreSubmitIdentityBindingError,
+        match="cannot bind durable signed identity",
+    ):
+        executor._bind_signed_identity_persister(
+            object(),
+            object(),
+            command_id="command-1",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +688,34 @@ def _make_exit_intent(
 def _capture_bound_submission_envelope(mock_client):
     bound = {}
     mock_client.bind_submission_envelope.side_effect = lambda envelope: bound.__setitem__("envelope", envelope)
+    mock_client.bind_signed_submission_identity_persister.side_effect = (
+        lambda persister: bound.__setitem__("identity_persister", persister)
+    )
     return bound
+
+
+def _exercise_bound_signed_identity(bound: dict, *, order_id: str):
+    import hashlib
+
+    from src.venue.polymarket_v2_adapter import (
+        _consume_signed_identity_persistence_receipt,
+    )
+
+    envelope = bound.get("envelope")
+    persister = bound.get("identity_persister")
+    if envelope is None or not callable(persister):
+        raise AssertionError(
+            "executor did not bind both submission envelope and identity persister"
+        )
+    signed_order = f"signed:{order_id}".encode()
+    receipt = persister(
+        envelope.with_updates(
+            signed_order=signed_order,
+            signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+            order_id=order_id,
+        )
+    )
+    return _consume_signed_identity_persistence_receipt(receipt)
 
 
 def _final_submit_result(
@@ -696,6 +818,11 @@ def _allow_entry_submit_until_client(monkeypatch):
             "reason": "valid",
         },
     )
+    monkeypatch.setattr(
+        executor_module,
+        "_entry_replacement_family_from_snapshot",
+        lambda *args, **kwargs: "test-family",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -705,7 +832,7 @@ def _allow_entry_submit_until_client(monkeypatch):
 class TestLiveOrderCommandSplit:
     """INV-30: _live_order must persist before it submits."""
 
-    def test_persist_precedes_submit(self, mem_conn):
+    def test_persist_precedes_submit(self, mem_conn, monkeypatch):
         """insert_command must run before place_limit_order.
 
         Uses a call-order spy: both insert_command and place_limit_order are
@@ -714,6 +841,7 @@ class TestLiveOrderCommandSplit:
         """
         from src.execution.executor import _live_order
 
+        _allow_entry_submit_until_client(monkeypatch)
         call_log: list[str] = []
 
         real_insert = None
@@ -735,6 +863,12 @@ class TestLiveOrderCommandSplit:
             bound = _capture_bound_submission_envelope(mock_inst)
 
             def spy_place(**kwargs):
+                receipt = _exercise_bound_signed_identity(
+                    bound,
+                    order_id="ord-test-001",
+                )
+                assert receipt.order_id == "ord-test-001"
+                call_log.append("signed_identity_committed")
                 call_log.append("place_limit_order")
                 return _final_submit_result(bound, order_id="ord-test-001")
 
@@ -749,8 +883,11 @@ class TestLiveOrderCommandSplit:
             )
 
         assert "insert_command" in call_log, "insert_command must have been called"
+        assert "signed_identity_committed" in call_log
         assert "place_limit_order" in call_log, "place_limit_order must have been called"
-        assert call_log.index("insert_command") < call_log.index("place_limit_order"), (
+        assert call_log.index("insert_command") < call_log.index(
+            "signed_identity_committed"
+        ) < call_log.index("place_limit_order"), (
             f"INV-30: insert_command must precede place_limit_order; call order was {call_log}"
         )
         bound_envelope = mock_inst.bind_submission_envelope.call_args.args[0]
@@ -4534,9 +4671,19 @@ class TestExitOrderCommandSplit:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
             bound = _capture_bound_submission_envelope(mock_inst)
-            mock_inst.place_limit_order.side_effect = (
-                lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-acked-001")
-            )
+
+            def _place_exit(**kwargs):
+                receipt = _exercise_bound_signed_identity(
+                    bound,
+                    order_id="ord-exit-acked-001",
+                )
+                assert receipt.order_id == "ord-exit-acked-001"
+                return _final_submit_result(
+                    bound,
+                    order_id="ord-exit-acked-001",
+                )
+
+            mock_inst.place_limit_order.side_effect = _place_exit
 
             result = execute_exit_order(
                 intent=intent,

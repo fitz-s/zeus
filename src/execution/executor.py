@@ -4161,6 +4161,56 @@ def _persist_final_submission_envelope_payload(
         raise FinalSubmissionEnvelopePersistenceError(str(exc)) from exc
 
 
+def _persist_signed_submission_identity_before_post(
+    conn: sqlite3.Connection,
+    envelope,
+    *,
+    command_id: str,
+) -> object:
+    """Commit deterministic signed-order identity before venue side effect."""
+
+    from src.state.venue_command_repo import bind_signed_submission_identity
+    from src.venue.polymarket_v2_adapter import (
+        _issue_signed_identity_persistence_receipt,
+    )
+
+    try:
+        envelope_id = bind_signed_submission_identity(
+            conn,
+            command_id=command_id,
+            envelope=envelope,
+        )
+        conn.commit()
+        return _issue_signed_identity_persistence_receipt(
+            conn,
+            command_id=command_id,
+            envelope_id=envelope_id,
+        )
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _bind_signed_identity_persister(
+    client,
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+) -> None:
+    bind = getattr(client, "bind_signed_submission_identity_persister", None)
+    if not callable(bind):
+        raise PreSubmitIdentityBindingError(
+            "live client cannot bind durable signed identity before venue POST"
+        )
+    bind(
+        lambda envelope: _persist_signed_submission_identity_before_post(
+            conn,
+            envelope,
+            command_id=command_id,
+        )
+    )
+
+
 def _ambiguous_submit_exception_payload(
     conn: sqlite3.Connection,
     exc: Exception,
@@ -6240,6 +6290,11 @@ def execute_exit_order(
             )
         if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
             client.bind_submission_envelope(pre_submit_envelope)
+            _bind_signed_identity_persister(
+                client,
+                conn,
+                command_id=command_id,
+            )
         authority_deadline_error = _exit_execution_authority_deadline_error(
             intent,
             conn=conn,
@@ -7912,6 +7967,11 @@ def _live_order(
         )
         if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
             client.bind_submission_envelope(pre_submit_envelope)
+            _bind_signed_identity_persister(
+                client,
+                conn,
+                command_id=command_id,
+            )
 
         # -----------------------------------------------------------------------
         # Phase 5: submit — SDK call (INV-30: row already SUBMITTING)

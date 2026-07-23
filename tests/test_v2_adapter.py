@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-18; last_reused=2026-07-18
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import sqlite3
 import sys
 import types
 from dataclasses import dataclass, field
@@ -383,6 +384,69 @@ def _adapter(tmp_path: Path, fake_client=None):
         q1_egress_evidence_path=evidence,
         client_factory=lambda **kwargs: fake_client,
     ), fake_client
+
+
+def _submit(adapter, envelope, *, before_post=None):
+    """Submit with a test persister that represents a successful durable write."""
+
+    persister = before_post or _test_identity_receipt
+    return adapter.submit(envelope, before_post=persister)
+
+
+def _test_identity_receipt(signed_envelope, **overrides):
+    from src.venue.polymarket_v2_adapter import (
+        _issue_signed_identity_persistence_receipt,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                venue_order_id TEXT
+            );
+            CREATE TABLE venue_submission_envelopes (
+                envelope_id TEXT PRIMARY KEY,
+                order_id TEXT,
+                signed_order_hash TEXT,
+                canonical_pre_sign_payload_hash TEXT,
+                raw_request_hash TEXT
+            );
+            """
+        )
+        identity = {
+            "order_id": signed_envelope.order_id,
+            "signed_order_hash": signed_envelope.signed_order_hash,
+            "canonical_pre_sign_payload_hash": (
+                signed_envelope.canonical_pre_sign_payload_hash
+            ),
+            "raw_request_hash": signed_envelope.raw_request_hash,
+        }
+        identity.update(overrides)
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?, 'SUBMITTING', ?)",
+            ("test-command", identity["order_id"]),
+        )
+        conn.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?, ?, ?, ?, ?)",
+            (
+                "test-persisted-envelope",
+                identity["order_id"],
+                identity["signed_order_hash"],
+                identity["canonical_pre_sign_payload_hash"],
+                identity["raw_request_hash"],
+            ),
+        )
+        conn.commit()
+        return _issue_signed_identity_persistence_receipt(
+            conn,
+            command_id="test-command",
+            envelope_id="test-persisted-envelope",
+        )
+    finally:
+        conn.close()
 
 
 def test_default_client_factory_prefers_keychain_creds_over_env_and_derivation(monkeypatch):
@@ -1326,7 +1390,7 @@ def test_submit_fails_closed_when_q1_egress_evidence_absent(tmp_path):
         order_type="GTC",
     )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "Q1_EGRESS_EVIDENCE_ABSENT"
@@ -1457,7 +1521,7 @@ def test_two_step_signing_failure_is_typed_pre_submit_rejection(tmp_path):
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
@@ -1478,12 +1542,231 @@ def test_post_order_exception_carries_deterministic_order_identity(tmp_path, mon
     )
 
     with pytest.raises(adapter_mod.AmbiguousSubmitError, match="post timed out") as caught:
-        adapter.submit(envelope)
+        _submit(adapter, envelope)
 
     assert caught.value.envelope.order_id == "0xexpected-order-id"
     assert caught.value.envelope.signed_order == fake.signed_order
     assert caught.value.envelope.error_code == "V2_POST_SUBMIT_AMBIGUOUS"
     assert any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_signed_identity_callback_runs_before_post(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    expected = "0xexpected-order-id"
+    fake = FakeTwoStepClient(
+        post_response={"orderID": expected, "status": "LIVE"}
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: expected,
+    )
+    persisted = []
+
+    def _persist(signed_envelope):
+        persisted.append(signed_envelope)
+        fake.calls.append(("identity_persisted", signed_envelope.order_id))
+        return _test_identity_receipt(signed_envelope)
+
+    result = _submit(adapter, envelope, before_post=_persist)
+
+    assert result.status == "accepted"
+    assert persisted[0].order_id == expected
+    assert persisted[0].signed_order == fake.signed_order
+    assert persisted[0].signed_order_hash == hashlib.sha256(fake.signed_order).hexdigest()
+    names = [call[0] for call in fake.calls]
+    assert names.index("create_order") < names.index("identity_persisted") < names.index("post_order")
+
+
+def test_signed_identity_persistence_failure_prevents_post(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    def _fail(_signed_envelope):
+        raise RuntimeError("signed identity journal unavailable")
+
+    result = _submit(adapter, envelope, before_post=_fail)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "signed identity journal unavailable" in (result.error_message or "")
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_noop_signed_identity_callback_prevents_post(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    result = adapter.submit(envelope, before_post=lambda signed_envelope: None)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "no canonical read-back receipt" in (result.error_message or "")
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_publicly_constructed_identity_receipt_cannot_authorize_post(
+    tmp_path, monkeypatch
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    def _forged(signed_envelope):
+        return adapter_mod.SignedIdentityPersistenceReceipt(
+            command_id="forged-command",
+            envelope_id="nonexistent-envelope",
+            order_id=signed_envelope.order_id,
+            signed_order_hash=signed_envelope.signed_order_hash,
+            canonical_pre_sign_payload_hash=(
+                signed_envelope.canonical_pre_sign_payload_hash
+            ),
+            raw_request_hash=signed_envelope.raw_request_hash,
+        )
+
+    result = adapter.submit(envelope, before_post=_forged)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "not issued by canonical read-back gateway" in (result.error_message or "")
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_signed_identity_receipt_is_one_shot(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    expected = "0xexpected-order-id"
+    fake = FakeTwoStepClient(
+        post_response={"orderID": expected, "status": "LIVE"}
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: expected,
+    )
+    issued = []
+
+    def _replay(signed_envelope):
+        if not issued:
+            issued.append(_test_identity_receipt(signed_envelope))
+        return issued[0]
+
+    first = adapter.submit(envelope, before_post=_replay)
+    second = adapter.submit(envelope, before_post=_replay)
+
+    assert first.status == "accepted"
+    assert second.status == "rejected"
+    assert second.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "not issued by canonical read-back gateway" in (
+        second.error_message or ""
+    )
+    assert sum(call[0] == "post_order" for call in fake.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("order_id", "0xwrong-order"),
+        ("signed_order_hash", "f" * 64),
+        ("canonical_pre_sign_payload_hash", "e" * 64),
+        ("raw_request_hash", "d" * 64),
+    ],
+)
+def test_issued_identity_receipt_mismatch_cannot_authorize_post(
+    tmp_path, monkeypatch, field, wrong_value
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    expected = "0xexpected-order-id"
+    fake = FakeTwoStepClient(
+        post_response={"orderID": expected, "status": "LIVE"}
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: expected,
+    )
+
+    result = adapter.submit(
+        envelope,
+        before_post=lambda signed_envelope: _test_identity_receipt(
+            signed_envelope,
+            **{field: wrong_value},
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "does not match signed order" in (result.error_message or "")
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_signed_identity_receipt_issuer_has_one_runtime_gateway():
+    symbol = "_issue_signed_identity_persistence_receipt"
+    callers = []
+    for path in Path("src").rglob("*.py"):
+        if path.as_posix() == "src/venue/polymarket_v2_adapter.py":
+            continue
+        if symbol in path.read_text():
+            callers.append(path.as_posix())
+
+    assert callers == ["src/execution/executor.py"]
+
+
+def test_missing_signed_identity_persister_prevents_all_post(tmp_path):
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    )
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "SIGNED_IDENTITY_PERSISTER_REQUIRED"
+    assert fake.calls == []
 
 
 def test_geoblock_403_is_definitive_rejection_without_venue_identity(
@@ -1502,7 +1785,7 @@ def test_geoblock_403_is_definitive_rejection_without_venue_identity(
         lambda *args, **kwargs: "0xclient-derived-not-venue-identity",
     )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "venue_rejected_geoblock_403"
@@ -1525,7 +1808,7 @@ def test_fok_killed_400_is_definitive_rejection(tmp_path, monkeypatch):
         lambda *args, **kwargs: "0xexpected-order-id",
     )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "venue_fok_not_fully_filled_400"
@@ -1545,7 +1828,7 @@ def test_fak_no_match_400_is_definitive_zero_fill_rejection(tmp_path, monkeypatc
         lambda *args, **kwargs: "0xexpected-order-id",
     )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "venue_fak_no_match_400"
@@ -1567,7 +1850,7 @@ def test_fok_rechecks_full_depth_after_signing_immediately_before_post(tmp_path,
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
     monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     names = [call[0] for call in fake.calls]
     assert result.status == "accepted"
@@ -1591,7 +1874,7 @@ def test_fok_depth_loss_after_signing_rejects_without_post(tmp_path, monkeypatch
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
     monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "SUBMIT_ABORTED_PRICE_MOVED"
@@ -1605,11 +1888,13 @@ def test_fok_one_step_only_client_fails_closed_before_submit(tmp_path):
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
-    assert result.error_code == "SUBMIT_ABORTED_PRICE_MOVED"
-    assert "FOK_FINAL_DEPTH_TWO_STEP_SUBMIT_REQUIRED" in (result.error_message or "")
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "pre-POST signed identity persistence requires two-step SDK submit" in (
+        result.error_message or ""
+    )
     assert not any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
@@ -1659,27 +1944,32 @@ def test_response_order_id_mismatch_is_ambiguous(tmp_path, monkeypatch):
     )
 
     with pytest.raises(adapter_mod.AmbiguousSubmitError) as caught:
-        adapter.submit(envelope)
+        _submit(adapter, envelope)
 
     assert caught.value.envelope.order_id == "0xexpected-order-id"
     assert caught.value.envelope.error_code == "V2_ORDER_ID_ACK_MISMATCH"
     assert '"orderID":"0xwrong"' in (caught.value.envelope.raw_response_json or "")
 
 
-def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_retry(tmp_path):
+def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_retry(
+    tmp_path, monkeypatch
+):
     import src.venue.polymarket_v2_adapter as adapter_mod
 
     adapter_mod._DERIVED_API_CREDS_CACHE.clear()
-    fake = FakeInvalidSafeSignatureOneStepClient()
+    fake = FakeInvalidSafeSignatureTwoStepClient()
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "ord-safe"
+    )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "venue_auth_invalid_signature_400"
     assert "invalid POLY_GNOSIS_SAFE signature" in (result.error_message or "")
-    assert [call[0] for call in fake.calls] == ["get_ok", "create_and_post_order"]
+    assert [call[0] for call in fake.calls] == ["get_ok", "create_order", "post_order"]
     assert adapter_mod._cached_derived_api_creds(
         host="https://clob-v2.polymarket.com",
         chain_id=137,
@@ -1689,13 +1979,18 @@ def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_ret
     ) is None
 
 
-def test_two_step_invalid_safe_signature_preserves_signed_order_hash(tmp_path):
+def test_two_step_invalid_safe_signature_preserves_signed_order_hash(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
     signed = b"signed-safe-order"
     fake = FakeInvalidSafeSignatureTwoStepClient(signed_order=signed)
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "ord-safe"
+    )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "venue_auth_invalid_signature_400"
@@ -1747,7 +2042,7 @@ def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):
     assert envelope.error_code is None
 
 
-def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
+def test_one_step_sdk_path_fails_closed_before_side_effect(tmp_path):
     fake = FakeOneStepClient(
         response={
             "orderID": "ord-one",
@@ -1760,36 +2055,45 @@ def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
-    assert result.status == "accepted"
-    assert result.error_code is None
-    assert result.envelope.order_id == "ord-one"
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "pre-POST signed identity persistence requires two-step SDK submit" in (
+        result.error_message or ""
+    )
+    assert result.envelope.order_id is None
     assert result.envelope.signed_order is None
     assert result.envelope.signed_order_hash is None
     assert result.envelope.raw_request_hash == envelope.raw_request_hash
-    assert '"orderID":"ord-one"' in (result.envelope.raw_response_json or "")
-    assert result.envelope.transaction_hashes == ("0xhash-one",)
-    assert any(call[0] == "create_and_post_order" for call in fake.calls)
+    assert result.envelope.raw_response_json is None
+    assert not any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
 @pytest.mark.parametrize("price", [0.05, 0.95])
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
-def test_live_submit_unit_price_band_is_inclusive(tmp_path, price, side):
-    fake = FakeOneStepClient(response={"orderID": "ord-boundary", "status": "live"})
+def test_live_submit_unit_price_band_is_inclusive(tmp_path, price, side, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(post_response={"orderID": "ord-boundary", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
         _priced_intent(price),
         FakeSnapshot(tick_size=Decimal("0.01")),
         order_type="GTC",
     ).with_updates(side=side)
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "ord-boundary",
+    )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "accepted"
     assert result.envelope.price == Decimal(str(price))
     assert result.envelope.tick_size == Decimal("0.01")
-    assert any(call[0] == "create_and_post_order" for call in fake.calls)
+    assert any(call[0] == "post_order" for call in fake.calls)
 
 
 @pytest.mark.parametrize(
@@ -1815,7 +2119,7 @@ def test_live_submit_rejects_out_of_band_price_before_sdk_contact(
         _priced_intent(0.50), FakeSnapshot(), order_type="GTC"
     ).with_updates(price=Decimal(str(price)), side=side)
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert error_fragment in str(result.error_message)
@@ -1834,16 +2138,18 @@ def test_adapter_sdk_boundary_rejects_even_if_envelope_guard_is_bypassed(
     ).with_updates(price=Decimal("0.998"))
     monkeypatch.setattr(VenueSubmissionEnvelope, "assert_live_submit_bound", lambda self: None)
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert "outside absolute inclusive [0.05, 0.95]" in str(result.error_message)
     assert not fake.calls
 
 
-def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):
-    fake = FakeOneStepClient(
-        response={
+def test_legacy_order_result_preserves_matched_submit_truth(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(
+        post_response={
             "orderID": "ord-one",
             "status": "matched",
             "makingAmount": "1.7",
@@ -1853,8 +2159,11 @@ def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):
     )
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "ord-one"
+    )
 
-    submit = adapter.submit(envelope)
+    submit = _submit(adapter, envelope)
 
     from src.data.polymarket_client import _legacy_order_result_from_submit
 
@@ -1964,13 +2273,18 @@ def test_point_order_ingress_provides_one_human_contract_to_live_consumers(tmp_p
     ) is payload
 
 
-def test_two_step_sdk_path_produces_envelope_with_signed_order_hash(tmp_path):
+def test_two_step_sdk_path_produces_envelope_with_signed_order_hash(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
     signed = b"fake-signed-order"
     fake = FakeTwoStepClient(post_response={"orderID": "ord-two", "status": "live"}, signed_order=signed)
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "ord-two"
+    )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert [call[0] for call in fake.calls if call[0] in {"create_order", "post_order"}] == [
         "create_order",
@@ -1982,27 +2296,41 @@ def test_two_step_sdk_path_produces_envelope_with_signed_order_hash(tmp_path):
     assert result.envelope.signed_order_hash == hashlib.sha256(signed).hexdigest()
 
 
-def test_missing_order_id_does_not_produce_submit_acked(tmp_path):
-    fake = FakeOneStepClient(response={"success": True, "status": "LIVE"})
+def test_missing_order_id_response_is_ambiguous_with_signed_identity(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(post_response={"success": True, "status": "LIVE"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "ord-expected"
+    )
 
-    result = adapter.submit(envelope)
+    with pytest.raises(adapter_mod.AmbiguousSubmitError) as caught:
+        _submit(adapter, envelope)
 
-    assert result.status == "rejected"
-    assert result.error_code == "MISSING_ORDER_ID"
-    assert result.envelope.order_id is None
-    assert result.envelope.error_code == "MISSING_ORDER_ID"
+    assert caught.value.envelope.order_id == "ord-expected"
+    assert caught.value.envelope.error_code == "V2_ORDER_ID_ACK_MISMATCH"
+    assert "missing deterministic order id" in (caught.value.envelope.error_message or "")
 
 
-def test_success_false_response_returns_typed_rejection_with_error_code(tmp_path):
-    fake = FakeOneStepClient(
-        response={"success": False, "errorCode": "INSUFFICIENT_BALANCE", "errorMessage": "not enough funds"}
+def test_success_false_response_returns_typed_rejection_with_error_code(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(
+        post_response={
+            "success": False,
+            "errorCode": "INSUFFICIENT_BALANCE",
+            "errorMessage": "not enough funds",
+        }
     )
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod, "_deterministic_v2_order_id", lambda *args, **kwargs: "ord-rejected"
+    )
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "INSUFFICIENT_BALANCE"
@@ -2052,7 +2380,7 @@ def test_neg_risk_passthrough_v2_preserves_snapshot_value(tmp_path):
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(neg_risk=True), order_type="GTC")
 
-    result = adapter.submit(envelope)
+    result = _submit(adapter, envelope)
 
     create_call = next(call for call in fake.calls if call[0] == "create_order")
     options = create_call[2]
@@ -2067,7 +2395,7 @@ def test_submit_rejects_unbound_pre_submit_funder_before_sdk_contact(tmp_path):
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
     pre_submit_placeholder = envelope.with_updates(funder_address="UNRESOLVED_PRE_SUBMIT_FUNDER")
 
-    result = adapter.submit(pre_submit_placeholder)
+    result = _submit(adapter, pre_submit_placeholder)
 
     assert result.status == "rejected"
     assert result.envelope.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
@@ -2081,7 +2409,7 @@ def test_submit_rejects_mismatched_pre_submit_funder_before_sdk_contact(tmp_path
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
     mismatched = envelope.with_updates(funder_address="0xotherfunder")
 
-    result = adapter.submit(mismatched)
+    result = _submit(adapter, mismatched)
 
     assert result.status == "rejected"
     assert result.envelope.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
@@ -2209,8 +2537,9 @@ def test_polymarket_client_bound_envelope_bypasses_legacy_compat_submit(tmp_path
             self.submit_calls = []
             self.compat_calls = []
 
-        def submit(self, bound_envelope):
+        def submit(self, bound_envelope, *, before_post=None):
             self.submit_calls.append(bound_envelope)
+            assert before_post is identity_persister
             from src.venue.polymarket_v2_adapter import SubmitResult
 
             return SubmitResult(
@@ -2226,6 +2555,8 @@ def test_polymarket_client_bound_envelope_bypasses_legacy_compat_submit(tmp_path
     fake_adapter = FakeAdapter()
     client._v2_adapter = fake_adapter
     client.bind_submission_envelope(envelope)
+    identity_persister = lambda signed_envelope: None
+    client.bind_signed_submission_identity_persister(identity_persister)
 
     result = client.place_limit_order(token_id="yes-token", price=0.5, size=20.0, side="BUY")
 
@@ -2258,6 +2589,29 @@ def test_polymarket_client_bound_envelope_rejects_submit_shape_mismatch(tmp_path
     assert result["success"] is False
     assert result["errorCode"] == "BOUND_ENVELOPE_MISMATCH"
     assert result["_venue_submission_envelope"]["condition_id"] == "cond-123"
+
+
+def test_polymarket_client_requires_pre_post_identity_persister(tmp_path):
+    from src.data.polymarket_client import PolymarketClient
+
+    envelope = _adapter(tmp_path, FakeOneStepClient())[0].create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    )
+
+    class FakeAdapter:
+        def submit(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("missing identity persister must fail before submit")
+
+    client = PolymarketClient()
+    client._v2_adapter = FakeAdapter()
+    client.bind_submission_envelope(envelope)
+
+    result = client.place_limit_order(
+        token_id="yes-token", price=0.5, size=20.0, side="BUY"
+    )
+
+    assert result["success"] is False
+    assert result["errorCode"] == "SIGNED_IDENTITY_PERSISTER_REQUIRED"
 
 
 def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):

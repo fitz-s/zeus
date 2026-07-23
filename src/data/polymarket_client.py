@@ -1,11 +1,12 @@
 # Created: prior to 2026-04-26
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-07-23
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
 #                  + 2026-05-17 riskguard/read-only bankroll lock remediation.
 #                  + 2026-07-09 concurrent public CLOB metadata prefetch.
+#                  + 2026-07-23 pre-POST deterministic signed-order identity journal.
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
@@ -22,7 +23,7 @@ import warnings
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -801,6 +802,16 @@ class PolymarketClient:
 
         self._pending_submission_envelope = envelope
 
+    def bind_signed_submission_identity_persister(
+        self,
+        persister: Callable[[Any], None],
+    ) -> None:
+        """Bind the one-shot durable signed-identity write required before POST."""
+
+        if not callable(persister):
+            raise TypeError("signed submission identity persister must be callable")
+        self._pending_signed_identity_persister = persister
+
     def place_limit_order(
         self,
         token_id: str,
@@ -832,6 +843,10 @@ class PolymarketClient:
         pending_envelope = getattr(self, "_pending_submission_envelope", None)
         if pending_envelope is not None:
             self._pending_submission_envelope = None
+            identity_persister = getattr(
+                self, "_pending_signed_identity_persister", None
+            )
+            self._pending_signed_identity_persister = None
             live_bound_error = _submission_envelope_live_bound_error(pending_envelope)
             if live_bound_error:
                 rejected_envelope = _submission_envelope_with_error(
@@ -866,6 +881,19 @@ class PolymarketClient:
                         pending_envelope
                     ),
                 }
+            if identity_persister is None:
+                return {
+                    "success": False,
+                    "status": "rejected",
+                    "errorCode": "SIGNED_IDENTITY_PERSISTER_REQUIRED",
+                    "errorMessage": (
+                        "live placement requires durable signed order identity "
+                        "persistence before venue POST"
+                    ),
+                    "_venue_submission_envelope": _submission_envelope_to_dict(
+                        pending_envelope
+                    ),
+                }
             try:
                 adapter = self._ensure_v2_adapter()
             except Exception as exc:
@@ -880,7 +908,10 @@ class PolymarketClient:
                     "errorMessage": rejected_envelope.error_message,
                     "_venue_submission_envelope": rejected_envelope.to_dict(),
                 }
-            submit = adapter.submit(pending_envelope)
+            submit = adapter.submit(
+                pending_envelope,
+                before_post=identity_persister,
+            )
             result = _legacy_order_result_from_submit(submit)
             logger.info(
                 "V2 bound-envelope submit result: %s %s @ %.3f x %.1f → %s",

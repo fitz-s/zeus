@@ -1,12 +1,14 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-23
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
+#                  + 2026-07-23 pre-POST deterministic signed-order identity journal.
 """Durable command journal — append-only repo API for venue_commands / venue_command_events.
 
 Public API:
   insert_command(conn, *, ...) -> None
+  bind_signed_submission_identity(conn, *, command_id, envelope) -> str
   append_event(conn, *, command_id, event_type, occurred_at, payload=None) -> str
   get_command(conn, command_id) -> Optional[dict]
   find_unresolved_commands(conn) -> Iterable[dict]
@@ -916,6 +918,178 @@ def insert_submission_envelope(
             },
         )
     return envelope_id_value
+
+
+def bind_signed_submission_identity(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    envelope,
+) -> str:
+    """Durably bind the locally signed order identity before venue POST.
+
+    The append-only signed envelope is the truth record; ``venue_order_id`` on
+    ``venue_commands`` is its command projection.  A caller must commit this
+    transaction before allowing the adapter to cross the venue side-effect
+    boundary.  State remains SUBMITTING until the later ACK/UNKNOWN event.
+    """
+
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    command_id = _require_nonempty("command_id", command_id)
+    if not isinstance(envelope, VenueSubmissionEnvelope):
+        raise TypeError("envelope must be a VenueSubmissionEnvelope")
+    order_id = _require_nonempty("envelope.order_id", envelope.order_id)
+    if not envelope.signed_order:
+        raise ValueError("signed submission identity requires signed_order")
+    signed_hash = _require_nonempty(
+        "envelope.signed_order_hash", envelope.signed_order_hash
+    )
+    _validate_sha256_hex("signed_order_hash", signed_hash)
+    if hashlib.sha256(envelope.signed_order).hexdigest() != signed_hash:
+        raise ValueError("signed_order_hash does not match signed_order bytes")
+
+    envelope_id = hashlib.sha256(envelope.to_json().encode("utf-8")).hexdigest()
+    with _savepoint_atomic(conn):
+        with _row_factory_as(conn, sqlite3.Row):
+            command = conn.execute(
+                """
+                SELECT command.state,
+                       command.token_id,
+                       command.side,
+                       command.size,
+                       command.price,
+                       command.venue_order_id,
+                       pre.canonical_pre_sign_payload_hash,
+                       pre.raw_request_hash,
+                       pre.order_type
+                  FROM venue_commands command
+                  JOIN venue_submission_envelopes pre
+                    ON pre.envelope_id = command.envelope_id
+                 WHERE command.command_id = ?
+                """,
+                (command_id,),
+            ).fetchone()
+            duplicate = conn.execute(
+                """
+                SELECT command_id
+                  FROM venue_commands
+                 WHERE venue_order_id = ?
+                   AND command_id <> ?
+                 LIMIT 1
+                """,
+                (order_id, command_id),
+            ).fetchone()
+            persisted_identity = conn.execute(
+                """
+                SELECT envelope_id,
+                       selected_outcome_token_id,
+                       side,
+                       price,
+                       size,
+                       order_type,
+                       canonical_pre_sign_payload_hash,
+                       raw_request_hash,
+                       signed_order_blob,
+                       signed_order_hash,
+                       order_id
+                  FROM venue_submission_envelopes
+                 WHERE order_id = ?
+                   AND signed_order_hash = ?
+                 ORDER BY captured_at ASC, envelope_id ASC
+                 LIMIT 1
+                """,
+                (order_id, signed_hash),
+            ).fetchone()
+        if command is None:
+            raise ValueError(f"Unknown command_id: {command_id!r}")
+        if str(command["state"] or "") != "SUBMITTING":
+            raise ValueError("signed submission identity requires SUBMITTING command")
+        if duplicate is not None:
+            raise ValueError("venue_order_id is already bound to another command")
+        existing_order_id = str(command["venue_order_id"] or "").strip()
+        if existing_order_id and existing_order_id != order_id:
+            raise ValueError("command already carries a different venue_order_id")
+        if (
+            str(command["token_id"] or "") != envelope.selected_outcome_token_id
+            or str(command["side"] or "").upper() != envelope.side
+            or not _decimal_text_equal(command["size"], envelope.size)
+            or not _decimal_text_equal(command["price"], envelope.price)
+            or str(command["order_type"] or "").upper()
+            != str(envelope.order_type or "").upper()
+            or str(command["canonical_pre_sign_payload_hash"] or "")
+            != envelope.canonical_pre_sign_payload_hash
+            or str(command["raw_request_hash"] or "") != envelope.raw_request_hash
+        ):
+            raise ValueError("signed submission identity does not match canonical command envelope")
+
+        if existing_order_id == order_id:
+            if persisted_identity is None:
+                raise ValueError(
+                    "command venue_order_id has no matching persisted signed identity"
+                )
+            if (
+                str(persisted_identity["selected_outcome_token_id"] or "")
+                != envelope.selected_outcome_token_id
+                or str(persisted_identity["side"] or "").upper() != envelope.side
+                or not _decimal_text_equal(persisted_identity["price"], envelope.price)
+                or not _decimal_text_equal(persisted_identity["size"], envelope.size)
+                or str(persisted_identity["order_type"] or "").upper()
+                != str(envelope.order_type or "").upper()
+                or str(persisted_identity["canonical_pre_sign_payload_hash"] or "")
+                != envelope.canonical_pre_sign_payload_hash
+                or str(persisted_identity["raw_request_hash"] or "")
+                != envelope.raw_request_hash
+                or bytes(persisted_identity["signed_order_blob"] or b"")
+                != envelope.signed_order
+                or str(persisted_identity["signed_order_hash"] or "") != signed_hash
+                or str(persisted_identity["order_id"] or "") != order_id
+            ):
+                raise ValueError(
+                    "persisted signed identity does not match idempotent retry"
+                )
+            return str(persisted_identity["envelope_id"])
+
+        try:
+            insert_submission_envelope(conn, envelope, envelope_id=envelope_id)
+        except sqlite3.IntegrityError:
+            with _row_factory_as(conn, sqlite3.Row):
+                existing = conn.execute(
+                    """
+                    SELECT order_id, signed_order_hash
+                      FROM venue_submission_envelopes
+                     WHERE envelope_id = ?
+                    """,
+                    (envelope_id,),
+                ).fetchone()
+            if (
+                existing is None
+                or str(existing["order_id"] or "") != order_id
+                or str(existing["signed_order_hash"] or "") != signed_hash
+            ):
+                raise
+        occurred_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET venue_order_id = ?, updated_at = ?
+             WHERE command_id = ?
+            """,
+            (order_id, occurred_at, command_id),
+        )
+        _append_command_provenance_event(
+            conn,
+            command_id=command_id,
+            event_type="SIGNED_IDENTITY_PERSISTED_PRE_POST",
+            occurred_at=occurred_at,
+            payload={
+                "envelope_id": envelope_id,
+                "venue_order_id": order_id,
+                "signed_order_hash": signed_hash,
+                "side_effect_boundary_crossed": False,
+            },
+        )
+    return envelope_id
 
 
 def record_position_decision_attribution(

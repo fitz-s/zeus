@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-08; last_reused=2026-07-09
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S1
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import glob
+import hashlib
 import sqlite3
 import unittest.mock
 from datetime import datetime, timedelta, timezone
@@ -268,6 +269,178 @@ def _ensure_envelope(
         envelope_id=envelope_id,
     )
     return envelope_id
+
+
+def _signed_envelope(*, order_id="0xorder", token_id="tok-001", side="BUY"):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    signed_order = b"canonical-signed-order"
+    return VenueSubmissionEnvelope(
+        sdk_package="py-clob-client-v2",
+        sdk_version="test",
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        funder_address="0xfunder",
+        condition_id="condition-test",
+        question_id="question-test",
+        yes_token_id=token_id,
+        no_token_id=f"{token_id}-no",
+        selected_outcome_token_id=token_id,
+        outcome_label="YES",
+        side=side,
+        price=Decimal("0.5"),
+        size=Decimal("10"),
+        order_type="GTC",
+        post_only=False,
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("0.01"),
+        neg_risk=False,
+        fee_details={},
+        canonical_pre_sign_payload_hash="d" * 64,
+        signed_order=signed_order,
+        signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+        raw_request_hash="e" * 64,
+        raw_response_json=None,
+        order_id=order_id,
+        trade_ids=(),
+        transaction_hashes=(),
+        error_code=None,
+        error_message=None,
+        captured_at=_NOW.isoformat(),
+    )
+
+
+def test_bind_signed_submission_identity_is_durable_before_ack(conn):
+    from src.state.venue_command_repo import bind_signed_submission_identity
+
+    _insert(conn)
+    conn.execute(
+        "UPDATE venue_commands SET state='SUBMITTING' WHERE command_id='cmd-001'"
+    )
+    envelope = _signed_envelope()
+
+    envelope_id = bind_signed_submission_identity(
+        conn,
+        command_id="cmd-001",
+        envelope=envelope,
+    )
+
+    command = conn.execute(
+        "SELECT state, venue_order_id FROM venue_commands WHERE command_id='cmd-001'"
+    ).fetchone()
+    assert dict(command) == {"state": "SUBMITTING", "venue_order_id": "0xorder"}
+    persisted = conn.execute(
+        """
+        SELECT order_id, signed_order_hash
+          FROM venue_submission_envelopes
+         WHERE envelope_id = ?
+        """,
+        (envelope_id,),
+    ).fetchone()
+    assert persisted["order_id"] == "0xorder"
+    assert persisted["signed_order_hash"] == envelope.signed_order_hash
+    provenance = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM provenance_envelope_events
+         WHERE subject_type='command' AND subject_id='cmd-001'
+         ORDER BY local_sequence DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert provenance["event_type"] == "SIGNED_IDENTITY_PERSISTED_PRE_POST"
+    assert '"side_effect_boundary_crossed":false' in provenance["payload_json"]
+
+
+def test_executor_pre_post_receipt_is_backed_by_committed_canonical_readback(conn):
+    from src.execution.executor import _persist_signed_submission_identity_before_post
+
+    _insert(conn)
+    conn.execute(
+        "UPDATE venue_commands SET state='SUBMITTING' WHERE command_id='cmd-001'"
+    )
+    conn.commit()
+    envelope = _signed_envelope()
+
+    receipt = _persist_signed_submission_identity_before_post(
+        conn,
+        envelope,
+        command_id="cmd-001",
+    )
+
+    assert receipt.command_id == "cmd-001"
+    assert receipt.order_id == envelope.order_id
+    assert receipt.signed_order_hash == envelope.signed_order_hash
+    assert receipt.canonical_pre_sign_payload_hash == (
+        envelope.canonical_pre_sign_payload_hash
+    )
+    assert receipt.raw_request_hash == envelope.raw_request_hash
+    persisted = conn.execute(
+        """
+        SELECT command.venue_order_id, signed.envelope_id
+          FROM venue_commands command
+          JOIN venue_submission_envelopes signed
+            ON signed.envelope_id = ?
+           AND signed.order_id = command.venue_order_id
+         WHERE command.command_id = ?
+        """,
+        (receipt.envelope_id, receipt.command_id),
+    ).fetchone()
+    assert tuple(persisted) == (envelope.order_id, receipt.envelope_id)
+
+
+def test_bind_signed_submission_identity_rejects_wrong_order_economics(conn):
+    from src.state.venue_command_repo import bind_signed_submission_identity
+
+    _insert(conn)
+    conn.execute(
+        "UPDATE venue_commands SET state='SUBMITTING' WHERE command_id='cmd-001'"
+    )
+    bad = _signed_envelope().with_updates(price=Decimal("0.49"))
+
+    with pytest.raises(ValueError, match="does not match canonical command"):
+        bind_signed_submission_identity(conn, command_id="cmd-001", envelope=bad)
+
+    row = conn.execute(
+        "SELECT venue_order_id FROM venue_commands WHERE command_id='cmd-001'"
+    ).fetchone()
+    assert row[0] is None
+
+
+def test_bind_signed_submission_identity_retry_is_strict_noop(conn):
+    from src.state.venue_command_repo import bind_signed_submission_identity
+
+    _insert(conn)
+    conn.execute(
+        "UPDATE venue_commands SET state='SUBMITTING' WHERE command_id='cmd-001'"
+    )
+    envelope = _signed_envelope()
+    first_id = bind_signed_submission_identity(
+        conn,
+        command_id="cmd-001",
+        envelope=envelope,
+    )
+    second_id = bind_signed_submission_identity(
+        conn,
+        command_id="cmd-001",
+        envelope=envelope.with_updates(
+            captured_at="2026-04-26T00:00:01+00:00"
+        ),
+    )
+
+    assert second_id == first_id
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_submission_envelopes WHERE order_id='0xorder'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM provenance_envelope_events
+         WHERE subject_type='command'
+           AND subject_id='cmd-001'
+           AND event_type='SIGNED_IDENTITY_PERSISTED_PRE_POST'
+        """
+    ).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("terminal_state", ["MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"])
