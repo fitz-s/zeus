@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-23
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -2995,6 +2995,23 @@ def _init_edli_queue_db(path: Path) -> sqlite3.Connection:
         """
     )
     return conn
+
+
+def test_deploy_live_monitor_wait_budget_covers_runtime_coverage_contract(
+    monkeypatch,
+):
+    monkeypatch.delenv(
+        "ZEUS_DEPLOY_LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS",
+        raising=False,
+    )
+    dl = _load("deploy_live_monitor_wait_budget", "deploy_live.py")
+
+    assert dl.LIVE_MONITOR_CADENCE_CONTRACT_SECONDS == 3 * 2 * 60
+    assert (
+        dl.LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS
+        >= dl.LIVE_MONITOR_CADENCE_CONTRACT_SECONDS
+        + dl.LIVE_MONITOR_CADENCE_VERIFY_GRACE_SECONDS
+    )
 
 
 def test_deploy_live_post_start_edli_queue_wait_rejects_stale_processing_claim(

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-07-23
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -156,8 +156,19 @@ LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
 LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS", "90")
 )
+# The runtime deliberately spreads a full held book over as many as three
+# two-minute monitor cycles.  Four minutes cannot prove that six-minute
+# contract; allow one additional cycle for launch jitter and DB observation.
+LIVE_MONITOR_CADENCE_CONTRACT_SECONDS = 3 * 2 * 60
+LIVE_MONITOR_CADENCE_VERIFY_GRACE_SECONDS = 2 * 60
 LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS = float(
-    os.environ.get("ZEUS_DEPLOY_LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS", "240")
+    os.environ.get(
+        "ZEUS_DEPLOY_LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS",
+        str(
+            LIVE_MONITOR_CADENCE_CONTRACT_SECONDS
+            + LIVE_MONITOR_CADENCE_VERIFY_GRACE_SECONDS
+        ),
+    )
 )
 LIVE_EDLI_QUEUE_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_EDLI_QUEUE_VERIFY_TIMEOUT_SECONDS", "240")
