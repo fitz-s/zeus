@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 20
+  catalog_size: 21
   sunset_default: 90d
 
 hooks:
@@ -57,19 +57,14 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
-      BLOCK branch-/HEAD-/working-tree-mutating git (checkout, switch,
-      branch -b/-B/-d/-D/-f/-m, reset --hard) when the effective repo dir is
-      the MAIN tree (/Users/leofitz/zeus), including `git -C <main> ...` and
-      bare invocations whose cwd is the main tree. Failure #3 (operator
-      directive 2026-06-12): an agent ran `git fetch && git checkout -B` in
-      the MAIN tree and hijacked the live checkout's branch out from under
-      running daemons. Linked worktrees (.claude/worktrees/*) are EXEMPT —
-      agents own those. Bypass for deliberate operator action:
-      MAINTREE_GIT_BYPASS=1 (also used by scripts/agent_worktree_merge.py for
-      its sanctioned ff-only merge into the session branch).
+      BLOCK branch-/HEAD-/working-tree-mutating Git in the MAIN live checkout,
+      including direct commit, merge, reset, rebase, revert, restore, apply,
+      stash, clean, and pull. Linked worktrees are exempt. Only a verified
+      `git cherry-pick` is permitted as a local landing lane; PR merging occurs
+      through GitHub.
     blocked_when:
       - branch_mutating_git_in_main_tree
-    severity: ADVISORY
+    severity: BLOCKING
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true
@@ -197,13 +192,22 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
 
-  # pre_edit_architecture + pre_write_capability_gate DELETED 2026-06-14
-  # (workspace-routing-redesign S3 collapse, PLAN §5). Both were ADVISORY-only
-  # (never blocked = zero enforcement value) placement/capability checks on the
-  # Edit/Write line. Placement is now owned structurally by route_write
-  # (silent-route + nudge + cross-tenant HARD-STOP). Per operator gate-mass law:
-  # collapse decayed advisories, do not re-implement them. Edit-line keeps only
-  # citation_grep_gate.
+  - id: live_tree_write_guard
+    event: PreToolUse
+    matcher: "Edit|Write|MultiEdit|NotebookEdit|apply_patch"
+    intent: >
+      BLOCK agent file writes whose target resolves inside the live main checkout
+      (/Users/leofitz/zeus). Linked worktrees are explicitly allowed, including
+      nested .claude/worktrees and .codex/worktrees. Agents make and test changes
+      in their own linked worktree, commit there, then land only through a merged
+      PR or a verified git cherry-pick onto live.
+    blocked_when:
+      - agent_write_targets_live_checkout
+      - codex_apply_patch_target_unknown_from_live_checkout
+    severity: BLOCKING
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/dispatch.py
 
   - id: session_start_visibility
     event: SessionStart

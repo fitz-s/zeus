@@ -1560,6 +1560,85 @@ def _run_advisory_check_pr_monitor_arm_ack(
 _MAIN_TREE = Path("/Users/leofitz/zeus").resolve()
 
 
+def _is_nested_linked_worktree(path: Path) -> bool:
+    """Return whether `path` belongs to a linked worktree nested under live."""
+    try:
+        rel = path.relative_to(_MAIN_TREE)
+    except ValueError:
+        return False
+    return (
+        len(rel.parts) >= 3
+        and rel.parts[0] in {".claude", ".codex"}
+        and rel.parts[1] == "worktrees"
+    )
+
+
+def _live_write_target(raw_path: str, base_dir: Path) -> Path | None:
+    """Resolve an edit target only when it is in the live checkout."""
+    try:
+        candidate = Path(raw_path).expanduser()
+        target = (candidate if candidate.is_absolute() else base_dir / candidate).resolve()
+    except (OSError, ValueError):
+        return None
+    if _is_nested_linked_worktree(target):
+        return None
+    try:
+        target.relative_to(_MAIN_TREE)
+    except ValueError:
+        return None
+    return target
+
+
+def _run_advisory_check_live_tree_write_guard(
+    payload: dict[str, Any],
+) -> str | None:
+    """BLOCKING: agents never dirty the live checkout; linked worktrees are safe."""
+    tool_name = payload.get("tool_name", "") or payload.get("tool", "")
+    tool_input = payload.get("tool_input", {}) or {}
+    if not isinstance(tool_input, dict):
+        return None
+    original_tool = tool_input.get("codex_original_tool_name", "")
+    is_codex_patch = tool_name == "apply_patch" or original_tool == "apply_patch"
+    if tool_name not in {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"} and not is_codex_patch:
+        return None
+
+    raw_cwd = payload.get("cwd", "")
+    try:
+        base_dir = Path(raw_cwd).expanduser().resolve() if raw_cwd else Path.cwd().resolve()
+    except (OSError, ValueError):
+        return None
+
+    raw_paths = tool_input.get("codex_patch_paths")
+    if not isinstance(raw_paths, list):
+        raw_paths = [
+            tool_input.get("file_path", ""),
+            tool_input.get("path", ""),
+            tool_input.get("notebook_path", ""),
+        ]
+    targets = [
+        target
+        for raw_path in raw_paths
+        if isinstance(raw_path, str) and raw_path
+        if (target := _live_write_target(raw_path, base_dir)) is not None
+    ]
+
+    # A malformed Codex patch has no extractable target. Inside live, deny it
+    # instead of letting a parser gap create an edit bypass.
+    if not targets and is_codex_patch and _live_write_target(".", base_dir) is not None:
+        targets = [_MAIN_TREE]
+    if not targets:
+        return None
+
+    target_list = ", ".join(str(target) for target in targets)
+    print(
+        "BLOCKED [live_tree_write_guard]: agent file write targets the live "
+        f"checkout ({target_list}). Work only in a linked worktree; commit and "
+        "land through a merged PR or verified git cherry-pick onto live.",
+        file=sys.stderr,
+    )
+    return _BLOCK_SENTINEL
+
+
 def _run_advisory_check_maintree_git_state_guard(
     payload: dict[str, Any],
 ) -> str | None:
@@ -1573,7 +1652,11 @@ def _run_advisory_check_maintree_git_state_guard(
 
         git checkout ...        git switch ...
         git branch -b/-B/-d/-D/-f/-m ...
-        git reset --hard ...
+        git reset ...           git commit ...
+        git merge ...           git rebase ...
+        git revert ...          git restore ...
+        git apply ...           git stash ...
+        git clean ...           git pull ...
 
     Effective-dir resolution:
       * `git -C <path> ...`  -> <path> is the target dir.
@@ -1584,10 +1667,9 @@ def _run_advisory_check_maintree_git_state_guard(
     Non-mutating reads (`git branch` with no create/delete/force/move flag,
     `git branch --show-current`, `git status`, ...) never match.
 
-    Bypass (human operator deliberate action): MAINTREE_GIT_BYPASS=1, inline
-    in the command or in the hook env — same convention as the cotenant guard.
-    The agent_worktree_merge.py helper sets this for its sanctioned ff-only
-    merge into the session branch.
+    `git cherry-pick <verified-commit>` remains the one local landing lane.
+    A human operator outside agent tooling remains able to act directly; agents
+    have no bypass for direct live-tree mutation.
     """
     command = _command_from_payload(payload)
     if not command:
@@ -1601,7 +1683,11 @@ def _run_advisory_check_maintree_git_state_guard(
     # `bash -c "git checkout"`, `( git checkout )`, `time git reset --hard`, etc.
     # (2026-06-13 final-review CRITICAL-1). Groups: (1)=opts (2)=subcmd (3)=args.
     seg = _git_subcmd_at_command_position(
-        command, ("checkout", "switch", "branch", "reset")
+        command,
+        (
+            "checkout", "switch", "branch", "reset", "commit", "merge",
+            "rebase", "revert", "restore", "apply", "stash", "clean", "pull",
+        ),
     )
     if not seg:
         return None
@@ -1611,15 +1697,22 @@ def _run_advisory_check_maintree_git_state_guard(
 
     # Decide whether THIS subcommand is actually branch/HEAD/tree-mutating.
     mutating = False
-    if subcmd in ("checkout", "switch"):
+    if subcmd in (
+        "checkout", "switch", "reset", "commit", "merge", "rebase", "revert",
+        "restore", "stash", "pull",
+    ):
         mutating = True
     elif subcmd == "branch":
         # Only create/force/delete/move/copy variants mutate refs.
         if re.search(r"(?:^|\s)-(?:b|B|d|D|f|m|M|c|C)\b", sub_args):
             mutating = True
-    elif subcmd == "reset":
-        if re.search(r"(?:^|\s)--hard\b", sub_args):
-            mutating = True
+    elif subcmd == "apply":
+        mutating = "--check" not in sub_args.split()
+    elif subcmd == "clean":
+        mutating = not any(
+            arg == "--dry-run" or (arg.startswith("-") and not arg.startswith("--") and "n" in arg[1:])
+            for arg in sub_args.split()
+        )
     if not mutating:
         return None
 
@@ -1659,25 +1752,11 @@ def _run_advisory_check_maintree_git_state_guard(
     if not is_main:
         return None
 
-    # Bypass: inline assignment in the command OR exported hook env.
-    inline_bypass = re.search(r"\bMAINTREE_GIT_BYPASS=1\b", command) is not None
-    if inline_bypass or os.environ.get("MAINTREE_GIT_BYPASS", "").strip() == "1":
-        return (
-            "ADVISORY (MAINTREE_GIT_BYPASS=1): branch-mutating git on the MAIN "
-            "tree allowed by explicit bypass. The live daemons run from this "
-            "checkout — confirm no daemon depends on the current HEAD before "
-            "switching."
-        )
-
     print(
         f"BLOCKED [maintree_git_state_guard]: `git {subcmd}` would mutate the "
-        f"MAIN tree's branch/HEAD/working state ({_MAIN_TREE}). LIVE daemons run "
-        f"from this checkout — switching its branch out from under them is the "
-        f"2026-06-12 incident (an agent ran `git fetch && git checkout -B` here "
-        f"and hijacked the live branch). Agents work in their OWN linked "
-        f"worktree (.claude/worktrees/agent-*) and never mutate the main tree's "
-        f"git state. Use scripts/agent_worktree_merge.py to land work on the "
-        f"session branch. Deliberate operator action: prefix MAINTREE_GIT_BYPASS=1.",
+        f"MAIN tree's branch/HEAD/working state ({_MAIN_TREE}). Agents work in "
+        f"their own linked worktree and never mutate live directly. Commit there, "
+        f"then land through a merged PR or `git cherry-pick <verified-commit>`.",
         file=sys.stderr,
     )
     return _BLOCK_SENTINEL
@@ -1808,6 +1887,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "secrets_scan": _run_advisory_check_secrets_scan,
     "cotenant_staging_guard": _run_advisory_check_cotenant_staging_guard,
     "maintree_git_state_guard": _run_advisory_check_maintree_git_state_guard,
+    "live_tree_write_guard": _run_advisory_check_live_tree_write_guard,
     "pre_checkout_uncommitted_overlap": _run_advisory_check_pre_checkout_uncommitted_overlap,
     "pr_create_loc_accumulation": _run_advisory_check_pr_create_loc_accumulation,
     "pre_merge_comment_check": _run_advisory_check_pre_merge_comment_check,
