@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-# Created: 2026-07-23
-# Last audited: 2026-07-23
+# Lifecycle: created=2026-07-23; last_reviewed=2026-07-23; last_reused=never
+# Purpose: operator tool — archive pre-epoch (default 2026-07-01) trade records
+#   out of zeus_trades.db into a standalone archive DB, then delete them
+#   FK-safe child-first; dry-run by default, --execute gated on a backup.
+# Reuse: run dry-run before any retention/archive operation on zeus_trades.db;
+#   re-audit on any change to the trade-class schema, its append-only guard
+#   triggers, or FK edges.
 # Authority basis: operator directive 2026-07-2x "清空7月之前所有的交易记录作为archive
 #   不要再分析" (archive all pre-2026-07-01 trade records; analytics must never
 #   consult them again). Trigger drop/restore pattern is the one already
@@ -236,11 +241,13 @@ def _precondition_violations(conn: sqlite3.Connection, epoch: str) -> list[dict]
 
 
 def _candidate_venue_command_ids(
-    conn: sqlite3.Connection, epoch: str, archived_position_ids: list[str]
+    conn: sqlite3.Connection, epoch: str, position_ids: list[str]
 ) -> list[str]:
-    if not archived_position_ids:
+    """Pre-epoch commands of archived/orphan positions with no post-epoch
+    child rows (order/trade facts, lots, exit-mutex holdings)."""
+    if not position_ids:
         return []
-    placeholders = ",".join("?" for _ in archived_position_ids)
+    placeholders = ",".join("?" for _ in position_ids)
     rows = conn.execute(
         f"""
         SELECT vc.command_id
@@ -264,7 +271,7 @@ def _candidate_venue_command_ids(
               WHERE em.command_id = vc.command_id AND em.acquired_at >= ?
           )
         """,
-        (*archived_position_ids, epoch, epoch, epoch, epoch, epoch),
+        (*position_ids, epoch, epoch, epoch, epoch, epoch),
     ).fetchall()
     return [r["command_id"] for r in rows]
 
@@ -279,7 +286,10 @@ def _candidates(conn: sqlite3.Connection, epoch: str) -> dict:
     archived_positions = _archived_position_ids(conn, epoch)
     orphan_positions = _orphan_residue_position_ids(conn, epoch)
     all_positions = archived_positions + orphan_positions
-    command_ids = _candidate_venue_command_ids(conn, epoch, archived_positions)
+    # Commands are swept for archived AND orphan positions: an orphan's
+    # command chain is exactly as pre-epoch as its events/lots residue, and
+    # the same post-epoch-child NOT EXISTS guards apply (Copilot #442).
+    command_ids = _candidate_venue_command_ids(conn, epoch, all_positions)
 
     out: dict[str, tuple[str, list]] = {}
 

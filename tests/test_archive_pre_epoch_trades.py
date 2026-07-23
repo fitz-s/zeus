@@ -1,5 +1,9 @@
-# Created: 2026-07-23
-# Last audited: 2026-07-23
+# Lifecycle: created=2026-07-23; last_reviewed=2026-07-23; last_reused=never
+# Purpose: prove archive_pre_epoch_trades.py is safe — dry-run writes nothing,
+#   open-position precondition aborts, FK-safe order, trigger drop/restore,
+#   archive==delete reconciliation.
+# Reuse: run on any change to scripts/ops/archive_pre_epoch_trades.py, the
+#   trade-class guard triggers, or the trade-DB FK graph.
 # Authority basis: operator directive 2026-07-2x "清空7月之前所有的交易记录作为archive
 #   不要再分析"; companion to scripts/ops/archive_pre_epoch_trades.py.
 """Fixture-only tests for scripts/ops/archive_pre_epoch_trades.py.
@@ -398,6 +402,14 @@ def test_orphan_residue_positions_swept(tmp_path, capsys):
     live = sqlite3.connect(str(db_path))
     assert live.execute(
         "SELECT COUNT(*) FROM position_events WHERE position_id='pos-orphan-1'"
+    ).fetchone()[0] == 0
+    # Copilot #442: the orphan's pre-epoch command chain is swept with it —
+    # commands/facts/lots must not be left behind in the live DB.
+    assert live.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-orphan-1'"
+    ).fetchone()[0] == 0, "orphan's pre-epoch command chain must be archived too"
+    assert live.execute(
+        "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id='cmd-orphan-1'"
     ).fetchone()[0] == 0
     assert live.execute(
         "SELECT COUNT(*) FROM position_events WHERE position_id='pos-orphan-2'"
