@@ -766,118 +766,43 @@ def assert_sqlite_version_safe() -> None:
     )
 
 
-def checkpoint_world_wal() -> tuple[int, int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-world.db.
+def checkpoint_wal(db_path: Path) -> tuple[int, int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on the canonical DB at ``db_path``.
 
-    THE BACKSTOP (2026-06-04 WAL checkpoint-starvation fix, part 2).
-
-    Root (critic-proven, live): ``state/zeus-world.db-wal`` grows to GBs because
-    long-lived READER connections hold a WAL snapshot (read-mark) across cycles.
-    The checkpointer can only reclaim frames OLDER than the oldest active reader's
-    mark, so while a reader pins the floor ``wal_checkpoint`` copies fewer frames
-    than are in the log (``checkpointed_frames < log_frames``) and the -wal file
-    never truncates → unbounded growth → eventual lock-starvation of
-    opportunity_events emission (30-min ZERO candidates). Part 1 of the fix
-    releases each long-lived reader's snapshot per cycle (``conn.rollback()``
-    between polls) so the floor advances; THIS function is the periodic backstop
-    that actually reclaims the freed frames.
+    THE BACKSTOP against WAL checkpoint starvation, one function for all three
+    canonical DBs (world 2026-06-04; trades 2026-06-16 after the 810 MB -wal
+    incident starved snapshot writes into ``database is locked`` →
+    ``fresh_executable_city_count=0`` → no crosses; forecasts 2026-07-21, audit
+    finding W5-4). Root (critic-proven, live): a long-lived READER connection
+    holds a WAL snapshot (read-mark) across cycles; the checkpointer can only
+    reclaim frames OLDER than the oldest active reader's mark, so a pinned floor
+    means ``wal_checkpoint`` copies fewer frames than the log holds
+    (``checkpointed_frames < log_frames``) and the -wal file grows unboundedly.
+    Part 1 of the fix releases each long-lived reader's snapshot per cycle
+    (``conn.rollback()`` between polls); THIS function is the periodic backstop
+    that reclaims the freed frames.
 
     Returns ``(busy, log_frames, checkpointed_frames, page_size)`` — the
     ``wal_checkpoint(PASSIVE)`` triple plus the DB's page_size so the caller can
     size the un-checkpointed backlog in bytes without assuming a 4 KiB page.
-    PASSIVE checkpoints copy all currently safe WAL
-    frames without waiting for readers/writers or trying to truncate the file.
-    That preserves live writer priority: a checkpoint must never sit in SQLite's
-    busy handler while held-position monitor/redecision work is waiting to write.
-    W5-2 fix (2026-07-21): ``busy`` (row[0]) is a PASSIVE-mode constant 0 —
-    ``sqlite3_wal_checkpoint_v2`` never invokes the busy handler and never
-    returns SQLITE_BUSY for PASSIVE; that field is 1 only for a blocked
-    RESTART/FULL/TRUNCATE checkpoint, none of which this function runs. The
-    real reader-pinning-the-floor signal is ``checkpointed_frames < log_frames``
-    (row[2] < row[1]); callers (``main.py``'s ``_wal_checkpoint_is_starved``)
-    alert on that, not on ``busy``.
+    PASSIVE is intentional for live writer priority: it copies all currently
+    safe frames without waiting behind readers/writers and never truncates.
+    W5-2 (2026-07-21): PASSIVE never invokes the busy handler for a pinned
+    floor — ``busy`` is 1 only when a CONCURRENT checkpointer holds the
+    exclusive checkpoint lock. The real starvation signal is
+    ``checkpointed_frames < log_frames``; ``main.py``'s
+    ``_wal_checkpoint_is_starved`` alerts on that, not on ``busy``.
 
     Lock discipline: a checkpoint is NOT a write transaction. SQLite serializes
-    checkpoints internally (the checkpoint lock), so this MUST NOT take the
-    process-global world write mutex — holding it here would needlessly block
-    every world writer for the checkpoint duration. A dedicated short-lived
-    connection is used and closed immediately so it never itself becomes a
-    floor-pinning reader.
+    checkpoints internally, so this MUST NOT take a process-global write
+    mutex — holding one here would needlessly block every writer for the
+    checkpoint duration. A dedicated short-lived connection is used and closed
+    immediately so it never itself becomes a floor-pinning reader.
     """
-    conn = _connect(ZEUS_WORLD_DB_PATH, write_class=None)
+    conn = _connect(db_path, write_class=None)
     try:
         row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         # Row is (busy, log, checkpointed). Normalise to ints for callers/logs.
-        busy = int(row[0]) if row is not None else 1
-        log_frames = int(row[1]) if row is not None else -1
-        ckpt_frames = int(row[2]) if row is not None else -1
-        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
-        return (busy, log_frames, ckpt_frames, page_size)
-    finally:
-        conn.close()
-
-
-def checkpoint_trades_wal() -> tuple[int, int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus_trades.db.
-
-    THE BACKSTOP (2026-06-16) — the zeus_trades.db twin of ``checkpoint_world_wal``.
-
-    Root (live-evidenced 2026-06-16): ``state/zeus_trades.db-wal`` grew to 810 MB
-    because a long-lived READER connection in the live daemon held a WAL snapshot
-    (read-mark) across cycles, pinning the WAL floor so ``wal_checkpoint`` could
-    not drain the full log (``checkpointed_frames < log_frames``) and never
-    truncated → unbounded growth → ``executable_market_snapshots`` writes failed
-    ``database is locked`` (auto-checkpoint contention on every write) →
-    ``fresh_executable_city_count=0`` → the q-kernel spine could not price fresh
-    families → no crosses. zeus-world.db already had this backstop; the trade DB did
-    not. Same lock discipline: a dedicated short-lived connection, NO process-global
-    write mutex (a checkpoint is not a write txn; SQLite serializes checkpoints
-    internally), closed immediately so it never itself becomes a floor-pinning reader.
-
-    Returns ``(busy, log_frames, checkpointed_frames, page_size)``. PASSIVE mode
-    is intentional for live: reclaim safe frames without waiting behind active
-    monitor writers or blocking the next held-position redecision tick. W5-2 fix
-    (2026-07-21): ``busy`` is always 0 for PASSIVE — see ``checkpoint_world_wal``'s
-    docstring for why; the real starvation signal is ``checkpointed_frames <
-    log_frames``.
-    """
-    conn = _connect(_zeus_trade_db_path(), write_class=None)
-    try:
-        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
-        busy = int(row[0]) if row is not None else 1
-        log_frames = int(row[1]) if row is not None else -1
-        ckpt_frames = int(row[2]) if row is not None else -1
-        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
-        return (busy, log_frames, ckpt_frames, page_size)
-    finally:
-        conn.close()
-
-
-def checkpoint_forecasts_wal() -> tuple[int, int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-forecasts.db.
-
-    THE BACKSTOP (2026-07-21, audit finding W5-4) — the zeus-forecasts.db twin of
-    ``checkpoint_world_wal`` / ``checkpoint_trades_wal``. Forecasts previously had
-    no checkpoint backstop at all, relying solely on the default
-    ``wal_autocheckpoint`` (1000 pages ≈ 4 MB) — structurally unguarded against the
-    same reader-pinning-the-floor starvation world/trades were patched for, masked
-    so far only by the forecasts WAL being the smallest of the three canonical DBs
-    (observed 2.0-7.7 MB vs. trades' 95-373 MB). Same lock discipline: a dedicated
-    short-lived connection, NO process-global write mutex (a checkpoint is not a
-    write txn; SQLite serializes checkpoints internally), closed immediately so it
-    never itself becomes a floor-pinning reader.
-
-    Returns ``(busy, log_frames, checkpointed_frames, page_size)``. PASSIVE mode
-    is intentional for live, matching the world/trades twins: reclaim safe frames
-    without waiting behind active forecast writers. ``busy`` (row[0]) is always 0
-    for PASSIVE — see ``checkpoint_world_wal``'s docstring for why; the real
-    reader-pinning-the-floor signal is ``checkpointed_frames < log_frames``
-    (row[2] < row[1]), which callers (``main.py``'s ``_wal_checkpoint_is_starved``)
-    alert on.
-    """
-    conn = _connect(ZEUS_FORECASTS_DB_PATH, write_class=None)
-    try:
-        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         busy = int(row[0]) if row is not None else 1
         log_frames = int(row[1]) if row is not None else -1
         ckpt_frames = int(row[2]) if row is not None else -1
@@ -1434,15 +1359,6 @@ _RUNTIME_PENDING_FILL_AUTHORITIES = frozenset(
     {
         FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
         FILL_AUTHORITY_CANCELLED_REMAINDER,
-    }
-)
-TERMINAL_TRADE_DECISION_STATUSES = frozenset(
-    {
-        "exited",
-        "settled",
-        "voided",
-        "admin_closed",
-        "unresolved_ghost",
     }
 )
 PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
@@ -3015,7 +2931,12 @@ def init_schema(
 
     """)
     _ensure_job_run_release_key_identity(conn)
-    init_snapshot_schema(conn, include_latest=False)
+    # Residue dissolve 2026-07-23: init_snapshot_schema is NOT called here.
+    # executable_market_snapshots is trade-class (all writers/readers use the
+    # trade connection; registry entry on world is legacy_archived/non-owning),
+    # so world init must not materialize a ghost copy. The live world DB's
+    # existing empty ghost is retained until a separately authorized drop;
+    # settlement_commands' Tier-1 world-ATTACH lookup fail-softs to Tier 2/3.
     # R3 M4 exit mutex DDL lives here to keep DB initialization independent of
     # importing src.execution modules.  The execution module repeats the same
     # idempotent CREATE TABLE for direct use.
@@ -13910,17 +13831,6 @@ def log_exit_fill_check_error_event(
         event_type="EXIT_FILL_CHECK_FAILED",
         status="",
         order_id=order_id,
-        timestamp=timestamp,
-    )
-
-
-def log_exit_retry_released_event(conn: sqlite3.Connection, pos: object, *, timestamp: str | None = None) -> None:
-    """Append telemetry when cooldown expires and exit can be re-evaluated."""
-    log_exit_lifecycle_event(
-        conn,
-        pos,
-        event_type="EXIT_RETRY_RELEASED",
-        status="ready",
         timestamp=timestamp,
     )
 
