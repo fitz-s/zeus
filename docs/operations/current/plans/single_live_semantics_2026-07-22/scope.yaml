@@ -1,0 +1,66 @@
+id: single_live_semantics_2026_07_22
+status: executing
+owner: operator
+frontier: single_live_runtime_semantics
+allowed_files:
+  - docs/operations/current/plans/single_live_semantics_2026-07-22.md
+  - docs/operations/current/plans/single_live_semantics_2026-07-22/scope.yaml
+  - docs/operations/current/plans/INDEX.md
+  - AGENTS.md
+  - architecture/AGENTS.md
+  - architecture/ast_rules/forbidden_patterns.md
+  - architecture/canonical_vocabulary.yaml
+  - architecture/db_table_ownership.yaml
+  - architecture/docs_registry.yaml
+  - architecture/map_maintenance.yaml
+  - architecture/money_path_objects.yaml
+  - architecture/script_manifest.yaml
+  - architecture/source_rationale.yaml
+  - architecture/test_topology.yaml
+  - deploy/launchd/com.zeus.calibration-transfer-eval.plist
+  - docs/authority/replacement_final_form_2026_06_09.md
+  - docs/authority/regime_unification_2026-06-12.md
+  - docs/authority/zeus_current_architecture.md
+  - docs/reference/glossary.md
+  - docs/reference/modules/scripts.md
+  - scripts/check_advisory_gates.py
+  - scripts/check_edli_live_probe_gate.py
+  - scripts/check_retired_forecast_preview.py
+  - scripts/evaluate_calibration_transfer_oos.py
+  - scripts/rehearse_replacement_forecast_simple_switch.py
+  - scripts/apply_replacement_forecast_live_switch.py
+  - src/backtest/decision_time_truth.py
+  - src/backtest/executable_ev_replay.py
+  - src/backtest/purpose.py
+  - removed temporal report engine
+  - src/data/forecast_source_registry.py
+  - src/data/retired_forecast_preview.py
+  - src/data/scheduler_adapter.py
+  - src/data/source_job_registry.py
+  - src/engine/cycle_runtime.py
+  - src/engine/replay.py
+  - src/state/db_writer_lock.py
+  - src/state/schema/v2_schema.py
+  - src/supervisor_api/contracts.py
+  - tests/test_backtest_purpose_contract.py
+  - tests/test_replacement_forecast_live_schema.py
+  - tests/test_replacement_forecast_materializer.py
+  - tests/test_source_job_registry.py
+  - tests/test_live_safety_invariants.py
+forbidden_files:
+  - state/zeus-world.db
+  - state/zeus-forecasts.db
+  - state/zeus_trades.db
+live_side_effects_allowed: none_in_source_waves
+high_risk_changes:
+  - live DB schema migration
+  - LaunchAgent unload or deletion
+  - daemon restart or deploy
+  - active authority rewrite
+tests:
+  - tests/test_backtest_purpose_contract.py
+  - tests/test_replacement_forecast_live_schema.py
+  - tests/test_replacement_forecast_materializer.py
+  - tests/test_source_job_registry.py
+  - tests/test_live_safety_invariants.py
+closeout_required: true

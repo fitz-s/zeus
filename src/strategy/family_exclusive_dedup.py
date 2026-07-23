@@ -17,9 +17,9 @@ The live path uses ``optimize_exclusive_outcome_portfolio`` through
 ``preselect_single_family_edge_before_kelly`` / ``build_weather_family_decision``.
 That optimizer compares buy-YES and native buy-NO by the same payoff-vector
 objective, so dominated sibling-NO exposure loses to a capital-efficient center
-YES when the payoff is equivalent. Multi-leg portfolio search remains available
-only by explicit operator override; the live default is single-leg until the
-execution layer has a tested stake-vector/partial-fill portfolio state machine.
+YES when the payoff is equivalent. Multi-leg search is always evaluated against
+the current family endowment; execution still admits each selected leg only
+through its own durable command, fill, and cumulative-capital checks.
 
 ``dedup_mutually_exclusive_families`` remains a second-line runtime safety net
 for legacy/mixed callers and existing-exposure conflicts. It prevents scalar
@@ -37,60 +37,12 @@ from dataclasses import dataclass
 from itertools import combinations
 import logging
 import math
-import os
 from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.engine.evaluator import EdgeDecision
 
 logger = logging.getLogger(__name__)
-
-ENV_FLAG = "ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY"
-_DEFAULT = "1"  # ON by default (live-money fail-safe).
-BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_ENABLED"
-BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED"
-
-# Wave 4 (2026-05-27), live repair 2026-06-19: the full-omega family optimizer
-# is live, but live execution is constrained to single-leg selection by default.
-# Multi-leg portfolios require a separate execution state machine for legging,
-# partial fills, UNKNOWN recovery, and stake-vector optimization; until then an
-# explicit env override is test/research only and blocked by restart preflight.
-ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS"
-DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = 1
-# Hard cap on a family portfolio's worst-case loss (USD). When set, the
-# optimizer rejects portfolios with ``max_loss_usd > cap``. Default None = no cap
-# (relies on per-leg Kelly + portfolio_heat to bound exposure).
-ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD = "ZEUS_FAMILY_PORTFOLIO_MAX_LOSS_USD"
-
-
-def _family_portfolio_max_legs() -> int:
-    """Live max_legs for the Stage B family portfolio optimizer.
-
-    Unknown or invalid values use the live default.
-    """
-    try:
-        raw = os.environ.get(
-            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
-            str(DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE),
-        )
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE
-
-
-def _family_portfolio_max_loss_usd() -> float | None:
-    """Optional hard-cap on Stage B portfolio worst-case loss (USD).
-
-    Returns None when unset, disabled, or invalid.
-    """
-    raw = os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD, "").strip()
-    if not raw:
-        return None
-    try:
-        cap = float(raw)
-    except (TypeError, ValueError):
-        return None
-    return cap if cap > 0.0 else None
 
 from src.contracts.no_trade_reason import NoTradeReason
 from src.contracts.canonical_lifecycle import (
@@ -99,18 +51,9 @@ from src.contracts.canonical_lifecycle import (
     VenueTradeStatus,
 )
 from src.state.canonical_projections import OPEN_ORDER_FACT_STATES
-from src.config import get_mode, settings
 
 # Audit reason string for dropped bins.
 MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
-# X2 fix (Copilot review of PR #348): audit-trail string for the Wave 4
-# loss-cap rejection path. NoTradeReason enum bump is deferred until the next
-# DB-migration PR (SV15 CHECK constraint requires schema_version bump + re-pin).
-# The string constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so
-# operators can grep / aggregate optimizer loss-cap rejections from logs.
-# See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
-# section Wave 4.
-FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED = "family_portfolio_loss_cap_exceeded"
 FAMILY_REJECTION_STAGE = "ANTI_CHURN"
 _SAME_FAMILY_MONITOR_OWNED_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
 
@@ -931,17 +874,6 @@ def _has_conflicting_existing_exposure(
     return False, None
 
 
-def family_gate_enabled() -> bool:
-    """True when the scalar family safety gate is ON.
-
-    Default ON ("1"). Disabled only by an explicit ``"0"`` / ``"false"`` /
-    ``"no"`` / ``"off"`` (case-insensitive). Any other value (including the
-    unset default) keeps the live-money fail-safe ON.
-    """
-    raw = os.environ.get(ENV_FLAG, _DEFAULT).strip().lower()
-    return raw not in {"0", "false", "no", "off"}
-
-
 def _decision_family_selection_score(decision: "EdgeDecision") -> float:
     """Expected net-profit proxy for a sized family leg.
 
@@ -1423,49 +1355,10 @@ def _edge_preselection_key(edge: Any) -> tuple[float, float, float, tuple[int, .
     return (score, posterior, entry_price, tuple(-ord(c) for c in label))
 
 
-def _strict_feature_flag(name: str, *, default: bool = False) -> bool:
-    flags = settings["feature_flags"]
-    value = flags.get(name, default)
-    if not isinstance(value, bool):
-        raise ValueError(f"feature flag {name} must be boolean, got {type(value).__name__}")
-    return bool(value)
-
-
-def _native_buy_no_live_rejection_reason() -> str | None:
-    if not buy_no_native_quote_evidence_submit_enabled():
-        return "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
-    return None
-
-
-def buy_no_native_quote_evidence_enabled() -> bool:
-    return _strict_feature_flag(BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG)
-
-
-def buy_no_native_quote_evidence_submit_enabled() -> bool:
-    evidence_enabled = buy_no_native_quote_evidence_enabled()
-    submit_enabled = _strict_feature_flag(BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG)
-    if submit_enabled and not evidence_enabled:
-        raise ValueError(
-            f"{BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG}=true requires "
-            f"{BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG}=true"
-        )
-    return submit_enabled
-
-
 def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
     """Return structural live-execution reason before a leg consumes ranked selection."""
 
-    structural = _edge_family_candidate_rejection_reason(edge)
-    if structural:
-        return structural
-    if get_mode() != "live":
-        return None
-    if str(getattr(edge, "direction", "") or "") != "buy_no":
-        return None
-    try:
-        return _native_buy_no_live_rejection_reason()
-    except ValueError as exc:
-        return f"BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID:{exc}"
+    return _edge_family_candidate_rejection_reason(edge)
 
 
 def _same_family_monitor_owned_reason(reason: object) -> bool:
@@ -1497,7 +1390,6 @@ def preselect_single_family_edge_before_kelly(
     target_date: str,
     temperature_metric: str,
     outcome_probabilities: Mapping[int, float] | Sequence[float] | None = None,
-    enabled: bool | None = None,
 ) -> tuple[list[Any], list[FamilyPreselectionDrop]]:
     """Collapse one mutually-exclusive weather family before scalar Kelly.
 
@@ -1506,15 +1398,11 @@ def preselect_single_family_edge_before_kelly(
     exposure, heat, min-order, or risk throttles.
     """
 
-    if enabled is None:
-        enabled = family_gate_enabled()
-    if not enabled or len(edges) < 2:
+    if len(edges) < 2:
         return edges, []
 
-    # The family portfolio optimizer is the live selector, including when max_legs is explicitly set
-    # to 1 for emergency single-leg rollback. This keeps pre-Kelly selection
-    # and build_weather_family_decision on the same payoff-vector objective.
-    max_legs = _family_portfolio_max_legs()
+    # The family portfolio optimizer is the only live selector.
+    max_legs = len(edges)
     portfolio = optimize_exclusive_outcome_portfolio(
         edges,
         city=city,
@@ -1523,10 +1411,7 @@ def preselect_single_family_edge_before_kelly(
         outcome_probabilities=outcome_probabilities,
         max_legs=max_legs,
     )
-    loss_cap = _family_portfolio_max_loss_usd()
-    if portfolio is not None and (
-        loss_cap is None or float(portfolio.max_loss_usd) <= loss_cap
-    ):
+    if portfolio is not None:
         selected_ids = {id(edge) for edge in portfolio.selected_legs}
         kept: list[Any] = [edge for edge in edges if id(edge) in selected_ids]
         kept_labels = ",".join(_edge_bin_label(edge) for edge in kept)
@@ -1601,13 +1486,9 @@ def build_weather_family_decision(
     temperature_metric: str,
     market_family_id: str = "",
     outcome_probabilities: Mapping[int, float] | Sequence[float] | None = None,
-    enabled: bool | None = None,
 ) -> WeatherFamilyDecision | None:
     """Build the family portfolio decision consumed before scalar Kelly."""
 
-    gate_enabled = family_gate_enabled() if enabled is None else enabled
-    if not gate_enabled:
-        return None
     candidate_edges = list(edges)
     blocked_edges: list[tuple[Any, str]] = []
     excluded_blocked_edges: list[tuple[Any, str]] = []
@@ -1622,8 +1503,7 @@ def build_weather_family_decision(
         candidate_edges = executable_candidate_edges
         excluded_blocked_edges = blocked_edges
 
-    # Wave 4 (2026-05-27): max_legs controls the live family portfolio optimizer.
-    max_legs = _family_portfolio_max_legs()
+    max_legs = len(candidate_edges)
     portfolio = optimize_exclusive_outcome_portfolio(
         candidate_edges,
         city=city,
@@ -1634,18 +1514,6 @@ def build_weather_family_decision(
         max_legs=max_legs,
     )
     if portfolio is None:
-        return None
-    # Wave 4: hard-cap on worst-case family loss. When the cap is set and the
-    # optimizer's portfolio exceeds it, reject this family decision explicitly.
-    loss_cap = _family_portfolio_max_loss_usd()
-    if loss_cap is not None and float(portfolio.max_loss_usd) > loss_cap:
-        logger.warning(
-            "[%s] city=%s target=%s metric=%s "
-            "max_loss_usd=%.4f > cap=%.4f - rejecting family portfolio",
-            FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED.upper(),
-            city, target_date, temperature_metric,
-            float(portfolio.max_loss_usd), loss_cap,
-        )
         return None
     ranked_edges = sorted(candidate_edges, key=_edge_preselection_key, reverse=True)
     selected_legs = list(portfolio.selected_legs)
@@ -1743,7 +1611,6 @@ def dedup_mutually_exclusive_families(
     target_date: str,
     temperature_metric: str,
     market_family_id: str = "",
-    enabled: bool | None = None,
     existing_exposures: Iterable[Any] | None = None,
     family_portfolio_allowed_exposure_ids: Iterable[str] | None = None,
     family_portfolio_intent: bool = False,
@@ -1766,8 +1633,6 @@ def dedup_mutually_exclusive_families(
         city / target_date / temperature_metric: the family key. EdgeDecision
             does not itself carry the family identity (city/date/metric live on
             the candidate, not the per-bin decision), so the caller supplies it.
-        enabled: override for the env gate; ``None`` reads
-            ``family_gate_enabled()``.
         existing_exposures: optional current-cycle read model of already
             open/pending/active exposure keyed by ``WeatherFamilyKey``. When a
             different bin already has exposure, new independent entries for the
@@ -1783,11 +1648,6 @@ def dedup_mutually_exclusive_families(
     Returns:
         The same ``decisions`` list (mutated in place when the gate fires).
     """
-    if enabled is None:
-        enabled = family_gate_enabled()
-    if not enabled:
-        return decisions
-
     key = _family_key(city, target_date, temperature_metric, market_family_id)
     allowed_exposure_ids = {
         str(value).strip()

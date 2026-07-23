@@ -7,12 +7,8 @@ Design authority: `docs/rebuild/order_engine_first_principles_design_2026-07-02.
 
 ## WHY this zone matters
 
-SOLVE is the order-engine rebuild's decision core: given ONE served belief (joint q + band)
-and the executable venue menu, it plans the multi-order action that maximizes robust
-expected log terminal wealth against the current portfolio as ENDOWMENT. It replaces the
-top-1-candidate picker (`src/decision/family_decision_engine.py`) at exactly one seam —
-`src/engine/qkernel_spine_bridge.py:1332` — behind the time-boxed `w3_solve_enabled`
-promotion flag. The cross-family global single-order selector is wired through the reactor's
+SOLVE supplies the current-state probability, payoff, executable-curve, and wealth math used
+by the live global single-order selector. The selector is wired through the reactor's
 `prepare all -> choose one -> JIT recapture -> submit once` epoch; live authority still requires
 current scope, book, wealth, probability, RiskGuard, and venue receipt evidence each cycle.
 
@@ -23,8 +19,7 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
 | `types.py` | Typed menu / endowment / scenario / plan I/O. `PlannedOrder.q_version` mandatory (W1.2 stamp law); every plan stamps `correlation_rail`. | MEDIUM — contract surface |
 | `scenario_service.py` | `ScenarioService` protocol + `TransitionalIndependentProduct` (index-paired product measure). The ONE seam C4 swaps; solver never re-samples. | MEDIUM — one-belief law |
 | `menu_adapter.py` | `NegRiskRouteSet` (+holdings/cash) → `SolveMenu`. PURE reshaping: no re-pricing, no dropping non-executable items, no synthesizing conversion routes. | MEDIUM |
-| `solver.py` | `solve()` → `SolutionPlan` (joint log-utility optimizer + κ + discrete repair) and `SolveEngineShim` (FamilyDecision-shaped seam, sub-slice 3). | HIGH — outcome-deciding math |
-| `kappa.py` | Fractional-shading policy. κ=1.0 while the downstream kelly_multiplier haircut lives (single-owner law, enforced by construction). | HIGH — double-shading guard |
+| `solver.py` | Current probability/payoff witnesses, executable-curve checks, and global log-wealth helpers. | HIGH — outcome-deciding math |
 | `exits.py` | Exits-as-same-solve (C5 marginal rule). Bodies land in a later sub-slice. | MEDIUM |
 
 ## Domain rules

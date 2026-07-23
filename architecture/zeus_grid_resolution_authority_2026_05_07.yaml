@@ -125,4 +125,4 @@ amendment_log:
   - date: 2026-05-07
     summary: "P0 surfaced: src/data/ecmwf_open_data.py still requests deprecated mx2t6 → silently broken since some unknown date. Patch pending (separate scope from this authority doc)."
   - date: 2026-05-07
-    summary: "Paradox diagnostic verified TIGGE extractor uses all-overlap discipline (line 504-505); 20/20 Tokyo days exact match. A1+3h paradox NULL. Live extractor inner-only asymmetry leaves daily_max unchanged for Asia (boundary windows = local night, never the max). Live patches: cloud extract TRACKS dict + Option 4 data_version rename + test update."
+    summary: "Paradox telemetry verified TIGGE extractor uses all-overlap discipline (line 504-505); 20/20 Tokyo days exact match. A1+3h paradox NULL. Live extractor inner-only asymmetry leaves daily_max unchanged for Asia (boundary windows = local night, never the max). Live patches: cloud extract TRACKS dict + Option 4 data_version rename + test update."

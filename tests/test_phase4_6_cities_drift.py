@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("eccodes")
 from scripts.extract_tigge_mx2t6_localday_max import (
     CityManifestDriftError,
     _cross_validate_city_manifests,

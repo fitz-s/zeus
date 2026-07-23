@@ -23,12 +23,26 @@ It also greps the live source to prove no live caller percentiles RAW per-bin ma
 from __future__ import annotations
 
 import pathlib
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.special import ndtr
 
 from src.data.replacement_forecast_materializer import _build_fused_q_bounds
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin
+
+
+@dataclass(frozen=True)
+class _TemperatureBin:
+    bin_id: str
+    lower_c: float | None = None
+    upper_c: float | None = None
+    center_c: float | None = None
+    display_unit: str = "C"
+    settlement_unit: str = "C"
+    rounding_rule: str = "wmo_half_up"
+
+
+AifsTemperatureBin = _TemperatureBin
 
 
 def _modal_spike_bins() -> list[AifsTemperatureBin]:

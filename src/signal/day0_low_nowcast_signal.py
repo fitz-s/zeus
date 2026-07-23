@@ -23,7 +23,7 @@ class Day0LowNowcastSignal:
 
     final_low = settle(min(observed_low_so_far, future_member_min))
     observed_low_so_far forms a ceiling: the day's minimum cannot be above it.
-    current_temp is diagnostic context only; it MUST NOT enter the settlement-value path
+    current_temp is telemetry context only; it MUST NOT enter the settlement-value path
     (a daily minimum is a path extremum, not a convex blend with the current temperature).
     """
 
@@ -79,7 +79,7 @@ class Day0LowNowcastSignal:
 
     def settlement_samples(self) -> np.ndarray:
         # Physical LOW preimage: each sample = settle(min(observed_low_so_far, future_member_min)).
-        # current_temp is intentionally NOT consulted (diagnostic only) — see build_day0_low_distribution.
+        # current_temp is intentionally NOT consulted (non-actuating record) — see build_day0_low_distribution.
         return build_day0_low_distribution(
             observed_low_so_far=self.obs_ceiling,
             future_member_mins=self.ens_remaining,

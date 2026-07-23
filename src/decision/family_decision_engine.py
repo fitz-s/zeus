@@ -11,9 +11,8 @@
 #   filter [direction_law_ok, coherence_allows, edge_lcb>0 & optimal_delta_u>0] ->
 #   selected = max ROI-frontier candidate) and the Stage 8 block lines 1166-1184.
 #   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
-#   (GREENFIELD — no live edits; reactor wiring is Wave 5. The scalar robust_trade_score
-#   is telemetry only — it CANNOT select. This is the decision authority on the
-#   w3_solve_enabled()-OFF path; the flag ON wraps it with SolveEngineShim
+#   (GREENFIELD — no live edits; reactor wiring is Wave 5. This is the decision authority on the
+#   live per-family decision path
 #   (src/solve/solver.py), which composes it for scaffolding and replaces selection
 #   with the joint solver. It ASSEMBLES the already-built spine modules, never
 #   re-implements them).
@@ -34,7 +33,7 @@
 #     - src/probability/instruments.py::Instrument
 #     - src/decision/payoff_vector.py::{CandidateRoute, CandidateEconomics,
 #                       build_candidate_route, compute_candidate_economics,
-#                       live_candidate_passes, scalar_trade_score}      (payoff candidates)
+#                       live_candidate_passes}                          (payoff candidates)
 #     - src/strategy/utility_ranker.py::{FamilyPayoffMatrix, PortfolioExposureVector}
 #                       (the ΔU sizing geometry the payoff layer maximizes over)
 #     - src/contracts/native_side_candidate.py::NativeSideCandidate     (the sizing candidate)
@@ -77,20 +76,15 @@ THE THREE CORRECTED TRANSFORMATIONS THIS ORCHESTRATOR PRESERVES (operator law �
 bad output mathematically impossible; NO gate/cap/clamp/haircut that catches a bad value
 and leaves a broken transform in place):
 
-  1. SELECTION IS ROI-FRONTIER OVER THE SURVIVORS, NEVER A SCALAR TRADE
-     SCORE (operator Shanghai correction over spec lines 900-903, 1184). The candidate filter chain is
+  1. SELECTION IS ROI-FRONTIER OVER THE SURVIVORS (operator Shanghai correction over spec
+     lines 900-903). The candidate filter chain is
      ``direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)``,
      and live qkernel selects on an ROI frontier: guarded edge per dollar first, after
      excluding dust candidates with no meaningful lower-bound profit, with robust log-growth
      as the secondary tie-breaker. ``total_delta_u`` remains an explicit research objective,
-     but it is not the live default. The scalar
-     ``robust_trade_score`` (``scalar_trade_score`` from payoff_vector) is computed for
-     EVERY candidate as TELEMETRY on the receipt, but it is never one of the filter
-     conditions and never the argmax key. There is no code path where the scalar reaches
-     the selection — the inputs are the vector quantities (``edge_lcb``, ``optimal_delta_u``,
-     ``optimal_stake_usd``) and the structural proofs (direction law, coherence). A reversion
-     that selected ``argmax robust_trade_score`` would pick a different candidate; here the
-     scalar cannot select.
+     but it is not the live default. Selection consumes vector quantities
+     (``edge_lcb``, ``optimal_delta_u``, ``optimal_stake_usd``) and structural proofs
+     (direction law, coherence).
 
   2. COHERENCE BLOCKS BEFORE SCORING (spec lines 891, 897, 953; market_coherence Stage 9).
      ``coherence_allows(c)`` consults the typed ``MarketCoherenceReport``: when the report
@@ -192,7 +186,6 @@ from src.decision.payoff_vector import (
     build_candidate_route,
     compute_candidate_economics,
     live_candidate_passes,
-    scalar_trade_score,
 )
 from src.execution.family_book import FamilyBook, family_book_from_snapshots
 from src.execution.negrisk_routes import (
@@ -490,7 +483,7 @@ class RouteSetBuilder(Protocol):
 # ===========================================================================
 # CandidateDecision — one enumerated candidate's full economics + provenance.
 # (Internal carrier; the FamilyDecision.candidates tuple is CandidateEconomics
-# per the spec, but the engine threads the route + side + scalar telemetry alongside.)
+# per the spec, while the engine threads the route + side proofs alongside.)
 # ===========================================================================
 
 @dataclass(frozen=True)
@@ -505,9 +498,6 @@ class CandidateDecision:
     * ``direction_law_ok`` — whether the candidate's (side, bin) is direction-law-legal
       against the forecast (modal) bin.
     * ``coherence_allows`` — whether the market-coherence report does NOT block this bin.
-    * ``robust_trade_score`` — the SCALAR ``q - price`` telemetry (point fair value minus
-      cost). RECORDED for the receipt; NEVER read by the selection. This is the demoted
-      scalar that cannot select a trade.
     * ``q_lcb_guard_basis`` / ``q_lcb_guard_abstained`` — the side-aware OOF reliability
       verdict applied to this candidate. A NO-on-modal direction relaxation can only use
       an active OOF verdict, never an inert/missing evidence path.
@@ -521,7 +511,6 @@ class CandidateDecision:
     economics: CandidateEconomics
     direction_law_ok: bool
     coherence_allows: bool
-    robust_trade_score: float
     q_lcb_guard_basis: str = ""
     q_lcb_guard_abstained: bool = False
     # [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS] Domain provenance identifier, not a credential.
@@ -622,7 +611,7 @@ class FamilyDecision:
 def forecast_bin_id(joint_q: JointQ) -> str:
     """The modal max-mass bin of the joint q.
 
-    This is useful for receipts and diagnostics. It is not a live admission rule; direct
+    This is useful for receipts and telemetry. It is not a live admission rule; direct
     native side/bin selection is governed by vector economics.
     """
     q = np.asarray(joint_q.q, dtype=float)
@@ -932,7 +921,6 @@ class FamilyDecisionEngine:
                     forecast_bin=forecast_bin,
                 ),
                 coherence_allows=True,
-                robust_trade_score=d.robust_trade_score,
             )
             for d in enumerated
         )
@@ -1058,7 +1046,6 @@ class FamilyDecisionEngine:
 
         # --- (7) the filter chain (spec lines 896-898) — ORDER IS THE CONTRACT ----
         #   native side proof -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)
-        # The scalar robust_trade_score is NOT one of the conditions.
         selected_decision, no_trade_reason = self._select(scored)
         if selected_decision is not None:
             selected_decision = self._apply_symmetric_center_yes_dominance(
@@ -1200,7 +1187,6 @@ class FamilyDecisionEngine:
 
         Returns ``None`` only when the route's instrument bin is not in the Omega (a wiring
         fault surfaced by the instrument layer — skip rather than crash the whole family).
-        The scalar ``robust_trade_score`` is computed for the receipt; it never selects.
         """
         instrument = _instrument_for(route_cost)
         try:
@@ -1237,7 +1223,6 @@ class FamilyDecisionEngine:
                 guarded_payoff_q_lcb=served_payoff_q_lcb,
             )
 
-        scalar = scalar_trade_score(joint_q, route)
         # direction_law_ok / coherence_allows are stamped by the caller (coherence needs the
         # full candidate-bin set first); here we record placeholders that the caller overrides.
         return CandidateDecision(
@@ -1245,7 +1230,6 @@ class FamilyDecisionEngine:
             economics=economics,
             direction_law_ok=False,
             coherence_allows=False,
-            robust_trade_score=scalar,
         )
 
     def _zero_economics(
@@ -2281,10 +2265,9 @@ class FamilyDecisionEngine:
 
         The default live objective selects on an ROI frontier: lower-bound edge per cost
         with absolute lower-bound profit and stake floors, then robust utility. Research
-        callers may explicitly request ``total_delta_u`` or ``utility_density``. The scalar
-        ``robust_trade_score`` is NEVER consulted. When the survivor set is empty, the
-        returned ``no_trade_reason`` names the FIRST filter that emptied it (so the no-trade
-        is auditable to its cause).
+        callers may explicitly request ``total_delta_u`` or ``utility_density``. When the
+        survivor set is empty, the returned ``no_trade_reason`` names the FIRST filter that
+        emptied it (so the no-trade is auditable to its cause).
         """
         if not scored:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
@@ -2393,7 +2376,6 @@ class FamilyDecisionEngine:
         # rejected by confidence-weighted Kelly growth density plus lower-bound profit,
         # not by their raw notional size. Research callers can explicitly request total
         # utility or density.
-        # The scalar trade score is NOT a key in any objective.
         if self._selection_objective == "roi_frontier":
             roi_frontier = self._roi_frontier_candidates(survivors)
             if not roi_frontier:

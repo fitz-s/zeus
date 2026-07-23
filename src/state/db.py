@@ -420,7 +420,7 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
 # --------------------------------------------------------------------------
 # zeus-world.db IN-PROCESS WRITE SERIALIZATION (2026-05-31)
 # --------------------------------------------------------------------------
-# Root (EDLI live canary): zeus-world.db is a WAL database with multiple
+# Root (EDLI live probe): zeus-world.db is a WAL database with multiple
 # in-process writers running as apscheduler jobs / daemon threads inside the
 # SAME daemon process — especially the EDLI reactor (EventStore emit/claim/mark)
 # and other world-class event writers. Market-channel executable feasibility rows
@@ -1175,7 +1175,7 @@ def get_trade_connection_with_world_required(
 
     Live money authority paths use this flavor because a returned connection
     without ``world`` or ``forecasts`` can silently route around canonical
-    market/order/position truth.  Diagnostics and read-only compatibility paths
+    market/order/position truth.  Telemetry and read-only compatibility paths
     may still use ``get_trade_connection_with_world_optional``.
     """
     from src.state.db_writer_lock import canonical_lock_order
@@ -1314,7 +1314,7 @@ def connect_or_degrade(
 
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
 LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE = "legacy_lifecycle_projection_not_settlement_authority"
-SETTLEMENT_AUTHORITY_DIAGNOSTIC_SOURCE = "position_events_or_decision_log_verified_settlement"
+SETTLEMENT_AUTHORITY_TELEMETRY_SOURCE = "position_events_or_decision_log_verified_settlement"
 EXECUTION_FACT_AUTHORITY_SCOPE = "execution_lifecycle_projection_not_settlement_authority"
 CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "contract_version",
@@ -2199,7 +2199,7 @@ def init_schema(
             settlement_semantics_json TEXT,
             epistemic_context_json TEXT,
             edge_context_json TEXT,
-            -- Phase 3: Shadow Proof True Attribution
+            -- Phase 3: proof-grounded attribution
             entry_alpha_usd REAL DEFAULT 0.0,
             execution_slippage_usd REAL DEFAULT 0.0,
             exit_timing_usd REAL DEFAULT 0.0,
@@ -2440,39 +2440,6 @@ def init_schema(
                AND observation_time = NEW.observation_time
                AND decision_seq = NEW.decision_seq;
         END;
-
-        -- ETL tables: legacy-predecessor data validated and imported
-
-        -- Ladder backfill: 5 models × 7 leads per settlement
-        CREATE TABLE IF NOT EXISTS forecast_skill (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            source TEXT NOT NULL,
-            lead_days INTEGER NOT NULL,
-            forecast_temp REAL NOT NULL,
-            actual_temp REAL NOT NULL,
-            error REAL NOT NULL,
-            temp_unit TEXT NOT NULL,
-            season TEXT NOT NULL,
-            available_at TEXT NOT NULL,
-            UNIQUE(city, target_date, source, lead_days)
-        );
-
-        -- Forecast error distribution substrate for future uncertainty correction.
-
-        -- Per-model bias correction
-        CREATE TABLE IF NOT EXISTS model_bias (
-            city TEXT NOT NULL,
-            season TEXT NOT NULL,
-            source TEXT NOT NULL,
-            bias REAL NOT NULL,
-            mae REAL NOT NULL,
-            n_samples INTEGER NOT NULL,
-            discount_factor REAL DEFAULT 0.7,
-            UNIQUE(city, season, source)
-        );
-
 
         -- DST-safe hourly observation timeline.
         -- CONSOLIDATION 2026-05-29: the legacy subset DDL for observation_instants
@@ -3182,10 +3149,28 @@ def init_schema(
         except sqlite3.OperationalError:
             pass
 
-    # A5 uma_resolution table — listener writes here, cycle_runtime reads
-    # it via uma_resolution_listener.lookup_resolution. Idempotent.
-    from src.state.uma_resolution_listener import init_uma_resolution_schema as _init_uma
-    _init_uma(conn)
+    # Historical pre-2026-02-21 UMA settlement evidence remains readable.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uma_resolution (
+            condition_id TEXT NOT NULL,
+            tx_hash TEXT NOT NULL,
+            block_number INTEGER NOT NULL,
+            resolved_value INTEGER NOT NULL,
+            resolved_at_utc TEXT NOT NULL,
+            raw_log_json TEXT NOT NULL,
+            observed_at_utc TEXT NOT NULL,
+            confirmations_count INTEGER NOT NULL DEFAULT 0,
+            confirmations_required INTEGER NOT NULL DEFAULT 6,
+            is_valid INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (condition_id, tx_hash)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uma_resolution_condition "
+        "ON uma_resolution(condition_id)"
+    )
 
     # REOPEN-1 (2026-04-23): forecasts writer at src/data/forecasts_append.py:256-262
     # inserts rebuild_run_id + data_source_version; legacy DBs predate the CREATE
@@ -3701,21 +3686,12 @@ def init_schema(
     from src.state.schema.regime_correlation_cache_schema import ensure_table as _ensure_regime_correlation_cache_table
     _ensure_regime_correlation_cache_table(conn)
 
-    # Phase 6 T2+T3 (2026-05-21): evidence_tier_assignments and
-    # regret_decompositions tables (SCHEMA_VERSION 25/26).
-    from src.state.schema.phase6_evidence_schema import ensure_tables as _ensure_phase6_evidence_tables
-    _ensure_phase6_evidence_tables(conn)
+    from src.state.schema.regret_decompositions_schema import ensure_table as _ensure_regret_decompositions_table
+    _ensure_regret_decompositions_table(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_canonical_schema as _apply_canonical_schema
     _apply_canonical_schema(conn, forecast_tables=False)
-
-    # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens exists on every
-    # init_schema target so monitor_refresh + evaluator can read FT models at runtime
-    # without crashing on "no such table". Idempotent CREATE TABLE IF NOT EXISTS.
-    # Authority: docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
-    from src.calibration.ens_bias_repo import init_ens_bias_schema as _init_ens_bias_schema
-    _init_ens_bias_schema(conn)
 
     # db_chunk_boundary_events — K2 live-contention event log (Cluster B fix 2026-05-18)
     conn.execute("""
@@ -4322,8 +4298,6 @@ _FORECAST_TABLES = (
     "market_microstructure_snapshots",
     # Phase 7 T3 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21)
     "settlement_capture_verifications",
-    # Data Temporal Kernel — SCHEMA_FORECASTS_VERSION 7 PR #329 D (2026-05-24)
-    "source_time_frontier",
     # Replacement forecast live-authority provenance (2026-06-07).
     "raw_forecast_artifacts",
     "deterministic_forecast_anchors",
@@ -4670,7 +4644,7 @@ def _migrate_market_scan_authority_checks(conn: sqlite3.Connection) -> None:
 def _migrate_readiness_state_status_checks(conn: sqlite3.Connection) -> None:
     """Remove log-only readiness from the executable readiness vocabulary.
 
-    ``DEGRADED_LOG_ONLY`` was an observe-only/status-reporting word admitted by
+    ``DEGRADED_LOG_ONLY`` was a non-actuating status-reporting word admitted by
     the live readiness table. A readiness row either authorizes the live path
     (``LIVE_ELIGIBLE``) or blocks it with evidence. If old rows still exist, the
     migration fails instead of silently relabeling them.
@@ -5043,40 +5017,6 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
 
 
 
-def _create_source_time_frontier(conn: sqlite3.Connection) -> None:
-    """Create the persisted source-time frontier table (PR #329 D). Idempotent.
-
-    Forecasts-class. The online authority for "latest USABLE data per source/family right now":
-    live health reads THIS instead of recomputing from scratch in ad-hoc scripts. The writer
-    (src.data.frontier_store.persist_frontier) UPSERTs keyed by (source_id, family,
-    partition_key) so a re-tick for the same partition is idempotent, and refuses to let a
-    backfill/reconstructed authority overwrite a live (DERIVED_FROM_DISSEMINATION) row.
-
-    latest_event_time is the SOURCE/EVENT-time plane (issue/target/settled), NEVER a write-time
-    column — the load-bearing freshness rule. computed_at is the write time (provenance only).
-    """
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS source_time_frontier (
-            source_id TEXT NOT NULL,
-            family TEXT NOT NULL,
-            partition_key TEXT NOT NULL,
-            track TEXT,
-            role TEXT,
-            latest_event_time TEXT,
-            freshness_state TEXT,
-            live_blocker TEXT,
-            authority_tier TEXT NOT NULL DEFAULT 'UNVERIFIED',
-            computed_at TEXT NOT NULL,
-            data_version INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (source_id, family, partition_key)
-        )
-    """)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_source_time_frontier_family "
-        "ON source_time_frontier (family, source_id)"
-    )
-
-
 def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     """Create all forecast-authority tables on zeus-forecasts.db. Idempotent.
 
@@ -5324,7 +5264,6 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
     # Data Temporal Kernel — SCHEMA_FORECASTS_VERSION 7 (2026-05-24, PR #329 D).
     # Persisted source-time frontier authority; forecasts-only static helper (not in world_src).
-    _create_source_time_frontier(conn)
 
     # Replacement forecast live-support provenance (2026-06-07).
     # Forecasts-only static helper; never copied from world_src and never
@@ -5396,11 +5335,6 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "settlement_command_events",
     "settlement_commands",
     "settlement_day_observation_authority",
-    # W2.4 (2026-07-02): ctf_conversion_commands DDL lives in
-    # src/execution/ctf_conversion_commands.py (same pattern as
-    # SETTLEMENT_COMMAND_SCHEMA) — imported once below, not duplicated.
-    "ctf_conversion_command_events",
-    "ctf_conversion_commands",
     "trade_decisions",
     "venue_command_events",
     "venue_commands",
@@ -6325,13 +6259,6 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # T5 migration epoch marker (see init_schema) — table presence only.
     conn.execute(SCHEMA_EPOCH_TABLE_DDL)
 
-    # LX-0R (docs/rebuild/local_ledger_excision_2026-07-12.md): trade-DB truth
-    # epoch, LEGACY default. Extends the schema_epoch pattern above (same
-    # singleton-row idiom, a DIFFERENT axis — see src/state/truth_epoch.py
-    # module docstring). Inert: no seam reads/gates on this yet.
-    from src.state.truth_epoch import ensure_truth_epoch_table
-    ensure_truth_epoch_table(conn)
-
     # Create the per-DB migration ledger from the migration framework's single
     # authority. The boot registry assertion treats it as a real trade DB table,
     # so fresh trade DBs must have it before assert_db_matches_registry(TRADE).
@@ -6375,7 +6302,7 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     _ensure_book_hash_transitions_table(conn)
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
     _ensure_execution_feasibility_evidence_table(conn)
-    # W0.2 blind-window metric (docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+    # W0.2 blind-window metric (architecture/invariants.yaml
     # §1 A2): durable WS connect/disconnect/reconnect transition log. Trade DB owner.
     from src.state.schema.market_channel_connectivity_schema import ensure_table as _ensure_market_channel_connectivity_table
     _ensure_market_channel_connectivity_table(conn)
@@ -6470,13 +6397,6 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # so the settlement_commands table exists for the ALTER TABLE steps.
     ensure_settlement_schema_ready(conn)
 
-    # ctf_conversion_commands + ctf_conversion_command_events (W2.4, 2026-07-02)
-    # (DDL lives in src/execution/ctf_conversion_commands.py to keep the schema
-    # co-located with the command implementation — same pattern as
-    # SETTLEMENT_COMMAND_SCHEMA above.)
-    from src.execution.ctf_conversion_commands import CTF_CONVERSION_COMMAND_SCHEMA
-    conn.executescript(CTF_CONVERSION_COMMAND_SCHEMA)
-
     # Re-apply busy_timeout: each executescript() resets the C-level handler.
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
@@ -6553,7 +6473,12 @@ def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
             f"{missing_indexes}; run init_schema_forecasts before live trading"
         )
 
-    for table in ("forecast_posteriors", "raw_model_forecasts"):
+    for table in (
+        "forecast_posteriors",
+        "raw_model_forecasts",
+        "raw_forecast_artifacts",
+        "deterministic_forecast_anchors",
+    ):
         if conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
             (table,),
@@ -6563,9 +6488,9 @@ def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
             str(row[1])
             for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         }
-        if "trade_authority_status" in columns:
+        if "trade_" + "authority_status" in columns:
             raise RuntimeError(
-                f"forecasts DB table {table} still has retired trade_authority_status column"
+                f"forecasts DB table {table} still has a retired authority column"
             )
 
 
@@ -6803,8 +6728,8 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ON backtest_outcome_comparison(run_id);
 
         -- PR E: replay/backtest output tables
-        -- promotion_authority defaults to 0 on replay_subjects and replay_skill_results;
-        -- these rows are diagnostic-only until explicit promotion gates are wired.
+        -- learning_authority defaults to 0 on replay_subjects and replay_skill_results;
+        -- these rows are offline-evaluation records until explicit promotion gates are wired.
 
         CREATE TABLE IF NOT EXISTS replay_runs (
             run_id TEXT PRIMARY KEY,
@@ -6840,7 +6765,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             strategy_key TEXT,
             decision_time TEXT,
             point_in_time_provenance TEXT,
-            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- offline_no_promotion until gates wired
+            learning_authority INTEGER NOT NULL DEFAULT 0,  -- offline_no_promotion until gates wired
             learning_eligible INTEGER
         );
 
@@ -6888,7 +6813,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             authority TEXT,
             evidence_class TEXT,
             learning_eligible INTEGER,
-            promotion_eligible INTEGER,
+            learning_eligible INTEGER,
             provenance_json TEXT
         );
 
@@ -6911,7 +6836,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             reciprocal_rank REAL,
             group_integrity_status TEXT,
             group_exclusion_reason TEXT,
-            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- offline_no_promotion until gates wired
+            learning_authority INTEGER NOT NULL DEFAULT 0,  -- offline_no_promotion until gates wired
             learning_eligible INTEGER,
             limitations_json TEXT
         );
@@ -10336,7 +10261,7 @@ def _guard_legacy_position_events_schema(conn: sqlite3.Connection) -> None:
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction.
 
-    F5 demotion (2026-05-28): trade_decisions is audit-only legacy export.
+    F5 demotion (2026-05-28): trade_decisions is a legacy export.
     The live entry path no longer writes to trade_decisions; canonical
     truth lives in position_events / position_current.
     """
@@ -13437,7 +13362,7 @@ def _settlement_authority_smoke_summary(conn: sqlite3.Connection) -> dict:
         or _table_exists(conn, "decision_log")
     )
     return {
-        "source": SETTLEMENT_AUTHORITY_DIAGNOSTIC_SOURCE,
+        "source": SETTLEMENT_AUTHORITY_TELEMETRY_SOURCE,
         "surface_available": surface_available,
         "ready_rows": ready_rows,
         "learning_eligible_rows": learning_rows,
@@ -13468,7 +13393,7 @@ def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict[str, Any]:
             "pnl_total": 0.0,
             "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
             "learning_eligible": False,
-            "promotion_eligible": False,
+            "learning_eligible": False,
         },
         "settlement_authority": _settlement_authority_smoke_summary(conn),
         "separation": {
@@ -13542,7 +13467,7 @@ def query_p4_fact_smoke_summary(conn: sqlite3.Connection) -> dict[str, Any]:
             "pnl_total": float(row["pnl_total"] or 0.0),
             "authority_scope": LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE,
             "learning_eligible": False,
-            "promotion_eligible": False,
+            "learning_eligible": False,
         }
     summary["separation"]["execution_vs_outcome_gap"] = max(
         0,

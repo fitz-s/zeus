@@ -906,24 +906,6 @@ def selection_calibrated_admission_q_lcb(
                 temperature_metric=temperature_metric,
             )
         )
-        # 2026-06-23: compose the PRICE-CONDITIONED selection-curse deflation at ENTRY (the primary
-        # curse site — the gate admits mid-price buy_no whose realized rate (~0.69) is well below its
-        # claim (~0.83)). min() with the prior path: both only TIGHTEN. Absent/unarmed/out-of-support
-        # -> raw (identity). See src/decision/selection_curse_bound.py + the counterfactual evidence.
-        # PRICE BASIS: the bound is keyed on the RAW own-side ask. own_side_cost here is the candidate
-        # execution_price (the raw native ask — distinct from the fee-adjusted c_cost_95pct), matching
-        # the fitter's no_ask x-axis. The taker seams likewise pass the raw fresh ask. One basis.
-        if own_side_cost is not None and math.isfinite(float(own_side_cost)):
-            from src.decision.selection_curse_bound import corrected_side_q_lcb
-            from src.decision.selection_curse_bound_loader import load_bound
-
-            curse_lcb, _ = corrected_side_q_lcb(
-                load_bound(),
-                side=str(direction or ""),
-                price=float(own_side_cost),
-                raw_q_lcb=prior,
-            )
-            return min(sc_lcb, curse_lcb)
         return sc_lcb
     except Exception:  # noqa: BLE001
         return 0.0

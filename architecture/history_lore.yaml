@@ -326,7 +326,7 @@ cards:
       Before touching settlement/probability/calibration, verify WMO half-up
       through SettlementSemantics and never use banker rounding.
 
-  - id: DIAGNOSTIC_BACKTEST_NON_PROMOTION
+  - id: TELEMETRY_BACKTEST_NON_PROMOTION
     status: active_law
     severity: critical
     sources:
@@ -335,7 +335,7 @@ cards:
       - architecture/data_rebuild_topology.yaml
       - .omx/context/packet8_data_rebuild_topology_closeout_2026-04-13.md
     failure_mode: >
-      Backtest, replay, JSON, or CSV diagnostics are treated as authorization
+      Backtest, replay, JSON, or CSV telemetry are treated as authorization
       for live strategy, calibration, or DB truth changes.
     trigger_context:
       - replay PnL interpretation
@@ -364,11 +364,11 @@ cards:
         - python3 scripts/topology_doctor.py --data-rebuild
         - python3 scripts/audit_replay_fidelity.py
     residual_risk: >
-      Diagnostics can still influence human/agent reasoning unless digest
+      Telemetry can still influence human/agent reasoning unless digest
       routing reminds agents that reports are non-promotion.
     invalidation_condition: >
-      Only a future authority packet may promote a diagnostic lane, and it must
-      update live/backtest/shadow boundary law and machine gates.
+      Only a future authority packet may promote a telemetry lane, and it must
+      update live/backtest/observation boundary law and machine gates.
     routing:
       task_terms: [backtest, replay, audit, PnL, wu_settlement_sweep, trade_history_audit]
       file_patterns:
@@ -383,7 +383,7 @@ cards:
       - state/zeus-world.db
       - state/zeus_trades.db
     zero_context_digest: >
-      Treat replay/backtest output as diagnostic evidence only; never promote it
+      Treat replay/backtest output as telemetry evidence only; never promote it
       into live DB truth or strategy authority.
 
   - id: VERIFIED_AUTHORITY_IS_CONTRACT_NOT_STAMP
@@ -779,7 +779,7 @@ cards:
       Agents leave one-off scripts in scripts/ or create parallel tools instead
       of reusing/promoting existing long-lived scripts.
     trigger_context:
-      - adding diagnostics
+      - adding telemetry
       - adding audit scripts
       - creating probes
       - packet closeout
@@ -806,7 +806,7 @@ cards:
       A future script registry replacement may supersede this law if it keeps
       equivalent lifecycle and reuse enforcement.
     routing:
-      task_terms: [script, diagnostic script, audit script, probe, one-off, tooling]
+      task_terms: [script, telemetry script, audit script, probe, one-off, tooling]
       file_patterns:
         - scripts/**
         - architecture/script_manifest.yaml
@@ -817,61 +817,6 @@ cards:
       Before creating a script, search manifest for an existing tool; delete or
       promote one-off scripts instead of leaving them behind.
 
-  - id: LIVE_BACKTEST_SHADOW_BOUNDARY
-    status: active_law
-    severity: critical
-    sources:
-      - AGENTS.md
-      - docs/authority/zeus_current_architecture.md
-      - docs/authority/zeus_current_delivery.md
-    failure_mode: >
-      Live execution, backtest evaluation, and shadow observation semantics are
-      mixed, allowing diagnostic or observation surfaces to gate or mutate live
-      runtime behavior.
-    trigger_context:
-      - live-only cleanup
-      - replay/backtest changes
-      - shadow instrumentation
-      - non-live execution artifact removal
-    wrong_moves:
-      - let backtest authorize live changes
-      - let shadow observation gate live execution
-      - preserve non-live execution as a peer execution mode
-      - mutate repo truth from external workspace tools
-    correct_rule: >
-      Live may act, backtest may evaluate, shadow may observe. Zeus is
-      live-only; the retired peer execution mode is historical.
-    antibodies:
-      code:
-        - src/main.py
-        - src/engine/cycle_runner.py
-        - src/supervisor_api/contracts.py
-      tests:
-        - tests/test_architecture_contracts.py
-        - tests/test_live_execution.py
-      gates:
-        - python3 scripts/topology_doctor.py --strict
-        - python3 scripts/check_kernel_manifests.py
-    residual_risk: >
-      Historical non-live execution artifacts and tests still exist, so agents must check
-      current live-only law before using them.
-    invalidation_condition: >
-      Only an explicit authority packet can add a new execution context or make
-      non-live execution a peer mode again.
-    routing:
-      task_terms: [live, backtest, shadow, non-live execution, execution mode, supervisor, Venus]
-      file_patterns:
-        - src/main.py
-        - src/engine/**
-        - src/supervisor_api/**
-        - docs/authority/zeus_current_architecture.md
-    downstream_blast_radius:
-      - src/control/control_plane.py
-      - src/execution/executor.py
-      - scripts/run_replay.py
-    zero_context_digest: >
-      Keep live/backtest/shadow separated: live acts, backtest evaluates, shadow
-      observes; the non-live execution is historical.
 
   - id: EXACT_SEMANTIC_TESTS_OVER_EXISTENCE_TESTS
     status: active_law
@@ -946,7 +891,7 @@ cards:
       - use WU settlement sample as strategy replay coverage
       - ignore decision_group sample independence
       - estimate Platt lead-days coefficient from an unsquared lead matrix
-      - activate calibration models from diagnostic backtest output
+      - activate calibration models from telemetry backtest output
     correct_rule: >
       Data rebuild is not live math certification. All declared certification
       criteria must be proven before calibration or strategy math may rely on
@@ -1060,7 +1005,7 @@ cards:
     wrong_moves:
       - pass edge.entry_price directly to Kelly as a float
       - assume fee defaults when token fee lookup fails
-      - remove typed cost telemetry before canary evidence
+      - remove typed cost telemetry before probe evidence
       - conflate posterior probability with executable cost
     correct_rule: >
       Entry economics must flow through typed ExecutionPrice/cost semantics; do
@@ -1851,57 +1796,6 @@ cards:
       feeds authority decisions. Verify against real payloads; fail
       closed on unexpected shapes.
 
-  - id: FEATURE_FLAG_DEFAULT_OFF_FOR_BEHAVIOR_RISK
-    status: active_law
-    severity: high
-    sources:
-      - docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
-      - config/settings.json
-      - src/config.py
-    failure_mode: >
-      Code changes that alter live trading behavior land in a deploy
-      simultaneously with their activation, so any regression surfaces
-      only after money is at risk. Rollback requires reverting code, not
-      flipping a switch.
-    trigger_context:
-      - any slice that changes exit / entry / risk actuation semantics
-      - harvester enablement (DR-33-A)
-      - HoldValue cost-aware exit (T6.4)
-      - correlation crowding (T6.4-phase2)
-    wrong_moves:
-      - ship behavior change live on deploy without a dry-run gate
-      - rely on tests + review alone to validate runtime behavior shift
-      - combine deploy + enable in a single step for load-bearing logic
-    correct_rule: >
-      Code changes with material live-trading behavior risk ship with a
-      default-OFF feature flag. Deploy lands the code; operator flips
-      the flag after shadow validation (replay audit + small-capital A/B
-      test). Rollback = flag flip, not code revert.
-    antibodies:
-      flags:
-        - ZEUS_HARVESTER_LIVE_ENABLED (DR-33-A)
-        - HOLD_VALUE_EXIT_COSTS (T6.4)
-      discipline:
-        - shadow-validation prerequisite documented in flag note
-        - bounds validators on rate parameters to catch misconfig
-    residual_risk: >
-      Operator can flip without running prerequisites. Mitigation: code
-      enforcement of replay-receipt presence (T6.4 phase-next candidate).
-    invalidation_condition: >
-      Only a full typed deployment system that separates code-deploy
-      from behavior-enable structurally (e.g. progressive rollout via
-      orchestration layer) supersedes hand-rolled flags.
-    routing:
-      task_terms: [feature flag, default off, shadow validation, flag flip, behavior risk]
-      file_patterns:
-        - config/settings.json
-        - src/config.py
-    downstream_blast_radius:
-      - every slice that changes exit / entry / risk actuation
-      - T6.3-followup-1 replay harness becomes a flag-flip prerequisite
-    zero_context_digest: >
-      Code deploy and behavior enable are separate events. Default OFF
-      + operator flip after replay audit = rollback via config, not code.
 
   - id: CHANGED_FILES_ONLY_FRESHNESS_GATE
     status: active_law

@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS edli_live_profit_audit (
     cost_basis_source_certificate_hash TEXT,
     fill_source_event_hash TEXT,
     settlement_source_event_hash TEXT,
-    promotion_eligible INTEGER NOT NULL DEFAULT 0 CHECK (promotion_eligible IN (0,1)),
+    learning_eligible INTEGER NOT NULL DEFAULT 0 CHECK (learning_eligible IN (0,1)),
     created_at TEXT NOT NULL,
     schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
     UNIQUE(aggregate_id, execution_command_id, order_lifecycle_state)
@@ -68,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_state
 
 CREATE_PROMOTION_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_promotion
-    ON edli_live_profit_audit(promotion_eligible, order_lifecycle_state, created_at)
+    ON edli_live_profit_audit(learning_eligible, order_lifecycle_state, created_at)
 """
 
 # LX-E packet (2026-07-13, docs/rebuild/local_ledger_excision_2026-07-12.md Round-2
@@ -109,7 +109,7 @@ _COLUMN_MIGRATIONS = {
     "cost_basis_source_certificate_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN cost_basis_source_certificate_hash TEXT",
     "fill_source_event_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN fill_source_event_hash TEXT",
     "settlement_source_event_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN settlement_source_event_hash TEXT",
-    "promotion_eligible": "ALTER TABLE edli_live_profit_audit ADD COLUMN promotion_eligible INTEGER NOT NULL DEFAULT 0 CHECK (promotion_eligible IN (0,1))",
+    "learning_eligible": "ALTER TABLE edli_live_profit_audit ADD COLUMN learning_eligible INTEGER NOT NULL DEFAULT 0 CHECK (learning_eligible IN (0,1))",
     "edge_value_usd": "ALTER TABLE edli_live_profit_audit ADD COLUMN edge_value_usd REAL",
 }
 

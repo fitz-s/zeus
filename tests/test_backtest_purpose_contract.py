@@ -22,8 +22,8 @@ from src.backtest.decision_time_truth import (
 )
 from src.backtest.purpose import (
     BacktestPurpose,
-    DIAGNOSTIC_CONTRACT,
-    DIAGNOSTIC_FIELDS,
+    AUDIT_REPLAY_CONTRACT,
+    AUDIT_REPLAY_FIELDS,
     ECONOMICS_CONTRACT,
     ECONOMICS_FIELDS,
     Selection,
@@ -35,19 +35,19 @@ from src.backtest.purpose import (
 
 def test_purpose_outputs_pairwise_disjoint():
     assert SKILL_FIELDS.isdisjoint(ECONOMICS_FIELDS)
-    assert SKILL_FIELDS.isdisjoint(DIAGNOSTIC_FIELDS)
-    assert ECONOMICS_FIELDS.isdisjoint(DIAGNOSTIC_FIELDS)
+    assert SKILL_FIELDS.isdisjoint(AUDIT_REPLAY_FIELDS)
+    assert ECONOMICS_FIELDS.isdisjoint(AUDIT_REPLAY_FIELDS)
 
 
-def test_promotion_authority_only_economics():
-    assert SKILL_CONTRACT.promotion_authority is False
-    assert DIAGNOSTIC_CONTRACT.promotion_authority is False
-    assert ECONOMICS_CONTRACT.promotion_authority is True
+def test_learning_authority_only_economics():
+    assert SKILL_CONTRACT.learning_authority is False
+    assert AUDIT_REPLAY_CONTRACT.learning_authority is False
+    assert ECONOMICS_CONTRACT.learning_authority is True
 
 
 def test_purpose_contracts_frozen():
     with pytest.raises(Exception):
-        SKILL_CONTRACT.promotion_authority = True
+        SKILL_CONTRACT.learning_authority = True
 
 
 def test_economics_parity_requires_full_linkage_kelly_fdr():
@@ -62,9 +62,9 @@ def test_skill_parity_no_sizing_no_selection():
     assert SKILL_CONTRACT.parity.market_price_linkage == "none"
 
 
-def test_diagnostic_uses_flat_diagnostic_sizing_marker():
-    assert DIAGNOSTIC_CONTRACT.parity.sizing is Sizing.FLAT_DIAGNOSTIC
-    assert DIAGNOSTIC_CONTRACT.parity.selection is Selection.NONE
+def test_audit_replay_uses_flat_audit_sizing_marker():
+    assert AUDIT_REPLAY_CONTRACT.parity.sizing is Sizing.FLAT_AUDIT
+    assert AUDIT_REPLAY_CONTRACT.parity.selection is Selection.NONE
 
 
 def test_ecmwf_ens_dissemination_day0_is_base_plus_6h40m():
@@ -87,7 +87,7 @@ def test_decision_time_truth_promotion_grade_for_recorded_and_fetch_time():
     for prov in (AvailabilityProvenance.FETCH_TIME, AvailabilityProvenance.RECORDED):
         truth = DecisionTimeTruth(snapshot_id="s1", available_at=base, provenance=prov)
         assert truth.is_promotion_grade()
-        assert not truth.is_diagnostic_only()
+        assert not truth.is_non_promotable()
 
 
 def test_decision_time_truth_diagnostic_only_for_derived_and_reconstructed():
@@ -97,7 +97,7 @@ def test_decision_time_truth_diagnostic_only_for_derived_and_reconstructed():
         AvailabilityProvenance.RECONSTRUCTED,
     ):
         truth = DecisionTimeTruth(snapshot_id="s1", available_at=base, provenance=prov)
-        assert truth.is_diagnostic_only()
+        assert truth.is_non_promotable()
         assert not truth.is_promotion_grade()
 
 
@@ -155,4 +155,4 @@ def test_diagnostic_purpose_accepts_all_provenance_tiers():
     base = datetime(2026, 4, 27, tzinfo=timezone.utc)
     for prov in AvailabilityProvenance:
         truth = DecisionTimeTruth(snapshot_id="s1", available_at=base, provenance=prov)
-        assert gate_for_purpose(truth, BacktestPurpose.DIAGNOSTIC) is truth
+        assert gate_for_purpose(truth, BacktestPurpose.AUDIT_REPLAY) is truth

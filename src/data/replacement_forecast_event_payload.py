@@ -72,7 +72,7 @@ def _dependency_object_ids(readiness: ReplacementForecastReadinessDecision) -> d
     return result
 
 
-def _dependency_diagnostics(readiness: ReplacementForecastReadinessDecision) -> dict[str, list[str]]:
+def _dependency_telemetry(readiness: ReplacementForecastReadinessDecision) -> dict[str, list[str]]:
     dependency_json = readiness.dependency_json
     return {
         "missing_roles": list(dependency_json.get("missing_roles") or []),
@@ -112,7 +112,7 @@ def build_replacement_forecast_event_payload(
         "baseline_source_run_id": replacement_bundle.baseline_source_run_id,
         "dependency_source_run_ids": _dependency_source_run_ids(readiness),
         "dependency_object_ids": _dependency_object_ids(readiness),
-        "dependency_diagnostics": _dependency_diagnostics(readiness),
+        "dependency_telemetry": _dependency_telemetry(readiness),
         "source_available_at": replacement_bundle.source_available_at,
         "computed_at": replacement_bundle.computed_at,
         "authority_limits": {

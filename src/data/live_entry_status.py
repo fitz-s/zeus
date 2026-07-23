@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from src.config import EntryForecastConfig, EntryForecastRolloutMode
+from src.config import EntryForecastConfig
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 
 
@@ -139,8 +139,6 @@ def build_live_entry_forecast_status(
         if rows and producer_live_eligible_count == 0:
             blockers.extend(row_blockers or ("NO_CURRENT_PRODUCER_LIVE_ELIGIBLE",))
 
-    if config.rollout_mode is EntryForecastRolloutMode.BLOCKED:
-        blockers.append("ENTRY_FORECAST_ROLLOUT_BLOCKED")
     blockers = sorted(set(blockers))
     status = "LIVE_ELIGIBLE" if not blockers else "BLOCKED"
     return LiveEntryForecastStatus(

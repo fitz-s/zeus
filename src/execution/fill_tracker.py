@@ -62,7 +62,7 @@ RESTING_OPEN_STATUSES = frozenset({"LIVE", "RESTING", "OPEN", "ACCEPTED"})
 # T4 (docs/rebuild/, 2026-07-11 lifecycle-scar excision plan):
 # pending-entry uncertainty resolves through chain/venue truth, never through a
 # lifecycle scar. The order_status strings each _hold_pending_* helper sets
-# (below) are diagnostic breadcrumbs only — the position stays
+# (below) are telemetry breadcrumbs only — the position stays
 # "pending_tracked" and a ReviewWorkItem (see _open_review_work_item) carries
 # the real reason code, exposure bound, and retry schedule.
 

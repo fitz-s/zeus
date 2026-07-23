@@ -30,22 +30,13 @@ import src.data.openmeteo_quota as openmeteo_quota
 import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
-# STALE_LAW re-pin 2026-06-09: the BUY_NO_NATIVE_QUOTE_EVIDENCE_* flag-key constants moved from
-# src.engine.evaluator to src.strategy.family_exclusive_dedup (22dba73349 + slim bce3091a0d).
-from src.strategy.family_exclusive_dedup import (
-    BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG,
-    BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG,
-)
 import src.execution.exit_lifecycle as exit_lifecycle_module
 from src.backtest.economics import check_economics_readiness
 from src.data.observation_client import Day0ObservationContext
 from src.config import City, calibration_batch_rebuild_n_mc, ensemble_n_mc, settings
 from src.control import control_plane as control_plane_module
 from src.data.ecmwf_open_data import DATA_VERSION, collect_open_ens_cycle
-from src.data.calibration_transfer_policy import (
-    CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
-    _rebuild_complete_sentinel_key_for_transfer_evidence,
-)
+from src.calibration.store import CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
 from src.data.openmeteo_quota import (
     DAILY_LIMIT,
     HARD_THRESHOLD,
@@ -153,13 +144,6 @@ def _allow_entry_gates_for_runtime_test(monkeypatch) -> None:
         lambda *args, **kwargs: {"entry": {"allow_submit": True}},
     )
     monkeypatch.setattr("src.runtime.posture.read_runtime_posture", lambda: "NORMAL")
-
-
-def _set_buy_no_native_quote_evidence_flags(monkeypatch, *, evidence: bool, submit: bool = False) -> None:
-    flags = dict(settings["feature_flags"])
-    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = evidence
-    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = submit
-    monkeypatch.setitem(settings._data, "feature_flags", flags)
 
 
 def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
@@ -1081,7 +1065,6 @@ def test_entry_evaluator_uses_ask_only_buy_quote_when_yes_bid_is_absent(monkeypa
     """RELATIONSHIP: persisted executable BUY support must not require a YES bid."""
 
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
-    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=False, submit=False)
     captured: dict[str, object] = {}
 
     candidate = MarketCandidate(
@@ -1211,7 +1194,6 @@ def test_entry_evaluator_missing_ask_still_fails_closed(monkeypatch):
     """RELATIONSHIP: ask-only fallback must not make missing asks executable."""
 
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
-    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=False, submit=False)
 
     candidate = MarketCandidate(
         city=NYC,

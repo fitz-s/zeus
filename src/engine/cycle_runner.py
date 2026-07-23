@@ -47,7 +47,7 @@ from src.execution.executor import (
     _persist_pre_submit_envelope,
 )
 from src.riskguard.risk_level import RiskLevel, overall_level
-from src.riskguard.riskguard import get_current_level, get_force_exit_review, tick_with_portfolio
+from src.riskguard.riskguard import get_current_level, tick_with_portfolio
 from src.state.canonical_write import commit_then_export
 from src.state.db import (
     _zeus_trade_db_path,
@@ -346,7 +346,6 @@ def _discovery_gates_allow_entries(
     governor_status: dict,
     current_posture: str,
     chain_ready: bool,
-    force_exit: bool,
     freshness_allows_entries: bool,
     entry_bankroll,
     exposure_gate_hit: bool,
@@ -381,7 +380,6 @@ def _discovery_gates_allow_entries(
     """
     return (
         chain_ready
-        and not force_exit
         and freshness_allows_entries
         and not entries_paused
         and current_posture == "NORMAL"
@@ -431,14 +429,9 @@ def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
 
 
 def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
-    # P3 cycle-axis site (PLAN_v3 §6.P3 — explicitly NOT migrated to
-    # phase-axis because this fires before per-candidate phase is
-    # available). Routed through ``settlement_day_dispatch_for_mode``
-    # for grep-symmetry with the per-candidate sites; behavior is the
-    # legacy ``mode == DAY0_CAPTURE`` rule regardless of the
-    # ZEUS_MARKET_PHASE_DISPATCH flag. Critic R4 A5-L1 fix.
-    from src.engine.dispatch import settlement_day_dispatch_for_mode
-    if settlement_day_dispatch_for_mode(mode):
+    # This cycle-level classification runs before a candidate phase exists.
+    from src.engine.dispatch import is_day0_capture_mode
+    if is_day0_capture_mode(mode):
         return "settlement_capture"
     if mode == DiscoveryMode.OPENING_HUNT:
         return "opening_inertia"
@@ -451,17 +444,13 @@ def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
 
 def _classify_strategy(mode: DiscoveryMode, edge, edge_source: str = "") -> str:
     # Use the same source as ``KNOWN_STRATEGIES`` (boot-allowed set) so
-    # the classifier accepts only strategies the daemon would actually
-    # boot. Dormant/blocked strategies (shoulder_buy, center_sell) stay
-    # unclassified at this layer, mirroring the pre-A4 hardcoded set's
-    # 4-entry universe.
+    # the classifier accepts only strategies the daemon would actually boot.
     from src.strategy.strategy_profile import live_safe_keys
     candidate = edge_source or _classify_edge_source(mode, edge)
     # imminent_open_capture is its own registry profile (strategy_profile_registry.yaml:280,
     # added in #205) with distinct Kelly and market-phase settings. No collapse to
     # opening_inertia — pass through so live_safe_keys() lookup uses the correct key.
-    # (C-2 fix: pre-2026-05-22 this line collapsed to "opening_inertia", contaminating
-    # the opening_inertia promotion-evidence cohort.)
+    # Keep its distinct Kelly and market-phase settings.
     strategy = candidate
     if strategy in live_safe_keys():
         return strategy
@@ -531,7 +520,6 @@ def _execute_monitoring_phase(
     tracker,
     summary: dict,
     *,
-    exit_order_submit_enabled: bool = True,
     run_exit_preflight: bool = True,
     should_preempt_for_urgent_day0=None,
     defer_partial_orderbook_gaps: bool = False,
@@ -544,7 +532,6 @@ def _execute_monitoring_phase(
         tracker,
         summary,
         deps=sys.modules[__name__],
-        exit_order_submit_enabled=exit_order_submit_enabled,
         run_exit_preflight=run_exit_preflight,
         should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
         defer_partial_orderbook_gaps=defer_partial_orderbook_gaps,
@@ -591,8 +578,8 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         # silently bypass the ENTIRE freshness discipline for that cycle (the
         # silent-fallback disease). Non-fail-closed modes degrade-and-continue
         # with an EXPLICIT tag (loud, never silent).
-        from src.engine.dispatch import settlement_day_dispatch_for_mode as _sdd_on_error
-        _fail_closed_on_error = _sdd_on_error(mode) or mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE
+        from src.engine.dispatch import is_day0_capture_mode as _day0_mode_on_error
+        _fail_closed_on_error = _day0_mode_on_error(mode) or mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE
         logger.error(
             "freshness_gate mid_run evaluation FAILED (freshness UNKNOWN -> %s): %s",
             "SKIP cycle" if _fail_closed_on_error else "degrade+continue",
@@ -613,9 +600,9 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         # NOT migrated to phase-axis; this gate fires before any candidate
         # is constructed). Routed through helper for grep-symmetry per
         # critic R4 A5-L1.
-        from src.engine.dispatch import settlement_day_dispatch_for_mode
+        from src.engine.dispatch import is_day0_capture_mode
         _is_fail_closed_mode = (
-            settlement_day_dispatch_for_mode(mode)
+            is_day0_capture_mode(mode)
             or mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE
         )
         if _freshness_verdict.day0_capture_disabled and _is_fail_closed_mode:
@@ -825,31 +812,23 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     entry_bankroll, cap_summary = _entry_bankroll_for_cycle(portfolio, clob)
     summary.update({k: v for k, v in cap_summary.items() if v is not None})
 
-    # B5 + DT#2 P9B: When daily_loss RED, block new entries AND sweep active
-    # positions toward exit (previously Phase 1 was entry-block-only; Phase 9B
-    # closes the sweep gap per zeus_dual_track_architecture.md §6 DT#2 law:
+    # A current RED risk level blocks new entries and sweeps active positions
+    # toward exit, per zeus_dual_track_architecture.md §6 DT#2 law:
     # "RED must cancel all pending orders AND initiate an exit sweep on
     # active positions"). Sweep marks `exit_reason="red_force_exit"` on each
     # non-terminal, not-already-exiting position before monitor_refresh so the
     # existing exit_lifecycle/capability path can act in the same cycle instead
     # of waiting for the next daemon tick.
-    force_exit = get_force_exit_review()
-    red_risk_sweep = risk_level == RiskLevel.RED
-    if force_exit or red_risk_sweep:
-        if force_exit:
-            summary["force_exit_review"] = True
-        summary["force_exit_review_scope"] = "sweep_active_positions"
-        summary["force_exit_sweep_trigger"] = (
-            "force_exit_review" if force_exit else "risk_level_red"
-        )
+    if risk_level == RiskLevel.RED:
+        summary["risk_sweep_scope"] = "sweep_active_positions"
+        summary["force_exit_sweep_trigger"] = "risk_level_red"
         sweep_result = _execute_force_exit_sweep(portfolio, conn=conn)
         summary["force_exit_sweep"] = sweep_result
         if sweep_result["attempted"] > 0:
             portfolio_dirty = True  # positions' exit_reason changed; persist
         logger.warning(
-            "B5/DT#2: RED force-exit sweep active (trigger=%s). "
+            "RED force-exit sweep active. "
             "Sweep: attempted=%d already_exiting=%d skipped_terminal=%d.",
-            summary["force_exit_sweep_trigger"],
             sweep_result["attempted"],
             sweep_result["already_exiting"],
             sweep_result["skipped_terminal"],
@@ -913,7 +892,7 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     entries_blocked_reason = None
     # 2026-05-04 bankroll truth-chain cleanup tail: the legacy ONE-TIME
     # aggregate-exposure brake (added 2026-04-12 after the first live cycle
-    # placed too many canary orders) has been removed. Smoke-testing must run
+    # placed too many probe orders) has been removed. Smoke-testing must run
     # as a separate one-off
     # script, not as a perma-gate that throttles real live trading. Per-cycle
     # exposure discipline now lives in the existing posture / RiskGuard /
@@ -922,7 +901,7 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # Posture is recorded in `summary["posture"]` for operator visibility on
     # every cycle. It also blocks new entries when non-NORMAL — but only as
     # the FALLBACK reason when no more-specific gate fires. Specific gates
-    # (chain_sync, force_exit, risk_level, bankroll, exposure,
+    # (chain_sync, risk_level, bankroll, exposure,
     # entries_paused) take precedence so operators see actionable detail
     # rather than the outermost branch posture. Monitor, exit, and
     # reconciliation paths continue regardless of posture.
@@ -1013,8 +992,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
 
     if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
-    elif force_exit:
-        entries_blocked_reason = "force_exit_review_daily_loss_red"
     elif not freshness_allows_entries:
         entries_blocked_reason = "freshness_degraded"
     elif risk_level in (RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED, RiskLevel.DATA_DEGRADED):
@@ -1102,7 +1079,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         governor_status=_governor_status,
         current_posture=_current_posture,
         chain_ready=chain_ready,
-        force_exit=force_exit,
         freshness_allows_entries=freshness_allows_entries,
         entry_bankroll=entry_bankroll,
         exposure_gate_hit=exposure_gate_hit,

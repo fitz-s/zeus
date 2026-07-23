@@ -638,10 +638,8 @@ sources:
       reconstruction_method: "uma_chain_backfill"
 
     zeus_consumption:
-      transport: "Polygon RPC via scripts/backfill_uma_resolution_2026.py (one-time backfill)"
-      ingest_path:
-        - "backfill: scripts/backfill_uma_resolution_2026.py [VERIFIED settlement_dual_source_truth_2026_05_07.yaml:19]"
-        - "live listener (optional): src/state/uma_resolution_listener.py [VERIFIED source_rationale.yaml]"
+      transport: "retired after historical materialization"
+      ingest_path: []
       target_table: "settlements_v2 (provenance_json.reconstruction_method='uma_chain_backfill')"
       current_status: >
         HISTORICAL ONLY. Zero PriceSettled events after block 83,275,667.
@@ -836,48 +834,6 @@ sources:
     zeus_consumption:
       role: "Health monitoring — not a data feed. Operator alerting input."
 
-  - id: openmeteo_standard_forecast
-    display_name: "Open-Meteo Standard Forecast API"
-    category: forecast
-    publisher: "Open-Meteo (https://open-meteo.com)"
-    authority_tier: mainstream
-    authority_urls:
-      - "https://api.open-meteo.com/v1/forecast"
-      - "https://open-meteo.com/en/docs"
-
-    publication_schedule:
-      description: >
-        Near-real-time consensus forecast (GFS/ECMWF blend, best-match).
-        Updated approximately every 6 hours. Distinct from our raw ECMWF
-        ensemble (ecmwf_open_data) — serves as the independent mainstream
-        reference for the direction-agreement gate (#135).
-      max_forecast_days: 16
-      max_source_lag_hours: 6
-
-    what_is_published:
-      parameters_used_by_zeus:
-        - "temperature_2m_max (daily): daily max 2m temperature in city native unit"
-      base_url: "https://api.open-meteo.com/v1/forecast"
-
-    zeus_consumption:
-      purpose: "mainstream_agreement_gate_only — NOT a trading signal source"
-      authority_role: "arm_gate_reference (direction-agreement gate #135 only)"
-      ingest_path:
-        - "gate: src/data/mainstream_forecast_source.py::fetch_mainstream_point() [VERIFIED 2026-06-03]"
-        - "shared client: src/data/openmeteo_client.py::fetch() [VERIFIED openmeteo_client.py:1]"
-      source_tag_code: "open_meteo_standard_forecast"
-      fail_closed_contract: >
-        fetch_mainstream_point() returns None (never raises) on any fetch
-        failure, stale result, or unknown city. Gate module treats None as
-        FAIL_CLOSED (mainstream_available=False). Never auto-pass a candidate
-        without a fresh mainstream point.
-      do_not_use_as: >
-        Trading signal source. This endpoint is the gate reference ONLY.
-        Do not wire its output into q_raw, p_cal, trade_score, or any
-        probability-producing path. Independence from the trading signal
-        is the antibody's structural guarantee.
-    binding_doc: "architecture/zeus_grid_resolution_authority_2026_05_07.yaml forbidden_patterns[5]"
-
 # ============================================================
 # CROSS-REFERENCE INDEX
 # ============================================================
@@ -930,7 +886,6 @@ cross_references:
     - "src/data/release_calendar.py — source release calendar query layer"
     - "src/ingest/harvester_truth_writer.py — ingest-side settlement truth writer"
     - "config/source_release_calendar.yaml — safe-fetch timing per source"
-    - "scripts/backfill_uma_resolution_2026.py — UMA chain backfill"
     - "scripts/backfill_settlements_via_gamma_2026.py — Gamma settlement backfill"
 
 # ============================================================

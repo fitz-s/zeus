@@ -1,4 +1,4 @@
-"""EDLI no-submit decision compiler."""
+"""EDLI mandatory pre-submit decision compiler."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any, Literal
 from src.decision_kernel import claims
 from src.decision_kernel.authority import DECISION_KERNEL_AUTHORITY_ID, DECISION_KERNEL_AUTHORITY_VERSION
 from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, build_certificate
-from src.decision_kernel.certificates.no_submit import build_no_submit_decision_certificate
+from src.decision_kernel.certificates.pre_submit import build_pre_submit_decision_certificate
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.ledger import CompileFailure
 from src.decision_kernel.verifier import (
@@ -72,8 +72,8 @@ class AuthorityEvidence:
 
 
 @dataclass(frozen=True)
-class NoSubmitProofBundle:
-    """Typed authority evidence consumed by the no-submit compiler."""
+class PreSubmitProofBundle:
+    """Typed authority evidence consumed by the mandatory pre-submit compiler."""
 
     final_intent_id: str
     source_truth: AuthorityEvidence
@@ -90,53 +90,42 @@ class NoSubmitProofBundle:
     candidate_evidence: AuthorityEvidence
     testing_protocol: AuthorityEvidence
     fdr: AuthorityEvidence
-    kelly_dry_run: AuthorityEvidence
+    sizing: AuthorityEvidence
     risk_level: AuthorityEvidence
-    no_submit_projection: dict[str, Any]
+    pre_submit_projection: dict[str, Any]
 
 
 @dataclass(frozen=True)
-class NoSubmitCompileResult:
+class PreSubmitCompileResult:
     status: CompileStatus
-    no_submit_certificate: DecisionCertificate | None
+    pre_submit_certificate: DecisionCertificate | None
     certificates: tuple[DecisionCertificate, ...]
     failures: tuple[CompileFailure, ...]
 
 
 class DecisionCompiler:
-    """Compile typed no-submit authority evidence into a certificate DAG."""
+    """Compile typed mandatory pre-submit authority evidence into a certificate DAG."""
 
     def compile_authority_graph(
         self,
         event: OpportunityEvent,
         *,
         decision_time: datetime,
-        mode: Literal["LIVE"] = "LIVE",
-        proof_bundle: NoSubmitProofBundle | None = None,
-    ) -> NoSubmitCompileResult:
-        """Compile the authority parent graph without a no-submit decision leaf.
+        proof_bundle: PreSubmitProofBundle | None = None,
+    ) -> PreSubmitCompileResult:
+        """Compile the authority parent graph without a pre-submit decision leaf.
 
-        Live execution consumes the same typed proof bundle as the no-submit
-        compiler, but the parents of Actionable/FinalIntent must be LIVE-mode
-        certificates. This method verifies the same bundle consistency and emits
-        only the reusable authority graph in the requested live mode.
+        Live execution consumes the same typed proof bundle as the pre-submit
+        compiler. This method verifies the same bundle consistency and emits
+        only the reusable LIVE authority graph.
         """
 
         decision_time = _utc(decision_time)
-        if mode != "LIVE":
-            return self._rejected(
-                event,
-                decision_time=decision_time,
-                mode=mode,
-                stage="CLOCK_MODE",
-                reason_code="LIVE_AUTHORITY_GRAPH_REQUIRES_LIVE_MODE",
-            )
         event_clock = self._event_clock(event)
         if event_clock.persisted_at > decision_time:
             return self._rejected(
                 event,
                 decision_time=decision_time,
-                mode=mode,
                 stage="CLOCK_MODE",
                 reason_code="EVENT_PERSISTED_AFTER_DECISION_TIME",
                 reason_detail=f"persisted_at={event_clock.persisted_at.isoformat()}",
@@ -145,13 +134,12 @@ class DecisionCompiler:
             return self._rejected(
                 event,
                 decision_time=decision_time,
-                mode=mode,
                 stage="LIVE_AUTHORITY_GRAPH",
-                reason_code="NO_SUBMIT_PROOF_BUNDLE_REQUIRED",
+                reason_code="PRE_SUBMIT_PROOF_BUNDLE_REQUIRED",
                 reason_detail="Compiler requires typed authority evidence, not a receipt projection.",
             )
         try:
-            _validate_no_submit_parent_consistency(
+            _validate_pre_submit_parent_consistency(
                 event,
                 proof_bundle,
                 decision_time=decision_time,
@@ -160,42 +148,30 @@ class DecisionCompiler:
                 event,
                 decision_time=decision_time,
                 proof_bundle=proof_bundle,
-                mode=mode,
             )
         except (CertificateVerificationError, ValueError) as exc:
             return self._rejected(
                 event,
                 decision_time=decision_time,
-                mode=mode,
                 stage="LIVE_AUTHORITY_GRAPH",
                 reason_code="LIVE_AUTHORITY_GRAPH_REJECTED",
                 reason_detail=str(exc),
             )
-        return NoSubmitCompileResult("VERIFIED", None, certificates, ())
+        return PreSubmitCompileResult("VERIFIED", None, certificates, ())
 
-    def compile_no_submit(
+    def compile_pre_submit(
         self,
         event: OpportunityEvent,
         *,
         decision_time: datetime,
-        mode: Literal["NO_SUBMIT", "REPLAY_COUNTERFACTUAL"] = "NO_SUBMIT",
-        proof_bundle: NoSubmitProofBundle | None = None,
-    ) -> NoSubmitCompileResult:
+        proof_bundle: PreSubmitProofBundle | None = None,
+    ) -> PreSubmitCompileResult:
         decision_time = _utc(decision_time)
-        if mode != "NO_SUBMIT":
-            return self._rejected(
-                event,
-                decision_time=decision_time,
-                mode=mode,
-                stage="CLOCK_MODE",
-                reason_code="REPLAY_COUNTERFACTUAL_NOT_PROMOTABLE_TO_NO_SUBMIT",
-            )
         event_clock = self._event_clock(event)
         if event_clock.persisted_at > decision_time:
             return self._rejected(
                 event,
                 decision_time=decision_time,
-                mode=mode,
                 stage="CLOCK_MODE",
                 reason_code="EVENT_PERSISTED_AFTER_DECISION_TIME",
                 reason_detail=f"persisted_at={event_clock.persisted_at.isoformat()}",
@@ -204,9 +180,8 @@ class DecisionCompiler:
             return self._rejected(
                 event,
                 decision_time=decision_time,
-                mode=mode,
-                stage="NO_SUBMIT_COMPILER",
-                reason_code="NO_SUBMIT_PROOF_BUNDLE_REQUIRED",
+                stage="PRE_SUBMIT_COMPILER",
+                reason_code="PRE_SUBMIT_PROOF_BUNDLE_REQUIRED",
                 reason_detail="Compiler requires typed authority evidence, not a receipt projection.",
             )
 
@@ -214,7 +189,6 @@ class DecisionCompiler:
             event,
             decision_time=decision_time,
             proof_bundle=proof_bundle,
-            mode="NO_SUBMIT",
         )
         (
             clock,
@@ -233,26 +207,9 @@ class DecisionCompiler:
             candidate,
             protocol,
             fdr,
-            kelly,
+            sizing,
             risk,
         ) = base_parents
-        no_submit_mode = build_certificate(
-            certificate_type=claims.NO_SUBMIT_MODE,
-            semantic_key=f"no_submit_mode:{event.event_id}:{proof_bundle.final_intent_id}",
-            claim_type="no_submit_mode",
-            mode="NO_SUBMIT",
-            decision_time=decision_time,
-            payload={"event_id": event.event_id, "side_effect_status": "NO_SUBMIT"},
-            authority_id=DECISION_KERNEL_AUTHORITY_ID,
-            authority_version=DECISION_KERNEL_AUTHORITY_VERSION,
-            algorithm_id="decision_kernel.no_submit_mode",
-            algorithm_version="v1",
-            parent_edges=(edge("clock_mode", clock),),
-            parent_certificates=(clock,),
-            source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (NO_SUBMIT_MODE record generated AT decision_time, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
-            agent_received_at=decision_time,
-            persisted_at=decision_time,
-        )
         parents = (
             clock,
             causal,
@@ -270,48 +227,43 @@ class DecisionCompiler:
             candidate,
             protocol,
             fdr,
-            kelly,
+            sizing,
             risk,
-            no_submit_mode,
         )
         try:
-            _validate_no_submit_parent_consistency(event, proof_bundle, decision_time=decision_time)
-            no_submit = build_no_submit_decision_certificate(
-                semantic_key=f"no_submit:{event.event_id}:{proof_bundle.final_intent_id}",
+            _validate_pre_submit_parent_consistency(event, proof_bundle, decision_time=decision_time)
+            pre_submit = build_pre_submit_decision_certificate(
+                semantic_key=f"pre_submit:{event.event_id}:{proof_bundle.final_intent_id}",
                 decision_time=decision_time,
                 parent_edges=tuple(edge(_role_for(parent.certificate_type), parent) for parent in parents),
                 parents=parents,
                 payload={
                     "event_id": event.event_id,
                     "event_type": event.event_type,
-                    # This compiler emits the FORECAST no-submit certificate graph:
+                    # This compiler emits the FORECAST pre-submit certificate graph:
                     # source-truth, topology, forecast authority, calibration,
                     # belief, executable snapshot, quote, cost, pre-trade, FDR,
-                    # Kelly, and risk. Event types are trigger carriers; they do
+                    # sizing, and risk. Event types are trigger carriers; they do
                     # not change the certificate graph being verified here.
                     #
-                    # Live failure 2026-06-25: DAY0_EXTREME_UPDATED events that
-                    # reached this forecast graph were stamped "day0_or_other";
-                    # verify_no_submit_decision correctly accepts only forecast
-                    # no-submit scope, so the receipt was rejected before the real
-                    # no-trade/edge reason could persist. Keep the source aligned
+                    # Keep the source aligned
                     # with the verified parent set rather than the trigger name.
                     "decision_source": "forecast",
                     "final_intent_id": proof_bundle.final_intent_id,
                     "side_effect_status": "NO_SUBMIT",
-                    "proof_accepted": bool(proof_bundle.no_submit_projection.get("proof_accepted")),
+                    "proof_accepted": bool(proof_bundle.pre_submit_projection.get("proof_accepted")),
                     "submitted": False,
                     "quote_edge_bound": proof_bundle.pre_trade_evidence.payload.get("quote_edge_bound"),
                     "conditional_edge_given_fill": proof_bundle.pre_trade_evidence.payload.get("conditional_edge_given_fill"),
                     "actionable_trade_score": 0.0,
-                    "no_submit_verified": True,
-                    "projection_hash": proof_bundle.no_submit_projection.get("projection_hash"),
-                    "executable_snapshot_id": proof_bundle.no_submit_projection.get("executable_snapshot_id"),
+                    "pre_submit_verified": True,
+                    "projection_hash": proof_bundle.pre_submit_projection.get("projection_hash"),
+                    "executable_snapshot_id": proof_bundle.pre_submit_projection.get("executable_snapshot_id"),
                     "generated_at_decision_time": True,
                     "header_persisted_at_semantics": "decision_kernel_generated_at_decision_time",
                     "db_created_at_may_follow_header_persisted_at": True,
                 },
-                source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (NO_SUBMIT decision generated AT decision_time per generated_at_decision_time payload flag, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
+                source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural pre-submit decision generated AT decision_time per generated_at_decision_time payload flag, wraps no external source; field is consumed only by verifier no-future-leakage checks and certificate monotonicity.
                 agent_received_at=decision_time,
                 persisted_at=decision_time,
             )
@@ -319,33 +271,31 @@ class DecisionCompiler:
             return self._rejected(
                 event,
                 decision_time=decision_time,
-                mode=mode,
-                stage="NO_SUBMIT_CERTIFICATE",
-                reason_code="NO_SUBMIT_CERTIFICATE_REJECTED",
+                stage="PRE_SUBMIT_CERTIFICATE",
+                reason_code="PRE_SUBMIT_CERTIFICATE_REJECTED",
                 reason_detail=str(exc),
             )
-        return NoSubmitCompileResult("VERIFIED", no_submit, parents + (no_submit,), ())
+        return PreSubmitCompileResult("VERIFIED", pre_submit, parents + (pre_submit,), ())
 
     def _rejected(
         self,
         event: OpportunityEvent,
         *,
         decision_time: datetime,
-        mode: str,
         stage: str,
         reason_code: str,
         reason_detail: str | None = None,
-    ) -> NoSubmitCompileResult:
+    ) -> PreSubmitCompileResult:
         failure = CompileFailure(
             event_id=event.event_id,
             decision_time=decision_time,
-            mode=mode,
-            claim_type="no_submit_dry_run_decision",
+            mode="LIVE",
+            claim_type="pre_submit_decision",
             stage=stage,
             reason_code=reason_code,
             reason_detail=reason_detail,
         )
-        return NoSubmitCompileResult("REJECTED", None, (), (failure,))
+        return PreSubmitCompileResult("REJECTED", None, (), (failure,))
 
     def _event_clock(self, event: OpportunityEvent) -> EvidenceClock:
         return EvidenceClock(
@@ -359,16 +309,15 @@ class DecisionCompiler:
         event: OpportunityEvent,
         *,
         decision_time: datetime,
-        proof_bundle: NoSubmitProofBundle,
-        mode: Literal["LIVE", "NO_SUBMIT"],
+        proof_bundle: PreSubmitProofBundle,
     ) -> tuple[DecisionCertificate, ...]:
         event_clock = self._event_clock(event)
-        clock = self._clock_certificate(event, decision_time=decision_time, mode=mode)
+        clock = self._clock_certificate(event, decision_time=decision_time)
         causal = build_certificate(
             certificate_type=claims.CAUSAL_EVENT,
             semantic_key=f"event:{event.event_id}",
             claim_type="causal_event",
-            mode=mode,
+            mode="LIVE",
             decision_time=decision_time,
             payload={
                 "event_id": event.event_id,
@@ -392,22 +341,22 @@ class DecisionCompiler:
             agent_received_at=event_clock.agent_received_at,
             persisted_at=event_clock.persisted_at,
         )
-        source_truth = self._authority_certificate(event, decision_time, proof_bundle.source_truth, (clock, causal), mode=mode)
-        topology = self._authority_certificate(event, decision_time, proof_bundle.market_topology, (source_truth,), mode=mode)
-        family = self._authority_certificate(event, decision_time, proof_bundle.family_closure, (topology,), mode=mode)
-        forecast = self._authority_certificate(event, decision_time, proof_bundle.forecast_authority, (source_truth, family), mode=mode)
-        calibration = self._authority_certificate(event, decision_time, proof_bundle.calibration, (forecast,), mode=mode)
-        model_config = self._authority_certificate(event, decision_time, proof_bundle.model_config, (forecast, calibration), mode=mode)
-        belief = self._authority_certificate(event, decision_time, proof_bundle.belief, (forecast, calibration, model_config, family), mode=mode)
-        executable = self._authority_certificate(event, decision_time, proof_bundle.executable_snapshot, (topology,), mode=mode)
-        quote = self._authority_certificate(event, decision_time, proof_bundle.quote_feasibility, (topology, executable), mode=mode)
-        cost = self._authority_certificate(event, decision_time, proof_bundle.cost_model, (quote,), mode=mode)
-        pre_trade = self._authority_certificate(event, decision_time, proof_bundle.pre_trade_evidence, (belief, quote, cost, source_truth), mode=mode)
-        candidate = self._authority_certificate(event, decision_time, proof_bundle.candidate_evidence, (pre_trade, family), mode=mode)
-        protocol = self._authority_certificate(event, decision_time, proof_bundle.testing_protocol, (family, candidate), mode=mode)
-        fdr = self._authority_certificate(event, decision_time, proof_bundle.fdr, (protocol, candidate), mode=mode)
-        kelly = self._authority_certificate(event, decision_time, proof_bundle.kelly_dry_run, (belief, quote, cost), mode=mode)
-        risk = self._authority_certificate(event, decision_time, proof_bundle.risk_level, (candidate,), mode=mode)
+        source_truth = self._authority_certificate(event, decision_time, proof_bundle.source_truth, (clock, causal))
+        topology = self._authority_certificate(event, decision_time, proof_bundle.market_topology, (source_truth,))
+        family = self._authority_certificate(event, decision_time, proof_bundle.family_closure, (topology,))
+        forecast = self._authority_certificate(event, decision_time, proof_bundle.forecast_authority, (source_truth, family))
+        calibration = self._authority_certificate(event, decision_time, proof_bundle.calibration, (forecast,))
+        model_config = self._authority_certificate(event, decision_time, proof_bundle.model_config, (forecast, calibration))
+        belief = self._authority_certificate(event, decision_time, proof_bundle.belief, (forecast, calibration, model_config, family))
+        executable = self._authority_certificate(event, decision_time, proof_bundle.executable_snapshot, (topology,))
+        quote = self._authority_certificate(event, decision_time, proof_bundle.quote_feasibility, (topology, executable))
+        cost = self._authority_certificate(event, decision_time, proof_bundle.cost_model, (quote,))
+        pre_trade = self._authority_certificate(event, decision_time, proof_bundle.pre_trade_evidence, (belief, quote, cost, source_truth))
+        candidate = self._authority_certificate(event, decision_time, proof_bundle.candidate_evidence, (pre_trade, family))
+        protocol = self._authority_certificate(event, decision_time, proof_bundle.testing_protocol, (family, candidate))
+        fdr = self._authority_certificate(event, decision_time, proof_bundle.fdr, (protocol, candidate))
+        sizing = self._authority_certificate(event, decision_time, proof_bundle.sizing, (belief, quote, cost))
+        risk = self._authority_certificate(event, decision_time, proof_bundle.risk_level, (candidate,))
         return (
             clock,
             causal,
@@ -425,7 +374,7 @@ class DecisionCompiler:
             candidate,
             protocol,
             fdr,
-            kelly,
+            sizing,
             risk,
         )
 
@@ -434,16 +383,15 @@ class DecisionCompiler:
         event: OpportunityEvent,
         *,
         decision_time: datetime,
-        mode: Literal["LIVE", "NO_SUBMIT"] = "NO_SUBMIT",
     ) -> DecisionCertificate:
         return build_certificate(
             certificate_type=claims.CLOCK_MODE,
             semantic_key=f"clock:{event.event_id}:{decision_time.isoformat()}",
             claim_type="clock_mode",
-            mode=mode,
+            mode="LIVE",
             decision_time=decision_time,
             payload={
-                "mode": mode,
+                "mode": "LIVE",
                 "decision_time": decision_time,
                 "clock_source": "reactor_decision_time",
                 "agent_runtime_id": "edli_event_reactor",
@@ -464,14 +412,12 @@ class DecisionCompiler:
         decision_time: datetime,
         evidence: AuthorityEvidence,
         parents: tuple[DecisionCertificate, ...],
-        *,
-        mode: Literal["LIVE", "NO_SUBMIT"] = "NO_SUBMIT",
     ) -> DecisionCertificate:
         return build_certificate(
             certificate_type=evidence.certificate_type,
             semantic_key=f"{evidence.semantic_suffix}:{event.event_id}:{evidence.payload.get('identity', '')}",
             claim_type=evidence.claim_type,
-            mode=mode,
+            mode="LIVE",
             decision_time=decision_time,
             payload=evidence.payload,
             authority_id=evidence.authority_id,
@@ -486,8 +432,8 @@ class DecisionCompiler:
         )
 
 
-def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSubmitProofBundle, *, decision_time: datetime) -> None:
-    projection = bundle.no_submit_projection
+def _validate_pre_submit_parent_consistency(event: OpportunityEvent, bundle: PreSubmitProofBundle, *, decision_time: datetime) -> None:
+    projection = bundle.pre_submit_projection
     source = bundle.source_truth.payload
     topology = bundle.market_topology.payload
     family = bundle.family_closure.payload
@@ -501,7 +447,7 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
     candidate = bundle.candidate_evidence.payload
     protocol = bundle.testing_protocol.payload
     fdr = bundle.fdr.payload
-    kelly = bundle.kelly_dry_run.payload
+    sizing = bundle.sizing.payload
     risk = bundle.risk_level.payload
 
     _require_equal("projection.event_id", projection.get("event_id"), "event.event_id", event.event_id)
@@ -536,8 +482,8 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
             raise ValueError("source_truth.required_fields_present must be true")
         if source.get("required_steps_present") is not True:
             raise ValueError("source_truth.required_steps_present must be true")
-        # WAVE-1 W1-T3: dual-chain source_run binding (gated; legacy single-chain
-        # equality preserved when the flag is OFF or derived_from_source_run_id absent).
+        # WAVE-1 W1-T3: dual-chain source_run binding; the legacy equality remains
+        # only as the fail-closed check for inputs without executable-run identity.
         bind_source_run_chains(source, forecast)
         event_payload = _event_payload_dict(event)
         if event_payload.get("source_run_id") not in (None, ""):
@@ -585,8 +531,8 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
     )
     _require_equal("quote.native_side", quote.get("native_side"), "direction native side", _native_side_for_direction(candidate.get("direction")))
     _require_equal("quote.direction", quote.get("direction"), "candidate.direction", candidate.get("direction"))
-    _require_equal("kelly.cost_basis_id", kelly.get("cost_basis_id"), "cost_model.cost_basis_id", cost.get("cost_basis_id"))
-    _require_equal("kelly.execution_price_type", kelly.get("execution_price_type"), "cost_model.execution_price_type", cost.get("execution_price_type"))
+    _require_equal("sizing.cost_basis_id", sizing.get("cost_basis_id"), "cost_model.cost_basis_id", cost.get("cost_basis_id"))
+    _require_equal("sizing.execution_price_type", sizing.get("execution_price_type"), "cost_model.execution_price_type", cost.get("execution_price_type"))
     if forecast.get("snapshot_id") is not None:
         _require_equal("belief.forecast_snapshot_id", belief.get("forecast_snapshot_id"), "forecast.snapshot_id", forecast.get("snapshot_id"))
     _require_equal(
@@ -929,21 +875,6 @@ def _event_payload_dict(event: OpportunityEvent) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _dual_chain_source_run_enabled() -> bool:
-    """Read edli.edli_source_run_dual_chain_enabled (default OFF in code).
-
-    WAVE-1 W1-T3. FAIL-CLOSED to the legacy single-chain binding: any
-    config-access error → False. Shadow-safe — the relaxation is inert until the
-    operator flips the flag in live config.
-    """
-    try:
-        from src.config import settings
-
-        return bool(settings["edli"].get("edli_source_run_dual_chain_enabled", False))
-    except Exception:  # noqa: BLE001 — config glitch must never relax the cert silently
-        return False
-
-
 def bind_source_run_chains(source: dict[str, Any], forecast: dict[str, Any]) -> None:
     """Bind the source_run identity across the causal + executable chains.
 
@@ -954,9 +885,8 @@ def bind_source_run_chains(source: dict[str, Any], forecast: dict[str, Any]) -> 
     run and the executable (forecast) run differ — and 11 benign advances died
     at NO_SUBMIT_CERTIFICATE.
 
-    With ``edli_source_run_dual_chain_enabled`` ON AND the adapter having stamped
-    ``source_truth.derived_from_source_run_id`` (the reader-elected executable
-    run), we bind BOTH chains independently:
+    When the adapter stamps ``source_truth.derived_from_source_run_id`` (the
+    reader-elected executable run), bind BOTH chains independently:
       - executable chain: derived_from_source_run_id == forecast.source_run_id
       - causal chain:      source_truth.source_run_id is the event's causal run
                            (NOT required to equal the forecast run); its causal
@@ -966,11 +896,11 @@ def bind_source_run_chains(source: dict[str, Any], forecast: dict[str, Any]) -> 
     A FABRICATED forecast whose source_run_id differs from the reader-elected
     derived_from_source_run_id STILL FAILS — causal integrity is not weakened.
 
-    When the flag is OFF (default) OR derived_from_source_run_id is absent, the
-    legacy single-chain equality is enforced — byte-identical to pre-W1-T3.
+    When derived_from_source_run_id is absent, the legacy single-chain equality
+    remains the fail-closed identity check.
     """
     derived = source.get("derived_from_source_run_id")
-    if _dual_chain_source_run_enabled() and derived not in (None, ""):
+    if derived not in (None, ""):
         # Executable chain binds to the reader-elected run.
         _require_equal(
             "source_truth.derived_from_source_run_id",

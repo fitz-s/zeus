@@ -6,7 +6,7 @@
 
 **Version 2** (2026-04-13): corrections incorporated per user review of v1 — logit clipping explicit, open-boundary bins allowed, Monte Carlo pseudocode deduplicated across bins, stream-of-consciousness removed, `decision_group` concept added as independent sample unit.
 
-> **Authority notice — strategy of record (2026-06-09).** The live q is built by the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block), summarized in **§0.1** below. The Monte-Carlo P_raw (§4), Extended Platt (§6), and α-weighted market fusion (§7) math in this spec now describes the diagnostic/comparison baseline path, NOT the primary q. The former baseline-to-live `min(...)` cap/floor join was deleted; baseline outputs may appear as provenance/comparison only and must not cap, floor, or veto live replacement q without new authority. Two corrections propagated below: the 10k-MC `p_raw_vector_from_maxes` is **retired** in favor of the closed-form `analytic_p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py`); live market fusion runs `model_only_v1` with **NO market-prior blend** (`src/strategy/market_fusion.py` `compute_posterior`), so the α-weighted `P_posterior` in §7 is spec-only. Cite symbols, not line numbers — lines drift.
+> **Authority notice — strategy of record (2026-06-09).** The live q is built by the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block), summarized in **§0.1** below. The Monte-Carlo P_raw (§4), Extended Platt (§6), and α-weighted market fusion (§7) math in this spec now describes the offline historical baseline path, NOT the primary q. The former baseline-to-live `min(...)` cap/floor join was deleted; baseline outputs may appear as provenance/comparison only and must not cap, floor, or veto live replacement q without new authority. Two corrections propagated below: the 10k-MC `p_raw_vector_from_maxes` is **retired** in favor of the closed-form `analytic_p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py`); live market fusion runs `model_only_v1` with **NO market-prior blend** (`src/strategy/market_fusion.py` `compute_posterior`), so the α-weighted `P_posterior` in §7 is spec-only. Cite symbols, not line numbers — lines drift.
 
 ---
 
@@ -76,7 +76,7 @@ ENS/provider-center displacement is systematic disagreement and is not divided
 by member count. The same ENS values remain absolute settlement-preimage hit
 evidence, so recentering that displacement out of `σ_pred` would make the width
 and tail certificate describe different probability worlds. Historical
-residual widths and fitted floors remain diagnostic/non-source-clock only.
+residual widths and fitted floors remain offline/non-runtime only.
 
 `semantics_revision` is included in the shape hash. It changes whenever these
 current-evidence equations change, so posterior identity and coverage cannot
@@ -343,7 +343,7 @@ This guarantees every possible `settlement_value` falls in exactly one bin. Beca
 
 ## 6. Extended Platt calibration (LEGACY BASELINE)
 
-> Diagnostic baseline calibration only. The live q is the fused-normal-direct settlement integration of §0.1d (`emos.bin_probability_settlement`), not Platt. This Platt math may produce comparison/provenance output only; it must not cap, floor, or veto live replacement q without new authority.
+> Offline historical calibration only. The live q is the fused-normal-direct settlement integration of §0.1d (`emos.bin_probability_settlement`), not Platt. This Platt math may produce comparison/provenance output only; it must not cap, floor, or veto live replacement q without new authority.
 
 ### 6.1 Model (with logit numerical safety)
 
@@ -855,7 +855,7 @@ Current code disagrees with this spec at the following points. The data-rebuild 
 
 These concepts come from the prior `02_mathematics_and_statistics_upgrade.md` document and are **not part of current Zeus math**. They are documented here so the current spec cannot be confused with a future upgraded one, and so reviewers know what is intentionally not yet implemented.
 
-> **Now implemented (flag-gated, activation pending), do not confuse with §15.1:** an empirical-Bayes *ENS bias correction* applied to forecast member extrema (not Platt-parameter pooling) is implemented — it shrinks the TIGGE structural prior toward live OpenData settled residuals (SNR-gated), with a predictive-error scale term and a 0.5°→0.25° variance transport, applied pre-Monte-Carlo. Gate: `settings.bias_correction_enabled` (default `false`). Code: `src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py` (PRs #334/#336). §15.1 below remains deferred and refers to pooling of *Platt* parameters, a different layer.
+> Historical ENS-bias correction is retained here as offline baseline math only; it is not an activation-pending live branch and has no current runtime flag. §15.1 remains deferred and refers to pooling of *Platt* parameters, a different layer.
 
 ### 15.1 Empirical-Bayes partial pooling
 Replace hard fallback (city → cluster → global → uncalibrated) with shrinkage:
@@ -906,117 +906,29 @@ Two stages: P(Y > 0 | x), E[Y | Y > 0, x]. Preserves the physics constraint that
 ### 15.6 Execution microstructure (edge half-life)
 Use the existing `token_price_log` to model whether an edge persists 5/15/30 minutes into the future. Deferred.
 
-### 15.7 Market-cost executable seam + executable-uncertainty (2026-05-27)
+### 15.7 Market-cost executable seam
 
-**Authority:** `architecture/market_cost_seam_executable_uncertainty_2026_05_27.md` (Fitz §1 5-K decision restatement of current `BinEdge.entry_price: float` defect + scattered 15-multiplier chain).
-
-**Problem.** Current edge math is:
-```
-edge_i = p_posterior[i] - p_market[i]
-```
-where `p_market[i]` is `float(vwmp(bid, ask, bid_size, ask_size))` from `_buy_entry_price_from_orderbook` (top-of-book only — `_top_book_level_decimal`). At the Kelly boundary, this float is re-typed at `evaluator.py:_size_at_execution_price_boundary` by constructing
-```
-ExecutionPrice(value=raw, price_type="implied_probability", fee_deducted=False)
-.with_taker_fee(fee_rate)
-```
-which **launders the implied-probability tag into `fee_adjusted` at the same call** that calls `assert_kelly_safe()`. The contract that `ExecutionPrice` was created to enforce (INV-12 typed seam, D3 resolution) is defeated at its own enforcement site.
-
-Independently, `_bootstrap_bin` samples forecast / Platt / transfer uncertainty per iteration but subtracts the FIXED `p_market[i]` unchanged — so `edge_ci_lower` ignores market-cost uncertainty (spread, slippage, fill probability, quote staleness, fee variance).
-
-Separately, Kelly sizing applies 15 multiplicative haircuts spread across `dynamic_kelly_mult` (7), `phase_aware_kelly_multiplier` (4), `EffectiveKellyContext.haircut` (1), oracle/observed-fraction/phase-source guards. Multiple soft uncertainties (CI width, spread, depth) appear in BOTH `edge_ci_lower` AND multiplier chain → silent double-counting → death-by-thousand-gates collapse of valid edges.
-
-**Upgrade.** Restate as:
+The live path has one market-cost and sizing shape:
 
 ```
-edge_LCB,i = p_LCB,i - c_UCB,i
-
-where
-  p_LCB,i = p_posterior,i - z · σ_p,i        (already in code via bootstrap CI)
-  c_UCB,i = c_mean,i + z · σ_c,i             (NEW — Wave 5 bootstrap c_b sampling)
-
-  σ_c,i = sqrt(
-            (spread_usd,i / 2)^2
-          + slippage_walk_variance,i
-          + fee_variance,i
-          + quote_age_penalty,i^2
-          )
-
-  c_mean,i = depth_walk_fill_price,i + polymarket_fee(c_mean,i)
-  c_mean,i carried as typed ExecutionPrice(price_type="fee_adjusted", fee_deducted=True)
-           with provenance ∈ {"vwmp", "ask", "depth_walked"} preserved upstream
+edge_yes = p_posterior_yes - executable_yes_price
+edge_no  = p_posterior_no  - executable_no_price
 ```
 
-`σ_c` enters the edge bootstrap exactly once. The previously-scattered soft multipliers (CI width haircut, spread/depth haircut, transfer σ already exists) collapse to either:
+`MarketAnalysis.find_edges` creates a typed `ExecutionPrice` at the edge-scan
+boundary. `_size_at_execution_price_boundary` preserves that provenance, applies
+the venue fee if necessary, enforces `assert_kelly_safe()`, applies the current
+`EffectiveKellyContext` haircut, and calls Kelly. A caller may additionally cap
+size with authoritative `max_executable_shares`.
 
-1. **Hard veto** (multiplicative {0, 1}) — `executable_mask`, `oracle_penalty=0`, `strategy_phase=0`, `quote_age > stale_threshold`, `reliability_status ∈ {THIN_BOOK, CROSSED}`. These remain as multiplicative gates.
-2. **Soft σ contribution** — every other uncertainty enters `σ_edge` (forecast σ + Platt σ + transfer σ + market σ) which produces `edge_LCB` once. No second multiplication.
+The bootstrap subtracts the same fixed executable price used by the current live
+route. There is no optional alternate market-cost sampler, no environment
+switch that suppresses selected haircuts, and no second edge regime waiting for
+activation. Missing live effective context fails closed.
 
-**Kelly formula unchanged at the boundary:**
-```
-f* = (p_LCB - c_UCB) / (1 - c_UCB)
-```
-with `c_UCB` supplied as a typed `ExecutionPrice` whose provenance was set at `_buy_entry_price_from_clob` and propagated through `BinEdge.entry_price: ExecutionPrice`. `_size_at_execution_price_boundary` no longer fabricates `price_type`.
-
-**Family-level optimum.** Within one `(city, target_date, temperature_metric)` family, bins are a partition. The existing `optimize_exclusive_outcome_portfolio` (`src/strategy/family_exclusive_dedup.py:909`) already maximises
-```
-max_f  E[ log(1 + Σ_i f_i · R_i(Y)) ]
-```
-over selected leg combinations of an exclusive-outcome payoff matrix; default `max_legs=1` keeps it behaviourally identical to the Stage A emergency gate. Wave 4 bumps `max_legs` via caller config (shadow first), preserving Stage A as fallback.
-
-**Market prior fusion is not a corrected posterior path.** `MODEL_ONLY_POSTERIOR_MODE` remains the default `posterior_mode` for `MarketAnalysis`. Corrected posterior construction consumes calibrated model belief only. KL-divergence inequality `KL(p ‖ (1−β)p + βm) ≥ 0` explains why unverified blending of a calibrated model with an unvalidated market distribution is forbidden.
-
-**Acceptance for §15.7 being closed:** all of INV-38, INV-39, INV-40 antibody tests GREEN, `_size_at_execution_price_boundary` constructs no `ExecutionPrice` with `price_type="implied_probability"`, `_bootstrap_bin` samples `c_b` from `EntryQuoteEvidence.cost_uncertainty`, no soft uncertainty enters Kelly via more than one path.
-
-**Status (2026-05-27):** Waves 0-7 LANDED on `claude/market-cost-seam-2026-05-27` (PR #348). Wave 5.5 + Wave 6 both feature-flagged (default OFF) per the staged-promotion contract in §15.8; operator owns Stage 1 / Stage 2 flag flips after replay validation.
-
-### 15.8 Unified uncertainty budget (Wave 6 math)
-
-**Authority:** `architecture/market_cost_seam_executable_uncertainty_2026_05_27.md` §Wave 6.
-
-**Claim.** Under the post-Wave-5 + Wave-5.5 pipeline (σ_market sampled in `_bootstrap_bin`; EntryQuoteEvidence wired in evaluator), the ci_width multiplicative haircuts in `dynamic_kelly_mult` (×0.7 above 0.10; ×0.5 above 0.15) and the EffectiveKellyContext.haircut() spread/depth multiplier in `_size_at_execution_price_boundary` are mathematically REDUNDANT — the same soft uncertainty also enters `edge_LCB` via the bootstrap CI lower bound — so applying them on top of edge_LCB is a double-count INV-40 forbids.
-
-**Setup.** Let `e` be the edge random variable computed inside `_bootstrap_bin`:
-```
-e_i = p_post,i - c_b,i
-p_post,i = π(ens_resample_i, platt_resample_i, lead, ...)   ← forecast σ
-c_b,i = c_mean + ε_market,i,   ε_market ~ N(0, σ_market²)     ← market σ (Wave 5)
-```
-Then by construction:
-```
-edge_LCB = quantile_5%(e_i)
-Var(e) ≈ Var(p_post) + Var(c_b)   ← independence by RNG-stream split (Wave 5)
-       = σ_forecast² + σ_market²
-```
-So `edge_LCB` is a single-pass aggregation of forecast σ AND market σ.
-
-**Legacy chain.** Pre-Wave-6 Kelly size = `f*(p_post, c) × kelly_mult` where `kelly_mult` ALSO carries multiplicative haircuts driven by the SAME σ_forecast (via `ci_width`) and σ_market (via `EffectiveKellyContext.haircut(spread, depth)`). Numerically:
-```
-size_legacy = f*(p_post, c) × base × h_ci(σ_forecast) × h_micro(σ_market) × {hard vetoes}
-```
-
-**Unified budget (Wave 6 flag ON).** Kelly receives the bootstrap CI lower bound IMPLICITLY via the standard edge formula on the same (p_post, c) inputs because c_b is already σ_market-sampled. Removing `h_ci` and `h_micro` from `kelly_mult` gives:
-```
-size_unified = f*(p_post, c) × base × {hard vetoes}
-```
-where the soft σ contribution lives entirely in the bootstrap-CI side of the pipeline.
-
-**Equivalence direction.** `size_unified ≥ size_legacy` for every input because we removed `0 < h_ci, h_micro ≤ 1` multipliers without adding any new haircut. The compensating EQUIVALENT-RISK widening comes from the bootstrap edge floor being already wider than the pre-Wave-5 fixed-c_b CI. Operator promotes only after replay validates that:
-```
-σ_market and σ_forecast in edge_LCB ≥ implied haircut reduction from h_ci × h_micro
-```
-i.e. the bootstrap-side widening is at least as large as the multiplicative shrinkage that was removed. Equality holds asymptotically (large n_bootstrap + correctly calibrated σ_market); strict inequality (size_unified > size_legacy) indicates over-conservative pre-Wave-6 sizing.
-
-**Hard vetoes preserved.** `oracle_penalty` (METRIC_UNSUPPORTED → 0), `kelly_for_phase` (PHASE_BLOCKED → 0), `executable_mask` (non-executable → 0), `MissingEffectiveContextError` (live without context → raise) all remain multiplicative `{0, 1}` gates. INV-40 only forbids double-count of SOFT σ contributions.
-
-**Activation gates.**
-1. `ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED=1` — evaluator constructs EntryQuoteEvidence per token and passes per-bin arrays to MarketAnalysis. σ_market enters `_bootstrap_bin`.
-2. `ZEUS_UNIFIED_UNCERTAINTY_BUDGET=1` — the collapse is gated **per-edge, not merely globally** (PR #348 P0-1 + pre-merge SEV-1). For an edge to skip its soft haircuts BOTH must hold: (a) this global flag is ON, AND (b) `BinEdge.market_cost_uncertainty_applied == True` — i.e. σ_market actually entered THAT edge's bootstrap (EQE present with `cost_uncertainty > 0`). The per-edge boolean is forwarded as `market_uncertainty_in_lcb` to every haircut site: `dynamic_kelly_mult` (ci_width haircut — evaluator + replay) and `_size_at_execution_price_boundary` (EffectiveKellyContext multiplier — cycle_runtime W2/W3/W4, the live microstructure boundary). An edge whose EQE construction failed keeps its legacy soft haircuts even under the global flag, so EQE-missing edges never lose uncertainty. Single-count enforced per-edge.
-
-Flipping (2) without (1) is unsafe (removes multipliers without widening edge_LCB). The evaluator-wiring flag must lead. The plan doc §Wave 5.5 + §Wave 6 documents the staged promotion. The seam wiring (every haircut call site forwards the per-edge gate) is pinned by the AST contract `tests/test_pr348_unified_budget_seam_wiring.py`.
-
-**Acceptance for §15.8 being closed:** R3 GREEN under flag ON; replay before/after on stored decision_log: average `size_unified / size_legacy ∈ [1.0, 1.2]` (compensating widening matches removed haircuts within tolerance); zero `MissingEffectiveContextError` raises under flag ON in shadow.
-
-**Status (2026-05-27):** Wave 5.5 wiring + Wave 6 collapse implemented behind both feature flags; both default OFF; R3 antibody GREEN under flag ON; live promotion gated on operator replay validation.
+**Acceptance:** typed price provenance reaches Kelly; no default-off alternate
+edge/cost path exists in live modules; replay and cycle runtime use the same
+sizing boundary; executable-depth caps remain cumulative when supplied.
 
 ---
 

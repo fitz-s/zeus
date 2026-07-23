@@ -12,7 +12,6 @@ Design invariants:
 - Does NOT write to settlements, settlement_outcomes, market_events, or any forecast table.
 - If neither forecast truth nor an exact held-event payout is resolved, returns
   awaiting_truth_writer status.
-- Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or function is a no-op.
 - May import from src.execution.harvester (trading side, no circular reference).
 - Does NOT import from src.ingest_main or scripts.ingest.*.
 
@@ -24,7 +23,6 @@ Callers pass get_forecasts_connection() as the second argument.
 from __future__ import annotations
 
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -262,19 +260,6 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     dict with keys: positions_settled, decision_log_rows_written, errors,
     and optionally status="awaiting_truth_writer" if no settled rows found.
     """
-    if os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED", "0") != "1":
-        logger.info(
-            "harvester_pnl_resolver disabled by ZEUS_HARVESTER_LIVE_ENABLED flag "
-            "(DR-33-A default-OFF); cycle skipped"
-        )
-        return {
-            "status": "disabled_by_feature_flag",
-            "disabled_by_flag": True,
-            "positions_settled": 0,
-            "decision_log_rows_written": 0,
-            "errors": 0,
-        }
-
     # Import trading-side dependencies before reading settlements so the truth
     # query can be keyed by currently open inventory instead of a global recency
     # window that starves older-but-still-open positions during backlog catch-up.

@@ -16,7 +16,7 @@ Explain how the test suite protects law, module boundaries, and migration safety
 - Law-gate tests.
 - Cross-module relationship tests.
 - Migration and antibody tests.
-- Advisory/diagnostic vs blocking categories.
+- Advisory/offline evidence vs blocking categories.
 
 ## 4. Runtime role
 Tests do not run in production, but they are the main executable proof that repo law is still encoded in code.
@@ -38,7 +38,7 @@ Delivery law ranks executable source/tests above prose docs. A failing architect
 - Pytest suites and contract validation manifests
 
 ## 8. Internal seams
-- Blocking law tests vs useful regression tests vs diagnostics
+- Blocking law tests vs useful regression tests vs offline evidence checks
 - Top-level tests vs tests/contracts manifests
 - Freshness headers vs stale reused tests
 
@@ -101,7 +101,7 @@ python scripts/topology_doctor.py --tests --json
 Rollback test-topology or law-test edits together with the code/doc change they supported.
 
 ## 22. Open questions
-- Which existing tests are advisory/diagnostic but still look like active law gates because manifesting is too thin?
+- Which existing tests are advisory/offline evidence but still look like active law gates because manifesting is too thin?
 
 ## 23. Future expansion notes
 - Expand `architecture/test_topology.yaml` into a proper per-module and per-law routing map.

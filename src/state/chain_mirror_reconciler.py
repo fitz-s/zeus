@@ -1244,9 +1244,7 @@ def reconcile(
         # had no per-row isolation -- one raising position aborted the WHOLE
         # pass, silently skipping classification/repair for every row after
         # it. Each row is now independently try/excepted: a raising
-        # classify/apply call is logged and skipped, never aborts the pass
-        # (the diff engine's reconcile() in src/reconcile/diff_engine.py has
-        # this from birth for the same reason).
+        # classify/apply call is logged and skipped, never aborts the pass.
         try:
             # P0b: only compute the (DB-touching) force-resolve signals when they
             # could actually matter — held token absent from THIS snapshot and

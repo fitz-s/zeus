@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 # All other sources produce runtime-only observations; training_allowed is
 # forced to False regardless of what the caller passes.
 _TRAINING_ALLOWED_SOURCES = frozenset({"tigge", "ecmwf_ens"})
+CANONICAL_CALIBRATION_PAIR_BIN_SOURCE = "canonical_v2"
 _CALIBRATION_READ_TABLES = frozenset({
     "calibration_pairs",
     "platt_models",

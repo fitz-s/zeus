@@ -3,7 +3,7 @@
 # Authority basis: live Day0 and forecast events share one production execution
 #   lane. Single shared location for opportunity-event priority constants — no
 #   magic numbers at call sites.
-"""Opportunity-event priority constants and the scope-aware claim-tier authority.
+"""Opportunity-event priority constants and the single-live claim-tier authority.
 
 THE CATEGORY THIS MODULE MAKES UNCONSTRUCTABLE
 ----------------------------------------------
@@ -13,9 +13,8 @@ tier.
 
 THE STRUCTURAL DECISION
 -----------------------
-Day0 is the freshest *tradeable* alpha only when Day0 is a tradeable lane
-(production scope ``forecast_plus_day0``). The claim tier is therefore
-scope-aware for tests/replay, while production keeps Day0 tradeable.
+Day0 is live alpha. Every Day0 event uses the same priority and claim tier;
+there is no dormant or non-tradeable Day0 lane.
 
 The integer priority on each event (``opportunity_events.priority``) is a
 SUB-SORT within a tier — it cannot reorder across tiers. Both surfaces (the
@@ -32,8 +31,7 @@ from typing import Final
 #
 # These are a SUB-SORT WITHIN a claim tier (see CLAIM_TIER_CASE_SQL below): the
 # tier CASE dominates, then ``e.priority DESC`` breaks ties inside a tier. So a
-# higher integer here only wins among events in the SAME tier — it can never
-# promote a non-tradeable event past a tradeable one (that is the tier's job).
+# higher integer here only wins among events in the SAME tier.
 # ---------------------------------------------------------------------------
 
 # Tradeable FORECAST_SNAPSHOT_READY families that are COMPLETE + LIVE_ELIGIBLE:
@@ -44,37 +42,12 @@ PRIORITY_TRADEABLE: Final[int] = 100
 # real future-target candidate, just not window-complete this cycle.
 PRIORITY_FORECAST_INCOMPLETE: Final[int] = 0
 
-# DAY0_EXTREME_UPDATED emitted while day0 is a TRADEABLE lane
-# (edli_live_scope='forecast_plus_day0'): realized observation, freshest alpha.
-PRIORITY_DAY0_TRADEABLE: Final[int] = 60
-
-# Reserved low priority for non-tradeable Day0 scopes in tests or historical
-# replay only. Production live scope is forecast_plus_day0.
-PRIORITY_DAY0_NON_TRADEABLE: Final[int] = 10
+# DAY0_EXTREME_UPDATED: realized observation, freshest alpha.
+PRIORITY_DAY0: Final[int] = 60
 
 
-def day0_emit_priority(*, day0_is_tradeable: bool) -> int:
-    """Priority to stamp on a DAY0_EXTREME_UPDATED event at emit time.
-
-    ``day0_is_tradeable`` is derived from ``edli_live_scope``. Production live
-    uses ``forecast_plus_day0`` so Day0 can submit through the same live lane.
-    """
-    return PRIORITY_DAY0_TRADEABLE if day0_is_tradeable else PRIORITY_DAY0_NON_TRADEABLE
-
-
-def day0_is_tradeable_for_scope(edli_live_scope: str | None) -> bool:
-    """True iff a DAY0_EXTREME_UPDATED event could lawfully reach a submit path
-    under ``edli_live_scope``.
-
-    Single source of truth for the scope→tradeability mapping shared by the
-    emitter (priority stamp) and the reactor (claim-tier selection). Any scope
-    other than the Day0-tradeable lane is treated as non-tradeable for Day0.
-    """
-    return str(edli_live_scope or "") == "forecast_plus_day0"
-
-
-def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
-    """The scope-aware claim-tier CASE EXPRESSION (no sort direction).
+def claim_tier_expr_sql() -> str:
+    """The claim-tier CASE EXPRESSION (no sort direction).
 
     This is the single tier authority as a bare ``CASE ... END`` that evaluates
     to the tier integer for a row. It is usable both as a SELECT column (e.g. to
@@ -88,20 +61,14 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
          order management. These are live money-at-risk or confirmed-positive-value
          rechecks, so they must not wait behind the ordinary FSR discovery
          round-robin.
-      0  DAY0_EXTREME_UPDATED  — ONLY when ``day0_is_tradeable`` (realized obs is
-         the freshest actionable alpha and must not sit behind forecast backlog).
+      0  DAY0_EXTREME_UPDATED — realized observation, freshest actionable alpha,
+         must not sit behind forecast backlog.
       1  FORECAST_SNAPSHOT_READY that is COMPLETE + LIVE_ELIGIBLE — the direct
          tradeable order candidates.
-      2  Other decision-trigger events (incl. non-tradeable DAY0_EXTREME_UPDATED
-         when NOT ``day0_is_tradeable``) — still actionable/dead-letterable but
+      2  Other decision-trigger events — still actionable/dead-letterable but
          must never starve a tradeable forecast family.
       3  Market-channel cache-hydration events — rejected immediately; demoted
          so they cannot starve all FSR.
-
-    When ``day0_is_tradeable`` is False the DAY0_EXTREME_UPDATED Tier-0 clause is
-    OMITTED, so day0 falls through to the ELSE (Tier 2) — strictly below the
-    tradeable FSR Tier 1. This is the live-incident fix; the True branch is
-    byte-identical to the historical authority.
 
     NON-REDECISION FAIRNESS IS UNTOUCHED: ordinary FSR still uses the
     2026-06-11 per-city round-robin law. Order-management continuations use the
@@ -111,15 +78,10 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
         "WHEN e.event_type = 'EDLI_REDECISION_PENDING'\n"
         "                THEN 0\n              "
     )
-    day0_tier0_clause = (
-        "WHEN e.event_type = 'DAY0_EXTREME_UPDATED'\n                THEN 0\n              "
-        if day0_is_tradeable
-        else ""
-    )
     return (
         "CASE\n              "
         + redecision_tier0_clause
-        + day0_tier0_clause
+        + "WHEN e.event_type = 'DAY0_EXTREME_UPDATED'\n                THEN 0\n              "
         + "WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'\n"
         "                 AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'\n"
         "                 AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'\n"
@@ -131,12 +93,12 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
     )
 
 
-def claim_tier_case_sql(*, day0_is_tradeable: bool) -> str:
-    """The scope-aware claim-tier CASE expression for ``fetch_pending`` ORDER BY.
+def claim_tier_case_sql() -> str:
+    """The claim-tier CASE expression for ``fetch_pending`` ORDER BY.
 
     ONE ordering authority. The tier CASE is the cross-tier rank; ``e.priority
     DESC`` (appended by the caller) is the within-tier sub-sort. Derived from
     :func:`claim_tier_expr_sql` by appending the ``ASC`` sort direction, so the
     ORDER BY form and the column form are the same expression by construction.
     """
-    return claim_tier_expr_sql(day0_is_tradeable=day0_is_tradeable) + " ASC"
+    return claim_tier_expr_sql() + " ASC"

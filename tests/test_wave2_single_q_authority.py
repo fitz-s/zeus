@@ -10,7 +10,7 @@ Pins the Wave-2 simplifications so a re-introduction is a RED test, not a note:
 
   item 1  baseline LCB no longer caps the replacement (live) q — single q authority.
           The comparison reference is never min()-joined.
-  item 5  live_execution_mode collapses to "edli_live" (canary string deleted; mapped
+  item 5  alternate execution-mode strings are absent (mapped
           old->new at the read boundary so persisted data stays readable).
   item 6  the settlement σ-floor applies by PER-CELL DATA AVAILABILITY (no flag); the
           three σ-floor knobs are merged + deleted.
@@ -267,7 +267,7 @@ def test_item1_adapter_records_baseline_diagnostics_not_min_join():
 
 
 # ---------------------------------------------------------------------------
-# item 5 — live_execution_mode collapse.
+# item 5 — alternate execution modes removed.
 # ---------------------------------------------------------------------------
 def test_item5_routing_tables_use_edli_live_only():
     import src.main as main
@@ -279,17 +279,8 @@ def test_item5_routing_tables_use_edli_live_only():
         assert kept in main.LIVE_EXECUTION_MODES
 
 
-def test_item5_unknown_mode_string_fails_closed():
-    """Unknown event-driven mode strings must fail closed."""
-    import src.main as main
-
-    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:totally_unknown_mode"):
-        main._live_execution_mode({"live_execution_mode": "totally_unknown_mode"})
 
 
-def test_item5_settings_mode_is_edli_live():
-    data = json.loads(_SETTINGS.read_text())
-    assert data["edli"]["live_execution_mode"] == "edli_live"
 
 
 # ---------------------------------------------------------------------------

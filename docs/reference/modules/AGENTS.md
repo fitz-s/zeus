@@ -32,12 +32,12 @@ authority docs, machine manifests, current-fact surfaces, tests, or source.
 | `supervisor_api.md` | Dense module book for Zeus/Venus typed boundary contracts |
 | `strategy.md` | Dense module book for edge selection, FDR, Kelly, and posterior fusion |
 | `signal.md` | Dense module book for P_raw, Day0, and diurnal signal generation |
-| `calibration.md` | Dense module book for Platt calibration, maturity gates, and diagnostic baseline metrics |
+| `calibration.md` | Dense module book for Platt calibration, maturity gates, and offline evidence baseline metrics |
 | `observability.md` | Dense module book for derived operator read models and health views |
 | `types.md` | Dense module book for unit safety, market types, and observation atoms |
 | `analysis.md` | Dense module book for placeholder/derived analysis utilities |
 | `scripts.md` | Dense module book for top-level script families and safety boundaries |
-| `tests.md` | Dense module book for law gates, relationship tests, and diagnostic/advisory families |
+| `tests.md` | Dense module book for law gates, relationship tests, and offline evidence/advisory families |
 | `topology_system.md` | Dense module book for machine routing, topology doctor, and manifest law |
 | `docs_system.md` | Dense module book for the tracked docs mesh and trust-layer routing |
 | `code_review_graph.md` | Dense module book for derived structural context and graph boundaries |

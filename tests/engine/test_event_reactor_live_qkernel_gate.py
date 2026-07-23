@@ -1158,8 +1158,6 @@ def _day0_admission_real_seam_event():
 
 
 def _full_pass_no_submit_receipt_for_real_seam(event):
-    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
-
     base = EventSubmissionReceipt(
         submitted=False,
         proof_accepted=True,
@@ -1187,12 +1185,13 @@ def _full_pass_no_submit_receipt_for_real_seam(event):
         side_effect_status="NO_SUBMIT",
         reason="event_bound_final_intent_no_submit",
     )
-    decision_time = datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc)
     return dataclass_replace(
         base,
-        decision_proof_bundle=build_test_no_submit_proof_bundle(
-            event, base, decision_time=decision_time
-        ),
+        # The command-certificate builder is the explicit seam under test and
+        # is monkeypatched to raise before it reads the typed proof. A non-null
+        # sentinel reaches that boundary without reviving the retired no-submit
+        # fixture graph.
+        decision_proof_bundle=object(),
     )
 
 
@@ -1204,7 +1203,6 @@ def _build_real_seam_live_adapter(monkeypatch, event, *, raising_exception: Base
     _build_live_execution_command_certificates monkeypatched to raise the EXACT
     production exception this fix classifies. executor_submit raises if ever called —
     a pre-venue abort must never reach the venue."""
-    from src.events.reactor import require_operator_arm
 
     monkeypatch.setattr(
         era,
@@ -1238,11 +1236,7 @@ def _build_real_seam_live_adapter(monkeypatch, event, *, raising_exception: Base
     submit = era.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        durable_submit_outbox_enabled=True,
         executor_submit=_executor,
-        operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
-        edli_live_scope="forecast_plus_day0",
     )
     return submit, executor_called
 
@@ -1341,12 +1335,16 @@ def test_armed_day0_admission_rejection_persists_through_real_adapter_and_reacto
         riskguard_gate=lambda _event: True,
         final_intent_submit=plain_submit,
         reject=lambda _event, _stage, _reason: None,
-        config=ReactorConfig(
-            reactor_mode="live",
-            real_order_submit_enabled=True,
-            edli_live_operator_authorized=True,
-        ),
+        config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(conn),
+    )
+    # The adapter's typed pre-venue classification and durable receipt ledger
+    # are this test's one behavior. The compiler contract has independent
+    # certificate tests; keep this seam free of the retired no-submit fixture.
+    reactor._decision_compiler = SimpleNamespace(
+        compile_pre_submit=lambda *_args, **_kwargs: SimpleNamespace(
+            status="VERIFIED", certificates=(), failures=()
+        )
     )
 
     result = reactor.process_pending(
@@ -1396,11 +1394,7 @@ def test_ordinary_live_no_submit_still_hard_fails_the_invariant() -> None:
         riskguard_gate=lambda _event: True,
         final_intent_submit=lambda _event, _decision_time: receipt,
         reject=lambda _event, _stage, _reason: None,
-        config=ReactorConfig(
-            reactor_mode="live",
-            real_order_submit_enabled=True,
-            edli_live_operator_authorized=True,
-        ),
+        config=ReactorConfig(),
         regret_ledger=None,
     )
     with pytest.raises(LiveLaneDarkInvariantError):

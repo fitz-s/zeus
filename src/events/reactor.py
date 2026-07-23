@@ -55,7 +55,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from src.decision_kernel import claims
-from src.decision_kernel.compiler import NoSubmitProofBundle
+from src.decision_kernel.compiler import PreSubmitProofBundle
 from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
@@ -384,7 +384,6 @@ def _operator_disarm_active() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
 LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
     "SUBMITTED",
     "REJECTED",
@@ -392,8 +391,7 @@ LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
     "PRE_SUBMIT_ERROR",
     "POST_SUBMIT_UNKNOWN",
 })
-EXECUTION_RECEIPT_TERMINAL_STATUSES = DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES | LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES
-EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit"})
+EXECUTION_RECEIPT_TERMINAL_STATUSES = LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane includes the
 # price-driven re-decision type. Mirrors src.engine.event_reactor_adapter._FORECAST_DECISION_EVENT_TYPES
 # and src.events.continuous_redecision.REDECISION_EVENT_TYPE (literal here to avoid an import cycle:
@@ -504,15 +502,6 @@ class EventSubmissionReceipt:
     reason: str = ""
     proof_accepted: bool | None = None
     decision_proof_bundle: Any | None = field(default=None, repr=False, compare=False)
-    # Mainstream-agreement gate fields (#135, 2026-06-03).
-    # None = gate not evaluated (flag OFF or evaluation error).
-    mainstream_agreement_pass: bool | None = None
-    mainstream_agreement_fail_reason: str | None = None
-    mainstream_point: float | None = None
-    mainstream_delta: float | None = None
-    mainstream_bin_label: str | None = None
-    mainstream_source: str | None = None
-    mainstream_fetched_at_utc: str | None = None
     # B2 (PR-4, 2026-06-03): edge-axis plumbing.
     # alpha_gap = q_live - c_fee_adjusted (direction-adjusted posterior minus
     # executable market price).  Positive = our estimate exceeds the ask price.
@@ -556,8 +545,8 @@ class EventSubmissionReceipt:
     min_entry_price: float | None = None
     min_expected_profit_usd: float | None = None
     min_submit_edge_density: float | None = None
-    # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
-    # when None so pre-book receipts keep byte-identical hashes.
+    # Opportunity Book selector evidence. Omitted from receipt_json when None so
+    # pre-book receipts keep byte-identical hashes; this field never authorizes submit.
     opportunity_book: dict[str, Any] | None = None
     replacement_forecast: dict[str, Any] | None = None
     unit: str | None = None
@@ -677,64 +666,14 @@ class EventSubmissionReceipt:
     # ran this decision so a full-pass receipt emitted by the no-submit adapter
     # during a live-arm degrade can never be confused with a genuine
     # decision-declined no-submit. Values:
-    #   "LIVE"              — live adapter, real_order_submit_enabled True (the real
-    #                          submit lane; either SUBMITTED / SUBMIT_DISABLED build /
-    #                          a TYPED NO_SUBMIT abort — never the default reason).
-    #   "SUBMIT_DISABLED"   — live adapter, real_order_submit_enabled False (the
-    #                          submit-disabled-bridge build lane).
-    #   "NO_SUBMIT_ADAPTER" — the no-submit adapter ran (control-blocked live-submit lane). On a
-    #                          full-pass its reason names the live block cause that drove
-    #                          the selector off the live lane (NO_SUBMIT_ADAPTER_LANE:
-    #                          <cause>), NEVER the default literal.
+    #   "LIVE"              — the sole live adapter; it either submits, emits a
+    #                          venue terminal, or records a typed pre-venue abort.
+    #   "NO_SUBMIT_ADAPTER" — an explicitly selected offline/test adapter.
     # This is DECISION provenance (which lane decided), not transport metadata, so it
     # IS serialized into receipt_json. None on legacy / pre-stamp receipts; omit-when-
     # None in receipt_json keeps existing receipt_hash byte-stable, and readers MUST
     # tolerate its absence (only NEW writes carry/enforce it).
     submit_lane: str | None = None
-    # C2 SELECTION SHRINKAGE TELEMETRY (task #60, 2026-06-13). The trading-path
-    # FDR/BH gate consumes degenerate {0,1} p-values (a no-op multiplicity
-    # correction; event_reactor_adapter.py:9854/9876) and, even with continuous
-    # p-values, mutually-exclusive bins violate PRDS so BH is invalid and FDR is
-    # the wrong objective (not bankroll log growth). The replacement (authority
-    # statistical_calibration_addendum_2026-06-13 A2/D3) is the posterior
-    # local-false-sign-rate + correlation-aware EB selection shrinkage +
-    # expected-log-utility license. These columns carry the NEW quantities on
-    # every adapter receipt:
-    #   lfsr                     — posterior P(edge <= 0 | D), the p-value
-    #                              replacement (small = confident positive edge).
-    #   edge_shrunk              — winner's-curse-corrected (EB-shrunk) edge.
-    #   edge_shrunk_posterior_sd — posterior SD of the shrunk edge.
-    #   selection_authority      — which gate DECIDED: "BH_FDR" (flag OFF, the
-    #                              current behavior) | "EB_SHRINKAGE" (flag ON).
-    # These are DECISION provenance fields. Current live selection remains unchanged
-    # unless selection_authority explicitly records an EB_SHRINKAGE gate result; the
-    # fields are serialized into receipt_json so later attribution can audit the
-    # selected order without feeding this data back into the same decision.
-    # None on legacy / gate-reject receipts; omit-when-None keeps existing
-    # receipt_hash byte-stable, mirroring submit_lane / envelope_json travel.
-    lfsr: float | None = None
-    edge_shrunk: float | None = None
-    edge_shrunk_posterior_sd: float | None = None
-    selection_authority: str | None = None
-    # F1 (2026-07-04): hierarchical settlement-coverage calibrator provenance
-    # (src/calibration/settlement_coverage_hierarchy.py). ``q_live``/``q_lcb_5pct``
-    # above BECOME the EXECUTABLE pair when the flag is ON (the values Kelly/
-    # admission actually consume); ``q_live_raw``/``q_lcb_raw`` carry the FROZEN
-    # raw certificate unchanged (audit law — the raw pair is never mutated).
-    # ``coverage_hierarchy_level`` names which cohort licensed the verdict
-    # (LOCAL_SHIELD/STRATEGY_BUCKET/STRATEGY_SUPERBUCKET/CROSS_STRATEGY/GLOBAL);
-    # None when no cohort reached a licensed verdict (flag OFF, or a genuine
-    # INSUFFICIENT_DATA no-op — both leave q_live/q_lcb_5pct untouched). All
-    # None on legacy / flag-OFF receipts; omit-when-None in receipt_json keeps
-    # existing receipt_hash byte-stable (mirrors submit_lane / lfsr above).
-    q_live_raw: float | None = None
-    q_lcb_raw: float | None = None
-    coverage_hierarchy_level: str | None = None
-    coverage_hierarchy_cohort_key: str | None = None
-    coverage_hierarchy_n: int | None = None
-    coverage_hierarchy_wins: int | None = None
-    coverage_hierarchy_estimator: str | None = None
-
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
             object.__setattr__(self, "proof_accepted", bool(self.submitted))
@@ -770,8 +709,8 @@ Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionRec
 
 
 class LiveLaneDarkInvariantError(RuntimeError):
-    """Raised at the no-submit persist boundary when a full-pass receipt would be
-    booked as accepted while the live lane was nominally armed and stamped LIVE.
+    """Raised at the no-submit persist boundary when a full-pass live receipt would be
+    booked as accepted without a registered pre-venue abort.
 
     The combination (nominally-armed live daemon + proof_accepted=True +
     side_effect_status=NO_SUBMIT + submit_lane="LIVE") is IMPOSSIBLE for a genuine
@@ -782,9 +721,8 @@ class LiveLaneDarkInvariantError(RuntimeError):
     silent-kill incident — so we RAISE instead of persisting a kill
     indistinguishable from normal no-submit accounting.
 
-    A no-submit receipt produced by the legitimate control-blocked lane carries
-    submit_lane="NO_SUBMIT_ADAPTER" + a named live block cause and is NOT impacted by
-    this invariant (it persists, honestly labelled).
+    An explicitly selected offline/test no-submit adapter carries
+    submit_lane="NO_SUBMIT_ADAPTER" and is not a live fallback.
 
     LIVE_PRE_VENUE_ABORT (BLOCKER fix, 2026-07-20, ~/cgc-answers/
     2026-07-19_zeus-multiwinner-auction-merge-gate/answer.md): a genuine terminal
@@ -833,27 +771,7 @@ LIVE_PRE_VENUE_ABORT_REASONS: frozenset[str] = frozenset({
 
 @dataclass
 class ReactorConfig:
-    reactor_mode: str = "live_no_submit"
-    real_order_submit_enabled: bool = False
-    # Task #102 (BEST-ORDER SELECTION): book-wide edge-zone admission gate, the
-    # LAST step in the money-path. DEFAULT FALSE => byte-identical to today (the
-    # gate is computed only when this flag is True). When True, a candidate is
-    # admitted ONLY if its honest (q_lcb-based) after-cost EV-per-dollar clears
-    # Scope-aware claim tier (2026-06-11 anti-starvation). True (default) =
-    # historical behaviour: DAY0_EXTREME_UPDATED ranks at the top claim tier
-    # (realized obs = freshest tradeable alpha). False is reserved for tests or
-    # historical replay scopes where Day0 is not a live entry lane. Derived from
-    # the scope via src.events.event_priority.day0_is_tradeable_for_scope.
-    day0_is_tradeable: bool = True
-    # SUBMIT-LANE INVARIANT (silent-trade-kill antibody 2026-06-12). The SAME
-    # operator-arm authority the main.py submit-adapter selector reads
-    # (edli_cfg["edli_live_operator_authorized"] is True, via require_operator_arm).
-    # Threaded here so the no-submit persist boundary can recognise a NOMINALLY-ARMED
-    # live daemon and refuse to silently book a full-pass receipt stamped LIVE as a
-    # NO_SUBMIT accepted terminal. NOT a second authority: it is the same flag value,
-    # passed in, read-only. Default False => byte-identical legacy behaviour (the
-    # invariant only fires when the operator has actually armed AND reactor_mode=live).
-    edli_live_operator_authorized: bool = False
+    """Structural reactor settings; submit authority has no runtime off mode."""
 
 
 # An executable market snapshot for the family may simply not be captured yet on the cycle
@@ -883,9 +801,7 @@ class ReactorConfig:
 #       reactor can read cheaply. We deliberately do NOT build a new venue/delist
 #       probe (operator no-new-probe guard) — if a cheaper authoritative delist
 #       signal is later surfaced, it joins this same horizon predicate.
-#   (c) OPERATOR_DISARM — the operator turned the lane off. The reactor_mode flip
-#       (REACTOR_NOT_LIVE) already consumes events in _process_one_pre_submit
-#       BEFORE retry; the explicit env disarm (ZEUS_REACTOR_TRANSIENT_DISARM)
+#   (c) OPERATOR_DISARM — the explicit env disarm (ZEUS_REACTOR_TRANSIENT_DISARM)
 #       gives operations a kill-switch that terminalizes in-flight transients
 #       with an honest cause instead of letting them spin.
 #
@@ -1274,7 +1190,6 @@ class OpportunityEventReactor:
             fetch_kwargs = {
                 "decision_time": decision_time.astimezone(UTC).isoformat(),
                 "limit": fetch_limit,
-                "day0_is_tradeable": self._config.day0_is_tradeable,
             }
             if targeted_event_ids:
                 fetch_kwargs["targeted_event_ids"] = targeted_event_ids
@@ -1766,7 +1681,7 @@ class OpportunityEventReactor:
         """Process ONE event as TWO serialized world-DB write units around the
         network submit boundary (#95 SEV-2.1).
 
-        EDLI live-canary contention fix (2026-05-31): the EDLI reactor and the
+        EDLI live-probe contention fix (2026-05-31): the EDLI reactor and the
         market-channel ingestor are two in-process WAL writers on zeus-world.db.
         Each event's world WRITE UNIT (claim → ledger writes → mark → commit) is
         serialized against the ingestor via the process-global world-DB write
@@ -2847,7 +2762,7 @@ class OpportunityEventReactor:
     def _commit_event_unit(self) -> None:
         """Commit the current event's world-DB write unit and release the WAL write lock.
 
-        EDLI live-canary contention fix (2026-05-31): the reactor and the
+        EDLI live-probe contention fix (2026-05-31): the reactor and the
         market-channel ingestor are two in-process writers on the same WAL
         zeus-world.db. Previously the reactor opened one implicit DEFERRED
         transaction at the first ``claim()`` and held the single WAL *write* lock
@@ -2986,13 +2901,6 @@ class OpportunityEventReactor:
                     dead_letter_stage="FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
                     dead_letter_error=error_msg,
                 )
-        if self._config.reactor_mode not in EDLI_PROCESSING_REACTOR_MODES:
-            return _PreSubmitCheck(
-                disposition=None,
-                should_submit=False,
-                reject_stage="LIVE_CAP",
-                reject_reason="REACTOR_NOT_LIVE",
-            )
         if event.event_type == "DAY0_EXTREME_UPDATED" and not _day0_hard_fact_payload_live_eligible(event):
             return _PreSubmitCheck(
                 disposition=None,
@@ -3156,15 +3064,6 @@ class OpportunityEventReactor:
             # EXIT_INTENT/venue command in the trade DB by exit_lifecycle.  It is
             # not an entry DecisionCertificate and must not be reinterpreted by
             # entry-only trade-score/FDR/Kelly/final-intent checks here.
-            if not self._config.real_order_submit_enabled:
-                return self._reject_or_retry_post_submit(
-                    event,
-                    "EXECUTOR_EXPRESSIBILITY",
-                    "GLOBAL_SELL_LIVE_SIDE_EFFECT_FORBIDDEN",
-                    result,
-                    receipt=receipt,
-                    decision_time=decision_time,
-                )
             result.proof_accepted += 1
             return None
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
@@ -3173,24 +3072,6 @@ class OpportunityEventReactor:
                 event,
                 proof_stage,
                 proof_reason,
-                result,
-                receipt=receipt,
-                decision_time=decision_time,
-            )
-        if receipt.side_effect_status in LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
-            return self._reject_or_retry_post_submit(
-                event,
-                "EXECUTOR_EXPRESSIBILITY",
-                receipt.reason or "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN",
-                result,
-                receipt=receipt,
-                decision_time=decision_time,
-            )
-        if receipt.side_effect_status not in {"NO_SUBMIT"} | EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
-            return self._reject_or_retry_post_submit(
-                event,
-                "EXECUTOR_EXPRESSIBILITY",
-                receipt.reason or "EDLI_REAL_ORDER_SUBMIT_DISABLED",
                 result,
                 receipt=receipt,
                 decision_time=decision_time,
@@ -3223,17 +3104,16 @@ class OpportunityEventReactor:
                 return _EXECUTABLE_SNAPSHOT_RETRY
             proof_bundle = receipt.decision_proof_bundle
             if proof_bundle is None:
-                compile_result = self._decision_compiler.compile_no_submit(
+                compile_result = self._decision_compiler.compile_pre_submit(
                     event,
                     decision_time=decision_time,
-                    mode="NO_SUBMIT",
                     proof_bundle=None,
                 )
                 self._decision_certificate_ledger.persist_failures(compile_result.failures)
                 reason = (
                     compile_result.failures[0].reason_code
                     if compile_result.failures
-                    else "NO_SUBMIT_PROOF_BUNDLE_REQUIRED"
+                    else "PRE_SUBMIT_PROOF_BUNDLE_REQUIRED"
                 )
                 return self._reject_or_retry_post_submit(
                     event,
@@ -3243,10 +3123,9 @@ class OpportunityEventReactor:
                     receipt=receipt,
                     decision_time=decision_time,
                 )
-            compile_result = self._decision_compiler.compile_no_submit(
+            compile_result = self._decision_compiler.compile_pre_submit(
                 event,
                 decision_time=decision_time,
-                mode="NO_SUBMIT",
                 proof_bundle=proof_bundle,
             )
             self._decision_certificate_ledger.persist_all(compile_result.certificates)
@@ -3266,7 +3145,7 @@ class OpportunityEventReactor:
                 # available time and the proof verifies. Requeue (bounded by retry cap →
                 # dead-letter) instead of terminally dropping the positive-edge candidate.
                 # 129/174 of the DECISION_CERTIFICATE rejections are exactly this.
-                reason = failure.reason_code if failure else "NO_SUBMIT_CERTIFICATE_REJECTED"
+                reason = failure.reason_code if failure else "PRE_SUBMIT_CERTIFICATE_REJECTED"
                 if detail:
                     reason = f"{reason}:{detail}"
                 return self._reject_or_retry_post_submit(
@@ -3280,8 +3159,8 @@ class OpportunityEventReactor:
             # SUBMIT-LANE PERSIST-BOUNDARY INVARIANT (silent-trade-kill antibody
             # 2026-06-12; /tmp/allpass_nosubmit_rootcause.md). A VERIFIED, full-pass
             # (proof_accepted=True) NO_SUBMIT receipt is about to be booked as an
-            # accepted terminal. If the daemon is NOMINALLY ARMED (reactor_mode=live AND
-            # the operator arm is on — read the SAME way the main.py selector reads it,
+            # accepted terminal. If the daemon is NOMINALLY ARMED (the operator arm
+            # is on — read the SAME way the main.py contract reads it,
             # no second authority) the receipt MUST NOT carry submit_lane="LIVE": the
             # live lane never produces an ORDINARY full-pass NO_SUBMIT with
             # proof_accepted — submit_lane="LIVE" here means the live lane silently ate
@@ -3307,11 +3186,6 @@ class OpportunityEventReactor:
                     decision_time=decision_time,
                 )
             self._decision_certificate_ledger.persist_all(certificates)
-            if receipt.side_effect_status in DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES:
-                self._no_submit_receipt_ledger.insert_idempotent(
-                    dataclass_replace(receipt, side_effect_status="NO_SUBMIT"),
-                    decision_time=decision_time,
-                )
             # FAILED-WITHOUT-SIDE-EFFECT terminals are VISIBLE rejections
             # (live 2026-06-12 00:52-01:13Z: five maker intents died
             # status=PRE_SUBMIT_ERROR and were silently counted proof_accepted —
@@ -3356,19 +3230,12 @@ class OpportunityEventReactor:
         reason. Ordinary submit_lane="LIVE" stays impossible for a full-pass
         NO_SUBMIT regardless of reason text.
         """
-        nominally_armed = (
-            self._config.reactor_mode == "live"
-            and bool(self._config.edli_live_operator_authorized)
-        )
-        if not nominally_armed:
-            return
         if not (receipt.proof_accepted is True and receipt.side_effect_status == "NO_SUBMIT"):
             return
         if receipt.submit_lane == "LIVE":
             raise LiveLaneDarkInvariantError(
                 "LIVE_LANE_DARK_FULL_PASS_NO_SUBMIT: a proof_accepted NO_SUBMIT receipt "
-                f"stamped submit_lane=LIVE reached the persist boundary on an armed live "
-                f"daemon (reactor_mode=live, operator_authorized=True). event_id="
+                f"stamped submit_lane=LIVE reached the live persist boundary. event_id="
                 f"{receipt.event_id} final_intent_id={receipt.final_intent_id} reason="
                 f"{receipt.reason!r}. The live lane never produces a full-pass NO_SUBMIT — "
                 "this is a silently-consumed tradeable entry."
@@ -3495,8 +3362,8 @@ class OpportunityEventReactor:
                 CompileFailure(
                     event_id=event.event_id,
                     decision_time=decision_time.astimezone(UTC),
-                    mode="NO_SUBMIT",
-                    claim_type="no_submit_dry_run_decision",
+                    mode="LIVE",
+                    claim_type="pre_submit_decision",
                     stage=stage,
                     reason_code=reason,
                     parent_hashes=parent_hashes,
@@ -3767,7 +3634,6 @@ class OpportunityEventReactor:
                 executable_snapshot_row=snapshot_row,
                 economics=economics,
                 direction=_receipt_or_payload(receipt, payload, "direction"),
-                mainstream=None,
                 rejection={"stage": stage, "reason": reason},
                 # city/target_date from the event payload so time-to-settlement is populated even
                 # for early-stage rejections (EVENT_FILTER / SOURCE_TRUTH) that have no bundle yet.
@@ -4309,7 +4175,6 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Honest no-edge declines on the same adapter keep their SPECIFIC reason
     # (FDR_REJECTED / TRADE_SCORE_NON_POSITIVE / ...) and stay terminal — only the
     # full-pass-default rewrite carries this base.
-    "NO_SUBMIT_ADAPTER_LANE",
     # FINDING-A (external review 2026-06-12): the FINAL taker size was being swept
     # from the elected DB snapshot's DEPTH while the limit price was the FRESH
     # submit-time witness price (which carries no depth). When the elected snapshot's
@@ -4380,7 +4245,7 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # A family excluded from the current complete auction because its current
     # probability/source bundle is not yet admissible must be reconsidered
     # after that substrate advances.  The wrapper is itself the stable reactor
-    # reason; inner diagnostics are intentionally more specific and variable.
+    # reason; inner telemetry are intentionally more specific and variable.
     "GLOBAL_FAMILY_INELIGIBLE",
 })
 
@@ -4400,7 +4265,6 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
 _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # --- _receipt_money_path_blocker terminal bases (reactor.py) ---
     "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN",
-    "EDLI_REAL_ORDER_SUBMIT_DISABLED",
     # Duplicate active live order suppression is a correct final disposition for
     # this event: the existing live order owns the family until it fills/cancels.
     # Requeueing the same event only clogs the redecision lane.
@@ -4415,11 +4279,10 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "ADMISSION_LCB_CONSISTENCY",
     "ADMISSION_CAPITAL_EFFICIENCY",
     "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE",
-    # --- no-submit / execution-receipt certificate codes (src/decision_kernel) ---
-    "NO_SUBMIT_PROOF_BUNDLE_REQUIRED",
+    # --- pre-submit / execution-receipt certificate codes (src/decision_kernel) ---
+    "PRE_SUBMIT_PROOF_BUNDLE_REQUIRED",
     "EXECUTION_RECEIPT_CERTIFICATE_REQUIRED",
     "EVENT_PERSISTED_AFTER_DECISION_TIME",
-    "REPLAY_COUNTERFACTUAL_NOT_PROMOTABLE_TO_NO_SUBMIT",
     # Execution-receipt FAILED-WITHOUT-SIDE-EFFECT terminals (routed via
     # receipt.reason or the bare status when reason is empty).
     "REJECTED",
@@ -5162,13 +5025,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
 
     import logging as _logging
 
-    from src.config import settings
-
     _log = _logging.getLogger("zeus.events.reactor")
-    _settings_source = settings._data if hasattr(settings, "_data") else settings
-    edli_cfg = _settings_source.get("edli", {}) if isinstance(_settings_source, dict) else {}
-    if not edli_cfg.get("enabled"):
-        return
     try:
         from src.config import runtime_cities as _rc
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
@@ -5468,38 +5325,6 @@ def _edli_day0_live_family_admission(
     )
 
 
-@dataclass(frozen=True)
-class OperatorArm:
-    """FIX-2b (PR_SPEC.md §2) operator-arm token for the EDLI live-submit boundary.
-
-    A capability token that is constructible ONLY through ``require_operator_arm``
-    after asserting ``edli_live_operator_authorized is True``. The EDLI live submit
-    adapter requires this token (regardless of mode — canary included) before any
-    real venue submit. Absent the token, the live adapter's submit guard fails closed
-    with ``OPERATOR_ARM_REQUIRED`` and main.py selects the no-submit adapter.
-
-    Frozen + presence-typed so "armed without operator authorization" is
-    unconstructable rather than merely flag-OFF. The token is applied EXACTLY at the
-    EDLI boundary; the mainline executor (execute_final_intent / _live_order) never
-    constructs this adapter and so is untouched by this gate.
-    """
-
-    authorized: bool = True
-
-def require_operator_arm(edli_cfg: dict) -> "OperatorArm | None":
-    """Mint an ``OperatorArm`` token IFF the operator has explicitly authorized live.
-
-    Mirrors the strict assert pattern at ``_assert_edli_live_promotion_artifact``
-    (main.py:567): only the literal ``True`` for ``edli_live_operator_authorized``
-    authorizes — any other value (missing, False, truthy-non-bool) returns ``None``.
-    Returning ``None`` (rather than raising) lets the live-builder selector degrade to
-    the no-submit adapter fail-closed instead of crashing the daemon boot.
-    """
-
-    if edli_cfg.get("edli_live_operator_authorized") is True:
-        return OperatorArm(authorized=True)
-    return None
-
 def _build_edli_status_pulse(
     *,
     started_at: str,
@@ -5512,7 +5337,6 @@ def _build_edli_status_pulse(
     dead_lettered: int,
     rejection_reason_counts: dict,
     risk_level: str,
-    submit_disabled_effective_mode: bool,
     live_submit_attempts: int,
     live_venue_acks: int = 0,
 ) -> dict:
@@ -5544,11 +5368,7 @@ def _build_edli_status_pulse(
         "dead_lettered": dead_lettered,
         "rejection_reason_counts": rejection_reason_counts,
         "top_no_trade_reasons": rejection_reason_counts,
-        "deterministic_rejections": (
-            {"real_order_submit_disabled": proof_accepted}
-            if submit_disabled_effective_mode and proof_accepted > 0
-            else {}
-        ),
+        "deterministic_rejections": {},
         "risk_level": risk_level,
     }
 
@@ -5772,59 +5592,6 @@ def _weather_family_from_market_slug(slug: str) -> tuple[str, str, str] | None:
         city = city_slug.replace("-", " ").title()
     return (city, target_date, metric)
 
-def _replacement_forecast_refit_decision_from_settings():
-
-    import logging as _logging
-    from src.main import _settings_section
-    _log = _logging.getLogger("zeus.events.reactor")
-
-    from src.config import PROJECT_ROOT
-    from src.data.replacement_forecast_refit_handoff import refit_decision_from_handoff_payload
-
-    cfg = _settings_section("replacement_forecast_live", {}) or {}
-    raw_path = cfg.get("refit_handoff_path") or "state/replacement_forecast_live/refit_handoff.json"
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except Exception as exc:  # noqa: BLE001 - fail closed at switch decision
-        _log.warning("replacement forecast refit handoff unreadable: %s", exc)
-        return None
-    if not isinstance(payload, dict):
-        _log.warning("replacement forecast refit handoff must be a JSON object: %s", path)
-        return None
-    try:
-        return refit_decision_from_handoff_payload(payload)
-    except Exception as exc:  # noqa: BLE001 - fail closed at switch decision
-        _log.warning("replacement forecast refit handoff invalid: %s", exc)
-        return None
-
-def _sqlite_table_names(conn) -> tuple[str, ...]:
-    rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
-    names: list[str] = []
-    for row in rows:
-        if isinstance(row, dict):
-            names.append(str(row["name"]))
-        else:
-            names.append(str(row[0]))
-    return tuple(sorted(names))
-
-def _current_live_fact_status(relative_path: str) -> str:
-    from src.config import PROJECT_ROOT
-
-    path = PROJECT_ROOT / relative_path
-    try:
-        first_lines = path.read_text(encoding="utf-8").splitlines()[:20]
-    except OSError:
-        return "STALE_FOR_LIVE"
-    for line in first_lines:
-        if line.startswith("Status:"):
-            return "CURRENT_FOR_LIVE" if "CURRENT_FOR_LIVE" in line else "STALE_FOR_LIVE"
-    return "STALE_FOR_LIVE"
-
 def _process_pending_cancelled(
     *,
     committed_day0_wake: bool,
@@ -5933,6 +5700,7 @@ def run_edli_event_reactor_cycle(
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
     urgent_day0_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
+    live_entry_block_reason: str | None = None,
 ) -> bool:
     """EDLI event-reactor cycle body (R4-b3 extraction from src/main.py::
     _edli_event_reactor_cycle, 2026-07-08). main.py's scheduler hook is now a
@@ -5972,7 +5740,6 @@ def run_edli_event_reactor_cycle(
         _settings_section,
         _start_venue_background_maintenance_after_reactor_if_required,
     )
-    from src.data.replacement_forecast_production import _replacement_forecast_runtime_flags_from_settings
     from src.state.portfolio import load_runtime_open_portfolio
 
     _log = _logging.getLogger("zeus.events.reactor")
@@ -6012,8 +5779,6 @@ def run_edli_event_reactor_cycle(
         urgent_day0_pending=urgent_day0_pending,
     )
 
-    if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
-        return False
     if _defer_for_held_position_monitor("edli_event_reactor"):
         return False
     if active_lock.locked():
@@ -6031,13 +5796,10 @@ def run_edli_event_reactor_cycle(
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
         event_bound_live_adapter_from_trade_conn,
-        event_bound_no_submit_adapter_from_trade_conn,
         executable_snapshot_gate_from_trade_conn,
-        replacement_forecast_baseline_bundle_provider_from_forecast_conn,
         riskguard_allows_new_entries,
     )
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
-    from src.events.event_priority import day0_is_tradeable_for_scope
     from src.events.event_store import EventStore
     from src.risk_allocator import snapshot_global_auction_capital_authority
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
@@ -6154,11 +5916,7 @@ def run_edli_event_reactor_cycle(
                 )
         _log_stage("day0_ledger_sync")
         _day0_family_admission: _Day0LiveFamilyAdmission | None = None
-        if (
-            not producer_fast_path
-            and edli_cfg.get("day0_extreme_trigger_enabled")
-            and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
-        ):
+        if not producer_fast_path:
             try:
                 from src.state.db import get_trade_connection_read_only as _get_trade_ro
 
@@ -6234,10 +5992,7 @@ def run_edli_event_reactor_cycle(
             )
             return False
         _fsr_events = []
-        if (
-            not committed_event_wake
-            and edli_cfg.get("forecast_snapshot_trigger_enabled")
-        ):
+        if not committed_event_wake:
             try:
                 _fair_source = _edli_next_redecision_source()
                 _fsr_pending = set()
@@ -6315,7 +6070,7 @@ def run_edli_event_reactor_cycle(
         )
         if _emit_acquired:
             try:
-                if edli_cfg.get("forecast_snapshot_trigger_enabled"):
+                if _fsr_events:
                     # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
                     # opportunity_events to the WAL world DB shared with the market-channel
                     # ingestor and CollateralLedger heartbeat. Under live load that DB hits
@@ -6347,11 +6102,7 @@ def run_edli_event_reactor_cycle(
                 # families with confirmed trade value, maker rests needing action, or held
                 # positions with money at risk. The reactor still emits ordinary
                 # FORECAST_SNAPSHOT_READY candidates for new-entry discovery above.
-                if (
-                    not producer_fast_path
-                    and edli_cfg.get("day0_extreme_trigger_enabled")
-                    and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
-                ):
+                if not producer_fast_path:
                     _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
                     try:
                         try:
@@ -6361,11 +6112,6 @@ def run_edli_event_reactor_cycle(
                                 decision_time=now,
                                 received_at=received_at,
                                 limit=day0_emit_limit,
-                                # Stamp scope-aware emission priority. Production live
-                                # scope makes Day0 tradeable.
-                                day0_is_tradeable=day0_is_tradeable_for_scope(
-                                    str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-                                ),
                                 budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
                                 family_admission=_day0_family_admission,
                                 urgent_wake_pending=_urgent_wake_pending,
@@ -6454,27 +6200,15 @@ def run_edli_event_reactor_cycle(
         trade_conn = get_trade_connection_with_world_required(write_class=None)
 
         regret_ledger = NoTradeRegretLedger(conn)
-        reactor_mode = str(edli_cfg.get("reactor_mode", "live"))
-        edli_live_scope = str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-        real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
-        submit_disabled_effective_mode = reactor_mode == "live_no_submit"
-        live_bridge_mode = reactor_mode == "live"
-        real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False
         # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
         # built so the live submit path's select_global_order_type does not raise
         # AllocationDenied("allocator_not_configured"). The legacy discover cycle wires this
         # via refresh_global_allocator; the EDLI cycle does not run that cycle, so without
-        # this seam every canary order silently blocks (see /tmp/edli_submit_gate_trace.md).
-        # FAIL-CLOSED: if the refresh cannot source a trustworthy drawdown (wallet unreachable
-        # / baseline undefined / exception), block THIS cycle to the no-submit adapter rather
-        # than submit live with an unconfigured-but-proceeding allocator.
-        # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12): track the TYPED
-        # cause whenever a live block clears live_submit_effective so the no-submit adapter
-        # can name it on every full-pass receipt it consumes (single source of truth —
-        # the same value that drove the selector off the live lane). None => no live block
-        # (the live lane was simply not configured for this reactor_mode).
-        _live_lane_block_cause: str | None = None
-        live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
+        # this seam every probe order silently blocks (see /tmp/edli_submit_gate_trace.md).
+        # Fail closed inside the sole live adapter when cycle-local truth needed for
+        # entry is unavailable. A live reactor never changes adapters to avoid a
+        # submit; an offline/test caller must construct its own no-submit adapter.
+        _live_entry_block_reason: str | None = live_entry_block_reason
         _auction_capital_authority = None
         # Task #107 (portfolio/multi Kelly): source one canonical exposure
         # snapshot per reactor cycle. Terminal history and operator/recovery
@@ -6487,32 +6221,25 @@ def run_edli_event_reactor_cycle(
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
         except Exception as _portfolio_exc:  # noqa: BLE001 — mode-sensitive fail-closed below
             _log.warning(
-                "EDLI reactor: portfolio snapshot load failed; no-submit telemetry may observe "
-                "with single-asset sizing, but real-submit will fail closed: %r",
+                "EDLI reactor: portfolio snapshot load failed; live entry will fail closed: %r",
                 _portfolio_exc,
             )
-        live_submit_effective, _portfolio_snapshot_block = _portfolio_snapshot_submit_gate(
-            live_submit_effective=live_submit_effective,
-            snapshot_required=real_submit_effective,
-            snapshot_available=_portfolio_state_provider is not None,
-        )
-        if _portfolio_snapshot_block is not None:
-            _live_lane_block_cause = _portfolio_snapshot_block
+        if _portfolio_state_provider is None:
+            _live_entry_block_reason = "portfolio_state_unavailable"
             _log.error(
-                "EDLI reactor: real submit disabled this cycle because portfolio_state_unavailable"
+                "EDLI reactor: live entry blocked this cycle because portfolio_state_unavailable"
             )
-        if live_submit_effective:
+        if _live_entry_block_reason is None:
             _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(
                 trade_conn,
                 portfolio_snapshot=_portfolio_snapshot,
             )
-            if live_bridge_mode and not _alloc_refresh.get("configured"):
-                live_submit_effective = False
+            if not _alloc_refresh.get("configured"):
                 _alloc_reason = _alloc_refresh.get("entry", {}).get("reason") or "allocator_not_configured"
-                _live_lane_block_cause = f"live_submit_effective_false:allocator_refresh:{_alloc_reason}"
+                _live_entry_block_reason = f"allocator_refresh:{_alloc_reason}"
                 _log.error(
-                    "EDLI reactor: live-bridge allocator refresh did not configure "
-                    "(fail_closed=%r reason=%r) — selecting NO-SUBMIT this cycle.",
+                    "EDLI reactor: allocator refresh did not configure "
+                    "(fail_closed=%r reason=%r) — blocking live entry this cycle.",
                     _alloc_refresh.get("fail_closed"),
                     _alloc_refresh.get("entry", {}).get("reason"),
                 )
@@ -6522,15 +6249,13 @@ def run_edli_event_reactor_cycle(
                         snapshot_global_auction_capital_authority()
                     )
                 except Exception as _capacity_exc:  # noqa: BLE001 - incoherent pair blocks live lane
-                    live_submit_effective = False
-                    _live_lane_block_cause = (
-                        "live_submit_effective_false:"
+                    _live_entry_block_reason = (
                         f"capital_authority_snapshot:{type(_capacity_exc).__name__}:"
                         f"{_capacity_exc}"
                     )
                     _log.error(
                         "EDLI reactor: allocator refresh reported configured but "
-                        "capacity authority snapshot failed; selecting NO-SUBMIT "
+                        "capacity authority snapshot failed; blocking live entry "
                         "this cycle: %r",
                         _capacity_exc,
                     )
@@ -6539,55 +6264,6 @@ def run_edli_event_reactor_cycle(
         # and portfolio reads; use the actual processing timestamp so fresh executable/book
         # parent certificates are never later than the decision they support.
         process_pending_decision_time = datetime.now(timezone.utc)
-        replacement_forecast_runtime_flags = _replacement_forecast_runtime_flags_from_settings()
-        replacement_forecast_refit_decision = _replacement_forecast_refit_decision_from_settings()
-        # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the runtime-policy resolver and
-        # switch-decision evaluator ignore these evidence objects after the live runtime
-        # flag path moved to runtime_layer='live'. None is behavior-identical to the deleted parsers.
-        replacement_forecast_promotion_evidence = None
-        replacement_forecast_capital_objective_evidence = None
-        replacement_forecast_baseline_bundle_provider = replacement_forecast_baseline_bundle_provider_from_forecast_conn(
-            forecasts_conn
-        )
-        replacement_forecast_world_tables = _sqlite_table_names(conn)
-        from src.data.replacement_forecast_live_switch_surface import (
-            CURRENT_DATA_FACT_FILE,
-            CURRENT_SOURCE_FACT_FILE,
-        )
-
-        replacement_forecast_source_fact_status = _current_live_fact_status(CURRENT_SOURCE_FACT_FILE)
-        replacement_forecast_data_fact_status = _current_live_fact_status(CURRENT_DATA_FACT_FILE)
-        # FIX-2b (PR_SPEC.md §2): mint the operator-arm token IFF edli_live_operator_authorized
-        # is True. The live submit adapter is selected ONLY when (live_submit_effective AND
-        # operator_arm is not None); otherwise the no-submit adapter is chosen. This gates
-        # EVERY real submit (canary included) at the EDLI boundary by TYPE. The mainline
-        # executor never constructs this adapter, so the 293-order mainline is untouched.
-        operator_arm = require_operator_arm(edli_cfg)
-        # SUBMIT-LANE STAMP + CYCLE-LEVEL LIVE-BLOCK SIGNAL (silent-trade-kill antibody
-        # 2026-06-12; /tmp/allpass_nosubmit_rootcause.md). The selector picks the live
-        # adapter ONLY when (live_submit_effective AND operator_arm is not None); else
-        # the no-submit adapter. Resolve the TYPED cause once, here, so it is
-        # the single source of truth threaded onto the control-blocked lane's receipts.
-        _edli_live_operator_authorized = edli_cfg.get("edli_live_operator_authorized") is True
-        _live_lane_selected = bool(live_submit_effective and operator_arm is not None)
-        if operator_arm is None and _live_lane_block_cause is None:
-            _live_lane_block_cause = "operator_arm_none"
-        if _live_lane_block_cause is None and not _live_lane_selected:
-            # live_submit_effective was False without a tracked live block.
-            _live_lane_block_cause = f"live_lane_unselected:reactor_mode={reactor_mode}"
-        _no_submit_live_block_cause = _live_lane_block_cause or "live_lane_unselected"
-        # LOUD cycle-level live-block signal: the live lane is dark THIS cycle while the
-        # operator has nominally armed it (reactor_mode=live + operator_authorized). The
-        # crash-loop incident ran ~50 min on the no-submit lane with the arm on and NO
-        # decision-lane signal. One ERROR per cycle here makes it impossible to miss.
-        if not _live_lane_selected and _edli_live_operator_authorized and reactor_mode == "live":
-            _log.error(
-                "LIVE LANE DARK: no-submit adapter selected while operator arm is on "
-                "(reactor_mode=live, edli_live_operator_authorized=True) — cause=%s. "
-                "Full-pass candidates this cycle are consumed on the NO_SUBMIT_ADAPTER "
-                "lane (receipts stamped with this cause); the live lane submitted nothing.",
-                _no_submit_live_block_cause,
-            )
         # Decision-triggered targeted substrate marker: when the adapter sees stale
         # executable prices, it marks the family for sidecar capture and returns
         # False so the stale event requeues fail-closed. Snapshot writes are owned
@@ -6613,78 +6289,39 @@ def run_edli_event_reactor_cycle(
                     edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000
                 ),
             )
-            if live_submit_effective
+            if _live_entry_block_reason is None
             else None
         )
-        submit_adapter = (
-            event_bound_live_adapter_from_trade_conn(
+        submit_adapter = event_bound_live_adapter_from_trade_conn(
+            trade_conn,
+            live_cap_conn=conn,
+            live_order_schema_initialized=True,
+            forecast_conn=forecasts_conn,
+            topology_conn=forecasts_conn,
+            calibration_conn=conn,
+            get_current_level=get_current_level,
+            portfolio_state_provider=_portfolio_state_provider,
+            entry_submit_block_reason=_live_entry_block_reason,
+            pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_book_evidence_conn(
                 trade_conn,
-                live_cap_conn=conn,
-                live_order_schema_initialized=True,
-                forecast_conn=forecasts_conn,
-                topology_conn=forecasts_conn,
-                calibration_conn=conn,
-                get_current_level=get_current_level,
-                portfolio_state_provider=_portfolio_state_provider,
-                real_order_submit_enabled=real_submit_effective,
-                durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
-                replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
-                replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
-                replacement_forecast_world_tables=replacement_forecast_world_tables,
-                replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
-                replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
-                replacement_forecast_refit_decision=replacement_forecast_refit_decision,
-                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
-                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_book_evidence_conn(
-                    trade_conn,
-                    edli_cfg,
-                    # GATE #84: in live-submit mode the pre-submit authority pulls a
-                    # just-in-time live book for the selected candidate so quote_age
-                    # reflects observation-to-submit latency, not the venue's coarse
-                    # book-change stamp on the shared feasibility feed.
-                    book_quote_provider=_live_jit_book_quote_provider,
-                ),
-                pre_submit_book_quote_provider=_live_jit_book_quote_provider,
-                executor_submit=lambda final_intent_cert, execution_command_cert: submit_event_bound_final_intent_via_existing_executor(
-                    final_intent_cert=final_intent_cert,
-                    execution_command_cert=execution_command_cert,
-                    conn=trade_conn,
-                    snapshot_conn=trade_conn,
-                    decision_time=process_pending_decision_time,
-                ),
-                operator_arm=operator_arm,
-                # Production live scope: forecast and Day0 share the same
-                # submit boundary.
-                edli_live_scope=edli_live_scope,
-                family_snapshot_refresher=_decision_family_snapshot_refresher,
-                auction_capital_authority=_auction_capital_authority,
-                producer_wake_ids=producer_wake_ids,
-                producer_wake_published_at=producer_wake_published_at,
-                selection_cancelled=held_position_monitor_pending,
-            )
-            if (live_submit_effective and operator_arm is not None)
-            else event_bound_no_submit_adapter_from_trade_conn(
-                trade_conn,
-                forecast_conn=forecasts_conn,
-                topology_conn=forecasts_conn,
-                calibration_conn=conn,
-                get_current_level=get_current_level,
-                portfolio_state_provider=_portfolio_state_provider,
-                replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
-                replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
-                replacement_forecast_world_tables=replacement_forecast_world_tables,
-                replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
-                replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
-                replacement_forecast_refit_decision=replacement_forecast_refit_decision,
-                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
-                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-                family_snapshot_refresher=_decision_family_snapshot_refresher,
-                # SUBMIT-LANE STAMP: name the live-block cause that selected this lane so a
-                # full-pass receipt consumed here can never be confused with a genuine
-                # decision-declined no-submit (single source of truth from the selector).
-                live_block_cause=_no_submit_live_block_cause,
-            )
+                edli_cfg,
+                # The pre-submit authority pulls a just-in-time live book so quote_age
+                # reflects observation-to-submit latency, not a shared-feed timestamp.
+                book_quote_provider=_live_jit_book_quote_provider,
+            ),
+            pre_submit_book_quote_provider=_live_jit_book_quote_provider,
+            executor_submit=lambda final_intent_cert, execution_command_cert: submit_event_bound_final_intent_via_existing_executor(
+                final_intent_cert=final_intent_cert,
+                execution_command_cert=execution_command_cert,
+                conn=trade_conn,
+                snapshot_conn=trade_conn,
+                decision_time=process_pending_decision_time,
+            ),
+            family_snapshot_refresher=_decision_family_snapshot_refresher,
+            auction_capital_authority=_auction_capital_authority,
+            producer_wake_ids=producer_wake_ids,
+            producer_wake_published_at=producer_wake_published_at,
+            selection_cancelled=held_position_monitor_pending,
         )
 
         reactor = OpportunityEventReactor(
@@ -6716,22 +6353,7 @@ def run_edli_event_reactor_cycle(
             # CREATE/INDEX DDL here can wait two full SQLite busy-timeouts while a
             # fresh forecast or observation is waiting to enter the decision path.
             world_schema_initialized=True,
-            config=ReactorConfig(
-                reactor_mode=reactor_mode,
-                real_order_submit_enabled=real_order_submit_enabled,
-                # Task #102 book-wide edge-zone admission. Absent key => default
-                # False => byte-identical legacy money-path (the operator owns
-                # config/settings.json; this reads it without writing it).
-                # Scope-aware claim tier. Production live scope makes Day0
-                # tradeable and rank as fresh alpha.
-                day0_is_tradeable=day0_is_tradeable_for_scope(edli_live_scope),
-                # SUBMIT-LANE PERSIST-BOUNDARY INVARIANT (silent-trade-kill antibody
-                # 2026-06-12): the SAME operator-arm authority the selector above reads,
-                # threaded so the reactor's no-submit persist boundary can recognise a
-                # nominally-armed live daemon and refuse to silently book a LIVE-stamped
-                # full-pass NO_SUBMIT. Not a second authority — the same flag value.
-                edli_live_operator_authorized=_edli_live_operator_authorized,
-            ),
+            config=ReactorConfig(),
         )
         _log_stage("reactor_construct")
         _rr = reactor.process_pending(
@@ -6785,7 +6407,6 @@ def run_edli_event_reactor_cycle(
                     dead_lettered=int(_rr.dead_lettered),
                     rejection_reason_counts=_rejection_counts,
                     risk_level=get_current_level().value,
-                    submit_disabled_effective_mode=submit_disabled_effective_mode,
                     live_submit_attempts=_live_submit_attempts,
                     live_venue_acks=_live_venue_acks,
                 )
@@ -7817,7 +7438,6 @@ def _edli_emit_day0_extreme_events(
     decision_time: datetime,
     received_at: str,
     limit: int,
-    day0_is_tradeable: bool = True,
     budget_seconds: float | None = None,
     family_admission: _Day0LiveFamilyAdmission | None = None,
     urgent_wake_pending: Callable[[], bool] | None = None,
@@ -7863,7 +7483,6 @@ def _edli_emit_day0_extreme_events(
     try:
         trigger = Day0ExtremeUpdatedTrigger(
             EventWriter(world_conn),
-            day0_is_tradeable=day0_is_tradeable,
             suppress_recent_no_value_refutations=True,
             family_admission=family_admission,
             scan_cities=(
@@ -8820,7 +8439,7 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     creation.
 
     ``book_quote_provider`` (GATE #84) is a just-in-time single-token
-    ``/book`` fetch (``token_id -> dict``). When wired in live/canary mode it is
+    ``/book`` fetch (``token_id -> dict``). When wired in live/probe mode it is
     the PRIMARY book authority: for the selected candidate at submit time we pull
     its live book and anchor ``quote_seen_at`` to our observation instant
     (``checked_at``), so the 1000ms freshness bound reflects observation-to-submit
@@ -8832,7 +8451,6 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     from src.engine.event_reactor_adapter import PreSubmitAuthorityWitness
 
     max_quote_age_ms = int(edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000)
-    balance_check_enabled = bool(edli_cfg.get("pre_submit_balance_allowance_check_enabled", True))
     venue_summary_cache: dict[str, object] | None = None
     pusd_collateral_payload_cache: dict[str, object] | None = None
     full_collateral_payload_cache: dict[str, object] | None = None
@@ -8900,7 +8518,6 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         ) = _edli_balance_allowance_status(
             final_intent,
             checked_at,
-            enabled=balance_check_enabled,
             collateral_payload=_cached_collateral_payload(
                 str(intent.get("side") or ""),
                 checked_at,
@@ -9061,11 +8678,8 @@ def _edli_balance_allowance_status(
     final_intent,
     checked_at: datetime,
     *,
-    enabled: bool,
     collateral_payload: dict[str, object] | None = None,
 ) -> tuple[str, str, str]:
-    if not enabled:
-        raise ValueError("PRE_SUBMIT_ALLOWANCE_CHECK_DISABLED")
     from src.data.polymarket_client import PolymarketClient
 
     intent = final_intent.payload
@@ -10485,13 +10099,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
     )
 
     _log = _logging.getLogger("zeus.events.reactor")
+    # The continuous re-decision consumer is part of the one live topology.
     edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
-        return
-    # Live-armed condition (replaces the deleted redecision_screen_enabled flag): the reactor
-    # must be in live mode. When submit is disabled the screen organ stays dark.
-    if str(edli_cfg.get("reactor_mode", "live")) != "live":
-        return
     if _defer_for_held_position_monitor("edli_redecision_screen"):
         return
     if not screen_lock.acquire(blocking=False):

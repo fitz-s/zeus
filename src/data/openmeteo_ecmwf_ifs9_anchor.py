@@ -117,7 +117,6 @@ class OpenMeteoIfs9LocalDayAnchor:
     low_data_version: str = LOW_DATA_VERSION
     model: str = MODEL
     measurement_policy: str = "hourly_temperature_2m_localday_anchor"
-    trade_authority_status: str = "BLOCKED"
     training_allowed: bool = False
 
     def __post_init__(self) -> None:
@@ -136,8 +135,8 @@ class OpenMeteoIfs9LocalDayAnchor:
             raise ValueError("contributing_local_times length must equal sample_count")
         if len(self.contributing_valid_times_utc) != self.sample_count:
             raise ValueError("contributing_valid_times_utc length must equal sample_count")
-        if self.trade_authority_status != "BLOCKED" or self.training_allowed:
-            raise ValueError("Open-Meteo ECMWF IFS 9km anchor is blocked until promoted by evidence")
+        if self.training_allowed:
+            raise ValueError("deterministic anchor cannot be calibration training input")
         if self.source_cycle_time is not None:
             object.__setattr__(self, "source_cycle_time", _coerce_cycle(self.source_cycle_time))
 
@@ -207,7 +206,6 @@ class OpenMeteoEcmwfIfs9AnchorRequest:
             "run": self.run_iso,
             "forecast_hours": self.forecast_hours,
             "role": "soft_spatial_anchor",
-            "trade_authority_status": "BLOCKED",
             "training_allowed": False,
             "measurement_policy": "hourly_temperature_2m_localday_anchor",
         }
@@ -511,7 +509,7 @@ def build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
     requested_source_available_at = _parse_utc(source_available_at, field_name="source_available_at")
     # C1-AVAIL-CLOCK (2026-06-16): source availability is PROOF OF POSSESSION = our captured_at
     # wall-clock, routed through the canonical producer. Open-Meteo serves no signed generation
-    # time, so the requested source_available_at is diagnostic-only (recorded below) and never
+    # time, so the requested source_available_at is recorded provenance (recorded below) and never
     # credited as a publish; captured_at is the honest earliest-usable basis. Re-parsed to a
     # tz-aware datetime because RawForecastArtifactManifest.to_dict() calls .astimezone(UTC).
     effective_source_available_at = _parse_utc(
@@ -521,7 +519,7 @@ def build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
     metadata["requested_source_available_at"] = requested_source_available_at.isoformat()
     metadata["source_available_at_authority"] = "captured_at_no_signed_openmeteo_generation_time"
     if requested_source_available_at != captured_at_utc:
-        metadata["requested_source_available_at_role"] = "diagnostic_not_authority"
+        metadata["requested_source_available_at_role"] = "telemetry_not_authority"
     return RawForecastArtifactManifest.from_file(
         artifact_path,
         source_id=SOURCE_ID,

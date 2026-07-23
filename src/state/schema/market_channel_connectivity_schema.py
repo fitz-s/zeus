@@ -1,6 +1,6 @@
 # Created: 2026-07-02
 # Last reused or audited: 2026-07-02
-# Authority basis: docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+# Authority basis: architecture/invariants.yaml
 #   §1 "input->q latency SLA (A2, 'THE metric')" / W0 "self-arming instrumentation" —
 #   W0.2 packet (measure only, no gate, no enforcement).
 """Trade DB DDL owner for market_channel_connectivity_events (W0.2 blind-window metric).

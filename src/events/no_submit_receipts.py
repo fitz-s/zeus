@@ -89,36 +89,22 @@ class EdliNoSubmitReceiptLedger:
                 executable_snapshot_id, final_intent_id, side_effect_status,
                 q_live, q_lcb_5pct, c_fee_adjusted, c_cost_95pct, p_fill_lcb,
                 trade_score, fdr_family_id, fdr_hypothesis_count,
-                lfsr, edge_shrunk, edge_shrunk_posterior_sd, selection_authority,
                 kelly_cost_basis_id, kelly_decision_id, risk_decision_id, kelly_size_usd,
                 projection_hash, receipt_json, receipt_hash, created_at, schema_version,
-                mainstream_agreement_pass, mainstream_agreement_fail_reason,
-                mainstream_point, mainstream_delta, mainstream_bin_label,
-                mainstream_source, mainstream_fetched_at_utc,
                 alpha_gap,
                 posterior_id, probability_authority, q_lcb_calibration_source,
-                envelope_json,
-                q_live_raw, q_lcb_raw, coverage_hierarchy_level,
-                coverage_hierarchy_cohort_key, coverage_hierarchy_n,
-                coverage_hierarchy_wins, coverage_hierarchy_estimator
+                envelope_json
             ) VALUES (
                 :receipt_id, :event_id, :causal_snapshot_id, :decision_time,
                 :family_id, :candidate_id, :condition_id, :token_id, :direction,
                 :executable_snapshot_id, :final_intent_id, :side_effect_status,
                 :q_live, :q_lcb_5pct, :c_fee_adjusted, :c_cost_95pct, :p_fill_lcb,
                 :trade_score, :fdr_family_id, :fdr_hypothesis_count,
-                :lfsr, :edge_shrunk, :edge_shrunk_posterior_sd, :selection_authority,
                 :kelly_cost_basis_id, :kelly_decision_id, :risk_decision_id, :kelly_size_usd,
                 :projection_hash, :receipt_json, :receipt_hash, :created_at, :schema_version,
-                :mainstream_agreement_pass, :mainstream_agreement_fail_reason,
-                :mainstream_point, :mainstream_delta, :mainstream_bin_label,
-                :mainstream_source, :mainstream_fetched_at_utc,
                 :alpha_gap,
                 :posterior_id, :probability_authority, :q_lcb_calibration_source,
-                :envelope_json,
-                :q_live_raw, :q_lcb_raw, :coverage_hierarchy_level,
-                :coverage_hierarchy_cohort_key, :coverage_hierarchy_n,
-                :coverage_hierarchy_wins, :coverage_hierarchy_estimator
+                :envelope_json
             )
             """,
             {
@@ -142,14 +128,6 @@ class EdliNoSubmitReceiptLedger:
                 "trade_score": receipt.trade_score,
                 "fdr_family_id": receipt.fdr_family_id,
                 "fdr_hypothesis_count": receipt.fdr_hypothesis_count,
-                # C2 selection-shrinkage telemetry columns (task #60). None on
-                # legacy / gate-reject receipts that never reached candidate-
-                # proof generation; populated by the adapter on every replacement
-                # -path candidate receipt.
-                "lfsr": receipt.lfsr,
-                "edge_shrunk": receipt.edge_shrunk,
-                "edge_shrunk_posterior_sd": receipt.edge_shrunk_posterior_sd,
-                "selection_authority": receipt.selection_authority,
                 "kelly_cost_basis_id": receipt.kelly_cost_basis_id,
                 "kelly_decision_id": receipt.kelly_decision_id,
                 "risk_decision_id": receipt.risk_decision_id,
@@ -159,17 +137,6 @@ class EdliNoSubmitReceiptLedger:
                 "receipt_hash": receipt_hash,
                 "created_at": created,
                 "schema_version": SCHEMA_VERSION,
-                "mainstream_agreement_pass": (
-                    int(receipt.mainstream_agreement_pass)
-                    if receipt.mainstream_agreement_pass is not None
-                    else None
-                ),
-                "mainstream_agreement_fail_reason": receipt.mainstream_agreement_fail_reason,
-                "mainstream_point": receipt.mainstream_point,
-                "mainstream_delta": receipt.mainstream_delta,
-                "mainstream_bin_label": receipt.mainstream_bin_label,
-                "mainstream_source": receipt.mainstream_source,
-                "mainstream_fetched_at_utc": receipt.mainstream_fetched_at_utc,
                 # B2 (PR-4, 2026-06-03): edge-axis column.
                 # NULL when c_fee_adjusted is NULL (no executable quote — fail-closed).
                 # Routed through compute_alpha_gap_from_market_price so that passing
@@ -196,16 +163,6 @@ class EdliNoSubmitReceiptLedger:
                 # provenance blob. NULL on legacy receipts; observability only — never gates and is
                 # omit-when-None in receipt_json so existing receipt_hash stays byte-stable.
                 "envelope_json": receipt.envelope_json,
-                # F1 (2026-07-04): hierarchical settlement-coverage calibrator
-                # provenance. None on legacy / flag-OFF receipts — observability
-                # only, never gates a schema requirement.
-                "q_live_raw": receipt.q_live_raw,
-                "q_lcb_raw": receipt.q_lcb_raw,
-                "coverage_hierarchy_level": receipt.coverage_hierarchy_level,
-                "coverage_hierarchy_cohort_key": receipt.coverage_hierarchy_cohort_key,
-                "coverage_hierarchy_n": receipt.coverage_hierarchy_n,
-                "coverage_hierarchy_wins": receipt.coverage_hierarchy_wins,
-                "coverage_hierarchy_estimator": receipt.coverage_hierarchy_estimator,
             },
         )
         return receipt_id
@@ -223,31 +180,11 @@ def _receipt_id(receipt: EventSubmissionReceipt) -> str:
     return f"edli_no_submit:{digest}"
 
 
-_MAINSTREAM_GATE_FIELDS = frozenset({
-    "mainstream_agreement_pass",
-    "mainstream_agreement_fail_reason",
-    "mainstream_point",
-    "mainstream_delta",
-    "mainstream_bin_label",
-    "mainstream_source",
-    "mainstream_fetched_at_utc",
-})
-
-
 def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     payload: dict[str, Any] = asdict(receipt)
     payload.pop("decision_proof_bundle", None)
     payload.pop("global_jit_candidate", None)
     payload.pop("global_jit_payoff_q_lcb", None)
-    # BUG-2 fix (#135): omit mainstream_* fields when the gate was NOT evaluated
-    # (all None) so receipt_hash is byte-identical to pre-gate baseline when the
-    # flag is OFF. Presence of the fields with null values changes the JSON and
-    # therefore the hash — breaking legacy-inertness / triggering EdliReceiptHashDrift
-    # on retry for pre-existing receipts. Mirror the decision_proof_bundle
-    # exclusion pattern: drop the block entirely when not populated.
-    if all(payload.get(k) is None for k in _MAINSTREAM_GATE_FIELDS):
-        for k in _MAINSTREAM_GATE_FIELDS:
-            payload.pop(k, None)
     # B2 (PR-4, 2026-06-03): alpha_gap — omit when None for hash stability.
     # Receipts without an executable quote (c_fee_adjusted=NULL) had no alpha_gap
     # before B2; including "alpha_gap: null" would change their hash and trigger
@@ -328,30 +265,6 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload.pop("min_expected_profit_usd", None)
     if payload.get("min_submit_edge_density") is None:
         payload.pop("min_submit_edge_density", None)
-    # C2 selection-shrinkage telemetry fields (task #60): ALWAYS excluded from
-    # receipt_json — never hashed. Their canonical home is the queryable COLUMNS
-    # (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority).
-    # Reason (same as envelope_json): the C2 quantities are populated on EVERY
-    # gate receipt the moment the code deploys — even with the replacement flag
-    # OFF — so serializing them would change receipt_json (and therefore
-    # receipt_hash) for a pre-C2 receipt RETRIED after deploy, raising
-    # EdliReceiptHashDriftError on the money path for the SAME (event_id,
-    # final_intent_id) key. Excluding them keeps receipt_hash byte-identical to
-    # the pre-C2 baseline (true legacy-inertness when the flag is OFF) while the
-    # full selection-stage decision stays queryable in SQL via the columns.
-    for _c2_field in ("lfsr", "edge_shrunk", "edge_shrunk_posterior_sd", "selection_authority"):
-        payload.pop(_c2_field, None)
-    # F1 (2026-07-04): hierarchical settlement-coverage calibrator provenance —
-    # omit when None so legacy / flag-OFF receipts keep byte-identical
-    # receipt_json (and therefore receipt_hash). Present (set) only when the
-    # hierarchy calibrator reached a licensed verdict for this receipt.
-    for _f1_field in (
-        "q_live_raw", "q_lcb_raw", "coverage_hierarchy_level",
-        "coverage_hierarchy_cohort_key", "coverage_hierarchy_n",
-        "coverage_hierarchy_wins", "coverage_hierarchy_estimator",
-    ):
-        if payload.get(_f1_field) is None:
-            payload.pop(_f1_field, None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

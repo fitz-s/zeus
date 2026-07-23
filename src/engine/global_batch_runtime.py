@@ -734,7 +734,7 @@ def _bind_selection_holdings(
 ) -> dict[str, object]:
     """Bind every family holding to the same selection-time ledger generation."""
 
-    from src.solve.menu_adapter import native_holdings_snapshot_from_positions
+    from src.engine.native_holdings import native_holdings_snapshot_from_positions
 
     positions = tuple(getattr(portfolio_state, "positions", ()) or ())
     ledger_snapshot_id = str(getattr(wealth_witness, "ledger_snapshot_id", "") or "")
@@ -2910,7 +2910,7 @@ def process_current_global_batch(
             "condition=%s token=%s "
             "q_mean=%s shares=%s cost_usd=%s fill_price=%s limit_price=%s "
             "max_spend_usd=%s win_probability_lcb=%s loss_probability_ucb=%s "
-            "ev_diagnostic_usd=%.6f robust_dlog=%.12f "
+            "ev_telemetry_usd=%.6f robust_dlog=%.12f "
             "capital_efficiency=%.12f candidate=%s",
             stage,
             family_key,

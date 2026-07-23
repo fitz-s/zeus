@@ -19,7 +19,7 @@ settlement_samples() implements HIGH physical law (PR-B fix 2026-05-22):
     return settle(max(observed_high_so_far, future_member_max[i]))
 current_temp must NOT enter the value path — it can only lower future highs,
 violating the monotonicity of a daily-max statistic. current_temp is kept
-as a diagnostic / uncertainty input only (forecast_context()).
+as a telemetry / uncertainty input only (forecast_context()).
 
 Intentionally does NOT import day0_low_nowcast_signal (parallel-structure invariant).
 """
@@ -141,7 +141,7 @@ class Day0HighNowcastSignal:
         Day's high = settle(max(observed_high_so_far, future_member_max)).
         current_temp must NOT enter the value path (it can only lower samples,
         violating the physical monotonicity of a daily-max statistic).
-        current_temp is preserved for diagnostics / uncertainty in forecast_context().
+        current_temp is preserved for telemetry / uncertainty in forecast_context().
 
         Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §Physical law
         """
@@ -184,7 +184,7 @@ class Day0HighNowcastSignal:
         return np.asarray(probs, dtype=np.float64)
 
     def forecast_context(self) -> dict:
-        """Diagnostic context dict.
+        """Telemetry context dict.
 
         Key structure matches Day0LowNowcastSignal.forecast_context (lines 143-157):
         {"observation_weight", "temporal_closure_weight", "backbone": {...}}

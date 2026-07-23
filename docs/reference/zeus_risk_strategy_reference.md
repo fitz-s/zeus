@@ -38,16 +38,16 @@ RiskGuard's `tick()` computes current-state risk levels, then takes the max:
 | `portfolio_consistency_level` | DATA_DEGRADED when the current canonical portfolio is not loadable consistently |
 | `unresolved_exposure_level` | DATA_DEGRADED for a current unbounded exposure obligation or unmapped blocking ChainOnlyFact |
 
-### 1.3 Trailing loss diagnostics
+### 1.3 Trailing loss offline evidence checks
 
-`_realized_window_loss_diagnostic()` reports 24h and 7-day settled PnL for
+`_realized_window_loss_offline evidence()` reports 24h and 7-day settled PnL for
 observability only. It does not return a `RiskLevel` and is not an input to
 `overall_level()`.
 
 1. Select authoritative settled outcomes within `[now - lookback, now]`.
 2. Exclude balance-only chain recovery rows from strategy attribution.
 3. Report `loss = max(0, -sum(realized_pnl))`, counts, window, and provenance.
-4. If settlement history is unavailable, mark the diagnostic degraded without
+4. If settlement history is unavailable, mark the offline evidence degraded without
    blocking a current-evidence action.
 
 The first-principles boundary is current state: settled outcomes are already
@@ -72,18 +72,16 @@ YELLOW-equivalent safety without declaring an actual loss breach."
 
 Concrete triggers are missing current truth such as an unloadable canonical
 portfolio or unbounded current exposure. Missing retrospective PnL history is
-diagnostic degradation, not `DATA_DEGRADED` actuation.
+offline evidence degradation, not `DATA_DEGRADED` actuation.
 
 In `tick_with_portfolio()` (degraded entry point), if
 `portfolio.portfolio_loader_degraded=True`, the brier input level is
 set to DATA_DEGRADED instead of GREEN.
 
-### 1.6 Force exit review
+### 1.6 RED exit authority
 
-`force_exit_review` remains a compatibility column/read seam for rolling
-deployments, but new full RiskGuard ticks write `0`. Historical PnL does not
-create exit intent. Current `RiskLevel.RED` conditions still actuate the normal
-RED behavior through the single risk-level authority.
+Historical PnL does not create exit intent. Current `RiskLevel.RED` conditions
+alone actuate RED behavior through the single risk-level authority.
 
 **Key files**: `src/riskguard/risk_level.py`, `src/riskguard/riskguard.py`
 

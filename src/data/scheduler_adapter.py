@@ -20,9 +20,9 @@ DB-heavy jobs starve heartbeats:
     settlement_db       — settlement truth collection
     venue_event_db      — long-running venue event ingestion
     backfill_db         — other backfill / historical DB writers (incl. UMA)
-    derived_db          — derived/diagnostic DB writers (calibration, skill, drift)
+    derived_db          — derived DB writers (calibration, skill, drift)
     io                  — non-DB IO jobs
-    diagnostic_io       — health/status probes (file-only, potentially slow)
+    health_io           — health/status/evidence probes (file-only, potentially slow)
     heartbeat           — process liveness heartbeat only
 
 This module is the structural home of the "UMA must not write the DB on the file-only fast
@@ -55,7 +55,7 @@ ExecutorClass = Literal[
     "backfill_db",
     "derived_db",
     "io",
-    "diagnostic_io",
+    "health_io",
     "heartbeat",
 ]
 
@@ -65,7 +65,7 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
     if not spec.writes_db:
         if spec.job_id in {"ingest_heartbeat", "forecast_live_heartbeat"}:
             return "heartbeat"
-        return "diagnostic_io" if spec.role == "diagnostic" else "io"
+        return "health_io" if spec.role in ("health", "evidence") else "io"
     if spec.role == "live" or spec.role == "settlement":
         if spec.job_id == "ingest_replacement_availability_poll":
             return "forecast_clock_db"
@@ -105,7 +105,7 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
         )
     if spec.role == "backfill":
         return "backfill_db"
-    return "derived_db"  # derived / diagnostic DB writers
+    return "derived_db"
 
 
 @dataclass(frozen=True)
@@ -195,7 +195,7 @@ def validate_executor_assignment(specs: list[JobBuildSpec] | None = None) -> lis
     for s in specs:
         job = JOB_REGISTRY.get(s.job_id)
         writes_db = job.writes_db if job is not None else s.is_db_writer
-        if writes_db and s.executor_class in ("io", "diagnostic_io", "heartbeat"):
+        if writes_db and s.executor_class in ("io", "health_io", "heartbeat"):
             violations.append(
                 f"{s.job_id}: writes_db job assigned file-only executor {s.executor_class!r}"
             )
@@ -284,7 +284,7 @@ def registry_executor_pools() -> dict[str, object]:
         "backfill_db": ThreadPoolExecutor(max_workers=1),
         "derived_db": ThreadPoolExecutor(max_workers=1),
         "io": ThreadPoolExecutor(max_workers=2),
-        "diagnostic_io": ThreadPoolExecutor(max_workers=3),
+        "health_io": ThreadPoolExecutor(max_workers=3),
         "heartbeat": ThreadPoolExecutor(max_workers=1),
     }
 
@@ -355,7 +355,7 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
             "market_topology_db",
             "settlement_db",
             "venue_event_db",
-        } and job.role in ("derived", "diagnostic", "backfill"):
+        } and job.role in ("derived", "health", "evidence", "backfill"):
             violations.append(
                 f"{s.job_id}: role={job.role} on latency-sensitive lane {s.executor_class}"
             )

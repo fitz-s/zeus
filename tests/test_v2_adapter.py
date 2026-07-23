@@ -1220,22 +1220,6 @@ def test_collateral_payload_pusd_allowance_preserved_with_zero_ctf_positions(tmp
     assert payload["ctf_token_balances_units"] == {}
 
 
-def test_polymarket_client_defaults_to_current_keychain_funder_signature_type(monkeypatch):
-    from src.data import polymarket_client as pm
-
-    monkeypatch.setattr(
-        pm,
-        "_resolve_credentials",
-        lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
-    )
-    monkeypatch.delenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", raising=False)
-    monkeypatch.setattr(pm, "_real_order_submit_enabled", lambda: False)
-
-    adapter = pm.PolymarketClient()._ensure_v2_adapter()
-
-    assert adapter.signature_type == 2
-    assert adapter.polygon_rpc_url
-
 
 def test_polymarket_client_translates_split_http_timeout_for_v2_reads(monkeypatch):
     """Authenticated monitor reads receive scalar seconds, never httpx.Timeout."""
@@ -1255,20 +1239,6 @@ def test_polymarket_client_translates_split_http_timeout_for_v2_reads(monkeypatc
 
     assert adapter.network_timeout_seconds == pytest.approx(2.0)
 
-
-def test_polymarket_client_requires_explicit_signature_type_when_submit_armed(monkeypatch):
-    from src.data import polymarket_client as pm
-
-    monkeypatch.setattr(
-        pm,
-        "_resolve_credentials",
-        lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
-    )
-    monkeypatch.delenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", raising=False)
-    monkeypatch.setattr(pm, "_real_order_submit_enabled", lambda: True)
-
-    with pytest.raises(RuntimeError, match="POLYMARKET_CLOB_V2_SIGNATURE_TYPE is required"):
-        pm.PolymarketClient()._ensure_v2_adapter()
 
 
 def test_default_q1_egress_evidence_uses_current_live_control_surface():

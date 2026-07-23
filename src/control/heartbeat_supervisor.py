@@ -359,7 +359,7 @@ def _reset_dedicated_heartbeat_http_transport(
     )
 
 
-def heartbeat_transport_diagnostics() -> dict[str, Any]:
+def heartbeat_transport_telemetry() -> dict[str, Any]:
     return {
         "request_cause_preserved": bool(_HEARTBEAT_REQUEST_CAUSE_PRESERVED),
         "transport_reset_count": int(_HEARTBEAT_TRANSPORT_RESET_COUNT),
@@ -1098,7 +1098,7 @@ def _describe_heartbeat_exception(exc: Exception | str) -> str:
 
     The py-clob SDK can collapse transport failures to the opaque string
     ``PolyApiException[status_code=None, error_message=Request exception!]``.
-    That is fail-closed enough for safety, but not diagnostic enough to repair
+    That is fail-closed enough for safety, but not telemetry enough to repair
     live heartbeat loss. Include exception class and immediate cause/context
     class/message while keeping the payload compact and free of credentials.
     """
@@ -1142,7 +1142,7 @@ def write_heartbeat_keeper_status(
     payload = {
         "schema_version": 2,
         "owner": owner,
-        "transport_diagnostics": heartbeat_transport_diagnostics(),
+        "transport_telemetry": heartbeat_transport_telemetry(),
         **status.to_dict(),
         "source": owner,
         "written_at": now.isoformat(),

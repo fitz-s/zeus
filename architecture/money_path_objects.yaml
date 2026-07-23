@@ -220,29 +220,6 @@ state_machines:
       - CONSISTENT
     invariant_tests:
       - tests/test_reconcile_chain_mirror.py
-  reconcile_diff_finding_classification:
-    owner: src/reconcile/diff_engine.py
-    description: >
-      R2-core diff-engine finding classification codes (docs/rebuild/
-      EXECUTION_MASTER_2026-07-07.md §E R2-a/R2-b). Not venue/lifecycle
-      states; this is the diff engine's own predicate-table outcome
-      vocabulary (classify(local, chain) -> findings), carried on
-      DiffFinding.classification. Report-only in R2-core except
-      RESERVATION_ORPHANED_FILL_AFTER_RELEASE, whose apply_corrective_event
-      appends an append-only REVIEW_REQUIRED position_events marker (never a
-      collateral_reservations balance mutation -- see diff_engine.py's
-      apply_corrective_event docstring for the scope rationale). The module
-      is SHADOW-FREE but INERT: nothing outside tests/the replay harness
-      calls reconcile(apply=True) yet; live wiring is R2-c.
-    states:
-      - LOCAL_STATE_IGNORES_CONCURRENT_FILL
-      - WS_STATE_STALE_NEEDS_REST_TRUTH
-      - PARTIAL_REMAINDER_TERMINAL_PROOF_AVAILABLE
-      - POSITION_SHARES_EXCEED_CANONICAL_FILL
-      - RESERVATION_ORPHANED_FILL_AFTER_RELEASE
-    invariant_tests:
-      - tests/reconcile/test_diff_engine.py
-      - tests/reconcile/test_replay_harness.py
   family_rebalance_lease:
     owner: src/state/schema/family_rebalance_intents_schema.py
     description: >
@@ -444,21 +421,6 @@ state_machines:
       - tests/test_negrisk_redeem_payout_proof.py
       - tests/test_redeem_cascade_liveness.py
       - tests/test_settlement_commands.py
-  ctf_conversion_command:
-    owner: src/execution/ctf_conversion_commands.py
-    description: >
-      SCH-W2.4 CTF conversion command lifecycle (split/merge collateral
-      primitives). Chain-truth terminal states; UNKNOWN is recovery-owned
-      (never silently retried). Inert until a W5 caller wires conversion
-      into the live path.
-    states:
-      - CTF_CONVERSION_INTENT_CREATED
-      - CTF_CONVERSION_TX_HASHED
-      - CTF_CONVERSION_CONFIRMED
-      - CTF_CONVERSION_FAILED
-      - CTF_CONVERSION_UNKNOWN
-    invariant_tests:
-      - tests/execution/test_ctf_conversion_commands.py
   venue_submit_error_code:
     owner: src/execution/batch_order_submission.py
     description: >
@@ -479,11 +441,10 @@ state_machines:
   operator_repair_evidence_label:
     owner: scripts/repair_review_required_no_venue_exposure.py
     description: >
-      Evidence/diagnostic labels introduced by the 2026-07-04 operator repair
+      Evidence/telemetry labels introduced by the 2026-07-04 operator repair
       and observability lane. Not command lifecycle states:
-      EXTERNALLY_REDEEMED_ZERO_PAYOUT is a chain_truth_resolution label the
-      release gate (scripts/check_live_release_gate.py) accepts as proof that a
-      redeem-review command's market settled externally with zero payout;
+      EXTERNALLY_REDEEMED_ZERO_PAYOUT is a chain_truth_resolution label proving
+      that a redeem-review command's market settled externally with zero payout;
       CLOSED_MARKET_UNKNOWN is an existing venue error-code literal matched by
       the repair script's candidate filter (src/state/venue_command_repo.py
       transition table already routes it to SUBMIT_UNKNOWN_SIDE_EFFECT);
@@ -496,7 +457,6 @@ state_machines:
       - VENUE_COMMANDS_SUBMIT_SCHEMA_DRIFT
     invariant_tests:
       - tests/test_repair_review_required_no_venue_exposure.py
-      - tests/test_live_release_gate.py
       - tests/test_healthcheck.py
   live_runtime_config:
     owner: src/strategy/family_exclusive_dedup.py
@@ -620,17 +580,6 @@ state_machines:
       as a string literal in scripts/check_advisory_gates.py.
     states:
       - GATE_REVIEW_CONDITION
-  schema_migration_sql_ops:
-    owner: scripts/migrate_model_bias_ens_canonical_fields.py
-    description: >
-      Raw SQL transaction operations used in schema migration scripts for
-      race-safe ALTER TABLE patterns. NOT a money-path state machine — these are
-      SQLite transaction control statements used in idempotent migration helpers.
-      Registered here because the "ACK" substring in ROLLBACK fires the semantic
-      classifier's ACK-prefix state check when the string literal "ROLLBACK"
-      appears in conn.execute() calls. (Zeus #64 PR #342)
-    states:
-      - ROLLBACK
     invariant_tests: []
   calibration_fitter_pooling_verdicts:
     owner: scripts/fit_bias_scale.py
@@ -692,7 +641,6 @@ state_machines:
       - REPLACEMENT_INTENT_IMMUTABILITY_PASS
     invariant_tests:
       - tests/test_openmeteo_ecmwf_ifs9_precision_guard.py
-      # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): test_replacement_forecast_go_live_report.py
       # deleted with the go_live_report verdict module. REPLACEMENT_INTENT_IMMUTABILITY_PASS
       # coverage retained by the two sibling tests below. The GO_LIVE_ROLLBACK_* states above
       # are now orphaned (emitting modules deleted) — flagged for topology/map-maintenance.
@@ -767,40 +715,9 @@ state_machines:
       - PRE_SUBMIT_CTF_BALANCE_INSUFFICIENT
       - PRE_SUBMIT_CTF_ALLOWANCE_INSUFFICIENT
       - DAY0_OUT_OF_SCOPE_FOR_PR332
-      - CANARY_SAFETY_PASS
-      - CANARY_PROFIT_PASS
-      - CANARY_PROOF_PASS
       - WAITING_FOR_QUALIFYING_EVENT
       - FAIL
-      - CANARY_ARTIFACT_MISSING
-      - CANARY_REQUIRED_FIELDS_MISSING
-      - CANARY_REQUIRES_VENUE_ORDER_OR_SUBMIT_UNKNOWN
-      - CANARY_REQUIRES_USER_CHANNEL_OR_RECONCILE
-      - CANARY_SUBMIT_UNKNOWN_UNRESOLVED
-      - CANARY_PENDING_RECONCILE
-      - CANARY_QUOTE_STALE
-      - CANARY_EXPECTED_EDGE_INSUFFICIENT
-      - CANARY_EXPECTED_EDGE_INVALID
-      - CANARY_CAP_TRANSITION_INVALID
-      - CANARY_REALIZED_STATE_INVALID
       - EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED
-      - EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT_REQUIRED
-      - EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT
-      - EDLI_LIVE_PROMOTION_ARTIFACT_INVALID_JSON
-      - EDLI_LIVE_PROMOTION_ARTIFACT_SCHEMA_INVALID
-      - EDLI_LIVE_PROMOTION_ARTIFACT_DB_MISMATCH
-      - EDLI_LIVE_PROMOTION_CANARY_COUNT_INSUFFICIENT
-      - EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN
-      - EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT
-      - EDLI_LIVE_PROMOTION_REALIZED_EDGE_INVALID
-      - EDLI_LIVE_PROMOTION_PENDING_RECONCILE
-      - EDLI_LIVE_PROMOTION_PROJECTION_MISSING
-      - EDLI_LIVE_PROMOTION_CAP_TRANSITION_MISSING
-      - EDLI_LIVE_PROMOTION_USER_OR_RECONCILE_MISSING
-      - EDLI_LIVE_PROMOTION_CONFIRMED_FILL_NOT_PROMOTION_ELIGIBLE
-      - EDLI_LIVE_PROMOTION_EXPECTED_EDGE_PROVENANCE_MISSING
-      - EDLI_LIVE_PROMOTION_COST_BASIS_PROVENANCE_MISSING
-      - EDLI_LIVE_PROMOTION_FILL_PROVENANCE_MISSING
       - EDLI_USER_CHANNEL_MESSAGE_HASH_REQUIRED
       - EDLI_USER_CHANNEL_MESSAGE_STALE_BEFORE_COMMAND
       - EDLI_USER_CHANNEL_MESSAGE_HASH_DRIFT
@@ -813,34 +730,7 @@ state_machines:
       - EDLI_STAGE_STATUS_SUMMARY_STALE
       - EDLI_STAGE_STATUS_SUMMARY_MISSING
       - EDLI_STAGE_READINESS_FAILED
-      - EDLI_LIVE_CANARY_READINESS_FAIL
-      - EDLI_LIVE_CANARY_SUBMIT_NOT_ALLOWED
       - EDLI_LIVE_SCALEOUT_READINESS_FAIL
-      - CANARY_DB_PROJECTION_MISSING
-      - CANARY_DB_PENDING_RECONCILE_MISMATCH
-      - CANARY_DB_EVENT_MISSING
-      - CANARY_DB_CAP_TRANSITION_MISSING
-      - CANARY_DB_USER_OR_RECONCILE_MISSING
-      - CANARY_DB_LIVE_CAP_RESERVED_USAGE_MISMATCH
-      - CANARY_DB_LIVE_CAP_USAGE_MISSING
-      - CANARY_DB_PROFIT_AUDIT_MISSING
-      - CANARY_DB_PROFIT_AUDIT_NOT_PROMOTION_ELIGIBLE
-      - CANARY_DB_PROFIT_AUDIT_PROVENANCE_MISSING
-      - CANARY_DB_EXECUTION_COMMAND_CERTIFICATE_MISSING
-      - CANARY_DB_EXECUTION_COMMAND_ID_MISMATCH
-      - CANARY_DB_EXECUTION_COMMAND_AGGREGATE_MISMATCH
-      - CANARY_DB_EXECUTION_COMMAND_EVENT_HASH_MISMATCH
-      - CANARY_DB_PRE_SUBMIT_EVENT_HASH_MISMATCH
-      - CANARY_DB_COMMAND_CERT_CONDITION_ID_MISMATCH
-      - CANARY_DB_COMMAND_CERT_TOKEN_ID_MISMATCH
-      - CANARY_DB_COMMAND_CERT_SIDE_MISMATCH
-      - CANARY_DB_COMMAND_CERT_DIRECTION_MISMATCH
-      - CANARY_DB_COMMAND_CERT_LIVE_CAP_USAGE_MISMATCH
-      - CANARY_DB_COMMAND_CERT_PARENT_MISSING
-      - CANARY_DB_PRE_SUBMIT_CONDITION_ID_MISMATCH
-      - CANARY_DB_PRE_SUBMIT_TOKEN_ID_MISMATCH
-      - CANARY_DB_PRE_SUBMIT_SIDE_MISMATCH
-      - CANARY_DB_QUOTE_AGE_MISMATCH
       - EDLI_BLOCKED_NO_SUBMIT_FORBIDS_REAL_ORDER_SUBMIT
       - EDLI_SUBMIT_DISABLED_BRIDGE_FORBIDS_REAL_ORDER_SUBMIT
       - EXECUTOR_REJECTED
@@ -872,7 +762,7 @@ state_machines:
       - QLCB_COVERAGE_AUTHORITY_FAULT         # FINDING-C: coverage shrinker threw (fail-closed in live)
       - ENTRY_TAKER_QUALITY_FALLBACK_NO_PASSIVE_BID_BELOW_ASK
       - BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED
-      - BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED
+      - retired native-quote submit switch
       - EVENT_BOUND_CANDIDATE_REJECTED
       - FILL_UP_NO_SUBMIT
       - SHIFT_BIN_NO_SUBMIT
@@ -917,45 +807,9 @@ state_machines:
     states:
       - NON_SETTLEMENT_SOURCE
 
-  collection_frontier:
-    owner: src/data/collection_frontier.py
+  edli_script_telemetry_labels:
     description: >
-      ADVISORY data-collection temporal-frontier vocabulary (PR #329 data_temporal_kernel).
-      NOT a trading lifecycle: these are read-only blocker/disposition tokens describing
-      forecast/source-collection readiness UPSTREAM of the money path. Registered so the
-      money-path semantic-diff classifier recognizes the tokens this advisory layer introduces
-      (per mesh-maintenance: new semantic vocabulary must be registered). They never gate a
-      trade; the live trading lane consumes readiness_state, not these labels.
-    states:
-      - OK                            # collection_frontier live_blocker values
-      - NOT_RELEASED
-      - STALE_SOURCE
-      - SOURCE_DOWN
-      - PARTIAL_RUN
-      - READINESS_BLOCKED
-      - NOT_LIVE_AUTHORIZED
-      - UNKNOWN_BLOCKED
-      - SHORT_HORIZON_ONLY
-      - COVERAGE_UNKNOWN
-      - BLOCK_LIVE                     # PartialPolicy values
-      - BLOCK_LIVE
-      - REPLACE_SAME_IDEMPOTENCY_KEY   # LateArrivalPolicy values
-      - APPEND_REVISION
-      - HOLD
-      - IGNORE_IF_LIVE_CLOSED
-      - BACKFILL_ONLY
-      - DERIVED_FROM_DISSEMINATION   # source_time_frontier authority_tier values (PR #329 D)
-      - BACKFILL
-      - RECONSTRUCTED
-      - UNVERIFIED
-    invariant_tests:
-      - tests/test_collection_frontier.py
-      - tests/test_temporal_provenance_and_lanes.py
-      - tests/test_frontier_store.py
-
-  edli_script_diagnostic_labels:
-    description: >
-      Diagnostic/terminal-stage string labels used exclusively in operational
+      Telemetry/terminal-stage string labels used exclusively in operational
       scripts (not live-path src/). Registered so the money-path semantic-diff
       classifier does not reject them as unregistered objects. These labels are
       NEVER emitted on the live trading path or used to gate a trade.
@@ -1072,7 +926,7 @@ state_machines:
     description: >
       Fallback-mode label returned by the EDLI entry calibration identity
       resolver when no matching calibration identity can be found for the
-      current position. Used only for diagnostic telemetry, never for
+      current position. Used only for telemetry telemetry, never for
       trade decisions.
     states:
       - EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK
@@ -1108,18 +962,6 @@ state_machines:
     states:
       - BAYES_PRECISION_FUSION_BACKFILL_DRY_RUN
       - BAYES_PRECISION_FUSION_BACKFILL_SEEDED
-
-  autonomous_redeem_config_keys:
-    owner: src/execution/settlement_commands.py
-    description: >
-      Environment-variable string constants gating the autonomous redemption
-      path (src/execution/settlement_commands.py, src/venue/polymarket_v2_adapter.py,
-      scripts/redeem_real_winners_2026_06_09.py). ZEUS_AUTONOMOUS_REDEEM_ENABLED
-      arms the chain-truth redeem flow; ZEUS_AUTONOMOUS_REDEEM_DRY_RUN forces
-      simulate-only. Config keys, not state machine states or economic objects.
-    states:
-      - ZEUS_AUTONOMOUS_REDEEM_ENABLED
-      - ZEUS_AUTONOMOUS_REDEEM_DRY_RUN
 
   inventory_redeem_sweep_config_keys:
     owner: src/main.py
@@ -1244,10 +1086,10 @@ state_machines:
       - tests/test_exit_safety.py
       - tests/test_unknown_side_effect.py
 
-  venue_submission_diagnostic_labels:
+  venue_submission_telemetry_labels:
     owner: src/venue/polymarket_v2_adapter.py
     description: >
-      Venue submission-envelope diagnostics and SDK adapter error labels. These
+      Venue submission-envelope telemetry and SDK adapter error labels. These
       labels fail closed before or around submit attempts; they are not command
       lifecycle states and do not prove fill truth.
     states:
@@ -1259,10 +1101,10 @@ state_machines:
       - tests/test_venue_envelope_live_bound.py
       - tests/test_settlement_axes_a8_a9.py
 
-  event_store_recovery_diagnostics:
+  event_store_recovery_telemetry:
     owner: src/events/event_store.py
     description: >
-      Event-store and reactor retry diagnostics for misclassified presubmit
+      Event-store and reactor retry telemetry for misclassified presubmit
       rejections and transient world-write contention. These are retry/recovery
       reason labels, not venue states.
     states:
@@ -1273,10 +1115,10 @@ state_machines:
       - tests/events/test_continuous_redecision_emit.py
       - tests/events/test_reactor.py
 
-  healthcheck_and_review_diagnostic_labels:
+  healthcheck_and_review_telemetry_labels:
     owner: scripts/healthcheck.py
     description: >
-      Healthcheck and source-comment diagnostic labels that trip the conservative
+      Healthcheck and source-comment telemetry labels that trip the conservative
       state-token scanner. UNKNOWN_UNAVAILABLE is an operator-facing health
       classification; REVIEW is a literal review marker and not a lifecycle,
       submit, venue, or settlement state.
@@ -1341,7 +1183,7 @@ schema_objects:
       writer: src/events/live_cap.py::LiveCapLedger.reserve
       meaning: >
         Durable EDLI pilot live-cap ledger. Reserves, releases, and consumes
-        event-bound live canary count/notional quota before live action or
+        event-bound live probe count/notional quota before live action or
         execution-command certificates can be accepted.
       required_tests:
         - tests/events/test_live_cap.py
@@ -1373,7 +1215,7 @@ schema_objects:
       writer: src/events/live_profit_audit.py::LiveProfitAuditLedger.insert_record
       meaning: >
         Event-bound EDLI live realized-edge audit projection. Promotion gates
-        consume it to require clean canary lifecycle evidence, zero unresolved
+        consume it to require clean probe lifecycle evidence, zero unresolved
         unknown side effects, and positive realized-edge telemetry before
         scaleout.
       required_tests:
@@ -1475,15 +1317,6 @@ external_truth_sources:
     authority_tier: calibration_archive
     endpoint_patterns: [mesonet.agron.iastate.edu, asos.py]
     required_tests: [tests/test_day0_first_principles_antibodies.py]
-  open_meteo_mainstream:
-    # Independent mainstream-forecast cross-check for the #135 direction-agreement
-    # gate. Distinct authority from `ecmwf` (our own primary forecast): this is the
-    # external reference our blocked candidate must AGREE with to be arm-eligible.
-    # Fail-closed on staleness (6h TTL); source+authority provenance in
-    # architecture/data_sources_registry_2026_05_08.yaml.
-    authority_tier: mainstream_forecast
-    endpoint_patterns: [open-meteo, api.open-meteo.com]
-    required_tests: [tests/test_mainstream_agreement_gate.py]
   official_station_forecast:
     # Config-routed official station/city forecast feeds used as forecast-skill
     # inputs for source-clock fusion. They are forecast covariates only: not WU

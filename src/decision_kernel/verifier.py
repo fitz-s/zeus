@@ -19,7 +19,7 @@ from src.decision_kernel.canonicalization import (
 )
 from src.decision_kernel.certificate import DecisionCertificate, certificate_hash_for
 from src.decision_kernel.errors import CertificateVerificationError
-from src.decision_kernel.modes import ALLOWED_MODES, is_live_like
+from src.decision_kernel.modes import ALLOWED_MODES
 from src.decision.family_decision_engine import (
     EntryPriceFloorDecision,
     entry_price_floor_decision,
@@ -184,29 +184,29 @@ def verify_certificate(
     _verify_generated_certificate_semantics(cert)
 
 
-def verify_no_submit_decision(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
+def verify_pre_submit_decision(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
     parent_tuple = tuple(parents)
     verify_certificate(cert, parent_tuple)
-    if cert.certificate_type != claims.NO_SUBMIT_DECISION:
-        raise CertificateVerificationError("expected NoSubmitDecisionCertificate")
-    if cert.header.mode != "NO_SUBMIT":
-        raise CertificateVerificationError("no-submit decision must use NO_SUBMIT mode")
-    _forbid_no_submit_payload(cert)
+    if cert.certificate_type != claims.PRE_SUBMIT_DECISION:
+        raise CertificateVerificationError("expected PreSubmitDecisionCertificate")
+    if cert.header.mode != "LIVE":
+        raise CertificateVerificationError("pre-submit decision must use LIVE mode")
+    _verify_pre_submit_payload(cert)
     decision_source = cert.payload.get("decision_source")
     if decision_source != "forecast":
         raise CertificateVerificationError(
-            f"unsupported no-submit decision_source for forecast no-submit scope: {decision_source!r}"
+            f"unsupported pre-submit decision_source for forecast scope: {decision_source!r}"
         )
     parent_types = {parent.certificate_type for parent in parent_tuple}
-    required = claims.NO_SUBMIT_FORECAST_REQUIRED_TYPES
+    required = claims.PRE_SUBMIT_FORECAST_REQUIRED_TYPES
     missing = required - parent_types
     if missing:
-        raise CertificateVerificationError(f"no-submit decision missing parents: {sorted(missing)}")
-    forbidden = claims.NO_SUBMIT_FORBIDDEN_TYPES & parent_types
+        raise CertificateVerificationError(f"pre-submit decision missing parents: {sorted(missing)}")
+    forbidden = claims.PRE_SUBMIT_FORBIDDEN_TYPES & parent_types
     if forbidden:
-        raise CertificateVerificationError(f"no-submit decision has forbidden parents: {sorted(forbidden)}")
-    _verify_no_submit_generated_time_semantics(cert)
-    _verify_forecast_no_submit_semantic_consistency(cert, parent_tuple)
+        raise CertificateVerificationError(f"pre-submit decision has forbidden parents: {sorted(forbidden)}")
+    _verify_pre_submit_generated_time_semantics(cert)
+    _verify_forecast_pre_submit_semantic_consistency(cert, parent_tuple)
 
 
 def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
@@ -445,30 +445,27 @@ def _verify_time_filtration(cert: DecisionCertificate) -> None:
         if value is None:
             continue
         if value > decision_time:
-            if name.endswith("persisted_at") and cert.header.mode == "REPLAY_COUNTERFACTUAL":
-                continue
             raise CertificateVerificationError(f"{name} after decision_time")
-    if is_live_like(cert.header.mode):
-        required = (
-            cert.header.source_available_at,
-            cert.header.agent_received_at,
-            cert.header.persisted_at,
-        )
-        if any(value is None for value in required):
-            raise CertificateVerificationError("live/no-submit certificate missing filtration timestamp")
+    required = (
+        cert.header.source_available_at,
+        cert.header.agent_received_at,
+        cert.header.persisted_at,
+    )
+    if any(value is None for value in required):
+        raise CertificateVerificationError("live certificate missing filtration timestamp")
 
 
-def _forbid_no_submit_payload(cert: DecisionCertificate) -> None:
+def _verify_pre_submit_payload(cert: DecisionCertificate) -> None:
     if cert.payload.get("submitted") is True:
-        raise CertificateVerificationError("NO_SUBMIT certificate cannot set submitted=true")
+        raise CertificateVerificationError("pre-submit certificate cannot set submitted=true")
     if cert.payload.get("proof_accepted") is not True:
-        raise CertificateVerificationError("NO_SUBMIT decision requires proof_accepted=true")
+        raise CertificateVerificationError("pre-submit decision requires proof_accepted=true")
     for key in ("action_score", "actionable_trade_score", "actionable_executable_trade_score"):
         value = cert.payload.get(key)
         if value is not None and float(value) > 0.0:
-            raise CertificateVerificationError(f"NO_SUBMIT certificate cannot carry positive {key}")
+            raise CertificateVerificationError(f"pre-submit certificate cannot carry positive {key}")
     if cert.payload.get("execution_command_id"):
-        raise CertificateVerificationError("NO_SUBMIT certificate cannot carry execution command")
+        raise CertificateVerificationError("pre-submit certificate cannot carry execution command")
 
 
 def _verify_actionable_payload(cert: DecisionCertificate) -> None:
@@ -854,7 +851,7 @@ def _verify_actionable_parent_consistency(
     cost = _required_parent_payload(parent, claims.COST_MODEL)
     candidate = _required_parent_payload(parent, claims.CANDIDATE_EVIDENCE)
     fdr = _required_parent_payload(parent, claims.FDR)
-    kelly = _required_parent_payload(parent, claims.KELLY_DRY_RUN)
+    sizing = _required_parent_payload(parent, claims.SIZING)
     risk = _required_parent_payload(parent, claims.RISK_LEVEL)
     live_cap = _required_parent_payload(parent, claims.LIVE_CAP)
 
@@ -936,12 +933,12 @@ def _verify_actionable_parent_consistency(
     _require_equal("actionable.executable_snapshot_id", payload.get("executable_snapshot_id"), "executable.executable_snapshot_id", executable.get("executable_snapshot_id", executable.get("selected_snapshot_id")))
     if candidate.get("hypothesis_id") not in tuple(fdr.get("selected_hypotheses") or ()):
         raise CertificateVerificationError("fdr.selected_hypotheses missing candidate hypothesis_id")
-    _require_equal("kelly.cost_basis_id", kelly.get("cost_basis_id"), "cost.cost_basis_id", cost.get("cost_basis_id"))
-    if kelly.get("passed") is not True:
-        raise CertificateVerificationError("kelly.passed must be true")
+    _require_equal("sizing.cost_basis_id", sizing.get("cost_basis_id"), "cost.cost_basis_id", cost.get("cost_basis_id"))
+    if sizing.get("passed") is not True:
+        raise CertificateVerificationError("sizing.passed must be true")
     if risk.get("passed") is not True:
         raise CertificateVerificationError("risk.passed must be true")
-    _require_equal("actionable.kelly_decision_id", payload.get("kelly_decision_id"), "kelly.kelly_decision_id", kelly.get("kelly_decision_id"))
+    _require_equal("actionable.kelly_decision_id", payload.get("kelly_decision_id"), "sizing.kelly_decision_id", sizing.get("kelly_decision_id"))
     _require_equal("actionable.risk_decision_id", payload.get("risk_decision_id"), "risk.risk_decision_id", risk.get("risk_decision_id"))
     _require_equal("live_cap.event_id", live_cap.get("event_id"), "actionable.event_id", payload.get("event_id"))
     _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "actionable.live_cap_usage_id", payload.get("live_cap_usage_id"))
@@ -1474,8 +1471,6 @@ def _verify_execution_receipt_payload(
         _require_equal(f"execution_receipt.{field}", payload.get(field), f"execution_command.{field}", command.get(field))
     status = payload.get("status")
     allowed = {
-        "NOT_SUBMITTED_DRY_RUN",
-        "SUBMIT_DISABLED",
         "SUBMITTED",
         "ACCEPTED",
         "RESTING",
@@ -1486,11 +1481,6 @@ def _verify_execution_receipt_payload(
     }
     if status not in allowed:
         raise CertificateVerificationError(f"execution receipt status unsupported: {status!r}")
-    if status in {"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"}:
-        if payload.get("venue_order_id") not in (None, ""):
-            raise CertificateVerificationError("execution receipt dry status cannot carry venue_order_id")
-        if payload.get("submit_started_at") not in (None, "") or payload.get("submit_finished_at") not in (None, ""):
-            raise CertificateVerificationError("execution receipt dry status cannot carry submit timestamps")
     if status in {"SUBMITTED", "ACCEPTED", "RESTING"}:
         if payload.get("submit_started_at") in (None, "") or payload.get("submit_finished_at") in (None, ""):
             raise CertificateVerificationError("execution receipt submitted status requires submit timestamps")
@@ -1531,8 +1521,6 @@ def _verify_live_cap_transition_payload(
         raise CertificateVerificationError(f"live cap transition status unsupported: {to_status!r}")
     receipt_status = receipt.get("status")
     expected_by_receipt = {
-        "SUBMIT_DISABLED": "RELEASED",
-        "NOT_SUBMITTED_DRY_RUN": "RELEASED",
         "REJECTED": "RELEASED",
         "PRE_SUBMIT_ERROR": "RELEASED",
         "POST_SUBMIT_UNKNOWN": "PENDING_RECONCILE",
@@ -1559,23 +1547,23 @@ def _verify_live_cap_transition_payload(
 def _verify_generated_certificate_semantics(cert: DecisionCertificate) -> None:
     if (
         cert.payload.get("generated_at_decision_time") is True
-        and cert.certificate_type != claims.NO_SUBMIT_DECISION
+        and cert.certificate_type != claims.PRE_SUBMIT_DECISION
     ):
         raise CertificateVerificationError("generated_at_decision_time is only allowed for generated decision certificates")
 
 
-def _verify_no_submit_generated_time_semantics(cert: DecisionCertificate) -> None:
+def _verify_pre_submit_generated_time_semantics(cert: DecisionCertificate) -> None:
     if cert.payload.get("generated_at_decision_time") is not True:
-        raise CertificateVerificationError("NO_SUBMIT decision requires generated_at_decision_time=true")
+        raise CertificateVerificationError("pre-submit decision requires generated_at_decision_time=true")
     if cert.payload.get("header_persisted_at_semantics") != "decision_kernel_generated_at_decision_time":
-        raise CertificateVerificationError("NO_SUBMIT decision missing generated header persisted_at semantics")
+        raise CertificateVerificationError("pre-submit decision missing generated header persisted_at semantics")
     if cert.payload.get("db_created_at_may_follow_header_persisted_at") is not True:
-        raise CertificateVerificationError("NO_SUBMIT decision must declare db_created_at may follow header persisted_at")
+        raise CertificateVerificationError("pre-submit decision must declare db_created_at may follow header persisted_at")
     if cert.header.persisted_at != cert.header.decision_time:
-        raise CertificateVerificationError("generated NO_SUBMIT decision persisted_at must equal decision_time")
+        raise CertificateVerificationError("generated pre-submit decision persisted_at must equal decision_time")
 
 
-def _verify_forecast_no_submit_semantic_consistency(
+def _verify_forecast_pre_submit_semantic_consistency(
     cert: DecisionCertificate,
     parents: tuple[DecisionCertificate, ...],
 ) -> None:
@@ -1593,10 +1581,10 @@ def _verify_forecast_no_submit_semantic_consistency(
     cost = _required_parent_payload(parent, claims.COST_MODEL)
     candidate = _required_parent_payload(parent, claims.CANDIDATE_EVIDENCE)
     fdr = _required_parent_payload(parent, claims.FDR)
-    kelly = _required_parent_payload(parent, claims.KELLY_DRY_RUN)
+    sizing = _required_parent_payload(parent, claims.SIZING)
     risk = _required_parent_payload(parent, claims.RISK_LEVEL)
 
-    _require_equal("no_submit.event_id", cert.payload.get("event_id"), "causal.event_id", causal.get("event_id"))
+    _require_equal("pre_submit.event_id", cert.payload.get("event_id"), "causal.event_id", causal.get("event_id"))
     _require_equal("source_truth.event_id", source.get("event_id"), "causal.event_id", causal.get("event_id"))
     _require_equal("source_truth.causal_snapshot_id", source.get("causal_snapshot_id"), "causal.causal_snapshot_id", causal.get("causal_snapshot_id"))
     # source_truth.snapshot_id is the CAUSAL trigger snapshot (provenance), NOT the reader-elected
@@ -1640,7 +1628,7 @@ def _verify_forecast_no_submit_semantic_consistency(
     _require_equal("candidate.condition_id", candidate.get("condition_id"), "cost.condition_id", cost.get("condition_id"))
     if candidate.get("hypothesis_id") not in tuple(fdr.get("selected_hypotheses") or ()):
         raise CertificateVerificationError("fdr.selected_hypotheses missing candidate hypothesis_id")
-    _require_equal("kelly.cost_basis_id", kelly.get("cost_basis_id"), "cost.cost_basis_id", cost.get("cost_basis_id"))
+    _require_equal("sizing.cost_basis_id", sizing.get("cost_basis_id"), "cost.cost_basis_id", cost.get("cost_basis_id"))
     _require_equal("belief.forecast_snapshot_id", belief.get("forecast_snapshot_id"), "forecast.snapshot_id", forecast.get("snapshot_id"))
     _require_equal("belief.calibrator_model_key", belief.get("calibrator_model_key"), "calibration.calibrator_model_key", calibration.get("calibrator_model_key"))
     _require_equal("model_config.calibrator_model_key", model_config.get("calibrator_model_key"), "calibration.calibrator_model_key", calibration.get("calibrator_model_key"))
@@ -1656,15 +1644,15 @@ def _verify_forecast_no_submit_semantic_consistency(
     _require_equal("forecast.bin_labels_hash", forecast.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
     _require_equal("forecast.members_extrema_metric_identity", forecast.get("members_extrema_metric_identity"), "family.metric", family.get("metric"))
     _require_equal("forecast.target_local_date", forecast.get("target_local_date"), "family.target_date", family.get("target_date"))
-    _require_equal("risk.final_intent_id", risk.get("final_intent_id"), "no_submit.final_intent_id", cert.payload.get("final_intent_id"))
-    _verify_no_submit_projection_hash(cert)
+    _require_equal("risk.final_intent_id", risk.get("final_intent_id"), "pre_submit.final_intent_id", cert.payload.get("final_intent_id"))
+    _verify_pre_submit_projection_hash(cert)
     _validate_forecast_authority_payload(forecast)
     _validate_calibration_payload(calibration, model_config, forecast, decision_time=cert.header.decision_time)
     _validate_unit_authority(forecast, belief, family)
     _validate_cost_sources(quote, cost, candidate)
 
 
-def _verify_no_submit_projection_hash(cert: DecisionCertificate) -> None:
+def _verify_pre_submit_projection_hash(cert: DecisionCertificate) -> None:
     projection = {
         "event_id": cert.payload.get("event_id"),
         "final_intent_id": cert.payload.get("final_intent_id"),
@@ -1675,7 +1663,7 @@ def _verify_no_submit_projection_hash(cert: DecisionCertificate) -> None:
     }
     expected_hash = stable_hash(projection)
     if cert.payload.get("projection_hash") != expected_hash:
-        raise CertificateVerificationError("no-submit projection_hash mismatch")
+        raise CertificateVerificationError("pre-submit projection_hash mismatch")
 
 
 def _validate_forecast_authority_payload(forecast: dict) -> None:
@@ -2271,15 +2259,12 @@ def _require_equal(left_name: str, left: object, right_name: str, right: object)
 def _bind_source_run_chains(source: dict, forecast: dict) -> None:
     """Verifier-side mirror of compiler.bind_source_run_chains (WAVE-1 W1-T3).
 
-    Uses the SAME flag reader (compiler._dual_chain_source_run_enabled) so the
-    compiler and verifier cannot disagree on whether the dual-chain relaxation is
-    in effect. Raises CertificateVerificationError (verifier's error type) rather
+    The dual-chain identity check is unconditional when executable-run identity is
+    present. Raises CertificateVerificationError (verifier's error type) rather
     than ValueError. See compiler.bind_source_run_chains for the full rationale.
     """
-    from src.decision_kernel.compiler import _dual_chain_source_run_enabled
-
     derived = source.get("derived_from_source_run_id")
-    if _dual_chain_source_run_enabled() and derived not in (None, ""):
+    if derived not in (None, ""):
         # Executable chain binds to the reader-elected run.
         _require_equal(
             "source_truth.derived_from_source_run_id",

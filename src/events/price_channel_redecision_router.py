@@ -235,10 +235,7 @@ def _edli_own_resting_order_token_ids(
     "Open" means the LATEST venue_order_facts row per command_id (by
     local_sequence — the table is append-only) has a state in the canonical
     OPEN_ORDER_FACT_STATES. Same "latest row per command_id in
-    OPEN_ORDER_FACT_STATES" predicate self_trade_guard's now-deleted
-    single-token loader used (removed as dead code in the gate-stack
-    simplification, Phase 1, 2026-07-06), generalized here from a single
-    token to a batch of quote-changed tokens.
+    OPEN_ORDER_FACT_STATES" predicate, applied to a batch of quote-changed tokens.
     """
     from src.ingest.price_channel_ingest import _edli_schema_prefix, _edli_table_exists
 

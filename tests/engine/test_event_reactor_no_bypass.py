@@ -124,7 +124,6 @@ def _enable_qkernel_fixture(conn: sqlite3.Connection) -> sqlite3.Connection:
     from src.config import settings
 
     feature_flags = dict(settings._data["feature_flags"])
-    feature_flags["qkernel_spine_enabled"] = True
     settings._data["feature_flags"] = feature_flags
     _attach_qkernel_world(conn)
     return conn
@@ -206,7 +205,6 @@ def _isolate_edli_settings(monkeypatch):
     )
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
-    feature_flags["qkernel_spine_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
     monkeypatch.setattr(
         sc,
@@ -1341,7 +1339,6 @@ def _trade_conn_with_live_replacement_snapshot(**kwargs) -> sqlite3.Connection:
 
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = True
-    feature_flags["qkernel_spine_enabled"] = True
     settings._data["feature_flags"] = feature_flags
     conn = _trade_conn_with_snapshot(
         selected_ask="0.40",
@@ -3832,80 +3829,6 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     assert receipt.proof_accepted is False
 
 
-def test_unpriced_qkernel_stamped_proof_returns_native_ask_missing_receipt(monkeypatch):
-    """Qkernel-stamped unpriced fallback must emit a receipt, not crash before q init."""
-    from src.engine import event_reactor_adapter as adapter
-    from src.engine import qkernel_spine_bridge
-
-    event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot(
-        selected_ask="0.40", depth_json="{}", snapshot_condition_count=1, include_no_snapshot=False
-    )
-
-    def _proofs(*, family, snapshot_rows, **_kwargs):
-        candidate = family.candidates[0]
-        proof = adapter._CandidateProof(
-            candidate=candidate,
-            token_id=candidate.yes_token_id,
-            direction="buy_yes",
-            row=dict(snapshot_rows[0]),
-            executable_snapshot_id=str(snapshot_rows[0]["snapshot_id"]),
-            execution_price=None,
-            q_posterior=0.62,
-            q_lcb_5pct=0.58,
-            c_cost_95pct=None,
-            p_fill_lcb=1.0,
-            trade_score=1.0,
-            p_value=0.01,
-            passed_prefilter=True,
-            native_quote_available=False,
-            p_cal_vector_hash="cal-hash",
-            p_live_vector_hash="live-hash",
-            missing_reason="native YES ask ladder is empty",
-            qkernel_execution_economics={
-                "source": "qkernel_spine",
-                "candidate_id": "DIRECT_YES:qkernel-unpriced@proof",
-                "route_id": "DIRECT_YES:qkernel-unpriced@proof",
-                "side": "YES",
-                "payoff_q_point": 0.62,
-                "payoff_q_lcb": 0.58,
-                "cost": 0.30,
-                "edge_lcb": 0.28,
-                "delta_u_at_min": 0.01,
-                "optimal_stake_usd": "5",
-                "optimal_delta_u": 0.02,
-                "false_edge_rate": 0.02,
-                "direction_law_ok": True,
-                "coherence_allows": True,
-                "selection_guard_basis": "SELECTION_BETA_95",
-                "selection_guard_abstained": False,
-                "selection_guard_q_safe": 0.58,
-            },
-            selection_authority_applied="qkernel_spine",
-        )
-        return (proof,)
-
-    monkeypatch.setattr(adapter, "_generate_candidate_proofs", _proofs)
-    monkeypatch.setattr(adapter, "_family_existing_exposure_for_selection_by_bin_id", lambda **_k: {})
-    monkeypatch.setattr(adapter, "_selection_scoped_proofs", lambda *, proofs, **_k: tuple(proofs))
-    monkeypatch.setattr(qkernel_spine_bridge, "qkernel_spine_enabled", lambda: True)
-    monkeypatch.setattr(
-        qkernel_spine_bridge,
-        "decide_family_via_spine",
-        lambda **kwargs: SimpleNamespace(
-            selected_proof=kwargs["proofs"][0],
-            no_trade_reason=None,
-            decision=None,
-        ),
-    )
-    monkeypatch.setattr(qkernel_spine_bridge, "qkernel_candidate_economics_by_bin_side", lambda _d: {})
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("QKERNEL_SPINE_NO_TRADE:QKERNEL_SELECTION_FACT_PERSISTENCE_FAILED:skipped_no_decision")
-    assert receipt.q_live is None
-    assert receipt.q_lcb_5pct is None
 
 
 def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():

@@ -317,7 +317,7 @@ q_lcb floor (Wilson z=1.645) → Edge → BH FDR → Fractional Kelly
 
 Live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`; q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL; q persisted in `src/data/replacement_forecast_materializer.py` `_insert_posterior`. The **single** live settlement integrator is `src/calibration/emos.py` `bin_probability_settlement` (WMO round-half preimage of N(μ*, σ)) — the integer-settlement preimage logic in this doc still holds, but the live q is built by `emos.py`, not by the Platt/MC path below.
 
-Sections 5.1–5.5 below describe the diagnostic/comparison baseline chain. It is not joined to the live q; the former baseline cap/floor join was deleted, and baseline output may appear only as comparison/provenance unless new authority explicitly reconnects it.
+Sections 5.1–5.5 below describe the offline evidence/comparison baseline chain. It is not joined to the live q; the former baseline cap/floor join was deleted, and baseline output may appear only as comparison/provenance unless new authority explicitly reconnects it.
 
 ### 5.1 End-to-end flow (legacy baseline)
 

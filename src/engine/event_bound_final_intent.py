@@ -22,8 +22,6 @@ SideEffectStatus = Literal[
     "TIMEOUT_UNKNOWN",
     "PRE_SUBMIT_ERROR",
     "POST_SUBMIT_UNKNOWN",
-    "SUBMIT_DISABLED",
-    "NOT_SUBMITTED_DRY_RUN",
 ]
 RECEIPT_SCHEMA = "edli_event_bound_no_submit_v1"
 

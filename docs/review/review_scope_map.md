@@ -69,7 +69,7 @@ src/ingest/**                       — event ingest boundary
 src/oracle/**                       — oracle interactions (resolution lookup, etc.)
 src/observability/**                — metrics, telemetry, structured events
 src/risk_allocator/**               — Kelly sizing, FDR, executable-cost economics
-src/analysis/**                     — analytical/diagnostic surfaces
+src/analysis/**                     — analytical/telemetry surfaces
 src/backtest/**                     — backtest evaluation (read-only relative to live)
 src/runtime/**                      — runtime configuration / harness
 src/types/**                        — semantic types (cross-zone identity)

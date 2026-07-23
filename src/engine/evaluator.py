@@ -4,9 +4,6 @@
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 #   P0-3 (2026-05-23): period_extrema guard before remaining_member_extrema_for_day0 call.
 #   P0-D (2026-05-23): retired sanity telemetry for non-day0 strategies.
-#   D2 bias-family unify (2026-06-03): _resolve_unified_entry_bias_native + flag-gated
-#     bias-shift + identity-Platt on the FT entry sites. Authority basis: D2 bias-family
-#     unify / wiring verdict 2026-06-03.
 #   day0-activate P2/P3 (2026-06-05): collapsed to ONE absorbing mask —
 #     _edli_day0_mask_for_analysis truth table hardened inline (dead `1.0 if … else 1.0`
 #     tautology branches replaced with explicit correct logic, ZERO behavioral delta; the
@@ -26,7 +23,6 @@ import json
 import logging
 import hashlib
 import math
-import os
 import sqlite3
 import uuid
 from collections import defaultdict
@@ -49,7 +45,6 @@ if TYPE_CHECKING:
 from src.calibration.manager import edge_threshold_multiplier, get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
-from src.calibration.ens_bias_repo import read_bias_model as _read_bias_model_for_entry
 from src.config import (
     CONFIG_DIR,
     City,
@@ -64,12 +59,6 @@ from src.config import (
     entry_forecast_config,
     get_mode,
     settings,
-)
-from src.data.calibration_transfer_policy import (
-    MIN_TRANSFER_EVIDENCE_PAIRS,
-    POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
-    source_platt_transfer_evidence_valid,
-    target_transfer_cohort_evidence_valid,
 )
 from src.data.executable_forecast_reader import read_executable_forecast
 from src.contracts import (
@@ -94,7 +83,6 @@ from src.data.forecast_fetch_plan import data_version_for_track, track_for_metri
 from src.engine.time_context import lead_days_to_date_start, lead_hours_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
 from src.signal.probability_sanity import (
-    check_cumulative_tail_discrepancy,
     probability_edge_bin_sanity,
     validate_high_distribution,
 )
@@ -133,13 +121,10 @@ from src.state.portfolio import (
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
-    WeatherFamilyKey,
-    buy_no_native_quote_evidence_enabled,
     build_weather_family_decision,
 )
 from src.state.review_work_items import blocked_family_keys
 from src.strategy.kelly import (
-    _unified_uncertainty_budget_enabled,
     dynamic_kelly_mult,
     kelly_size,
     phase_aware_kelly_multiplier,
@@ -177,7 +162,6 @@ from src.data.forecast_source_registry import (
     calibration_source_id_for_lookup,
 )
 from src.strategy.market_analysis import MarketAnalysis
-from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.strategy.market_fusion import (
     AuthorityViolation,
     MODEL_ONLY_POSTERIOR_MODE,
@@ -250,16 +234,6 @@ class LowPriceRejection:
         )
 
 
-def _strict_feature_flag(name: str, *, default: bool = False) -> bool:
-    """Read a boolean feature flag, failing closed on malformed values."""
-
-    flags = settings["feature_flags"]
-    value = flags.get(name, default)
-    if not isinstance(value, bool):
-        raise ValueError(f"feature flag {name} must be boolean, got {type(value).__name__}")
-    return bool(value)
-
-
 def _directional_executable_tokens(tokens: dict, direction: str) -> dict:
     """Return execution tokens with the snapshot id matching the selected side."""
     selected = dict(tokens or {})
@@ -322,75 +296,6 @@ def _buy_entry_price_from_orderbook(token_id: str, orderbook: dict) -> dict[str,
         "ask_only": False,
     }
 
-
-_ENV_EVALUATOR_EQE_ENABLED = "ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED"
-
-
-def _evaluator_eqe_enabled() -> bool:
-    """Wave 5.5 (2026-05-27) feature gate.
-
-    When OFF (default), the evaluator does NOT construct EntryQuoteEvidence
-    and MarketAnalysis falls back to the pre-Wave-5 fixed-p_market bootstrap
-    path. When ON, the evaluator fetches the full orderbook once per token,
-    constructs typed EntryQuoteEvidence with depth-walked fill_price_walk +
-    fee + cost_uncertainty, and passes per-bin arrays to MarketAnalysis so
-    the bootstrap samples c_b ~ N(all_in, σ_market) per iteration.
-
-    Activating this flag SHIFTS edge calculations by the fee amount + walks
-    depth, so live trade count may change. Pair with the matching
-    ZEUS_UNIFIED_UNCERTAINTY_BUDGET flip (Wave 6) only after replay
-    validation per architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
-    §Wave 6.
-    """
-    import os
-    return os.environ.get(_ENV_EVALUATOR_EQE_ENABLED, "0") in ("1", "true", "TRUE")
-
-
-def _buy_entry_evidence_from_clob(
-    clob,
-    token_id: str,
-    *,
-    side: str,
-    target_shares: float,
-    fee_rate: float,
-    quote_age_ms: int = 0,
-):
-    """Wave 5.5: fetch the orderbook once and produce EntryQuoteEvidence.
-
-    The ``side`` parameter is REQUIRED — Copilot review of PR #348 caught
-    that hard-coding ``side="yes"`` mislabels NO-token evidence when the
-    caller passes a no_token_id (the EQE was being stamped as a YES-side
-    quote even when it represented NO-side execution context).
-
-    Returns None when the orderbook is unavailable or empty (caller falls
-    back to legacy ``_buy_entry_price_from_clob``). Never raises — wiring
-    failures must not crash the evaluator loop.
-    """
-    if side not in ("yes", "no"):
-        raise ValueError(f"side must be 'yes' or 'no', got {side!r}")
-    if not _evaluator_eqe_enabled():
-        return None
-    from src.contracts.entry_quote_evidence import (
-        entry_quote_evidence_from_orderbook,
-    )
-    orderbook_getter = getattr(clob, "get_orderbook", None)
-    if not callable(orderbook_getter):
-        return None
-    try:
-        orderbook = orderbook_getter(token_id)
-    except Exception:
-        return None
-    try:
-        return entry_quote_evidence_from_orderbook(
-            token_id=token_id,
-            side=side,
-            orderbook=orderbook,
-            target_shares=max(1.0, float(target_shares)),
-            fee_rate=max(0.0, min(0.999, float(fee_rate))),
-            quote_age_ms=int(max(0, quote_age_ms)),
-        )
-    except (ValueError, KeyError, TypeError):
-        return None
 
 
 def _buy_entry_price_from_clob(clob, token_id: str) -> dict[str, float | bool | None]:
@@ -535,7 +440,7 @@ class EdgeDecision:
 
     # T2 Phase 2: no_trade instrumentation fields.
     # rejection_reason_enum: NoTradeReason CATEGORY — set by _make_rejection_decision.
-    # rejection_reason_detail: free-form diagnostic — original f-string / str(exc) content.
+    # rejection_reason_detail: free-form telemetry — original f-string / str(exc) content.
     # Both None on trade paths (should_trade=True) and pre-T2 callsites not yet migrated.
     # Persisted to no_trade_events by cycle_runtime after evaluate_candidate returns.
     rejection_reason_enum: Optional["NoTradeReason"] = None
@@ -551,14 +456,6 @@ class EdgeDecision:
     # legacy callsites. Persisted to opportunity_fact.observation_authority_id
     # so an operator can join an edge back to the runtime observation object.
     observation_authority_id: Optional[str] = None
-
-    # LIVE-PROB-P0 (2026-05-23): cumulative tail-mass evidence for
-    # probability_trace_fact persistence. Set by the gate at evaluator.py:4622
-    # when check_cumulative_tail_discrepancy is called; None on pre-gate paths
-    # (day0, legacy callers, decisions where p_market is unavailable).
-    prob_tail_mass_cal: Optional[float] = None
-    prob_tail_mass_market: Optional[float] = None
-    prob_tail_entropy: Optional[float] = None
 
     # LIVE-PROB-P0 §E (2026-05-23): per-edge-bin sanity telemetry columns.
     # Set by probability_edge_bin_sanity at the per-edge gate site (~5077).
@@ -783,7 +680,7 @@ def _make_rejection_decision(
     """Canonical ctor for pre-snapshot rejections. Stamps DSI sentinel.
 
     rejection_reason_enum: NoTradeReason CATEGORY for no_trade_events persistence.
-    rejection_reason_detail: free-form diagnostic (original string / f-string content).
+    rejection_reason_detail: free-form telemetry (original string / f-string content).
     Both forwarded to EdgeDecision for cycle_runtime to persist after evaluate_candidate.
     """
     return EdgeDecision(
@@ -1040,207 +937,6 @@ def _finite_day0_observation_float(
     return value
 
 
-def _finite_transfer_evidence_float(value: object) -> float | None:
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(result):
-        return None
-    return result
-
-
-def _finite_transfer_brier(value: object) -> float | None:
-    result = _finite_transfer_evidence_float(value)
-    if result is None or not (0.0 <= result <= 1.0):
-        return None
-    return result
-
-
-def _finite_transfer_brier_threshold(value: object) -> float | None:
-    result = _finite_transfer_evidence_float(value)
-    if result is None or not (0.0 <= result <= 1.0):
-        return None
-    return result
-
-
-def _parse_transfer_evaluated_at(value: object) -> datetime | None:
-    if value is None:
-        return None
-    try:
-        if isinstance(value, datetime):
-            parsed = value
-        else:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _nonempty_str(value: object) -> str | None:
-    text = str(value or "").strip()
-    return text or None
-
-
-def _transfer_logit_sigma_from_evidence(
-    conn,
-    *,
-    policy_id: object,
-    source_id: object,
-    target_source_id: object,
-    source_cycle: object,
-    target_cycle: object,
-    horizon_profile: object,
-    season: object,
-    cluster: object,
-    metric: object,
-    platt_model_key: object,
-    sigma_scale: float,
-    now: datetime | None,
-    staleness_days: int = 90,
-) -> float:
-    """Return transfer uncertainty only from fully-scoped promotion evidence.
-
-    Missing route identity is not a wildcard. In particular, an unavailable
-    Platt model key means the evaluator cannot prove which source calibrator the
-    evidence describes, so it must preserve pre-transfer behavior (sigma=0.0).
-    """
-    from src.strategy.market_analysis import compute_transfer_logit_sigma as _compute_sigma
-
-    route = (
-        _nonempty_str(policy_id),
-        _nonempty_str(source_id),
-        _nonempty_str(target_source_id),
-        _nonempty_str(source_cycle),
-        _nonempty_str(target_cycle),
-        _nonempty_str(horizon_profile),
-        _nonempty_str(season),
-        _nonempty_str(cluster),
-        _nonempty_str(metric),
-        _nonempty_str(platt_model_key),
-    )
-    if any(part is None for part in route):
-        return 0.0
-    (
-        policy_id_s,
-        source_id_s,
-        target_source_id_s,
-        source_cycle_s,
-        target_cycle_s,
-        horizon_profile_s,
-        season_s,
-        cluster_s,
-        metric_s,
-        platt_model_key_s,
-    ) = route
-    try:
-        row = conn.execute(
-            """
-            SELECT status, n_pairs, brier_source, brier_target, brier_diff,
-                   brier_diff_threshold, evaluated_at
-              FROM validated_calibration_transfers
-             WHERE policy_id        = ?
-               AND source_id        = ?
-               AND target_source_id = ?
-               AND source_cycle     = ?
-               AND target_cycle     = ?
-               AND season           = ?
-               AND cluster          = ?
-               AND metric           = ?
-               AND horizon_profile  = ?
-               AND platt_model_key  = ?
-             LIMIT 1
-            """,
-            (
-                policy_id_s,
-                source_id_s,
-                target_source_id_s,
-                source_cycle_s,
-                target_cycle_s,
-                season_s,
-                cluster_s,
-                metric_s,
-                horizon_profile_s,
-                platt_model_key_s,
-            ),
-        ).fetchone()
-    except Exception:
-        return 0.0
-    if row is None or row[0] != "LIVE_ELIGIBLE":
-        return 0.0
-    try:
-        n_pairs = int(row[1])
-    except (TypeError, ValueError):
-        return 0.0
-    if n_pairs < MIN_TRANSFER_EVIDENCE_PAIRS:
-        return 0.0
-    brier_source = _finite_transfer_brier(row[2])
-    brier_target = _finite_transfer_brier(row[3])
-    if brier_source is None or brier_target is None:
-        return 0.0
-    brier_diff = _finite_transfer_evidence_float(row[4])
-    brier_diff_threshold = _finite_transfer_brier_threshold(row[5])
-    if brier_diff is None or brier_diff_threshold is None:
-        return 0.0
-    if not (-1.0 <= brier_diff <= 1.0):
-        return 0.0
-    if not math.isclose(
-        brier_diff,
-        brier_target - brier_source,
-        rel_tol=1e-9,
-        abs_tol=1e-9,
-    ):
-        return 0.0
-    if not source_platt_transfer_evidence_valid(
-        conn,
-        platt_model_key=platt_model_key_s,
-        source_id=source_id_s,
-        source_cycle=source_cycle_s,
-        horizon_profile=horizon_profile_s,
-        season=season_s,
-        cluster=cluster_s,
-        metric=metric_s,
-        brier_source=brier_source,
-        evaluated_at=row[6],
-    ):
-        return 0.0
-    if not target_transfer_cohort_evidence_valid(
-        conn,
-        target_source_id=target_source_id_s,
-        target_cycle=target_cycle_s,
-        horizon_profile=horizon_profile_s,
-        season=season_s,
-        cluster=cluster_s,
-        metric=metric_s,
-        platt_model_key=platt_model_key_s,
-        n_pairs=n_pairs,
-        brier_source=brier_source,
-        brier_target=brier_target,
-        brier_diff=brier_diff,
-        evaluated_at=row[6],
-    ):
-        return 0.0
-    if brier_diff < 0.0:
-        return 0.0
-    if brier_diff > brier_diff_threshold:
-        return 0.0
-    evaluated_at = _parse_transfer_evaluated_at(row[6])
-    if evaluated_at is None:
-        return 0.0
-    if now is not None:
-        compare_now = now
-        if compare_now.tzinfo is None:
-            compare_now = compare_now.replace(tzinfo=timezone.utc)
-        compare_now = compare_now.astimezone(timezone.utc)
-        if evaluated_at > compare_now:
-            return 0.0
-        if (compare_now - evaluated_at).total_seconds() > staleness_days * 86400:
-            return 0.0
-    return _compute_sigma(brier_diff, sigma_scale)
-
-
 def _day0_gap_suspect_applies_to_metric(
     observation: "Day0ObservationContext",
     temperature_metric: MetricIdentity,
@@ -1310,9 +1006,9 @@ def _day0_observation_quality_rejection_reason(
     ).strip()
     # Canonical observation_instants rows for NOAA/Ogimet settlement stations
     # carry verified running high/low extrema but often no temp_current. Current
-    # temperature is diagnostic in the Day0 high/low value path, while the
+    # temperature is telemetry in the Day0 high/low value path, while the
     # observed extreme is the settlement-relevant bound. Do not block held
-    # redecision on a missing diagnostic field for this canonical source.
+    # redecision on a missing telemetry field for this canonical source.
     current_temp_required = not _day0_canonical_extrema_source(observation_source)
     required_fields = ["current_temp"] if current_temp_required else []
     if temperature_metric.is_low():
@@ -1666,51 +1362,6 @@ def _source_quality_kelly_haircut(strategy_key: str, ens_result: dict | None) ->
     return max(0.0, min(1.0, float(policy.partial_run_kelly_haircut)))
 
 
-def _crossing_decision(
-    *,
-    best_ask_price: float,
-    best_ask_size: float,
-    best_bid_price: float,
-    p_posterior: float,
-    expected_pnl_if_filled: float,
-    non_fill_probability: float,
-    taker_fee_bps: float,
-    min_economical_size: float,
-) -> tuple[bool, dict]:
-    """Returns (cross_spread, evidence_dict).
-
-    cross_spread=True when expected opportunity cost of not crossing exceeds the
-    taker fee paid.  Callers are responsible for guarding this behind
-    ZEUS_TAKER_CROSSING_ENABLED=1; the function itself has no env dependency.
-
-    Key formula:
-        taker_fee_per_share  = best_ask_price * (taker_fee_bps / 10_000)
-        spread_cost_per_share = best_ask_price - best_bid_price
-        cost_of_crossing     = (taker_fee_per_share + spread_cost_per_share) * best_ask_size
-        opportunity_cost     = expected_pnl_if_filled * non_fill_probability
-
-    If best_ask_size < min_economical_size the book is too thin to absorb a
-    taker order → always PASSIVE_THIN_BOOK regardless of opportunity cost.
-
-    F34 opt-in cost-of-fill optimizer.  Default OFF at the integration site.
-    """
-    taker_fee_per_share = best_ask_price * (taker_fee_bps / 10_000.0)
-    spread_cost_per_share = best_ask_price - best_bid_price
-    cost_of_crossing = (taker_fee_per_share + spread_cost_per_share) * best_ask_size
-    opportunity_cost = expected_pnl_if_filled * non_fill_probability
-    evidence: dict = {
-        "cost_of_crossing": cost_of_crossing,
-        "opportunity_cost": opportunity_cost,
-        "decision": "CROSS" if cost_of_crossing < opportunity_cost else "PASSIVE",
-        "best_ask_size": best_ask_size,
-        "min_economical_size": min_economical_size,
-    }
-    if best_ask_size < min_economical_size:
-        evidence["decision"] = "PASSIVE_THIN_BOOK"
-        return False, evidence
-    return cost_of_crossing < opportunity_cost, evidence
-
-
 def _size_at_execution_price_boundary(
     *,
     p_posterior: float,
@@ -1720,7 +1371,6 @@ def _size_at_execution_price_boundary(
     kelly_multiplier: float,
     effective_context: EffectiveKellyContext | None = None,
     allow_missing_context: bool = False,
-    market_uncertainty_in_lcb: bool = False,
     max_executable_shares: float | None = None,
 ) -> float:
     """Size a trade at the evaluator→Kelly boundary using typed entry cost.
@@ -1741,21 +1391,8 @@ def _size_at_execution_price_boundary(
     cycle_runtime W2/W3/W4.  Non-live paths (replay/backtest) pass None with
     graceful degrade (no haircut, WARNING logged).
     """
-    # PR 7: apply microstructure haircut to kelly_multiplier before sizing.
-    # Wave 6 (INV-40, 2026-05-27): when the unified-uncertainty-budget flag is
-    # ON, the microstructure haircut's information has already entered Kelly
-    # via EntryQuoteEvidence.cost_uncertainty (spread/2 + slippage_bps/10000)
-    # → σ_market → edge_LCB. Multiplying haircut() here as well = the double-
-    # count INV-40 forbids. Flag OFF (default) preserves the legacy chain.
-    # X9 fix (Copilot review of PR #348): import moved to module top.
-    # K1 fix (PR #348 P0-1, 2026-05-27): collapse requires BOTH the global env
-    # flag AND per-edge evidence — when an edge has no σ_market in its
-    # bootstrap, the EffectiveKellyContext haircut MUST stay applied.
-    _wave6_collapse = (
-        _unified_uncertainty_budget_enabled() and bool(market_uncertainty_in_lcb)
-    )
     effective_kelly_multiplier = kelly_multiplier
-    if effective_context is not None and not _wave6_collapse:
+    if effective_context is not None:
         effective_kelly_multiplier = kelly_multiplier * effective_context.haircut()
     elif effective_context is None:
         from src.config import get_mode as _get_mode
@@ -2375,31 +2012,6 @@ def _entry_forecast_condition_id(support_outcomes: list[dict]) -> str:
             if value:
                 return value
     return ""
-
-
-def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
-    if conn is None:
-        return {}
-    try:
-        row = conn.execute(
-            """
-            SELECT bias, mae, n_samples, discount_factor
-            FROM model_bias
-            WHERE city = ? AND season = ? AND source = ?
-            """,
-            (city_name, season, forecast_source),
-        ).fetchone()
-    except Exception:
-        return {}
-    if row is None:
-        return {}
-    return {
-        "source": forecast_source,
-        "bias": float(row["bias"]),
-        "mae": float(row["mae"]),
-        "n_samples": int(row["n_samples"]),
-        "discount_factor": float(row["discount_factor"]),
-    }
 
 
 def _imminent_open_capture_candidate(candidate: MarketCandidate) -> bool:
@@ -3437,73 +3049,6 @@ def _layer7_dedup_fires(conn, portfolio: "PortfolioState", token_id: str) -> boo
     return has_same_token_open(portfolio, token_id)
 
 
-def _resolve_unified_entry_bias_native(
-    conn,
-    city,
-    target_date: str,
-    metric_str: str,
-) -> "float | None":
-    """D2 bias-family unify (2026-06-03): cycle-evaluator analogue of the LIVE EDLI
-    reactor entry bias correction (``event_reactor_adapter._maybe_apply_edli_bias_correction``)
-    and ``monitor_refresh._resolve_unified_exit_bias_native``.
-
-    Returns the native-unit per-city bias SHIFT to subtract from member extrema BEFORE p_raw,
-    or None. The live flag ``feature_flags.exit_bias_family_unify_enabled`` keeps entry,
-    evaluator, and monitor on the same populated VERIFIED family the
-    reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` = 'edli_per_city_v1')
-    with the reactor's EXACT read shape (month=target_month, target_month=target_month,
-    authority='VERIFIED', lead_bucket=None) — the legacy ft read shape (month=0,
-    lead_bucket=computed) 0-row-missed the stored lead_bucket='LEGACY_POOLED' rows.
-
-    A4 lockstep: bias-SHIFT only (NO residual widening). The caller MUST apply identity-Platt
-    on the corrected domain (Platt models were fit on the UNCORRECTED p_raw domain). FAIL-CLOSED:
-    missing flag/config/row/field or any error → None (caller uses today's plain-p_raw + real
-    Platt path). Mirrors monitor_refresh._resolve_unified_exit_bias_native exactly so entry and
-    exit share ONE treatment. Authority: D2 bias-family unify / wiring verdict 2026-06-03.
-    """
-    try:
-        if not bool(settings["feature_flags"].get("exit_bias_family_unify_enabled", False)):
-            return None
-        from src.engine.event_reactor_adapter import _EDLI_BIAS_FAMILY  # noqa: PLC0415
-        try:
-            cfg = entry_forecast_config()
-            track = track_for_metric(cfg, metric_str)
-            live_data_version = data_version_for_track(track)
-        except Exception:
-            return None
-        season = season_from_date(str(target_date), lat=city.lat)
-        _tmonth = int(str(target_date)[5:7])
-        row = _read_bias_model_for_entry(
-            conn,
-            city=city.name,
-            season=season,
-            metric=metric_str,
-            live_data_version=live_data_version,
-            month=_tmonth,
-            target_month=_tmonth,
-            authority="VERIFIED",
-            error_model_family=_EDLI_BIAS_FAMILY,
-            lead_bucket=None,
-        )
-        if row is None:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "exit_bias_family_unify entry: flag ON but no VERIFIED %s row for "
-                "city=%r season=%r metric=%r live_data_version=%r month=%r — plain p_raw",
-                _EDLI_BIAS_FAMILY, city.name, season, metric_str, live_data_version, _tmonth,
-            )
-            return None
-        keys = set(row.keys())
-        eff = row["effective_bias_c"] if "effective_bias_c" in keys else None
-        wl = row["weight_live"] if "weight_live" in keys else 0.0
-        if eff is None or float(wl or 0.0) <= 0.0:
-            return None
-        unit = getattr(city, "settlement_unit", "C")
-        return float(eff) * 1.8 if unit == "F" else float(eff)
-    except Exception:  # fail-closed: never break the entry decision path
-        return None
-
-
 def evaluate_candidate(
     candidate: MarketCandidate,
     conn,
@@ -3542,11 +3087,6 @@ def evaluate_candidate(
     is_day0_mode = is_settlement_day_dispatch(candidate)
     # T4 F4: stash for deferred Day0 nowcast write (populated inside is_day0_mode block).
     _nowcast_write_params: "dict | None" = None
-    # D2 bias-family unify (2026-06-03): set True when the unified exit/entry bias SHIFT
-    # was applied on the period_extrema/ens FT sites (flag exit_bias_family_unify_enabled).
-    # When True, the calibration step below uses identity-Platt (A4 lockstep) so this
-    # entry path's belief matches the EDLI reactor entry belief. Default False → unchanged.
-    _unified_bias_applied = False
     _pre_day0_low_carryover_context: dict | None = None
     _pre_day0_low_carryover_applied = False
     selected_method = (
@@ -4334,29 +3874,13 @@ def evaluate_candidate(
                     rejection_reason_enum=NoTradeReason.EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID,
                     rejection_reason_detail="EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID",
                 )]
-            # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON;
-            # takes precedence over the legacy ft model. Identity-Platt set downstream.
-            _unified_bias_native = _resolve_unified_entry_bias_native(
-                conn, city, target_date, temperature_metric.temperature_metric,
+            p_raw = p_raw_vector_from_maxes(
+                member_extrema,
+                city,
+                settlement_semantics,
+                bins,
+                n_mc=ensemble_n_mc(),
             )
-            if _unified_bias_native is not None:
-                member_extrema = member_extrema - float(_unified_bias_native)
-                p_raw = p_raw_vector_from_maxes(
-                    member_extrema,
-                    city,
-                    settlement_semantics,
-                    bins,
-                    n_mc=ensemble_n_mc(),
-                )
-                _unified_bias_applied = True
-            else:
-                p_raw = p_raw_vector_from_maxes(
-                    member_extrema,
-                    city,
-                    settlement_semantics,
-                    bins,
-                    n_mc=ensemble_n_mc(),
-                )
             ensemble_spread = TemperatureDelta(
                 float(np.std(member_extrema)),
                 city.settlement_unit,
@@ -4368,8 +3892,6 @@ def evaluate_candidate(
                 "period_extrema_members_adapter",
                 "mc_instrument_noise",
             ]
-            if _unified_bias_applied:
-                entry_validations.append("exit_bias_family_unify")
             # P0 follow-up §2: surface the legacy-NULL-passthrough record (and any
             # other extrema-authority validation tokens) the bundle layer attached,
             # so the passthrough is auditable in the decision's applied_validations.
@@ -4379,28 +3901,10 @@ def evaluate_candidate(
             )
         else:
             assert ens is not None
-            # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON.
-            _unified_bias_native = _resolve_unified_entry_bias_native(
-                conn, city, target_date, temperature_metric.temperature_metric,
-            )
-            if _unified_bias_native is not None:
-                _shifted = np.asarray(ens.member_extrema, dtype=float) - float(_unified_bias_native)
-                p_raw = p_raw_vector_from_maxes(
-                    _shifted,
-                    city,
-                    settlement_semantics,
-                    bins,
-                    n_mc=ensemble_n_mc(),
-                )
-                _unified_bias_applied = True
-                analysis_member_extrema = _shifted
-            else:
-                p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
-                analysis_member_extrema = ens.member_extrema
+            p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
+            analysis_member_extrema = ens.member_extrema
             ensemble_spread = ens.spread()
             entry_validations = ["ens_fetch", "mc_instrument_noise"]
-            if _unified_bias_applied:
-                entry_validations.append("exit_bias_family_unify")
         if temperature_metric.is_low() and decision_time is not None:
             try:
                 decision_time_utc = decision_time.astimezone(timezone.utc)
@@ -4869,18 +4373,7 @@ def evaluate_candidate(
         horizon_profile=_phase2_horizon_profile,
     )
 
-    if _unified_bias_applied:
-        # D2 unify A4 lockstep: member maxes were bias-SHIFTED above, so the existing Platt
-        # models (fit on the UNCORRECTED p_raw domain) would mis-calibrate the shifted domain.
-        # Use identity Platt (p_cal = normalized p_raw) — EXACT mirror of the EDLI reactor
-        # entry path (event_reactor_adapter._snapshot_p_cal). No Platt row is consumed, so the
-        # market-fusion authority gate is not applicable to Platt rows (same as cal-None path).
-        _authority_verified = True
-        _arr = np.asarray(p_raw, dtype=float)
-        _tot = float(_arr.sum())
-        p_cal = (_arr / _tot) if _tot > 0.0 else _arr
-        entry_validations.extend(["identity_platt_bias_unify", "normalization"])
-    elif _pre_day0_low_carryover_applied:
+    if _pre_day0_low_carryover_applied:
         # Late T-1 LOW carryover changes the p_raw signal domain by mixing a
         # qualified observation feature into the forecast vector. Existing
         # Platt rows were fit on unconditioned forecast p_raw, so keep the
@@ -4969,32 +4462,6 @@ def evaluate_candidate(
     p_market_no = np.zeros(len(bins))
     buy_no_quote_available = np.zeros(len(bins), dtype=bool)
     market_is_complete = True
-    # Wave 5.5: per-bin EntryQuoteEvidence arrays. Populated only when the
-    # evaluator-EQE feature flag is ON; otherwise stay None and MarketAnalysis
-    # falls back to the pre-Wave-5 fixed-p_market bootstrap path.
-    eqe_yes_list: list | None = (
-        [None] * len(bins) if _evaluator_eqe_enabled() else None
-    )
-    eqe_no_list: list | None = (
-        [None] * len(bins) if _evaluator_eqe_enabled() else None
-    )
-    try:
-        probe_native_no_quotes = buy_no_native_quote_evidence_enabled()
-    except ValueError as exc:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
-            rejection_stage="RISK_REJECTED",
-            rejection_reasons=[NoTradeReason.BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID.value],
-            availability_status="CONFIG_INVALID",
-            selected_method=selected_method,
-            applied_validations=[*entry_validations, "buy_no_native_quote_evidence_flag_invalid"],
-            decision_snapshot_id=snapshot_id,
-            p_raw=p_raw,
-            p_cal=p_cal,
-            rejection_reason_enum=NoTradeReason.BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID,
-            rejection_reason_detail=str(exc),
-        )]
     native_no_quote_unavailable_labels: list[str] = []
     for i, o in enumerate(outcomes):
         if o.get("range_low") is None and o.get("range_high") is None:
@@ -5023,29 +4490,6 @@ def evaluate_candidate(
             bid_sz = float(yes_quote["bid_size"] or 0.0)
             ask_sz = float(yes_quote["ask_size"] or 0.0)
             p_market[idx] = float(yes_quote["price"])
-            # Wave 5.5: build typed EntryQuoteEvidence per token when the
-            # evaluator-EQE feature flag is ON. Best-effort: failure to
-            # construct (e.g. orderbook not depth-walkable, fee_rate lookup
-            # error) leaves the slot None and bootstrap falls back to the
-            # legacy fixed-p_market path for that bin.
-            if eqe_yes_list is not None:
-                try:
-                    _fee_rate = _fee_rate_for_token(clob, o.get("token_id", ""))
-                except Exception:
-                    _fee_rate = 0.05
-                # Conservative target-shares estimate: min_order_usd / best_ask.
-                # Captures the slippage a minimum-size order would face; Wave 6
-                # may iterate on this with the post-Kelly size for a re-eval.
-                _target_shares = max(
-                    1.0,
-                    float(limits.min_order_usd) / max(1e-6, float(p_market[idx])),
-                )
-                eqe_yes_list[idx] = _buy_entry_evidence_from_clob(
-                    clob, o["token_id"],
-                    side="yes",
-                    target_shares=_target_shares,
-                    fee_rate=_fee_rate,
-                )
 
             # Injection Point 7: Data completeness - record microstructure snapshot
             if callable(microstructure_sink):
@@ -5068,40 +4512,23 @@ def evaluate_candidate(
                         "source_timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
                     }
                 )
-            if probe_native_no_quotes:
-                no_token_id = str(o.get("no_token_id") or "")
-                if not no_token_id:
-                    logger.warning("Native NO quote unavailable for %s: missing no_token_id", o["title"])
+            no_token_id = str(o.get("no_token_id") or "")
+            if not no_token_id:
+                logger.warning("Native NO quote unavailable for %s: missing no_token_id", o["title"])
+                native_no_quote_unavailable_labels.append(str(o["title"]))
+            else:
+                try:
+                    no_quote = _buy_entry_price_from_clob(clob, no_token_id)
+                    p_market_no[idx] = float(no_quote["price"])
+                    buy_no_quote_available[idx] = True
+                except Exception as no_exc:
+                    logger.warning(
+                        "Native NO quote unavailable for %s/%s; buy_no disabled for this bin: %s",
+                        o["title"],
+                        no_token_id,
+                        no_exc,
+                    )
                     native_no_quote_unavailable_labels.append(str(o["title"]))
-                else:
-                    try:
-                        no_quote = _buy_entry_price_from_clob(clob, no_token_id)
-                        p_market_no[idx] = float(no_quote["price"])
-                        buy_no_quote_available[idx] = True
-                        # Wave 5.5: NO-side EQE (mirrors yes-side wiring).
-                        if eqe_no_list is not None:
-                            try:
-                                _no_fee_rate = _fee_rate_for_token(clob, no_token_id)
-                            except Exception:
-                                _no_fee_rate = 0.05
-                            _no_target_shares = max(
-                                1.0,
-                                float(limits.min_order_usd) / max(1e-6, float(p_market_no[idx])),
-                            )
-                            eqe_no_list[idx] = _buy_entry_evidence_from_clob(
-                                clob, no_token_id,
-                                side="no",
-                                target_shares=_no_target_shares,
-                                fee_rate=_no_fee_rate,
-                            )
-                    except Exception as no_exc:
-                        logger.warning(
-                            "Native NO quote unavailable for %s/%s; buy_no disabled for this bin: %s",
-                            o["title"],
-                            no_token_id,
-                            no_exc,
-                        )
-                        native_no_quote_unavailable_labels.append(str(o["title"]))
         except Exception as e:
             try:
                 from src.contracts.exceptions import EmptyOrderbookError
@@ -5148,7 +4575,7 @@ def evaluate_candidate(
                 city,
                 forecast_days=ens_forecast_days,
                 model=crosscheck_model,
-                role="diagnostic",
+                role="telemetry",
                 temperature_metric=temperature_metric.temperature_metric,
             )
         except Exception as e:
@@ -5365,11 +4792,10 @@ def evaluate_candidate(
         entry_validations.append("model_agreement")
     entry_validations.append("model_only_posterior")
     entry_validations.append("alpha_posterior")
-    if probe_native_no_quotes:
-        if native_no_quote_unavailable_labels:
-            entry_validations.append(NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION)
-        else:
-            entry_validations.append(NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION)
+    if native_no_quote_unavailable_labels:
+        entry_validations.append(NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION)
+    else:
+        entry_validations.append(NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION)
 
     forecast_source = _forecast_source_key(
         source_id=ens_result.get("source_id"),
@@ -5377,12 +4803,6 @@ def evaluate_candidate(
     )
     forecast_model_family = _forecast_model_family(ens_result.get("model"))
     season = season_from_date(target_date, lat=city.lat)
-    bias_reference = _load_model_bias_reference(
-        conn,
-        city_name=city.name,
-        season=season,
-        forecast_source=forecast_source,
-    )
 
     # Edge detection
     # Flag missing mapped outcomes against the declared family topology
@@ -5393,35 +4813,6 @@ def evaluate_candidate(
     )
     if mapped_executable_outcomes < executable_count:
         market_is_complete = False
-
-    # Phase β bootstrap σ wiring: only fully-scoped transfer evidence can widen
-    # MarketAnalysis uncertainty. Missing Platt model key or route identity is
-    # not a wildcard; it preserves pre-transfer behavior (sigma=0.0).
-    _transfer_logit_sigma: float = 0.0
-    try:
-        _sigma_scale: float = float(settings["calibration"]["transfer_logit_sigma_scale"])
-        _transfer_logit_sigma = _transfer_logit_sigma_from_evidence(
-            conn,
-            policy_id=POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
-            source_id=getattr(cal, "_bucket_source_id", None),
-            target_source_id=_phase2_source_id,
-            source_cycle=getattr(cal, "_bucket_cycle", None),
-            target_cycle=_phase2_cycle,
-            horizon_profile=(
-                getattr(cal, "_bucket_horizon_profile", None)
-                or _phase2_horizon_profile
-            ),
-            season=season,
-            cluster=city.cluster,
-            metric=temperature_metric.temperature_metric,
-            platt_model_key=getattr(cal, "_bucket_model_key", None),
-            sigma_scale=_sigma_scale,
-            now=decision_time,
-        )
-    except Exception as _sigma_exc:
-        logger.debug(
-            "transfer_logit_sigma lookup failed (legacy DB or missing table): %s", _sigma_exc
-        )
 
     # Probability sanity gate — day0 HIGH path only, fail-closed before Kelly sizing.
     if is_day0_mode and temperature_metric.is_high():
@@ -5468,49 +4859,12 @@ def evaluate_candidate(
     # HIGH is already covered by the per-edge probability_edge_bin_sanity gate below. The
     # day0 HIGH hard gate (above) is untouched.
 
-    # LIVE-PROB-P0 (2026-05-23): symmetric cumulative tail-mass discrepancy gate.
-    # Covers ALL temperature_metric (HIGH and LOW), ALL non-day0 strategies.
-    # day0 path excluded (is_day0_mode guard); see day0 rails above.
-    # TELEMETRY ONLY at this site: check_cumulative_tail_discrepancy computes
-    # family-level tail_cal/tail_mkt/entropy for audit columns and logs when the
-    # family gate would fire — but does NOT return a rejection here.
-    # REJECTION is at the per-edge level (below, in "for edge in filtered:" loop)
-    # via check_edge_bin_tail_discrepancy, BEFORE the economic floor.
-    # Decoupled: family telemetry fires even when the edge-bin check passes, so the
-    # schema-34 columns carry audit evidence regardless of rejection outcome.
-    # See REPLAY_TAIL_GATE.md for family-gate FP analysis (59 FPs at family level
-    # with tail_min_bins=2 collapsed to expected ~0 at edge-bin level).
-    _tail_evidence: dict | None = None
-    if not is_day0_mode:
-        _tail_ok, _tail_reason, _tail_evidence = check_cumulative_tail_discrepancy(
-            bins=bins,
-            p_cal=p_cal,
-            market_prices=p_market,
-        )
-        if not _tail_ok:
-            _metric_str = (
-                temperature_metric.value
-                if hasattr(temperature_metric, "value")
-                else str(temperature_metric)
-            )
-            _ev_str = (
-                f"tail_cal={_tail_evidence['tail_cal']:.4f},"
-                f"tail_mkt={_tail_evidence['tail_mkt']:.4f},"
-                f"entropy={_tail_evidence['entropy']:.4f}"
-                if _tail_evidence is not None
-                else "evidence=None"
-            )
-            logger.warning(
-                "[PROB_TAIL_FAMILY_TELEMETRY] strategy=%s city=%s date=%s metric=%s reason=%s %s",
-                selected_method, city.name, target_date, _metric_str, _tail_reason, _ev_str,
-            )
-
     analysis = MarketAnalysis(
         p_raw=p_raw,
         p_cal=p_cal,
         p_market=p_market,
-        p_market_no=p_market_no if probe_native_no_quotes else None,
-        buy_no_quote_available=buy_no_quote_available if probe_native_no_quotes else None,
+        p_market_no=p_market_no,
+        buy_no_quote_available=buy_no_quote_available,
         executable_mask=executable_mask,
         alpha=alpha,
         bins=bins,
@@ -5522,13 +4876,8 @@ def evaluate_candidate(
         city_name=city.name,
         season=season,
         forecast_source=forecast_source,
-        bias_corrected=bool(getattr(ens, "bias_corrected", False)),
         market_complete=market_is_complete,
-        bias_reference=bias_reference,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
-        transfer_logit_sigma=_transfer_logit_sigma,
-        entry_quote_evidence_yes=eqe_yes_list,
-        entry_quote_evidence_no=eqe_no_list,
         bootstrap_probability_sampler=(
             (lambda _analysis, _n_members: day0.p_vector(bins, n_mc=1, rng=_analysis._rng))
             if is_day0_mode
@@ -5544,14 +4893,12 @@ def evaluate_candidate(
         # K1: legacy evaluator path (not the EDLI event-bound live-q seam). The K1
         # sharpness gate targets the EDLI live path; here it is exempt so behaviour is
         # byte-identical. Day0 mode is exempt by definition (obs replaces forecast).
-        forecast_sharpness=ForecastSharpnessEvidence.exempt(unit=city.settlement_unit),
-    )
+            )
     if hasattr(analysis, "forecast_context"):
         forecast_context = analysis.forecast_context()
     else:
         forecast_context = {
             "uncertainty": analysis.sigma_context(),
-            "location": analysis.mean_context(),
         }
     edli_live_inference_proof = _apply_edli_live_family_before_selection(
         candidate=candidate,
@@ -5606,7 +4953,7 @@ def evaluate_candidate(
     entry_validations.append("bootstrap_ci")
 
     # FDR filter — full-family is the live standard (scan_full_hypothesis_family
-    # + apply_familywise_fdr below). S6-FDR (2026-06-01): the prior audit-only
+    # + apply_familywise_fdr below). S6-FDR (2026-06-01): the prior non-actuating
     # `legacy_filtered = fdr_filter(edges)` call was DELETED. It ran legacy BH
     # over the find_edges() survivor SUBSET (an inflated-denominator path) and
     # its result was never consumed — dead audit weight. Attesting
@@ -5729,11 +5076,6 @@ def evaluate_candidate(
             ),
             rejection_reason_detail="; ".join(rejection_reasons),
         )
-        # LIVE-PROB-P0 schema-34: stamp tail evidence if gate fired in log-only mode.
-        if _tail_evidence is not None and _fdr_no_filtered_rej.prob_tail_mass_cal is None:
-            _fdr_no_filtered_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
-            _fdr_no_filtered_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
-            _fdr_no_filtered_rej.prob_tail_entropy = _tail_evidence.get("entropy")
         return [_fdr_no_filtered_rej]
 
     n_edges_after_fdr_before_family_preselection = len(filtered)
@@ -6009,10 +5351,6 @@ def evaluate_candidate(
                     rejection_reason_enum=_eb_enum,
                     rejection_reason_detail=_eb_reason,
                 )
-                if _tail_evidence is not None:
-                    _eb_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
-                    _eb_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
-                    _eb_rej.prob_tail_entropy = _tail_evidence.get("entropy")
                 # Stamp §E telemetry columns
                 _eb_rej.probability_sanity_mode = _eb_telemetry_dict.get("probability_sanity_mode")
                 _eb_rej.probability_sanity_reason = _eb_telemetry_dict.get("probability_sanity_reason")
@@ -6143,11 +5481,11 @@ def evaluate_candidate(
         # ── DDD v2 gate (RERUN_PLAN_v2.md §5 D-E live wiring, 2026-05-03) ──
         # Two-Rail Data Density Discount: Rail 1 HALT for catastrophic-coverage
         # days, Rail 2 produces a sizing discount. F2 fail-CLOSED on
-        # NO_TRAIN_DATA / EXCLUDED / unconfigured cities. Feature-flagged so
-        # operator can disable without redeploying code. Skipped entirely when
-        # conn is None (legacy test paths exercise evaluate_candidate without
-        # a DB; production always passes a live connection).
-        if conn is not None and _strict_feature_flag("ddd_v2_enabled", default=True):
+        # NO_TRAIN_DATA / EXCLUDED / unconfigured cities. DDD is mandatory
+        # whenever the decision has its canonical DB connection; conn-less
+        # legacy/test callers cannot evaluate the DDD policy.
+        ddd_discount = 0.0
+        if conn is not None:
             metric_name = temperature_metric.temperature_metric
             if metric_name == "high":
                 peak_hour_for_metric = city.historical_peak_hour
@@ -6190,9 +5528,9 @@ def evaluate_candidate(
 
             if ddd_result.action == "HALT":
                 _ddd_halt_detail = (
-                    f"DDD Rail 1 HALT: cov={ddd_result.diagnostic.get('current_cov'):.3f} "
+                    f"DDD Rail 1 HALT: cov={ddd_result.telemetry.get('current_cov'):.3f} "
                     f"< 0.35 with window_elapsed="
-                    f"{ddd_result.diagnostic.get('window_elapsed'):.2f}"
+                    f"{ddd_result.telemetry.get('window_elapsed'):.2f}"
                 )
                 decisions.append(EdgeDecision(
                     False,
@@ -6210,10 +5548,13 @@ def evaluate_candidate(
                 ))
                 continue
 
-            # D4: Rail-2 DISCOUNT Kelly-discount capture DELETED 2026-06-14 (no-caps
-            # law). Rail-1 HALT above is the only honest DDD gate retained; the
-            # DISCOUNT action no longer haircuts Kelly. evaluate_ddd_for_decision
-            # still runs to enforce HALT.
+            # Apply only the density shortfall, not the mismatch component already
+            # represented by the oracle penalty in phase_aware_kelly_multiplier.
+            ddd_discount = float(
+                ddd_result.telemetry.get("final_discount_pre_mismatch") or 0.0
+            )
+            if ddd_discount > 0.0:
+                decision_validations.append(f"ddd_v2_discount_{ddd_discount:.4f}")
 
         # Kelly sizing
         decision_validations.extend(["kelly_sizing", "dynamic_multiplier"])
@@ -6313,15 +5654,6 @@ def evaluate_candidate(
                 portfolio_heat=current_heat,
                 strategy_key=None,
                 city=city.name,
-                # Wave 6 / K1 (PR #348): the per-edge unified-budget gate must
-                # reach the ci_width haircut here too, not only the
-                # EffectiveKellyContext boundary — otherwise a Stage-2 flip
-                # collapses one duplicate haircut and leaves ci_width applied
-                # (INV-40 double-count). No-op at flag-OFF (the collapse ANDs
-                # with _unified_uncertainty_budget_enabled()).
-                market_uncertainty_in_lcb=bool(
-                    getattr(edge, "market_cost_uncertainty_applied", False)
-                ),
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -6418,11 +5750,8 @@ def evaluate_candidate(
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
 
-        # D4 DDD Rail-2 continuous discount + D3 source-quality haircut DELETED
-        # 2026-06-14 (operator no-caps law: no continuous Kelly haircuts). DDD Rail-1
-        # HALT (binary no-trade on catastrophic coverage) is untouched above; the
-        # binary source-quality rejection gate is untouched above. Kelly size = q_lcb
-        # + fractional-Kelly only.
+        if ddd_discount > 0.0:
+            km *= max(0.0, one_minus(ddd_discount))
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.
         try:
@@ -6460,16 +5789,7 @@ def evaluate_candidate(
                 kelly_multiplier=km * risk_throttle,
                 effective_context=None,
                 allow_missing_context=True,
-                # K1 (PR #348 P0-1): per-edge gate for unified-budget collapse.
-                market_uncertainty_in_lcb=bool(
-                    getattr(edge, "market_cost_uncertainty_applied", False)
-                ),
                 # K3 (PR #348 P0-4): cap to depth-walked executable authority.
-                max_executable_shares=(
-                    float(edge.entry_quote_evidence.depth_at_target_size)
-                    if getattr(edge, "entry_quote_evidence", None) is not None
-                    else None
-                ),
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -6713,17 +6033,6 @@ def evaluate_candidate(
 
     # LIVE-PROB-P0 (schema-34): stamp tail-mass evidence onto ALL returned decisions
     # so probability_trace_fact columns are populated regardless of gate mode.
-    # Hard-reject path already stamps the single _rej decision (evaluator.py ~4708);
-    # the `is None` guard makes this idempotent. Log-only mode fires the gate but
-    # continues to analysis — without this loop, log-only decisions get None for
-    # all three columns because no hard-reject EdgeDecision is returned.
-    if _tail_evidence is not None:
-        for _d in decisions:
-            if getattr(_d, "prob_tail_mass_cal", None) is None:
-                _d.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
-                _d.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
-                _d.prob_tail_entropy = _tail_evidence.get("entropy")
-
     # LIVE-PROB-P0 §E: stamp edge-bin telemetry onto trade decisions.
     # Hard-reject decisions are stamped inline above. Trade decisions and
     # log-only pass-through decisions are stamped here using index ranges

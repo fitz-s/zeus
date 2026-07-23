@@ -100,27 +100,16 @@ invariants:
       - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
       - tests/money_path/test_004_schema_live_failclosed.py
 
-  MP-LEA-001:
-    description: "EvidenceReport.cohort_scope_status is FULL_SCOPE when no experiment/cohort filter applied; REGRET_ONLY_SCOPE when experiment_id or cohort_tag is supplied (n_decisions denominator is strategy+source only — decision_events has no experiment FK). n_no_trades_scope_status is always strategy_source_only. Promotion logic must block on REGRET_ONLY_SCOPE or treat n_decisions as strategy-wide."
-    tests:
-      - tests/analysis/test_evidence_report_cohort_scope.py
-      - tests/analysis/test_promotion_readiness.py
-      - tests/analysis/test_live_readiness_tribunal.py
   MP-LEA-002:
     description: "Regret decompositions joined through decision_events.decision_event_id to prevent cross-strategy contamination via shared experiment_id."
     tests:
       - tests/analysis/test_regret_decision_event_join.py
       - tests/analysis/test_regret_decomposer.py
       - tests/test_p1_findings_evidence_risk.py
-  MP-LEA-003:
-    description: "Bayesian prior is Beta(2,2); ci_lower compared against strategy breakeven_win_rate, not a hardcoded constant."
-    tests:
-      - tests/analysis/test_evidence_report_cohort_scope.py
-      - tests/analysis/test_promotion_readiness.py
   MP-OBS-001:
-    description: "B6 live-submit canary: submit→SUBMIT_REQUESTED→place_limit_order called→SUBMIT_ACKED durable→pending_entry projection→crash-then-reconcile resolves ACKED with no duplicate submit."
+    description: "B6 live-submit probe: submit→SUBMIT_REQUESTED→place_limit_order called→SUBMIT_ACKED durable→pending_entry projection→crash-then-reconcile resolves ACKED with no duplicate submit."
     tests:
-      - tests/execution/test_live_submit_canary_chain.py
+      - tests/execution/test_live_submit_probe_chain.py
   MP-OBS-002:
     description: "B6 dead-submit detection: armed_live (global_allow_submit=True AND final_intents_built>=1) with zero SUBMIT_REQUESTED/SUBMIT_ACKED receipts in last 30 min escalates infrastructure_level to RED."
     tests:
@@ -299,23 +288,16 @@ segments:
       - tests/test_market_scanner_provenance.py
       - tests/test_tigge_schema_contract.py
       - tests/test_source_run_schema.py
-  learning_promotion:
-    invariant_ids: [MP-LEA-001, MP-LEA-002, MP-LEA-003]
+  learning_analysis:
+    invariant_ids: [MP-LEA-002]
     files:
       - src/analysis/**
       - src/backtest/**
-      - src/state/*evidence*.py
       - src/state/*experiment*.py
     relationship_tests:
-      - tests/analysis/test_evidence_report_cohort_scope.py
       - tests/analysis/test_regret_decision_event_join.py
-      - tests/analysis/test_promotion_readiness.py
-      - tests/analysis/test_live_readiness_tribunal.py
       - tests/analysis/test_regret_decomposer.py
       - tests/test_p1_findings_evidence_risk.py
-    future_object_rules:
-      new_evidence_query: requires_cohort_scope_test
-      new_promotion_gate: requires_ci_lower_vs_strategy_breakeven_test
   strategy_authority:
     invariant_ids: [MP-STR-001, MP-STR-002]
     files:
@@ -330,7 +312,7 @@ segments:
       - tests/analysis/test_evidence_report_cohort_scope.py
     future_object_rules:
       new_strategy_dimension: requires_registry_first_architecture_review
-      new_shadow_source: requires_live_evidence_isolation_test
+      new_observation_source: requires_live_evidence_isolation_test
   risk_dimension:
     invariant_ids: [MP-RSK-001]
     files:

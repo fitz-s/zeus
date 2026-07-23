@@ -26,7 +26,7 @@ allowed_claim_roles:
   - authority_candidate
   - breadcrumb
   - stale_claim
-  - derived_diagnostic
+  - derived_telemetry
 
 allowed_claim_statuses:
   - not_replaced

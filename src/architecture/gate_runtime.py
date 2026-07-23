@@ -115,7 +115,7 @@ _CAP_BLOCKED_WHEN: dict[str, list[str]] = {
     "decision_artifact_write": [],
     "venue_command_write": [],
     "script_repair_write": [],
-    "backtest_diagnostic_write": [],
+    "backtest_audit_write": [],
     "authority_doc_rewrite": [],
     "archive_promotion": [],
     "source_validity_flip": [],

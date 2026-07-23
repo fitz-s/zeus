@@ -12,7 +12,11 @@ of antibody (e.g. tests/test_replacement_member_vote_smoothing_not_live_wired.py
 not a runtime behavior check, so it fails RED even if nothing currently imports the resurrected
 module.
 
-NOT deleted in this batch (scope note, so this antibody's boundary is legible):
+Additional retired modules are included in this antibody because they encoded
+an unwired alternate calibration/fine-tune path whose names and activation
+semantics could otherwise seed a second probability authority.
+
+Still outside this antibody's module-path boundary:
   - src/data/ecmwf_aifs_sampled_2t_localday.py (AifsSampledLocalDayExtraction/AifsInstantSample)
     and src/strategy/ecmwf_aifs_sampled_2t_probabilities.py (AifsTemperatureBin) turned out to be
     de facto GENERIC value types reused by ~8 test files across the whole replacement-forecast /
@@ -35,11 +39,6 @@ NOT deleted in this batch (scope note, so this antibody's boundary is legible):
     registry-consumer behavior. The audit itself flagged this needed a pre-check ("confirm no
     test asserts on registry completeness/count -- not confirmed safe in this audit"); the check
     came back unsafe.
-  - src/strategy/openmeteo_ecmwf_ifs9_aifs_finetune.py: not in the audit's deletion list at all,
-    and has a live production caller chain (src/events/reactor.py ->
-    src/data/replacement_forecast_refit_handoff.py ->
-    src/data/replacement_forecast_finetune_artifact.py).
-
 REPLACEMENT_SOURCE_ID / REPLACEMENT_PRODUCT_ID in src/data/replacement_forecast_calibration_
 block.py (identity "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor[_v1]") are the STILL-LIVE
 bayes-fusion replacement product family -- "aifs" survives there only as historical naming
@@ -61,11 +60,17 @@ _DELETED_MODULES = frozenset(
         "src.data.ecmwf_aifs_grib_identity",
         "src.data.ecmwf_aifs_grib_samples",
         "src.data.ecmwf_aifs_ens_request",
+        "src.data.replacement_forecast_finetune_artifact",
+        "src.strategy.openmeteo_ecmwf_ifs9_aifs_finetune",
     }
 )
 
 # Deleted standalone scripts (not import targets, but must not resurrect on disk either).
-_DELETED_SCRIPTS = ("scripts/measure_fusion_aifs_drop_performance.py",)
+_DELETED_SCRIPTS = (
+    "scripts/build_replacement_forecast_finetune_artifact.py",
+    "scripts/fit_emos_center_calibration.py",
+    "scripts/measure_fusion_aifs_drop_performance.py",
+)
 
 
 def _imported_modules(source: str) -> set[str]:

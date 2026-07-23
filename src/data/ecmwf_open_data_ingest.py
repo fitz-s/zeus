@@ -84,7 +84,7 @@ class ECMWFOpenDataIngest:
     are REJECTED_BOUNDARY_AMBIGUOUS) discards perfectly-good HIGH-OK rows.
 
     When ``temperature_metric=None`` (default), both metrics are combined as
-    before (backward-compatible for diagnostic/crosscheck callers).
+    before (backward-compatible for telemetry/crosscheck callers).
     """
 
     source_id = SOURCE_ID

@@ -16,7 +16,7 @@ The canonical K1 split (commit `eba80d2b9d`, 2026-05-11; registry `architecture/
 
 | Database | Physical path (env) | What it stores | Who writes |
 |----------|---------------------|---------------|------------|
-| **zeus-world.db** | `state/zeus-world.db` (`ZEUS_WORLD_DB_PATH`) | ensemble_snapshots, calibration_pairs, platt_models, model_bias, solar_daily, diurnal_curves, data_coverage, observation_instants | data ingest, harvester, calibration |
+| **zeus-world.db** | `state/zeus-world.db` (`ZEUS_WORLD_DB_PATH`) | solar_daily, diurnal_curves, data_coverage, observation_instants | data ingest and world-state context |
 | **zeus-forecasts.db** | `state/zeus-forecasts.db` (`ZEUS_FORECASTS_DB_PATH`) | forecast-class tables moved out of world.db in K1: settlement_outcomes (canonical settlement truth), observations, source_run, readiness_state, source_run_coverage, raw_forecast_artifacts, raw_model_forecasts | forecast ingest, harvester, calibration |
 | **zeus_trades.db** | `state/zeus_trades.db` (active since K1) | position_events, position_current, trade_decisions, chronicle, risk_actions, strategy_health, selection facts | cycle_runner, executor, harvester, riskguard |
 
@@ -241,7 +241,7 @@ Fail-closed: low-lane files (`platt_models_low.json`,
 `temperature_metric` are downgraded to UNVERIFIED.
 
 Runtime-state safety: `read_runtime_truth_json()` validates that the file is live
-runtime truth. Retired selector tags or diagnostic/backtest provenance in a
+runtime truth. Retired selector tags or offline evidence/backtest provenance in a
 runtime truth file fail closed with `RuntimeStateMismatchError`.
 
 ### 4.3 Market scan provenance
@@ -306,7 +306,7 @@ get_backtest_connection():
     must not read it as authority or write trade/world truth through it."""
 ```
 
-Replay is diagnostic until it preserves:
+Replay is offline evidence until it preserves:
 - Decision-time truth (the information available when the trade was made)
 - Point-in-time probability vectors (not reconstructed with hindsight)
 - Causally correct Day0 observation windows

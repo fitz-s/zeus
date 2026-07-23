@@ -35,7 +35,7 @@ Categories (operator-ratified framework, funnel autopsy 2026-06-10):
   source runs incomplete). Self-resolving on data cadence; actionable only if
   chronically dominant.
 - DESIGNED_GATE: a deliberate protection fired as designed (riskguard, Kelly,
-  FDR, direction law, non-tradeable scopes, submit-time fail-closed aborts).
+  FDR, direction law, submit-time fail-closed aborts).
 - ARTIFICIAL_SUSPECT: pipeline-defect signal (build failures, missing proofs
   that the pipeline should have produced, connection/boundary errors, raw
   exception text). Every sustained ARTIFICIAL_SUSPECT stream is a bug hunt.
@@ -243,22 +243,10 @@ class RejectionReason(str, Enum):
         RejectionCategory.DESIGNED_GATE,
         "FDR requires the full-family proof; absent proof fails closed.",
     )
-    UNSUPPORTED_EDLI_LIVE_SCOPE = (
-        "UNSUPPORTED_EDLI_LIVE_SCOPE",
+    EVENT_TYPE_UNSUPPORTED = (
+        "EVENT_TYPE_UNSUPPORTED",
         RejectionCategory.DESIGNED_GATE,
-        "Live adapter boundary rejected an unsupported EDLI live scope. The only "
-        "production scope is forecast_plus_day0.",
-    )
-    EVENT_TYPE_OUT_OF_LIVE_SCOPE = (
-        "EVENT_TYPE_OUT_OF_LIVE_SCOPE",
-        RejectionCategory.DESIGNED_GATE,
-        "Live adapter boundary rejected an event type outside the forecast/day0 "
-        "money path.",
-    )
-    DAY0_OUT_OF_SCOPE_AT_BOUNDARY = (
-        "DAY0_OUT_OF_SCOPE_AT_BOUNDARY",
-        RejectionCategory.DESIGNED_GATE,
-        "day0-lane event while scope excludes day0 entirely.",
+        "Live adapter boundary rejected an unknown event type.",
     )
     DAY0_HARD_FACT_AUTHORITY_BLOCKED = (
         "DAY0_HARD_FACT_AUTHORITY_BLOCKED",
@@ -284,20 +272,10 @@ class RejectionReason(str, Enum):
         "position_current; the monitor/exit lifecycle owns further decisions for "
         "that exposure, so the entry selector excludes it before executor submit.",
     )
-    LIVE_CANARY_DISABLED = (
-        "LIVE_CANARY_DISABLED",
-        RejectionCategory.DESIGNED_GATE,
-        "Live canary off: submit path closed by operator configuration.",
-    )
     OPERATOR_ARM_REQUIRED = (
         "OPERATOR_ARM_REQUIRED",
         RejectionCategory.DESIGNED_GATE,
         "Operator arm gate not armed for live submission.",
-    )
-    SUBMIT_DISABLED = (
-        "SUBMIT_DISABLED",
-        RejectionCategory.DESIGNED_GATE,
-        "real_order_submit_enabled=false: decision pipeline runs, submission closed.",
     )
     EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED = (
         "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",

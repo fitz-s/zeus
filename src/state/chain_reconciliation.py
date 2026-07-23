@@ -81,7 +81,7 @@ ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON = "entry_authority_chain_absence_con
 # "VERIFIED" string literals that bypass this constant. A future consumer
 # can satisfy the antibody without importing LEARNING_AUTHORITY_REQUIRED.
 # This is intentional: requiring the import would be a stronger antibody
-# but would also reject legitimate diagnostic / one-off audit reads. Code
+# but would also reject legitimate telemetry / one-off audit reads. Code
 # reviewers reading new SELECT-from-rescue_events sites should verify
 # the literal matches this constant value.
 LEARNING_AUTHORITY_REQUIRED = "VERIFIED"

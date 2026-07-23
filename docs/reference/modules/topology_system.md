@@ -110,7 +110,7 @@ Topology is most useful when it behaves like a runtime contract:
   repairs into the current diff.
 - Scoped closeout should say whether the changed surface is clean separately
   from repo-wide drift. Global drift remains visible, but unrelated weekly
-  diagnostics should not be presented as a changed-surface failure.
+  offline evidence checks should not be presented as a changed-surface failure.
 
 Route cards and context packs are generated guidance. They never replace
 `AGENTS.md`, manifests, tests, or executable source.

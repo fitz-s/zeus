@@ -1,7 +1,7 @@
 # Created: 2026-07-02
-# Authority basis: docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+# Authority basis: architecture/invariants.yaml
 #   §1 "batch submit + safe prefixes" (BUILD (thin) — SDK post_orders/cancel_orders
-#   exist, zero call sites) + docs/rebuild/order_engine_first_principles_design_2026-07-02.md
+#   exist, zero call sites) + architecture/invariants.yaml
 #   §3.3 "Discrete repair pass" (lines 118-121) — W2.1 packet. Lands INERT: no
 #   production call site. W3's solve is the intended future consumer.
 """Pure batch-submit primitives (W2.1): chunking, safe-prefix decomposition,
@@ -17,7 +17,7 @@ the command journal, or sqlite — they are building blocks the adapter
    reasoning).
 
 2. ``compute_safe_prefixes`` — the design doc's "safe prefixes" cut
-   (order_engine_first_principles_design_2026-07-02.md:118-121): given an
+   (architecture/invariants.yaml:118-121): given an
    ordered list of planned orders each carrying an exposure delta, and a
    caller-injected acceptability predicate over cumulative exposure, produce
    batch boundaries such that every boundary leaves an acceptable exposure
@@ -54,7 +54,7 @@ from typing import Any, Callable, Optional, Sequence, TypeVar
 # Self-imposed architecture constant -- the SDK itself has NO batch-size
 # limit (grepped py_clob_client_v2 for MAX_ORDERS/chunk constants: zero
 # hits). ≤15 orders/batch is an architecture decision, not an SDK
-# constraint: docs/rebuild/order_engine_first_principles_design_2026-07-02.md:119
+# constraint: architecture/invariants.yaml:119
 # "repair onto venue quantization (tick rounding, minimum order size,
 # ≤15-orders-per-batch)".
 MAX_ORDERS_PER_BATCH = 15
@@ -102,7 +102,7 @@ def compute_safe_prefixes(
 ) -> list[list[Any]]:
     """Decompose an ordered plan into safe-prefix batches.
 
-    Design law (order_engine_first_principles_design_2026-07-02.md:120-121):
+    Design law (architecture/invariants.yaml:120-121):
     "Batch plans decompose into safe prefixes -- every prefix leaves an
     acceptable exposure if later batches fail." A "prefix" here is a batch
     boundary: after batch i completes, the CUMULATIVE exposure realized so

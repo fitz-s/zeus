@@ -264,7 +264,7 @@ issue_severity:
       or add a documented exception.
 
   - rule_id: AS-08
-    code: script_diagnostic_forbidden_write_target
+    code: script_telemetry_forbidden_write_target
     emitter_path: scripts/topology_doctor_script_checks.py:267
     current_severity: BLOCKING
     target_severity: ADVISORY

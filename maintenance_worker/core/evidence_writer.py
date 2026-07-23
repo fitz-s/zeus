@@ -64,7 +64,7 @@ class TrailContext:
     trail_dir: the per-date directory (evidence_dir / YYYY-MM-DD).
     created_at: UTC datetime the trail was opened.
     task_events: running list of (task_id, event_kind) for SUMMARY.md.
-    guard_events: running list of (guard_name, ok, detail) for diagnostics.
+    guard_events: running list of (guard_name, ok, detail) for telemetrys.
     _exit_code: None until write_exit_code() is called.
     """
 

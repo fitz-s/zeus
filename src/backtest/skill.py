@@ -39,9 +39,9 @@ def run_skill(
             f"run_skill requires PurposeContract(purpose=SKILL); "
             f"got {contract.purpose.value}"
         )
-    if contract.promotion_authority:
+    if contract.learning_authority:
         raise PurposeContractViolation(
-            "SKILL purpose cannot carry promotion_authority=True"
+            "SKILL purpose cannot carry learning_authority=True"
         )
 
     from src.engine.replay import run_wu_settlement_sweep
@@ -121,7 +121,7 @@ def score_forecast_vector(
 
     Returns:
         dict with ``group_integrity_status`` and, when valid, the metric bundle.
-        ``promotion_authority`` is always False here — promotion gating is a
+        ``learning_authority`` is always False here — promotion gating is a
         separate, not-yet-wired layer (TRIBUNAL PR H). ``group_exclusion_reason``
         is set (and metrics are None) when the group fails integrity.
     """
@@ -137,7 +137,7 @@ def score_forecast_vector(
         "winner_bin_label": settlement_object.winning_bin_label,
         "truth_source": settlement_object.truth_source,
         "settlement_resolution_status": settlement_object.resolution_status,
-        "promotion_authority": False,
+        "learning_authority": False,
         "learning_eligible": settlement_object.learning_eligible,
     }
 
