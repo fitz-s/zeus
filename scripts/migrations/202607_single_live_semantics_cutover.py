@@ -1026,22 +1026,29 @@ def _rows_referencing_hashes(
         return set()
     normalized = {value.lower() for value in hashes}
     rows = conn.execute(
-        f"SELECT rowid, CAST({quote_identifier(field)} AS TEXT) "
+        f"SELECT rowid, CAST({quote_identifier(field)} AS TEXT), "
+        f"json_valid(CAST({quote_identifier(field)} AS TEXT)) "
         f"FROM {quote_identifier(schema)}.{quote_identifier(table)} "
         f"WHERE {quote_identifier(field)} IS NOT NULL"
     )
     digest = re.compile(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", re.IGNORECASE)
+    quoted_digest = re.compile(r"""["']([0-9a-f]{64})["']""", re.IGNORECASE)
 
-    def row_references(raw: object) -> bool:
+    def row_references(raw: object, valid_json: bool) -> bool:
         text = str(raw)
         lowered = text.lower()
-        return lowered in normalized or any(
+        if lowered in normalized:
+            return True
+        tokens = quoted_digest.findall(text)
+        if any(token.lower() in normalized for token in tokens):
+            return True
+        return not valid_json and any(
             token.lower() in normalized for token in digest.findall(text)
         )
 
     found: set[int] = set()
     for row in rows:
-        if row_references(row[1]):
+        if row_references(row[1], bool(row[2])):
             found.add(int(row[0]))
             if limit is not None and len(found) >= limit:
                 break
