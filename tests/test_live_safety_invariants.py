@@ -28,7 +28,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from src.contracts.semantic_types import ChainState, ExitState, LifecycleState
+from src.contracts.semantic_types import LifecycleState
 from src.execution.collateral import check_sell_collateral
 from src.execution.exit_lifecycle import (
     MAX_EXIT_RETRIES,
@@ -37,11 +37,6 @@ from src.execution.exit_lifecycle import (
     check_pending_retries,
     execute_exit,
     is_exit_cooldown_active,
-)
-from src.control.control_plane import (
-    clear_control_state,
-    process_commands,
-    write_commands,
 )
 from src.state.portfolio import (
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
@@ -55,7 +50,6 @@ from src.state.portfolio import (
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     Position,
     PortfolioState,
-    close_position,
 )
 from src.contracts.position_truth import ChainOnlyFact, ChainOnlyReviewState
 
@@ -643,7 +637,6 @@ def test_monitor_deadline_degraded_cycles_execute_rotating_reserved_thirds(monke
             summary,
             deps=_monitor_test_deps(f"test_monitor_deadline_coverage_{cycle}"),
             run_exit_preflight=False,
-            exit_order_submit_enabled=False,
             held_position_monitor_budget_seconds=0.5,
             should_preempt_for_urgent_day0=lambda: False,
         )
@@ -2164,7 +2157,7 @@ def test_live_exit_never_closes_without_fill():
 
     with patch("src.execution.exit_lifecycle.place_sell_order") as mock_sell:
         mock_sell.return_value = {"orderID": "sell_123"}
-        outcome = execute_exit(
+        execute_exit(
             portfolio=portfolio,
             position=pos,
             exit_context=ExitContext(
@@ -4722,7 +4715,6 @@ def test_backoff_exhausted_holds_to_settlement():
         exit_retry_count=MAX_EXIT_RETRIES,
     )
     portfolio = _make_portfolio(pos)
-    clob = _make_clob()
 
     # execute_exit should not be called for backoff_exhausted positions,
     # but even if it were, the position should remain unchanged
@@ -9528,7 +9520,7 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     """
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     from src.engine import cycle_runtime, monitor_refresh
-    from src.contracts import EdgeContext, EntryMethod
+    from src.contracts import EntryMethod
 
     pos = _make_position(
         state="holding",
@@ -11582,7 +11574,6 @@ def test_day0_separated_reversal_monetizes_expected_value_before_ucb_strands_leg
         shares=22.5,
         cost_basis_usd=4.32,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
     monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.05)
     monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.0001)
     monkeypatch.setattr(
@@ -11633,11 +11624,6 @@ def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
         shares=5.2,
         cost_basis_usd=1.768,
     )
-    monkeypatch.setattr(
-        "src.state.portfolio.hold_value_exit_costs_enabled",
-        lambda: False,
-    )
-
     decision = pos.evaluate_exit(
         ExitContext(
             fresh_prob=0.0,
@@ -11671,7 +11657,7 @@ def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, direction):
+def test_day0_low_price_high_expected_value_remains_a_hold(direction):
     """Low price alone cannot liquidate a fresh high-value held claim."""
 
     pos = _make_position(
@@ -11682,8 +11668,6 @@ def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, directio
         shares=100.0,
         cost_basis_usd=13.0,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
-
     decision = pos.evaluate_exit(
         ExitContext(
             fresh_prob=0.4939,
@@ -11705,7 +11689,7 @@ def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, directio
     assert decision.trigger == "CI_SEPARATED_POSITIVE_EDGE_HOLD"
 
 
-def test_day0_point_q_reversal_waits_for_temporal_maturity(monkeypatch):
+def test_day0_point_q_reversal_waits_for_temporal_maturity():
     """An Ankara-shaped early reversal cannot outrun Day0 maturity authority."""
     from src.engine import cycle_runtime
 
@@ -11728,8 +11712,6 @@ def test_day0_point_q_reversal_waits_for_temporal_maturity(monkeypatch):
         state="day0_window",
         applied_validations=[maturity_reason],
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
-
     decision = pos.evaluate_exit(
         ExitContext(
             fresh_prob=0.10,
@@ -11865,7 +11847,6 @@ def test_current_global_day0_maturity_survives_refresh_to_exit_overlay(monkeypat
         ExitContext=ExitContext,
         portfolio=_make_portfolio(pos),
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
     decision = pos.evaluate_exit(context)
 
     assert decision.should_exit is False
@@ -12771,19 +12752,17 @@ def test_incomplete_chain_response_does_not_mark_exit_pending_missing():
 
 def test_exit_retry_exponential_backoff():
     """Retry cooldown should increase exponentially."""
-    from src.execution.exit_lifecycle import _mark_exit_retry, _parse_iso, _utcnow
+    from src.execution.exit_lifecycle import _mark_exit_retry
 
     pos = _make_position()
 
     # First retry: base cooldown (300s = 5min)
     _mark_exit_retry(pos, reason="TEST", cooldown_seconds=300)
-    first_retry = _parse_iso(pos.next_exit_retry_at)
     assert pos.exit_retry_count == 1
     assert pos.exit_state == "retry_pending"
 
     # Second retry: 2x cooldown (600s = 10min)
     _mark_exit_retry(pos, reason="TEST", cooldown_seconds=300)
-    second_retry = _parse_iso(pos.next_exit_retry_at)
     assert pos.exit_retry_count == 2
 
     # Second retry should be further in the future than first was
