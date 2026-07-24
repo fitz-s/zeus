@@ -49,9 +49,13 @@ jobs:
             tests/test_single_live_semantics.py \
             tests/test_single_live_semantics_migration.py \
             tests/state/test_table_registry_coherence.py \
+            tests/test_replacement_fused_q_shape.py \
             tests/strategy/test_single_count_uncertainty.py \
             tests/engine/test_multiwinner_wealth_composition.py \
             tests/engine/test_native_holdings.py \
+            tests/solve/test_solver_properties.py \
+            tests/integration/test_w3_solve_seam_g3.py \
+            tests/test_day0_remaining_day_pricing.py \
             tests/test_no_aifs_module_resurrection.py \
             tests/calibration/test_scaled_normal_uniform_q_builder.py \
             tests/test_hk_settlement_preimage_contract.py \

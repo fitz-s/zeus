@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import fcntl
 import hashlib
@@ -370,41 +371,103 @@ def target_release_identity(root: Path) -> dict[str, str]:
     }
 
 
-_IDENTITY_TABLES = (
-    "decision_certificates",
-    "decision_certificate_edges",
-    "decision_certificate_supersessions",
-    "decision_compile_failures",
-    "position_current",
-    "position_decision_attribution",
-    "venue_commands",
-    "position_events",
-    "venue_command_events",
-    "decision_log",
-    "edli_live_profit_audit",
-    TRANSFER_TABLE,
-    CONVERSION_TABLE,
-    CONVERSION_EVENTS,
-    "raw_forecast_artifacts",
-    "deterministic_forecast_anchors",
-    "forecast_posteriors",
-    "settlement_capture_verifications",
-    "edli_no_submit_receipts",
-    "risk_state",
-)
+_GENERATION_TABLE = "single_live_cutover_generation"
 
 
 def _digest_sqlite_migration_state(conn: sqlite3.Connection) -> str:
+    """Digest every user-owned schema object and row except this digest's marker."""
+
     digest = hashlib.sha256()
-    for table in _IDENTITY_TABLES:
-        if not table_exists(conn, table):
-            continue
+    digest.update(
+        json.dumps(
+            {
+                "application_id": int(conn.execute("PRAGMA application_id").fetchone()[0]),
+                "user_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
+                "schema_version": int(conn.execute("PRAGMA schema_version").fetchone()[0]),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+    schema_rows = conn.execute(
+        """
+        SELECT type, name, tbl_name, sql
+          FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%'
+           AND name != ?
+           AND tbl_name != ?
+         ORDER BY type, name
+        """,
+        (_GENERATION_TABLE, _GENERATION_TABLE),
+    ).fetchall()
+    digest.update(
+        json.dumps(
+            [list(row) for row in schema_rows],
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        ).encode()
+    )
+    if table_exists(conn, "sqlite_sequence"):
+        sequence_rows = conn.execute(
+            "SELECT name, seq FROM sqlite_sequence ORDER BY name"
+        ).fetchall()
+        digest.update(
+            json.dumps(
+                [list(row) for row in sequence_rows],
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            ).encode()
+        )
+    tables = [
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT name
+              FROM sqlite_master
+             WHERE type='table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name != ?
+             ORDER BY name
+            """,
+            (_GENERATION_TABLE,),
+        )
+    ]
+    for table in tables:
         table_sql = quote_identifier(table)
-        schema = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
-        digest.update(json.dumps([table, schema[0] if schema else None]).encode())
-        cursor = conn.execute(f"SELECT * FROM {table_sql} ORDER BY rowid")
+        columns = conn.execute(f"PRAGMA table_xinfo({table_sql})").fetchall()
+        column_names = {str(row[1]).lower() for row in columns}
+        primary_key = [
+            (int(row[5]), str(row[1])) for row in columns if int(row[5]) > 0
+        ]
+        rowid_alias = next(
+            (
+                alias
+                for alias in ("rowid", "_rowid_", "oid")
+                if alias not in column_names
+            ),
+            None,
+        )
+        if rowid_alias is not None:
+            try:
+                cursor = conn.execute(
+                    f"SELECT {rowid_alias} AS __cutover_rowid__, * "
+                    f"FROM {table_sql} ORDER BY {rowid_alias}"
+                )
+            except sqlite3.OperationalError:
+                rowid_alias = None
+        if rowid_alias is None:
+            if not primary_key:
+                raise RuntimeError(
+                    "cannot digest hidden rowid because every SQLite alias is shadowed "
+                    f"and no primary key exists: {table}"
+                )
+            order = ", ".join(
+                quote_identifier(name) for _, name in sorted(primary_key)
+            )
+            cursor = conn.execute(f"SELECT * FROM {table_sql} ORDER BY {order}")
+        digest.update(json.dumps([table]).encode())
         digest.update(json.dumps([item[0] for item in cursor.description]).encode())
         for row in cursor:
             normalized = [
@@ -461,20 +524,27 @@ def settings_target_identity(path: Path) -> dict[str, Any]:
 def target_state_identity(
     root: Path, dbs: tuple[Path, ...], settings_path: Path
 ) -> dict[str, Any]:
-    runtime_json = {
+    return {
+        "databases": {path.name: sqlite_target_identity(path) for path in dbs},
+        "settings": settings_target_identity(settings_path),
+        "runtime_json": runtime_json_identity(root),
+        "retired_files_present": retired_files_identity(root),
+    }
+
+
+def runtime_json_identity(root: Path) -> dict[str, str]:
+    return {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted((root / ".local").rglob("*.json"))
         if path.is_file()
     } if (root / ".local").exists() else {}
+
+
+def retired_files_identity(root: Path) -> dict[str, str]:
     return {
-        "databases": {path.name: sqlite_target_identity(path) for path in dbs},
-        "settings": settings_target_identity(settings_path),
-        "runtime_json": runtime_json,
-        "retired_files_present": {
-            rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()
-            for rel in sorted(RETIRED_FILES)
-            if (root / rel).is_file()
-        },
+        rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()
+        for rel in sorted(RETIRED_FILES)
+        if (root / rel).is_file()
     }
 
 
@@ -584,7 +654,13 @@ def mark_cutover_generation(
     )
 
 
-def has_cutover_generation(path: Path, *, generation: str, stage: str) -> bool:
+def has_cutover_generation(
+    path: Path,
+    *,
+    generation: str,
+    stage: str,
+    migration_state_sha256: str | None = None,
+) -> bool:
     conn = open_db(path, writable=False)
     try:
         if not _schema_table_exists(conn, "main", "single_live_cutover_generation"):
@@ -594,7 +670,14 @@ def has_cutover_generation(path: Path, *, generation: str, stage: str) -> bool:
                 "WHERE generation=? AND stage=?",
                 (generation, stage),
             ).fetchone()
-        return row is not None and str(row[0]) == _digest_sqlite_migration_state(conn)
+        if row is None:
+            return False
+        current_digest = (
+            migration_state_sha256
+            if migration_state_sha256 is not None
+            else _digest_sqlite_migration_state(conn)
+        )
+        return str(row[0]) == current_digest
     finally:
         conn.close()
 
@@ -2013,6 +2096,9 @@ def recoverable_in_progress_target(
             root / "state" / name,
             generation=generation,
             stage=stage if stage.startswith("mutated:") else "decision_graphs",
+            migration_state_sha256=str(
+                current_dbs[name].get("migration_state_sha256") or ""
+            ),
         )
         for name in changed_dbs
     )
@@ -2050,6 +2136,7 @@ def _open_stage_journal(
                     f"stage journal target generation changed: {progress_path}"
                 )
             progress["recovering_stage_commit"] = progress.get("current_stage")
+            progress["expected_target_state"] = target_state
         if progress.get("status") == "complete":
             return progress
         progress["status"] = "running"
@@ -2095,6 +2182,7 @@ def _run_journaled_stage(
     precondition: Any | None = None,
     postcondition: Any | None = None,
     current_target_state: Any | None = None,
+    updated_target_state: Any | None = None,
     expected_recovery_state: Any | None = None,
 ) -> Any:
     if current_target_state is not None:
@@ -2119,7 +2207,9 @@ def _run_journaled_stage(
     result = action()
     if postcondition is not None:
         postcondition()
-    if current_target_state is not None:
+    if updated_target_state is not None:
+        progress["expected_target_state"] = updated_target_state()
+    elif current_target_state is not None:
         progress["expected_target_state"] = current_target_state()
     _record_stage_journal(progress_path, progress, stage, complete=True)
     return result
@@ -2212,6 +2302,24 @@ def main() -> int:
             target_identity=release_identity,
             target_state=initial_target_state,
         )
+
+        def refreshed_target_state(
+            *,
+            changed_dbs: tuple[Path, ...] = (),
+            runtime_json: bool = False,
+            retired_files_present: bool = False,
+            settings: bool = False,
+        ) -> dict[str, Any]:
+            refreshed = copy.deepcopy(progress["expected_target_state"])
+            for path in changed_dbs:
+                refreshed["databases"][path.name] = sqlite_target_identity(path)
+            if runtime_json:
+                refreshed["runtime_json"] = runtime_json_identity(root)
+            if retired_files_present:
+                refreshed["retired_files_present"] = retired_files_identity(root)
+            if settings:
+                refreshed["settings"] = settings_target_identity(settings_path)
+            return refreshed
     except RuntimeError as exc:
         if "lease" in locals():
             lease.__exit__(None, None, None)
@@ -2252,7 +2360,9 @@ def main() -> int:
             ),
             precondition=lambda: assert_writer_fence(root),
             postcondition=graph_postcondition,
-            current_target_state=current_target_state,
+            updated_target_state=lambda: refreshed_target_state(
+                changed_dbs=(world_path, trades_path)
+            ),
         )
         if receipt is not None:
             print(
@@ -2280,7 +2390,9 @@ def main() -> int:
                 ),
                 precondition=lambda: assert_writer_fence(root),
                 postcondition=lambda path=path: verify_mutated_db(path),
-                current_target_state=current_target_state,
+                updated_target_state=lambda path=path: refreshed_target_state(
+                    changed_dbs=(path,)
+                ),
             )
             if changed is not None:
                 for line in changed:
@@ -2292,7 +2404,7 @@ def main() -> int:
             lambda: [rewrite_json_without_field(path, REMOVED_MANIFEST_FIELD) for path in json_paths],
             precondition=lambda: assert_writer_fence(root),
             postcondition=lambda: verify_runtime_json(root),
-            current_target_state=current_target_state,
+            updated_target_state=lambda: refreshed_target_state(runtime_json=True),
             expected_recovery_state=lambda: expected_runtime_json_hashes(root),
         )
         def remove_retired_files() -> list[Path]:
@@ -2310,7 +2422,9 @@ def main() -> int:
             remove_retired_files,
             precondition=lambda: assert_writer_fence(root),
             postcondition=lambda: verify_retired_files_absent(root),
-            current_target_state=current_target_state,
+            updated_target_state=lambda: refreshed_target_state(
+                retired_files_present=True
+            ),
             expected_recovery_state=lambda: {},
         )
         if removed_files is not None:
@@ -2323,7 +2437,7 @@ def main() -> int:
             lambda: clean_config(settings_path),
             precondition=lambda: assert_writer_fence(root),
             postcondition=lambda: verify_config_clean(settings_path),
-            current_target_state=current_target_state,
+            updated_target_state=lambda: refreshed_target_state(settings=True),
             expected_recovery_state=lambda: expected_settings_identity(settings_path),
         )
         complete_postconditions()

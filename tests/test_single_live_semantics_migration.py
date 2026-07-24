@@ -944,6 +944,125 @@ def test_resume_accepts_own_transactional_generation_after_journal_gap(
     ) == "converged"
 
 
+def test_resume_rejects_external_write_after_stage_marker_before_journal(
+    tmp_path: Path,
+) -> None:
+    root, dbs, settings = _target_fixture(tmp_path)
+    journal = tmp_path / "cutover.progress.json"
+
+    def state() -> dict[str, object]:
+        return migration.target_state_identity(root, dbs, settings)
+
+    progress = migration._open_stage_journal(journal, root, target_state=state())
+    generation = progress["migration_generation"]
+    stage = "mutated:zeus-world.db"
+
+    def commit_then_interrupt() -> None:
+        conn = sqlite3.connect(dbs[0], isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        migration.mark_cutover_generation(
+            conn, generation=generation, stage=stage
+        )
+        conn.execute("COMMIT")
+        conn.close()
+        raise RuntimeError("killed after DB commit before journal update")
+
+    with pytest.raises(RuntimeError, match="after DB commit"):
+        migration._run_journaled_stage(
+            journal,
+            progress,
+            stage,
+            commit_then_interrupt,
+            current_target_state=state,
+        )
+
+    conn = sqlite3.connect(dbs[0])
+    conn.execute("CREATE TABLE external_generation (value TEXT NOT NULL)")
+    conn.execute("INSERT INTO external_generation VALUES ('foreign-write')")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="target generation changed"):
+        migration._open_stage_journal(journal, root, target_state=state())
+
+
+@pytest.mark.parametrize(
+    "mutation", ("rowid", "shadowed_rowid", "user_version", "sqlite_sequence")
+)
+def test_resume_rejects_metadata_only_change_after_stage_marker(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    root, dbs, settings = _target_fixture(tmp_path)
+    if mutation == "sqlite_sequence":
+        conn = sqlite3.connect(dbs[0])
+        conn.execute(
+            "CREATE TABLE sequenced (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)"
+        )
+        conn.execute("INSERT INTO sequenced(value) VALUES ('before')")
+        conn.commit()
+        conn.close()
+    elif mutation == "shadowed_rowid":
+        conn = sqlite3.connect(dbs[0])
+        conn.execute("CREATE TABLE rowid_shadow (rowid INTEGER, payload TEXT)")
+        conn.execute("INSERT INTO rowid_shadow VALUES (7, 'before')")
+        conn.commit()
+        conn.close()
+    journal = tmp_path / "cutover.progress.json"
+
+    def state() -> dict[str, object]:
+        return migration.target_state_identity(root, dbs, settings)
+
+    progress = migration._open_stage_journal(journal, root, target_state=state())
+    generation = progress["migration_generation"]
+    stage = "mutated:zeus-world.db"
+
+    def commit_then_interrupt() -> None:
+        conn = sqlite3.connect(dbs[0], isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        migration.mark_cutover_generation(
+            conn, generation=generation, stage=stage
+        )
+        conn.execute("COMMIT")
+        conn.close()
+        raise RuntimeError("killed after DB commit before journal update")
+
+    with pytest.raises(RuntimeError, match="after DB commit"):
+        migration._run_journaled_stage(
+            journal,
+            progress,
+            stage,
+            commit_then_interrupt,
+            current_target_state=state,
+        )
+
+    conn = sqlite3.connect(dbs[0])
+    if mutation == "rowid":
+        conn.execute("UPDATE risk_state SET rowid = rowid + 100")
+    elif mutation == "shadowed_rowid":
+        conn.execute("UPDATE rowid_shadow SET _rowid_ = _rowid_ + 100")
+    elif mutation == "user_version":
+        conn.execute("PRAGMA user_version=73")
+    else:
+        conn.execute("UPDATE sqlite_sequence SET seq = seq + 100")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="target generation changed"):
+        migration._open_stage_journal(journal, root, target_state=state())
+
+
+def test_digest_fails_closed_when_every_hidden_rowid_alias_is_shadowed() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        'CREATE TABLE hostile (rowid INTEGER, _rowid_ INTEGER, oid INTEGER, payload TEXT)'
+    )
+    conn.execute("INSERT INTO hostile VALUES (1, 2, 3, 'value')")
+    with pytest.raises(RuntimeError, match="every SQLite alias is shadowed"):
+        migration._digest_sqlite_migration_state(conn)
+    conn.close()
+
+
 def test_runtime_json_recovery_rejects_unrelated_external_change(tmp_path: Path) -> None:
     root, dbs, settings = _target_fixture(tmp_path)
     local = root / ".local"
