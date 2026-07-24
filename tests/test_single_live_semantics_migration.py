@@ -878,6 +878,54 @@ def test_nonempty_retired_calibration_transfer_rows_are_deleted(
         conn.close()
 
 
+def test_existing_learning_eligibility_wins_over_retired_column(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE edli_live_profit_audit ("
+            "id INTEGER PRIMARY KEY, "
+            "promotion_eligible INTEGER NOT NULL, "
+            "learning_eligible INTEGER NOT NULL, "
+            "order_lifecycle_state TEXT NOT NULL, "
+            "created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_edli_live_profit_audit_promotion "
+            "ON edli_live_profit_audit("
+            "promotion_eligible, order_lifecycle_state, created_at)"
+        )
+        conn.execute(
+            "INSERT INTO edli_live_profit_audit VALUES "
+            "(1, 1, 0, 'SETTLED', '2026-07-24T00:00:00Z')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert migration.mutation_blockers(path) == []
+    assert migration.mutate_db(path) == [
+        "dropped edli_live_profit_audit.promotion_eligible; "
+        "preserved learning_eligible"
+    ]
+    conn = sqlite3.connect(path)
+    try:
+        assert "promotion_eligible" not in migration.columns(
+            conn, "edli_live_profit_audit"
+        )
+        assert conn.execute(
+            "SELECT learning_eligible FROM edli_live_profit_audit"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='index' AND name='idx_edli_live_profit_audit_learning'"
+        ).fetchone() == (1,)
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize(
     "table",
     (

@@ -2271,11 +2271,6 @@ def mutation_blockers(path: Path) -> list[str]:
                 count = int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
                 if count:
                     blockers.append(f"{path.name}:{table} is non-empty ({count})")
-        table = "edli_live_profit_audit"
-        if table_exists(conn, table):
-            cols = columns(conn, table)
-            if RETIRED_ELIGIBILITY_COLUMN in cols and "learning_eligible" in cols:
-                blockers.append(f"{path.name}:{table} has both eligibility columns")
         table = "forecast_posteriors"
         if table_exists(conn, table):
             cols = columns(conn, table)
@@ -2461,18 +2456,26 @@ def mutate_db(
             table = "edli_live_profit_audit"
             if table_exists(conn, table):
                 cols = columns(conn, table)
-                if RETIRED_ELIGIBILITY_COLUMN in cols and "learning_eligible" in cols:
-                    raise RuntimeError(f"{table} has both old and new eligibility columns")
                 if RETIRED_ELIGIBILITY_COLUMN in cols:
-                    conn.execute(
-                        f"ALTER TABLE {table} RENAME COLUMN {RETIRED_ELIGIBILITY_COLUMN} TO learning_eligible"
-                    )
                     conn.execute(f"DROP INDEX IF EXISTS {RETIRED_AUDIT_INDEX}")
+                    if "learning_eligible" in cols:
+                        conn.execute(
+                            f"ALTER TABLE {table} DROP COLUMN {RETIRED_ELIGIBILITY_COLUMN}"
+                        )
+                        changed.append(
+                            f"dropped {table}.{RETIRED_ELIGIBILITY_COLUMN}; "
+                            "preserved learning_eligible"
+                        )
+                    else:
+                        conn.execute(
+                            f"ALTER TABLE {table} RENAME COLUMN "
+                            f"{RETIRED_ELIGIBILITY_COLUMN} TO learning_eligible"
+                        )
+                        changed.append(f"renamed {table} eligibility column")
                     conn.execute(
                         "CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_learning "
                         "ON edli_live_profit_audit(learning_eligible, order_lifecycle_state, created_at)"
                     )
-                    changed.append(f"renamed {table} eligibility column")
 
             table = "risk_state"
             if table_exists(conn, table) and RETIRED_FORCE_EXIT_COLUMN in columns(conn, table):
