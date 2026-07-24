@@ -13,8 +13,8 @@ One row per COMMAND. ENTRY records its actionable certificate; later commands re
 that exact position-entry certificate so every nonterminal venue action remains
 anchored to an extant decision proof.
 
-Append-only law: UNIQUE(command_id, position_id); a command's attribution is never
-overwritten by a later call.
+Append-only law: UNIQUE(command_id); a command has exactly one position attribution
+and is never overwritten by a later call.
 
 Two distinct resolutions, both explicit (never a silent NULL guess):
   ATTRIBUTED      — decision_certificate_hash is the exact hash resolved either at
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS position_decision_attribution (
     intent_kind TEXT,
     created_at TEXT NOT NULL,
     schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
-    UNIQUE(command_id, position_id),
+    UNIQUE(command_id),
     CHECK (
         (resolution = 'ATTRIBUTED' AND command_id IS NOT NULL
          AND decision_certificate_hash IS NOT NULL)

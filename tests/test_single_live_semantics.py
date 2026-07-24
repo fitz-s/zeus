@@ -106,6 +106,16 @@ def test_gate_rejects_resurrected_inactive_lane(tmp_path: Path) -> None:
     assert violations(tmp_path)
 
 
+def test_gate_rejects_literal_split_dormant_token(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "bad.py").write_text(
+        "mode = 'entry_forecast_' + 'rollout'\n",
+        encoding="utf-8",
+    )
+    assert any(item.startswith("src/bad.py:") for item in violations(tmp_path))
+
+
 def test_gate_rejects_retired_runtime_category(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()

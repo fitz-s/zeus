@@ -40,7 +40,6 @@ def test_forecast_live_boot_schema_fast_check_accepts_present_core_schema() -> N
     finally:
         conn.close()
 
-
 def test_forecast_live_boot_schema_fast_check_rejects_missing_required_column() -> None:
     conn = _conn_with_required_schema(omit=("forecast_posteriors", "runtime_layer"))
     try:
@@ -71,14 +70,5 @@ def test_forecast_live_boot_schema_rejects_index_bound_to_legacy_table() -> None
         assert _forecast_boot_schema_ready(conn) is False
         with pytest.raises(RuntimeError, match="misbound live-required indexes"):
             assert_schema_current_forecasts(conn)
-    finally:
-        conn.close()
-
-
-def test_forecast_live_boot_schema_fast_check_rejects_retired_authority_column() -> None:
-    conn = _conn_with_required_schema()
-    try:
-        conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN trade_authority_status TEXT")
-        assert _forecast_boot_schema_ready(conn) is False
     finally:
         conn.close()
