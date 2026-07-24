@@ -4937,10 +4937,21 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             np.array([0.05, 0.15]),
         )
         setattr(
-            position,
-            "_day0_monitor_probability_receipt",
-            {"probability_witness_identity": "probability-current"},
-        )
+                position,
+                "_day0_monitor_probability_receipt",
+                {
+                    "probability_witness_identity": "probability-current",
+                    "probability_content_identity": (
+                        "probability-content-current"
+                    ),
+                    "q_version": "probability-content-current",
+                    "source_truth_identity": "source-current",
+                    "band": {
+                        "alpha": 0.05,
+                        "basis": "test-band",
+                    },
+                },
+            )
         return EdgeContext(
             p_raw=np.array([]),
             p_cal=np.array([]),
@@ -5121,6 +5132,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
     )
     probability = SimpleNamespace(
         witness_identity="q-1",
+        probability_content_identity="q-content-1",
         bindings=(
             SimpleNamespace(
                 bin_id="canonical-bin-1",
@@ -5142,6 +5154,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
         held_shares=Decimal("10"),
         ledger_snapshot_id="ledger-1",
         probability_witness_identity="q-1",
+        probability_content_identity="q-content-1",
         wealth_economic_identity="wealth-1",
         selection_epoch_identity="epoch-1",
         book_epoch_identity="book-epoch-1",
@@ -5160,7 +5173,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
     )
     current = dict(
         position_id="position-1",
-        probability_witness_identity="q-1",
+        probability_content_identity="q-content-1",
         checked_at_utc=at + timedelta(seconds=2),
         family_key="family-1",
         bin_label="20C",
@@ -5170,7 +5183,7 @@ def test_global_holding_coverage_requires_exact_position_wealth_and_current_book
         held_shares=Decimal("10"),
         current_ledger_snapshot_id="ledger-1",
         current_wealth_economic_identity="wealth-1",
-        current_probability_witness_identity_resolver=lambda _row: "q-1",
+        current_probability_content_identity_resolver=lambda _row: "q-content-1",
         current_holding_witness_resolver=lambda _row: (
             global_batch_runtime._CurrentHoldingWitness(
                 ledger_snapshot_id="ledger-1",
@@ -5261,6 +5274,7 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
     )
     probability = SimpleNamespace(
         witness_identity="q-lease",
+        probability_content_identity="q-content-lease",
         bindings=(
             SimpleNamespace(
                 bin_id="canonical-bin-lease",
@@ -5281,6 +5295,7 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
         held_shares=obligation.held_shares,
         ledger_snapshot_id="ledger-lease",
         probability_witness_identity="q-lease",
+        probability_content_identity="q-content-lease",
         wealth_economic_identity="wealth-lease",
         selection_epoch_identity="epoch-lease",
         book_epoch_identity="book-lease",
@@ -5319,7 +5334,7 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
     )
     result = global_batch_runtime.current_global_holding_coverage(
         position_id=obligation.position_id,
-        probability_witness_identity="q-lease",
+        probability_content_identity="q-content-lease",
         checked_at_utc=at + timedelta(seconds=2),
         family_key=obligation.family_key,
         bin_label=obligation.bin_label,
@@ -5330,8 +5345,10 @@ def test_global_holding_coverage_lease_revalidates_after_resolver_io(
         current_ledger_snapshot_id="ledger-lease",
         current_wealth_economic_identity="wealth-lease",
         current_sell_book_witness_resolver=book_resolver,
-        current_probability_witness_identity_resolver=lambda _row: (
-            "q-advanced" if mutation == "q_advance" else "q-lease"
+        current_probability_content_identity_resolver=lambda _row: (
+            "q-content-advanced"
+            if mutation == "q_advance"
+            else "q-content-lease"
         ),
         current_holding_witness_resolver=lambda _row: holding,
         current_time_provider=lambda: (
@@ -5371,6 +5388,7 @@ def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():
     )
     probability = SimpleNamespace(
         witness_identity="q-current",
+        probability_content_identity="q-content-current",
         bindings=(
             SimpleNamespace(
                 bin_id="canonical-bin-current",
@@ -5391,6 +5409,7 @@ def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():
         held_shares=first.held_shares,
         ledger_snapshot_id="ledger-current",
         probability_witness_identity="q-current",
+        probability_content_identity="q-content-current",
         wealth_economic_identity="wealth-current",
         selection_epoch_identity="epoch-current",
         book_epoch_identity="book-current",
@@ -5412,6 +5431,7 @@ def test_global_holding_partition_rejects_single_q_epoch_or_deadline_mismatch():
         held_shares=second.held_shares,
         ledger_snapshot_id="ledger-current",
         probability_witness_identity=None,
+        probability_content_identity=None,
         wealth_economic_identity="wealth-current",
         selection_epoch_identity="epoch-current",
         book_epoch_identity="book-current",
@@ -5463,7 +5483,6 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         global_batch_runtime,
         monitor_refresh,
     )
-
     at = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
     portfolio = SimpleNamespace(positions=())
     position = SimpleNamespace(
@@ -5483,6 +5502,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         ledger_snapshot_id="ledger-current",
         economic_identity="wealth-current",
     )
+    content_identity = "q-content-current"
     monkeypatch.setattr(
         global_auction_universe,
         "current_portfolio_wealth_witness",
@@ -5536,7 +5556,14 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
             0.5,
             SimpleNamespace(
                 _day0_monitor_probability_receipt={
-                    "probability_witness_identity": "q-current"
+                    "probability_witness_identity": "q-current",
+                    "probability_content_identity": content_identity,
+                    "q_version": "q-content-current",
+                    "source_truth_identity": "source-current",
+                    "band": {
+                        "alpha": 0.05,
+                        "basis": "current-band",
+                    },
                 }
             ),
             True,
@@ -5554,7 +5581,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
             "current_sell_book_witness_resolver"
         ](coverage)
         captured["probability_witness"] = kwargs[
-            "current_probability_witness_identity_resolver"
+            "current_probability_content_identity_resolver"
         ](coverage)
         captured["holding_witness"] = kwargs[
             "current_holding_witness_resolver"
@@ -5578,7 +5605,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
         ),
         portfolio=portfolio,
         position=position,
-        probability_witness_identity="q-current",
+        probability_content_identity=content_identity,
         checked_at_utc=at,
         current_time_provider=lambda: at,
     )
@@ -5588,7 +5615,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
     assert captured["current_wealth_economic_identity"] == "wealth-current"
     assert captured["held_shares"] == Decimal("12.5")
     assert captured["sell_book_witness"]
-    assert captured["probability_witness"] == "q-current"
+    assert captured["probability_witness"] == content_identity
     assert captured["holding_witness"].ledger_snapshot_id == "ledger-current"
     assert captured["holding_witness"].held_shares == Decimal("12.5")
     assert captured["final_checked_at"] == at
@@ -5672,6 +5699,7 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
         held_shares=obligation.held_shares,
         ledger_snapshot_id="ledger-current",
         probability_witness_identity=None,
+        probability_content_identity=None,
         wealth_economic_identity="wealth-current",
         selection_epoch_identity="epoch-current",
         book_epoch_identity="book-unavailable-current",
@@ -5794,6 +5822,7 @@ def test_receipt_rejects_uniform_coverage_deadline_beyond_authoritative_book(
             held_shares=obligation.held_shares,
             ledger_snapshot_id="ledger-current",
             probability_witness_identity=None,
+            probability_content_identity=None,
             wealth_economic_identity="wealth-current",
             selection_epoch_identity="epoch-current",
             book_epoch_identity="book-unavailable-current",
@@ -5888,6 +5917,7 @@ def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path)
     )
     probability = SimpleNamespace(
         witness_identity="q-sell",
+        probability_content_identity="q-content-sell",
         bindings=(
             SimpleNamespace(
                 bin_id="canonical-bin-sell",
@@ -5908,6 +5938,7 @@ def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path)
         held_shares=obligation.held_shares,
         ledger_snapshot_id="ledger-current",
         probability_witness_identity="q-sell",
+        probability_content_identity="q-content-sell",
         wealth_economic_identity="wealth-current",
         selection_epoch_identity="epoch-current",
         book_epoch_identity="book-unavailable-current",

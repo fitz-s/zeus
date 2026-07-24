@@ -5314,13 +5314,21 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     )
 
 
+def _monitor_probability_content_identity(receipt: object) -> str:
+    """Return stable full-q content identity from a fresh monitor receipt."""
+
+    if not isinstance(receipt, dict):
+        return ""
+    return str(receipt.get("probability_content_identity") or "").strip()
+
+
 def _current_monitor_global_holding_coverage(
     *,
     conn,
     clob,
     portfolio,
     position,
-    probability_witness_identity: str,
+    probability_content_identity: str,
     checked_at_utc: datetime,
     current_time_provider: Callable[[], datetime] | None = None,
 ):
@@ -5455,7 +5463,7 @@ def _current_monitor_global_holding_coverage(
                 else global_sell_book_witness_identity(curve)
             )
 
-        def current_probability_witness_identity(_coverage) -> str | None:
+        def current_probability_content_identity(_coverage) -> str | None:
             from src.engine.monitor_refresh import (
                 _refresh_current_global_day0_probability,
             )
@@ -5473,11 +5481,7 @@ def _current_monitor_global_holding_coverage(
                 "_day0_monitor_probability_receipt",
                 None,
             )
-            return (
-                str(receipt.get("probability_witness_identity") or "")
-                if isinstance(receipt, dict)
-                else None
-            )
+            return _monitor_probability_content_identity(receipt) or None
 
         def current_holding_witness(_coverage) -> _CurrentHoldingWitness | None:
             current_wealth = current_portfolio_wealth_witness(
@@ -5509,7 +5513,7 @@ def _current_monitor_global_holding_coverage(
                 or getattr(position, "trade_id", "")
                 or ""
             ),
-            probability_witness_identity=probability_witness_identity,
+            probability_content_identity=probability_content_identity,
             checked_at_utc=checked,
             family_key=family_key,
             bin_label=str(getattr(position, "bin_label", "") or "").strip(),
@@ -5520,8 +5524,8 @@ def _current_monitor_global_holding_coverage(
             current_ledger_snapshot_id=str(wealth.ledger_snapshot_id),
             current_wealth_economic_identity=str(wealth.economic_identity),
             current_sell_book_witness_resolver=current_sell_book_witness,
-            current_probability_witness_identity_resolver=(
-                current_probability_witness_identity
+            current_probability_content_identity_resolver=(
+                current_probability_content_identity
             ),
             current_holding_witness_resolver=current_holding_witness,
             current_time_provider=current_time,
@@ -6741,15 +6745,12 @@ def execute_monitoring_phase(
                     "_day0_monitor_probability_receipt",
                     None,
                 )
-                probability_witness_identity = (
-                    str(
-                        probability_receipt.get("probability_witness_identity")
-                        or ""
+                probability_content_identity = (
+                    _monitor_probability_content_identity(
+                        probability_receipt
                     )
-                    if isinstance(probability_receipt, dict)
-                    else ""
                 )
-                if probability_witness_identity:
+                if probability_content_identity:
                     def coverage_time() -> datetime:
                         try:
                             value = (
@@ -6774,8 +6775,8 @@ def execute_monitoring_phase(
                         clob=clob,
                         portfolio=portfolio,
                         position=pos,
-                        probability_witness_identity=(
-                            probability_witness_identity
+                        probability_content_identity=(
+                            probability_content_identity
                         ),
                         checked_at_utc=coverage_checked_at,
                         current_time_provider=coverage_time,

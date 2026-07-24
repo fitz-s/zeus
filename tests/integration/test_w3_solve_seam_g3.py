@@ -102,6 +102,7 @@ from src.solve.solver import (
     global_sell_fill_prefix_objective,
     executable_curve_identity,
     family_payoff_q_samples,
+    joint_probability_content_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
     _score_global_single_order,
@@ -391,6 +392,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     holding_probability_witnesses = {
         "family-sell": SimpleNamespace(
             witness_identity="q-sell",
+            probability_content_identity="q-content-sell",
             bindings=(
                 SimpleNamespace(
                     bin_id="21C",
@@ -415,6 +417,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 held_shares=Decimal("12.346602"),
                 ledger_snapshot_id="ledger-current",
                 probability_witness_identity="q-sell",
+                probability_content_identity="q-content-sell",
                 wealth_economic_identity="wealth-economics-current",
                 selection_epoch_identity="epoch-current",
                 book_epoch_identity="book-current",
@@ -436,6 +439,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 held_shares=Decimal("4.5"),
                 ledger_snapshot_id="ledger-current",
                 probability_witness_identity=None,
+                probability_content_identity=None,
                 wealth_economic_identity="wealth-economics-current",
                 selection_epoch_identity="epoch-current",
                 book_epoch_identity="book-current",
@@ -965,6 +969,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
     )
     probability = SimpleNamespace(
         witness_identity="q-1",
+        probability_content_identity="q-content-1",
         bindings=(
             SimpleNamespace(
                 bin_id="20C",
@@ -985,6 +990,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         held_shares=Decimal("10"),
         ledger_snapshot_id="ledger-1",
         probability_witness_identity="q-1",
+        probability_content_identity="q-content-1",
         wealth_economic_identity="wealth-1",
         selection_epoch_identity="epoch-1",
         book_epoch_identity="book-1",
@@ -1004,7 +1010,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
 
     current = dict(
         position_id="position-1",
-        probability_witness_identity="q-1",
+        probability_content_identity="q-content-1",
         checked_at_utc=at + _dt.timedelta(seconds=2),
         family_key="family-1",
         bin_label="20C",
@@ -1014,7 +1020,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         held_shares=Decimal("10"),
         current_ledger_snapshot_id="ledger-1",
         current_wealth_economic_identity="wealth-1",
-        current_probability_witness_identity_resolver=lambda _row: "q-1",
+        current_probability_content_identity_resolver=lambda _row: "q-content-1",
         current_holding_witness_resolver=lambda _row: (
             global_batch_runtime._CurrentHoldingWitness(
                 ledger_snapshot_id="ledger-1",
@@ -1029,9 +1035,18 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
     ) == (evaluated, 42)
     assert global_batch_runtime.current_global_holding_coverage(
-        **{**current, "probability_witness_identity": "q-changed-kind"},
+        **{**current, "probability_content_identity": "q-content-changed"},
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
     ) is None
+    for changed_content in (
+        "q-content-source-changed",
+        "q-content-alpha-changed",
+        "q-content-band-changed",
+    ):
+        assert global_batch_runtime.current_global_holding_coverage(
+            **{**current, "probability_content_identity": changed_content},
+            current_sell_book_witness_resolver=lambda _row: "sell-book-1",
+        ) is None
     assert global_batch_runtime.current_global_holding_coverage(
         **{**current, "checked_at_utc": at + _dt.timedelta(seconds=31)},
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
@@ -1051,6 +1066,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
     excluded = replace(
         evaluated,
         probability_witness_identity=None,
+        probability_content_identity=None,
         status="EXCLUDED",
         candidate_id=None,
         reason="SELL_ASSET_NOT_EXECUTABLE",
@@ -1066,6 +1082,67 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         **current,
         current_sell_book_witness_resolver=lambda _row: "sell-book-1",
     ) is None
+
+
+def test_probability_content_identity_excludes_only_receipt_time_and_certificate():
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="20C",
+            condition_id="condition-20",
+            yes_token_id="yes-20",
+            no_token_id="no-20",
+        ),
+        OutcomeTokenBinding(
+            bin_id="21C",
+            condition_id="condition-21",
+            yes_token_id="yes-21",
+            no_token_id="no-21",
+        ),
+    )
+    point = np.array([0.4, 0.6])
+    samples = np.tile(point, (100, 1))
+    stable = dict(
+        family_key="City|2026-07-24|high",
+        bindings=bindings,
+        q_version="q-version",
+        resolution_identity="resolution",
+        topology_identity="topology",
+        posterior_identity_hash="posterior",
+        source_truth_identity="source",
+        band_alpha=0.05,
+        band_basis="finite-current-evidence",
+        yes_point_q=point,
+        yes_q_samples=samples,
+    )
+    content = joint_probability_content_identity(**stable)
+    first = joint_probability_witness_identity(
+        **stable,
+        authority_certificate_hash="certificate-a",
+        captured_at_utc=_dt.datetime(
+            2026, 7, 24, 5, 36, tzinfo=_dt.timezone.utc
+        ),
+    )
+    second = joint_probability_witness_identity(
+        **stable,
+        authority_certificate_hash="certificate-b",
+        captured_at_utc=_dt.datetime(
+            2026, 7, 24, 5, 37, tzinfo=_dt.timezone.utc
+        ),
+    )
+
+    assert first != second
+    assert joint_probability_content_identity(**stable) == content
+    changed_samples = samples.copy()
+    changed_samples[0] = np.array([0.5, 0.5])
+    assert joint_probability_content_identity(
+        **{**stable, "yes_q_samples": changed_samples}
+    ) != content
+    assert joint_probability_content_identity(
+        **{**stable, "source_truth_identity": "source-changed"}
+    ) != content
+    assert joint_probability_content_identity(
+        **{**stable, "topology_identity": "topology-changed"}
+    ) != content
 
 
 def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
@@ -2228,7 +2305,10 @@ def test_current_global_family_survives_duplicate_local_spine_input_loss():
 
 
 def test_global_deterministic_actuation_builds_only_selected_exact_proof():
-    from src.solve.solver import deterministic_bin_payoff_witness_identity
+    from src.solve.solver import (
+        deterministic_bin_payoff_content_identity,
+        deterministic_bin_payoff_witness_identity,
+    )
 
     family, _bins = R._three_bin_family()
     selected = family.candidates[0]
@@ -2264,6 +2344,40 @@ def test_global_deterministic_actuation_builds_only_selected_exact_proof():
             **witness_fields
         ),
     )
+    stable_content_fields = {
+        key: value
+        for key, value in witness_fields.items()
+        if key not in {"authority_certificate_hash", "captured_at_utc"}
+    }
+    content_identity = deterministic_bin_payoff_content_identity(
+        **stable_content_fields
+    )
+    assert witness.probability_content_identity == content_identity
+    assert deterministic_bin_payoff_content_identity(
+        **{
+            **stable_content_fields,
+            "exact_yes_payoffs": ((bin_id, 1),),
+        }
+    ) != content_identity
+    assert deterministic_bin_payoff_content_identity(
+        **{
+            **stable_content_fields,
+            "source_truth_identity": "source-day0-changed",
+        }
+    ) != content_identity
+    assert deterministic_bin_payoff_content_identity(
+        **{
+            **stable_content_fields,
+            "topology_identity": "topology-day0-changed",
+        }
+    ) != content_identity
+    assert deterministic_bin_payoff_witness_identity(
+        **{
+            **witness_fields,
+            "authority_certificate_hash": "authority-day0-changed",
+            "captured_at_utc": captured_at + _dt.timedelta(seconds=1),
+        }
+    ) != witness.witness_identity
     row = R._row(
         condition_id=selected.condition_id,
         yes_token=selected.yes_token_id,

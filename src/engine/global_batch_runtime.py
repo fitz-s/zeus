@@ -230,6 +230,12 @@ def _holding_coverage_key(
     )
 
 
+def _probability_content_identity(witness: object) -> str:
+    return str(
+        getattr(witness, "probability_content_identity", "") or ""
+    ).strip()
+
+
 def _holding_coverage_partition_complete(
     coverage: Sequence[GlobalHoldingAuctionCoverage],
     *,
@@ -256,14 +262,20 @@ def _holding_coverage_partition_complete(
     }
     evaluated_q_current = all(
         row.status != "EVALUATED"
-        or row.probability_witness_identity
-        == str(
-            getattr(
-                probability_witnesses.get(row.family_key),
-                "witness_identity",
-                "",
+        or (
+            row.probability_witness_identity
+            == str(
+                getattr(
+                    probability_witnesses.get(row.family_key),
+                    "witness_identity",
+                    "",
+                )
+                or ""
             )
-            or ""
+            and row.probability_content_identity
+            == _probability_content_identity(
+                probability_witnesses.get(row.family_key)
+            )
         )
         for row in rows
     )
@@ -322,6 +334,7 @@ def _complete_holding_coverage(
                 held_shares=obligation.held_shares,
                 ledger_snapshot_id=ledger_snapshot_id,
                 probability_witness_identity=None,
+                probability_content_identity=None,
                 wealth_economic_identity=wealth_economic_identity,
                 selection_epoch_identity=selection_epoch_identity,
                 book_epoch_identity=book_epoch_identity,
@@ -433,7 +446,7 @@ def _invalidate_global_holding_coverage_for_wealth(
 def current_global_holding_coverage(
     *,
     position_id: str,
-    probability_witness_identity: str,
+    probability_content_identity: str,
     checked_at_utc: datetime,
     family_key: str = "",
     bin_label: str = "",
@@ -447,7 +460,7 @@ def current_global_holding_coverage(
         [GlobalHoldingAuctionCoverage], str | None
     ]
     | None = None,
-    current_probability_witness_identity_resolver: Callable[
+    current_probability_content_identity_resolver: Callable[
         [GlobalHoldingAuctionCoverage], str | None
     ]
     | None = None,
@@ -466,7 +479,7 @@ def current_global_holding_coverage(
             str(value or "").strip()
             for value in (
                 position_id,
-                probability_witness_identity,
+                probability_content_identity,
                 family_key,
                 bin_label,
                 condition_id,
@@ -478,7 +491,7 @@ def current_global_holding_coverage(
         )
         or side not in {"YES", "NO"}
         or current_sell_book_witness_resolver is None
-        or current_probability_witness_identity_resolver is None
+        or current_probability_content_identity_resolver is None
         or current_holding_witness_resolver is None
     ):
         return None
@@ -492,8 +505,8 @@ def current_global_holding_coverage(
     checked = checked_at_utc.astimezone(UTC)
     if (
         row.status != "EVALUATED"
-        or row.probability_witness_identity
-        != str(probability_witness_identity or "")
+        or row.probability_content_identity
+        != str(probability_content_identity or "")
         or row.family_key != family_key
         or str(row.bin_label or "") != bin_label
         or row.condition_id != condition_id
@@ -510,8 +523,8 @@ def current_global_holding_coverage(
         return None
     try:
         current_sell_book_witness_identity = current_sell_book_witness_resolver(row)
-        current_probability_witness_identity = (
-            current_probability_witness_identity_resolver(row)
+        current_probability_content_identity = (
+            current_probability_content_identity_resolver(row)
         )
         current_holding_witness = current_holding_witness_resolver(row)
         final_checked_at = (
@@ -524,8 +537,8 @@ def current_global_holding_coverage(
     if (
         final_checked_at.tzinfo is None
         or current_sell_book_witness_identity != row.sell_book_witness_identity
-        or current_probability_witness_identity
-        != row.probability_witness_identity
+        or current_probability_content_identity
+        != row.probability_content_identity
         or current_holding_witness is None
         or current_holding_witness.ledger_snapshot_id != row.ledger_snapshot_id
         or current_holding_witness.wealth_economic_identity

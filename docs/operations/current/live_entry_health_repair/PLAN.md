@@ -87,6 +87,47 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Re-sample loaded SHA/PID, open positions, q identity, posterior/FSR identity, reactor completion cadence, and venue command/event counts.
 - Actual order proof requires separate `venue_commands`, submit event, venue ACK/order ID, fill/trade fact, and capital change lines. A candidate or health-clear signal is not an order.
 
+## Slice B69 -- Stable probability-content handoff for held statistical SELL
+
+- Current proof: Seoul position `e582b997-daf` reached held-side q `0` with a
+  current executable bid of `0.07` at `2026-07-24T05:36:12Z`. The global
+  auction had evaluated the position, but its probability witness identity
+  differed from the monitor's immediately rebuilt identity, so the monitor
+  suppressed the exit as
+  `GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE`.
+- Root cause: the full probability witness identity intentionally binds
+  `captured_at_utc` and the time-bound authority certificate. It is therefore
+  a decision-receipt identity, not a stable probability-content identity.
+  Requiring two independently captured current receipts to have the same full
+  identity makes a valid auction-to-monitor handoff impossible even when the
+  full q simplex, samples, source truth, topology, and posterior are unchanged.
+- Minimal repair: keep the full witness identity unchanged for immutable audit
+  provenance. Derive an explicit `probability_content_identity` from the
+  ordered bindings, resolution/topology, posterior/source truth, q version,
+  full point vector, full sample matrix, and probability-band basis/alpha.
+  Exclude only capture time and the time-bound authority certificate. Carry
+  that identity on held coverage and the fresh monitor receipt for the
+  cross-capture handoff.
+- Files authorized: `src/engine/global_single_order_auction.py`,
+  `src/engine/global_batch_runtime.py`, `src/engine/cycle_runtime.py`,
+  `src/engine/monitor_refresh.py`, `src/solve/solver.py`, and
+  `tests/test_live_safety_invariants.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`.
+- Cumulative gates remain mandatory: the monitor must freshly rebuild the same
+  probability content; the published coverage must remain inside its book
+  deadline; current exact SELL-book content, ledger snapshot, wealth economic
+  identity, and held shares must all still match. The full auction witness
+  remains recorded and is never replaced by the content identity.
+- Forbidden: compare only scalar held q, ignore sample/source/topology changes,
+  extend a stale book deadline, reuse stale wealth, permit local statistical
+  SELL actuation, relax the live `[0.05, 0.95]` band, or turn a monitor proposal
+  into a global winner.
+- Acceptance: same probability content captured at different instants may
+  delegate to the current global auction; changed q content, book, wealth,
+  shares, generation, or deadline fails closed; RED and hard-fact exits retain
+  their existing direct paths; no new local EXIT command is created by the
+  handoff.
+
 ## Slice B4 -- Bounded live working-set reads
 
 - Current runtime proof: the reactor run started at `18:46:50Z`, completed `pending_prune` at `18:46:57Z`, and then emitted no `forecast_snapshot_build` completion for more than ten minutes. That stage spans `_edli_pending_entity_keys` plus the forecast builder, so the log anchors alone do not isolate one call. The pending-key query had no SQLite progress deadline and its plan allowed an unbounded status scan, per-row event PK lookup, and temporary DISTINCT tree. `sqlite_stat1` was stale (2,520,044 estimated rows); a later exact read found 10,801,165 processing rows but only 1,018 pending and 12 processing. Hot read-only timing was 179ms for the old query and 94ms for the bounded query; this is a structural I/O amplifier, not proven as the sole ten-minute root. The separately budgeted forecast builder was 52ms hot after recovery.

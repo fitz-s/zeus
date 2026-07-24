@@ -450,6 +450,71 @@ def joint_probability_witness_identity(
     return digest.hexdigest()
 
 
+def joint_probability_content_identity(
+    *,
+    family_key: str,
+    bindings: Sequence[OutcomeTokenBinding],
+    q_version: str,
+    resolution_identity: str,
+    topology_identity: str,
+    posterior_identity_hash: str,
+    source_truth_identity: str,
+    band_alpha: float,
+    band_basis: str,
+    yes_point_q: np.ndarray,
+    yes_q_samples: np.ndarray,
+) -> str:
+    """Bind complete probability content without receipt-time identity."""
+
+    point = np.ascontiguousarray(np.asarray(yes_point_q, dtype=np.float64))
+    samples = np.ascontiguousarray(np.asarray(yes_q_samples, dtype=np.float64))
+    if (
+        not all(
+            str(value or "").strip()
+            for value in (
+                family_key,
+                q_version,
+                resolution_identity,
+                topology_identity,
+                posterior_identity_hash,
+                source_truth_identity,
+                band_basis,
+            )
+        )
+        or not bindings
+        or point.ndim != 1
+        or point.shape != (len(bindings),)
+        or samples.ndim != 2
+        or samples.shape[1] != len(bindings)
+        or not np.isfinite(point).all()
+        or not np.isfinite(samples).all()
+        or not math.isfinite(float(band_alpha))
+    ):
+        raise ValueError("probability content identity requires complete finite inputs")
+    digest = hashlib.sha256()
+    for value in (
+        "joint_probability_content_v1",
+        family_key,
+        tuple(
+            (b.bin_id, b.condition_id, b.yes_token_id, b.no_token_id)
+            for b in bindings
+        ),
+        q_version,
+        resolution_identity,
+        topology_identity,
+        posterior_identity_hash,
+        source_truth_identity,
+        repr(float(band_alpha)),
+        band_basis,
+        samples.shape,
+    ):
+        digest.update(str(value).encode("utf-8"))
+        digest.update(b"\x1f")
+    digest.update(point.astype("<f8", copy=False).tobytes(order="C"))
+    digest.update(samples.astype("<f8", copy=False).tobytes(order="C"))
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class JointOutcomeProbabilityWitness:
     """Current zero-sum outcome authority for one complete market family.
@@ -491,6 +556,22 @@ class JointOutcomeProbabilityWitness:
     @property
     def sample_matrix_identity(self) -> str:
         return probability_sample_matrix_identity(self.yes_q_samples)
+
+    @property
+    def probability_content_identity(self) -> str:
+        return joint_probability_content_identity(
+            family_key=self.family_key,
+            bindings=self.bindings,
+            q_version=self.q_version,
+            resolution_identity=self.resolution_identity,
+            topology_identity=self.topology_identity,
+            posterior_identity_hash=self.posterior_identity_hash,
+            source_truth_identity=self.source_truth_identity,
+            band_alpha=self.band_alpha,
+            band_basis=self.band_basis,
+            yes_point_q=self.yes_point_q,
+            yes_q_samples=self.yes_q_samples,
+        )
 
     def __post_init__(self) -> None:
         point = np.asarray(self.yes_point_q, dtype=np.float64)
@@ -599,6 +680,50 @@ def deterministic_bin_payoff_witness_identity(
     return _hash(*(str(value) for value in values))
 
 
+def deterministic_bin_payoff_content_identity(
+    *,
+    family_key: str,
+    bindings: Sequence[OutcomeTokenBinding],
+    exact_yes_payoffs: Sequence[tuple[str, int]],
+    q_version: str,
+    resolution_identity: str,
+    topology_identity: str,
+    posterior_identity_hash: str,
+    source_truth_identity: str,
+    band_alpha: float,
+    band_basis: str,
+) -> str:
+    """Bind exact payoff content without receipt-time identity."""
+
+    exact = tuple(
+        sorted((str(bin_id), int(value)) for bin_id, value in exact_yes_payoffs)
+    )
+    values = (
+        "deterministic_bin_payoff_content_v1",
+        family_key,
+        tuple(
+            (binding.bin_id, binding.condition_id, binding.yes_token_id, binding.no_token_id)
+            for binding in bindings
+        ),
+        exact,
+        q_version,
+        resolution_identity,
+        topology_identity,
+        posterior_identity_hash,
+        source_truth_identity,
+        repr(float(band_alpha)),
+        band_basis,
+    )
+    if (
+        not bindings
+        or not exact
+        or not math.isfinite(float(band_alpha))
+        or any(not str(value or "").strip() for value in values)
+    ):
+        raise ValueError("deterministic payoff content identity is incomplete")
+    return _hash(*(str(value) for value in values))
+
+
 def deterministic_bin_payoff_sample_identity(
     exact_yes_payoffs: Sequence[tuple[str, int]],
 ) -> str:
@@ -654,6 +779,21 @@ class DeterministicBinPayoffWitness:
     @property
     def sample_matrix_identity(self) -> str:
         return deterministic_bin_payoff_sample_identity(self.exact_yes_payoffs)
+
+    @property
+    def probability_content_identity(self) -> str:
+        return deterministic_bin_payoff_content_identity(
+            family_key=self.family_key,
+            bindings=self.bindings,
+            exact_yes_payoffs=self.exact_yes_payoffs,
+            q_version=self.q_version,
+            resolution_identity=self.resolution_identity,
+            topology_identity=self.topology_identity,
+            posterior_identity_hash=self.posterior_identity_hash,
+            source_truth_identity=self.source_truth_identity,
+            band_alpha=self.band_alpha,
+            band_basis=self.band_basis,
+        )
 
     def exact_yes_payoff(self, bin_id: str) -> int | None:
         return dict(self.exact_yes_payoffs).get(str(bin_id))

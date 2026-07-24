@@ -4540,6 +4540,9 @@ def _materialize_current_global_day0_probability(
             "held_direction": direction,
             "held_side_probability": held_probability,
             "probability_witness_identity": witness.witness_identity,
+            "probability_content_identity": str(
+                getattr(witness, "probability_content_identity", "") or ""
+            ),
             "q_version": witness.q_version,
             "source_truth_identity": witness.source_truth_identity,
             "band": {

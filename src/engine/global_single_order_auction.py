@@ -49,6 +49,7 @@ class GlobalHoldingAuctionCoverage:
     held_shares: Decimal
     ledger_snapshot_id: str
     probability_witness_identity: str | None
+    probability_content_identity: str | None
     wealth_economic_identity: str
     selection_epoch_identity: str
     book_epoch_identity: str
@@ -116,6 +117,7 @@ class GlobalHoldingAuctionCoverage:
             != bool(
                 str(self.candidate_id or "").strip()
                 and str(self.probability_witness_identity or "").strip()
+                and str(self.probability_content_identity or "").strip()
                 and str(self.sell_book_witness_identity or "").strip()
                 and not str(self.reason or "").strip()
             )
@@ -785,6 +787,9 @@ def select_prepared_global_auction(
                 held_shares=Decimal(holding.shares),
                 ledger_snapshot_id=str(holdings_by_family[holding.family_key].ledger_snapshot_id),
                 probability_witness_identity=str(probability.witness_identity),
+                probability_content_identity=str(
+                    probability.probability_content_identity
+                ),
                 wealth_economic_identity=wealth_witness.economic_identity,
                 selection_epoch_identity=selection_epoch_identity,
                 book_epoch_identity=book_epoch.witness_identity,
