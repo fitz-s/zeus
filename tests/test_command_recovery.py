@@ -9804,7 +9804,7 @@ class TestRecoveryResolutionTable:
         monkeypatch,
         scope,
     ):
-        """Scoped live recovery must release pending_exit when durable full-fill truth exists."""
+        """A durable venue fill stays pending until chain absence confirms closure."""
         from src.execution import command_recovery, venue_sync_contract
         from src.state.db import init_schema, init_schema_trade_only
         from src.state.collateral_ledger import init_collateral_schema
