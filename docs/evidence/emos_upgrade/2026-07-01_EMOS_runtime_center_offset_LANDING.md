@@ -49,7 +49,7 @@ Serve a city only if BOTH:
   `μ'=apply_affine(_mu_diagonal,a,b)` at the override construction (SINGLE authoritative center →
   q point + q_lcb/q_ucb bounds + provenance + reactor ENTRY read, entry/exit unified, no #135 split;
   critic-verified all consumers read the corrected value); provenance stamp (a,b,delta) reconstructible.
-- Candidate artifact `docs/evidence/emos_upgrade/emos_center_calibration.candidate.json` (NOT in state/).
+- Candidate artifact `docs/evidence/emos_upgrade/emos_center_calibration.candidate.json.md` (NOT in state/).
 
 ## Safety / go-live / rollback
 - INERT NOW: no `state/emos_center_calibration.json` → `lookup_affine` returns (0.0,1.0) identity →

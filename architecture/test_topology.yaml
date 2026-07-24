@@ -692,8 +692,8 @@ test_trust_policy:
     tests/test_auto_wrap_state_machine.py: {created: "2026-05-19", last_used: "2026-05-20"}
     tests/test_auto_wrap_broadcast_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-07-22"}
     # 2026-05-21 live release proof P0-1/P1-2/P1-7: loaded SHA/schema/state/freshness/paper proof gate.
-    tests/test_single_live_semantics.py: {created: "2026-07-22", last_used: "2026-07-22", note: "Relapse gate for retired alternate-runtime modes, authority labels, and dormant persistence surfaces."}
-    tests/test_single_live_semantics_migration.py: {created: "2026-07-23", last_used: "2026-07-23", note: "Fixture-only WORLD decision-graph cutover antibodies: recursive closure, live-reference refusal, orphan postcheck, LIVE-only CHECK rebuild, atomic receipt, and rollback."}
+    tests/test_single_live_semantics.py: {created: "2026-07-22", last_used: "2026-07-24", note: "Relapse gate for retired alternate-runtime modes, authority labels, dormant persistence, excluded non-document artifacts, and live path references into historical subtrees."}
+    tests/test_single_live_semantics_migration.py: {created: "2026-07-23", last_used: "2026-07-24", note: "Fixture-only WORLD cutover antibodies: graph closure and historical refusal, target-bound resume, whole-cutover lease exclusion for canonical writers, atomic receipt, and rollback."}
     tests/strategy/test_single_count_uncertainty.py: {created: "2026-07-23", last_used: "2026-07-23", note: "INV-40 proves current-q uncertainty is counted once while unique Kelly and portfolio-pressure terms remain."}
     tests/engine/test_multiwinner_wealth_composition.py: {created: "2026-07-23", last_used: "2026-07-23", note: "INV-44 proves fresh wealth decreases, bounded inflight composition, and exhaustion termination."}
     tests/events/test_sizing_proof_receipt.py: {created: "2026-06-04", last_used: "2026-07-23", note: "Sizing-proof receipt fields and positive-edge capital-pressure behavior."}

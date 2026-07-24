@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last audited: 2026-07-24
 # Authority basis: selection-aware settlement q_lcb calibrator
 #   (frontier consult REQ-20260622-151741; live_order_pathology 2026-06-22).
 #   Walk-forward forward-validation harness for the selection q_lcb calibrator. READ-ONLY over
 #   state/zeus-forecasts.db (forecast_posteriors ⋈ settlement_outcomes VERIFIED) + state/zeus-world.db
-#   (settlement_attribution). Writes a JSON report under docs/evidence/live_order_pathology/. The
+#   (settlement_attribution). Writes a document artifact under docs/evidence/live_order_pathology/. The
 #   orchestrator OWNS the promotion gate; this harness only MEASURES and REPORTS.
 """Forward-validation harness for the selection-aware settlement q_lcb calibrator.
 
@@ -47,7 +47,7 @@ FCST_DEFAULT = os.path.join(REPO, "state", "zeus-forecasts.db")
 WORLD_DEFAULT = os.path.join(REPO, "state", "zeus-world.db")
 OUT_DEFAULT = os.path.join(
     REPO, "docs", "evidence", "live_order_pathology",
-    "2026-06-22_qlcb_selection_forward_validation.json",
+    "2026-06-22_qlcb_selection_forward_validation.json.md",
 )
 
 

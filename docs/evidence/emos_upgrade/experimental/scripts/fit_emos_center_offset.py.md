@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Created: 2026-07-01
 # Last audited: 2026-07-01
 # Authority basis: EMOS-on-runtime-output center-bias correction. Frontier math consult

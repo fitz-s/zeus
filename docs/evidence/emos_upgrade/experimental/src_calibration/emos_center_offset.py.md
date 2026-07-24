@@ -124,7 +124,7 @@ def lookup_center_offset(city: str, metric: str) -> float:
     runtime center for (city, metric), or 0.0 when absent/not-served/malformed.
 
     Mirrors ``_replacement_sigma_scale_lookup``: reads ``state/emos_center_offset.json`` (written
-    ONLY by scripts/fit_emos_center_offset.py) via the RUNTIME state dir, and returns the offset
+    ONLY by the historical fit_emos_center_offset.py.md evidence document) via the RUNTIME state dir, and returns the offset
     ONLY for a city whose entry is ``serve=true`` (its walk-forward OOS ΔMSE cleared the per-unit
     no-material-harm gate at fit time). Any error / missing file / not-served -> 0.0 (byte-identical
     to the pre-EMOS served center). NEVER raises."""
