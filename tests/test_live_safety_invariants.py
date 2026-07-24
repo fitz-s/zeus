@@ -9274,8 +9274,8 @@ def test_monitor_refreshed_omits_stale_day0_probability_receipt_on_non_day0_meth
     assert "day0_monitor_probability_receipt" not in payload
 
 
-def test_family_monitor_overlay_blocks_statistical_exit_on_immature_day0_authority():
-    """An immature Day0 validation cannot sponsor a CI-style exit."""
+def test_immature_day0_statistical_exit_survives_monitor_overlay():
+    """Temporal maturity cannot erase a fresh statistical redecision."""
     from src.engine import cycle_runtime
 
     pos = _make_position(
@@ -9321,15 +9321,14 @@ def test_family_monitor_overlay_blocks_statistical_exit_on_immature_day0_authori
         summary=summary,
     )
 
-    assert should_exit is False
-    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
-    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
-    assert "family_day0_immature_exit_authority_blocked" in pos.applied_validations
-    assert pos._monitor_family_redecision["decision"] == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    assert should_exit is True
+    assert reason == exit_decision.reason
+    assert "family_redecision_day0_immature_exits_blocked" not in summary
+    assert not hasattr(pos, "_monitor_family_redecision")
 
 
-def test_family_monitor_overlay_blocks_exit_decision_only_immature_day0_authority():
-    """Munich regression: exit-decision-only immature Day0 cannot authorize exit."""
+def test_monitor_overlay_preserves_exit_decision_only_immature_day0_evidence():
+    """Munich regression: exit-decision evidence remains statistically actionable."""
     from src.engine import cycle_runtime
 
     pos = _make_position(
@@ -9375,16 +9374,14 @@ def test_family_monitor_overlay_blocks_exit_decision_only_immature_day0_authorit
         summary=summary,
     )
 
-    assert should_exit is False
-    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
-    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
-    assert pos._monitor_family_redecision["day0_maturity_block"].startswith(
-        "day0_high_extreme_not_mature:"
-    )
+    assert should_exit is True
+    assert reason == exit_decision.reason
+    assert "family_redecision_day0_immature_exits_blocked" not in summary
+    assert not hasattr(pos, "_monitor_family_redecision")
 
 
-def test_family_monitor_overlay_blocks_immature_day0_without_second_family_evaluator():
-    """The Day0 maturity wall does not depend on a second family evaluator."""
+def test_monitor_overlay_preserves_immature_day0_without_second_family_evaluator():
+    """A missing sibling quote cannot reintroduce a temporal SELL veto."""
     from src.engine import cycle_runtime
 
     pos = _make_position(
@@ -9448,15 +9445,14 @@ def test_family_monitor_overlay_blocks_immature_day0_without_second_family_evalu
         summary=summary,
     )
 
-    assert should_exit is False
-    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
-    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
-    family = pos._monitor_family_redecision
-    assert family["decision"] == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    assert should_exit is True
+    assert reason == exit_decision.reason
+    assert "family_redecision_day0_immature_exits_blocked" not in summary
+    assert not hasattr(pos, "_monitor_family_redecision")
 
 
-def test_exit_evidence_gate_blocks_family_direct_sell_on_immature_day0_authority():
-    """Final exit gate is a second Day0 maturity lock after family overlay."""
+def test_exit_evidence_gate_does_not_reimpose_day0_temporal_veto():
+    """The final evidence gate cannot undo current statistical authority."""
     from src.engine import cycle_runtime
 
     pos = _make_position(
@@ -9488,19 +9484,10 @@ def test_exit_evidence_gate_blocks_family_direct_sell_on_immature_day0_authority
         deps=deps,
     )
 
-    assert allowed is False
-    assert reason == (
-        "DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED:"
-        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034"
-    )
-    assert summary["exit_evidence_missing_blocked"] == 1
-    assert summary["exit_evidence_gate_blocked_positions"] == [
-        {
-            "position_id": "family-direct-sell-final-gate-day0-immature",
-            "trigger": "FAMILY_DIRECT_SELL_DOMINATES_HOLD",
-            "reason": reason,
-        }
-    ]
+    assert allowed is True
+    assert reason is None
+    assert summary["exit_evidence_gate_passed"] == 1
+    assert "exit_evidence_gate_blocked_positions" not in summary
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
@@ -11352,8 +11339,8 @@ def test_day0_low_price_high_expected_value_remains_a_hold(direction):
     assert decision.trigger == "HOLD"
 
 
-def test_day0_point_q_reversal_waits_for_temporal_maturity():
-    """An Ankara-shaped early reversal cannot outrun Day0 maturity authority."""
+def test_day0_point_q_reversal_survives_monitor_overlay_before_temporal_maturity():
+    """An Ankara-shaped early reversal remains in continuous redecision."""
     from src.engine import cycle_runtime
 
     maturity_reason = (
@@ -11414,9 +11401,9 @@ def test_day0_point_q_reversal_waits_for_temporal_maturity():
         summary=summary,
     )
 
-    assert should_exit is False
-    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
-    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
+    assert should_exit is True
+    assert reason == decision.reason
+    assert "family_redecision_day0_immature_exits_blocked" not in summary
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])

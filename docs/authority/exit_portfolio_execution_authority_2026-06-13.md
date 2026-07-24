@@ -2,6 +2,16 @@
 
 Status: ACTIVE
 
+## ERRATUM (2026-07-24, operator first-principles correction)
+
+Temporal maturity qualifies an absorbing Day0 observation; it is not permission
+for whether a fresh statistical probability can participate in redecision.
+Every non-deterministic Day0 SELL with an exact current probability witness uses
+posterior-predictive-mean expected log wealth and EV, with the same witness,
+holding, wealth, and executable book reproduced at submit. A pre/post-peak
+cutoff must not replace E2 with HOLD. Any future-information option value belongs
+inside the action objective, not in a binary temporal veto.
+
 ## ERRATUM (2026-07-02, operator decision)
 
 The staged delivery language previously present in X3 and the priority list is

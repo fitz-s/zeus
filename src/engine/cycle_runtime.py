@@ -367,15 +367,6 @@ def _exit_evidence_gate_allows_statistical_exit(
     summary: dict,
     deps,
 ) -> tuple[bool, str | None]:
-    day0_immature_reason = _day0_immature_exit_authority_reason(pos)
-    if day0_immature_reason and _exit_trigger_requires_mature_day0_authority(exit_trigger):
-        return _record_exit_evidence_gate_block(
-            summary,
-            deps,
-            trade_id=pos.trade_id,
-            trigger=exit_trigger,
-            reason=f"DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED:{day0_immature_reason}",
-        )
     summary["exit_evidence_gate_passed"] = summary.get("exit_evidence_gate_passed", 0) + 1
     return True, None
 
@@ -3260,9 +3251,9 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
         "VIG_EXTREME",
         "EDGE_REVERSAL",
         # ultimate_alpha 2026-07-24: the unified stopping-law sell. It is a
-        # statistical value comparison (robust q⁻ vs top-of-book proceeds), so
-        # it inherits this classification's Day0-immature-authority protection;
-        # the legacy triggers above are no longer emitted by evaluate_exit.
+        # statistical value comparison (current q vs executable proceeds). Day0
+        # temporal maturity qualifies absorbing hard facts, not whether a fresh
+        # statistical probability may participate in continuous redecision.
         "SELL_REVERSAL",
     }
 )
@@ -3605,50 +3596,12 @@ def _day0_immature_exit_authority_reason(*sources) -> str | None:
     return None
 
 
-def _exit_trigger_requires_mature_day0_authority(exit_trigger: str) -> bool:
-    trigger = str(exit_trigger or "")
-    if trigger == "FAMILY_DIRECT_SELL_DOMINATES_HOLD":
-        return True
-    if trigger == "DAY0_OBSERVATION_REVERSAL":
-        return True
-    return any(
-        trigger.startswith(prefix)
-        for prefix in _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS
-    )
-
-
-def _is_statistical_single_leg_exit(exit_decision, exit_reason: str) -> bool:
-    trigger = str(getattr(exit_decision, "trigger", "") or exit_reason or "")
-    return any(trigger.startswith(prefix) for prefix in _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS)
-
-
 def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bool:
     trigger = str(getattr(exit_decision, "trigger", "") or exit_reason or "")
     return any(
         trigger.startswith(prefix)
         for prefix in _GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS
     )
-
-
-def _block_immature_day0_exit_authority(
-    *,
-    pos,
-    payload: dict[str, object],
-    summary: dict,
-    exit_reason: str,
-    day0_maturity_block: str,
-) -> tuple[bool, str]:
-    payload["decision"] = "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
-    payload["blocked_exit_reason"] = exit_reason
-    payload["day0_maturity_block"] = day0_maturity_block
-    setattr(pos, "_monitor_family_redecision", payload)
-    validations = list(getattr(pos, "applied_validations", []) or [])
-    validations.append("family_day0_immature_exit_authority_blocked")
-    pos.applied_validations = list(dict.fromkeys(validations))
-    summary["family_redecision_day0_immature_exits_blocked"] = (
-        summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
-    )
-    return False, "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
 
 
 def _apply_family_monitor_overlay(
@@ -3660,26 +3613,13 @@ def _apply_family_monitor_overlay(
     exit_reason: str,
     summary: dict,
 ) -> tuple[bool, str]:
-    """Apply the Day0 maturity wall without a second hold/sell evaluator."""
+    """Preserve the one stopping law; maturity only qualifies hard facts."""
 
     try:
         if hasattr(pos, "_monitor_family_redecision"):
             delattr(pos, "_monitor_family_redecision")
     except Exception:
         pass
-
-    day0_maturity_block = _day0_immature_exit_authority_reason(pos, exit_decision)
-    if (
-        day0_maturity_block is not None
-        and _is_statistical_single_leg_exit(exit_decision, exit_reason)
-    ):
-        return _block_immature_day0_exit_authority(
-            pos=pos,
-            payload={},
-            summary=summary,
-            exit_reason=exit_reason,
-            day0_maturity_block=day0_maturity_block,
-        )
     return should_exit, exit_reason
 
 

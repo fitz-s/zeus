@@ -5526,7 +5526,8 @@ def _latest_global_auction_candidate_counts(
                     ).strip()
                     or (
                         functional == "POSTERIOR_PREDICTIVE_MEAN"
-                        and status != "mature"
+                        and status
+                        not in {"mature", "immature", "unavailable"}
                     )
                     or (
                         evaluation.get("status") in {"SCORED", "SELECTED"}

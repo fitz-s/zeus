@@ -4345,7 +4345,7 @@ def test_high_yes_edge_accepts_current_global_auction_candidate(
     assert evidence["yes_condition_count"] == 1
 
 
-def test_high_yes_edge_rejects_mean_sell_without_mature_temporal_authority(
+def test_high_yes_edge_rejects_mean_sell_without_typed_day0_authority(
     tmp_path: Path,
 ) -> None:
     sd = tmp_path / "state"

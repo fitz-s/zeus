@@ -14490,16 +14490,24 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         for row in immature_selected.holding_coverage
     }
     assert immature_rows == {
-        "position-evaluated": (
-            "EXCLUDED",
-            f"DAY0_STATISTICAL_EXIT_AUTHORITY_IMMATURE:{immature_reason}",
-        ),
+        "position-evaluated": ("EVALUATED", None),
         "position-missing-book": (
             "EXCLUDED",
-            f"DAY0_STATISTICAL_EXIT_AUTHORITY_IMMATURE:{immature_reason}",
+            "SELL_BOOK_NO_BID",
         ),
     }
-    assert not any(
+    immature_sell = next(
+        evaluation
+        for evaluation in immature_selected.decision.candidate_evaluations
+        if evaluation.action == "SELL"
+        and evaluation.position_id == "position-evaluated"
+    )
+    assert immature_sell.sell_probability_functional == (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    assert immature_sell.sell_exit_authority_status == "immature"
+    assert immature_sell.sell_exit_authority_reason == immature_reason
+    assert any(
         evaluation.action == "SELL"
         and evaluation.family_key == held_probability.family_key
         for evaluation in immature_selected.decision.candidate_evaluations
@@ -19700,7 +19708,7 @@ def _adapter_sell_actuation(
     )
 
 
-def test_global_sell_jit_rejects_regressed_day0_maturity(monkeypatch):
+def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch):
     event = _global_scope_event(city="Alpha", source_run_id="run-maturity-jit")
     actuation = _adapter_sell_actuation(
         event,
@@ -19738,7 +19746,7 @@ def test_global_sell_jit_rejects_regressed_day0_maturity(monkeypatch):
     assert receipt.submitted is False
     assert receipt.reason == (
         "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
-        "GLOBAL_SELL_DAY0_EXIT_AUTHORITY_SUPERSEDED:immature"
+        "GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:immature"
     )
 
 

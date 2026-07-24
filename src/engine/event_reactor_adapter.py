@@ -10298,7 +10298,10 @@ def _submit_current_global_sell(
                 decision_time=now,
             )
         )
-        if getattr(candidate, "exit_authority_status", None) == "mature":
+        if (
+            getattr(candidate, "probability_functional", None)
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        ):
             current_status = str(
                 getattr(
                     current_prepared,
@@ -10309,9 +10312,12 @@ def _submit_current_global_sell(
                 )
                 or ""
             ).strip().lower()
-            if current_status != "mature":
+            selected_status = str(
+                getattr(candidate, "exit_authority_status", "") or ""
+            ).strip().lower()
+            if current_status != selected_status:
                 raise ValueError(
-                    "GLOBAL_SELL_DAY0_EXIT_AUTHORITY_SUPERSEDED:"
+                    "GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:"
                     f"{current_status or 'missing'}"
                 )
             if str(
@@ -10325,7 +10331,7 @@ def _submit_current_global_sell(
                 getattr(candidate, "sell_action_authority_identity", "") or ""
             ):
                 raise ValueError(
-                    "GLOBAL_SELL_DAY0_EXIT_AUTHORITY_IDENTITY_SUPERSEDED"
+                    "GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED"
                 )
         wealth_block = _global_actuation_current_wealth_block_reason(
             trade_conn,
@@ -12353,7 +12359,10 @@ def _current_global_actuation_prepared_family(
             selected,
         )
     rebound = dataclass_replace(current, probability_witness=selected)
-    if str(getattr(rebound, "day0_exit_authority_status", "") or "") == "mature":
+    rebound_status = str(
+        getattr(rebound, "day0_exit_authority_status", "") or ""
+    ).strip().lower()
+    if rebound_status in {"mature", "immature", "unavailable"}:
         from src.engine.qkernel_spine_bridge import (
             sell_action_authority_identity,
         )
@@ -12365,7 +12374,7 @@ def _current_global_actuation_prepared_family(
                 probability_witness_identity=str(
                     getattr(selected, "witness_identity", "") or ""
                 ),
-                status=str(rebound.day0_exit_authority_status),
+                status=rebound_status,
                 reason=str(rebound.day0_exit_authority_reason),
             ),
         )

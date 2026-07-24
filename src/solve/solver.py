@@ -1552,6 +1552,8 @@ class GlobalSingleOrderSellCandidate:
     exit_authority_status: Literal[
         "not_applicable",
         "mature",
+        "immature",
+        "unavailable",
         "deterministic",
     ] = "not_applicable"
     exit_authority_reason: str = "non_day0_family"
@@ -1597,10 +1599,17 @@ class GlobalSingleOrderSellCandidate:
                 "POSTERIOR_PREDICTIVE_MEAN",
                 "DETERMINISTIC_PAYOFF",
             }
-            or status not in {"not_applicable", "mature", "deterministic"}
+            or status
+            not in {
+                "not_applicable",
+                "mature",
+                "immature",
+                "unavailable",
+                "deterministic",
+            }
             or (
                 functional == "POSTERIOR_PREDICTIVE_MEAN"
-                and status != "mature"
+                and status not in {"mature", "immature", "unavailable"}
             )
             or (functional == "DETERMINISTIC_PAYOFF" and status != "deterministic")
             or (
@@ -1631,6 +1640,8 @@ def global_sell_candidate_from_holding(
     exit_authority_status: Literal[
         "not_applicable",
         "mature",
+        "immature",
+        "unavailable",
         "deterministic",
     ] = "not_applicable",
     exit_authority_reason: str = "non_day0_family",
@@ -2307,13 +2318,20 @@ class GlobalSingleOrderCandidateEvaluation:
                 "DETERMINISTIC_PAYOFF",
             }
             or self.sell_exit_authority_status
-            not in {"not_applicable", "mature", "deterministic"}
+            not in {
+                "not_applicable",
+                "mature",
+                "immature",
+                "unavailable",
+                "deterministic",
+            }
             or not str(self.sell_exit_authority_reason or "").strip()
             or not str(self.sell_action_authority_identity or "").strip()
             or (
                 self.sell_probability_functional
                 == "POSTERIOR_PREDICTIVE_MEAN"
-                and self.sell_exit_authority_status != "mature"
+                and self.sell_exit_authority_status
+                not in {"mature", "immature", "unavailable"}
             )
             or (
                 self.sell_probability_functional == "DETERMINISTIC_PAYOFF"

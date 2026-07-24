@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-24
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -1733,19 +1733,39 @@ def test_sell_point_counterfactual_is_identity_bound_and_cannot_change_live_acti
     assert high_evaluation.sell_point_counterfactual.expected_ev_usd < 0.0
 
 
-def test_mature_day0_sell_uses_point_expectation_after_temporal_gate():
+@pytest.mark.parametrize(
+    ("exit_authority_status", "exit_authority_reason"),
+    (
+        (
+            "immature",
+            "day0_high_extreme_not_mature:post_peak_confidence=0.12",
+        ),
+        (
+            "mature",
+            "day0_high_extreme_mature:post_peak_confidence=0.97",
+        ),
+        (
+            "unavailable",
+            "day0_extreme_maturity_unavailable:temporal_context_missing",
+        ),
+    ),
+)
+def test_day0_sell_uses_point_expectation_across_temporal_maturity(
+    exit_authority_status,
+    exit_authority_reason,
+):
     """Parameter-tail caution cannot replace fixed-action expected utility."""
 
     sell = _global_sell_candidate(
-        candidate_id="mature-day0-point-functional",
-        family="mature-day0-point-functional-family",
+        candidate_id=f"{exit_authority_status}-day0-point-functional",
+        family=f"{exit_authority_status}-day0-point-functional-family",
         side="YES",
         held_q=0.10,
         bids=(("0.30", "10"),),
         shares="10",
         probability_functional="POSTERIOR_PREDICTIVE_MEAN",
-        exit_authority_status="mature",
-        exit_authority_reason="day0_high_extreme_mature:post_peak_confidence=0.97",
+        exit_authority_status=exit_authority_status,
+        exit_authority_reason=exit_authority_reason,
     )
     held_q_samples = np.concatenate((np.full(380, 0.10), np.full(20, 0.90)))
     sell = _replace_global_q_samples(sell, held_q_samples)
@@ -1784,8 +1804,35 @@ def test_mature_day0_sell_uses_point_expectation_after_temporal_gate():
     evaluation = decision.candidate_evaluations[0]
     assert evaluation.status == "SELECTED"
     assert evaluation.sell_probability_functional == "POSTERIOR_PREDICTIVE_MEAN"
-    assert evaluation.sell_exit_authority_status == "mature"
+    assert evaluation.sell_exit_authority_status == exit_authority_status
     assert evaluation.sell_exit_authority_reason == sell.exit_authority_reason
+
+
+def test_cape_town_immature_day0_reversal_enters_capital_auction():
+    """The observed q=0.134/bid=0.53 shape must not be forced to HOLD."""
+
+    sell = _global_sell_candidate(
+        candidate_id="cape-town-2026-07-24-high-17c",
+        family="Cape Town|2026-07-24|high",
+        side="YES",
+        held_q=0.134,
+        bids=(("0.53", "128.2"),),
+        shares="128.2",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="immature",
+        exit_authority_reason=(
+            "day0_high_extreme_not_mature:post_peak_confidence=0.296"
+        ),
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.shares == Decimal("128.2")
+    assert decision.limit_price == Decimal("0.53")
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
+    assert decision.candidate_evaluations[0].sell_exit_authority_status == "immature"
 
 
 def test_mature_mean_sell_cannot_masquerade_as_robust_certificate():

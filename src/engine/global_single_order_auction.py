@@ -891,24 +891,22 @@ def select_prepared_global_auction(
                         sell_functional = "LOWER_CVAR_PARAMETER_DRAWS"
                         exit_status = "not_applicable"
                         exit_reason = prepared_reason or "non_day0_family"
-                    elif prepared_status == "mature":
+                    elif prepared_status in {
+                        "mature",
+                        "immature",
+                        "unavailable",
+                    }:
                         sell_functional = "POSTERIOR_PREDICTIVE_MEAN"
-                        exit_status = "mature"
-                        exit_reason = prepared_reason
-                    else:
-                        holding_coverage.append(
-                            coverage_row(
-                                holding,
-                                probability,
-                                status="EXCLUDED",
-                                reason=(
-                                    "DAY0_STATISTICAL_EXIT_AUTHORITY_"
-                                    f"{prepared_status.upper() or 'UNAVAILABLE'}:"
-                                    f"{prepared_reason or 'missing_reason'}"
-                                ),
-                            )
+                        exit_status = prepared_status
+                        exit_reason = (
+                            prepared_reason
+                            or "day0_temporal_status_reason_missing"
                         )
-                        continue
+                    else:
+                        return _no_trade(
+                            "GLOBAL_DAY0_EXIT_AUTHORITY_STATUS_INVALID:"
+                            f"{prepared_status or 'missing'}"
+                        )
                 asset = book_epoch.sell_asset_by_key.get(
                     (
                         family_key,

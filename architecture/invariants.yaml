@@ -1065,30 +1065,33 @@ invariants:
   - id: INV-46
     zones: [K0_probability, K2_runtime, live_venue_submit]
     statement: >
-      A Day0 statistical SELL requires current temporal maturity authority bound
-      to the exact probability witness at selection and submit. Mature fixed-action
-      SELL size and every FAK prefix use posterior-predictive-mean expected log
-      wealth and EV in explicit expected certificates; posterior LCB/UCB or
-      lower-CVaR parameter tails cannot populate those fields. BUY keeps robust
-      admission and sizing. Every globally ranked action-law-admitted fixed proposal
-      carries one common posterior-mean expected-log-growth comparison.
+      A Day0 statistical SELL requires a current probability witness bound to the
+      exact holding, wealth, and executable book at selection and submit. Temporal
+      maturity may upgrade the same evidence to an absorbing hard fact, but it
+      cannot exclude a fresh statistical SELL from continuous redecision.
+      Fixed-action SELL size and every FAK prefix use posterior-predictive-mean
+      expected log wealth and EV in explicit expected certificates; posterior
+      LCB/UCB or lower-CVaR parameter tails cannot populate those fields. BUY keeps
+      robust admission and sizing. Every globally ranked action-law-admitted fixed
+      proposal carries one common posterior-mean expected-log-growth comparison.
     why: >
       Parameter uncertainty affects confidence, but fixed-action expected utility
-      is linear in q. Reusing a tail bound as expected HOLD value strands mature
-      reversals; ignoring maturity sells early-day reversals before the information
-      path has resolved. Relabeling mean values as robust makes execution receipts
-      unverifiable and comparing heterogeneous BUY/SELL scores is not a capital
-      objective.
+      is linear in q. Reusing a tail bound as expected HOLD value or imposing a
+      post-peak cutoff strands executable reversals even while the current q curve
+      has already moved. Future-information option value belongs inside the action
+      objective, not in a binary maturity veto. Relabeling mean values as robust
+      makes execution receipts unverifiable and comparing heterogeneous BUY/SELL
+      scores is not a capital objective.
     enforced_by:
       tests:
-        - tests/solve/test_solver_properties.py::test_mature_day0_sell_uses_point_expectation_after_temporal_gate
+        - tests/solve/test_solver_properties.py::test_day0_sell_uses_point_expectation_across_temporal_maturity
         - tests/solve/test_solver_properties.py::test_mature_mean_sell_cannot_masquerade_as_robust_certificate
         - tests/solve/test_solver_properties.py::test_buy_robust_admission_and_size_are_invariant_to_common_mean_score
         - tests/integration/test_w3_solve_seam_g3.py::test_two_prepared_families_choose_one_globally_unique_order
         - tests/integration/test_w3_solve_seam_g3.py::test_global_actuation_revalidates_content_then_preserves_selected_witness
-        - tests/integration/test_w3_solve_seam_g3.py::test_global_sell_jit_rejects_regressed_day0_maturity
-        - tests/test_live_safety_invariants.py::test_current_global_day0_maturity_survives_refresh_to_exit_overlay
-        - tests/test_run_mode_failure_surfaces.py::test_high_yes_edge_rejects_mean_sell_without_mature_temporal_authority
+        - tests/integration/test_w3_solve_seam_g3.py::test_global_sell_jit_rejects_changed_day0_statistical_authority
+        - tests/test_live_safety_invariants.py::test_immature_day0_statistical_exit_survives_monitor_overlay
+        - tests/test_run_mode_failure_surfaces.py::test_high_yes_edge_rejects_mean_sell_without_typed_day0_authority
         - tests/test_run_mode_failure_surfaces.py::test_high_yes_edge_rejects_mixed_or_incomplete_v11_receipt
       negative_constraints: []
     capability_tags: [probability_authority, global_auction, live_venue_submit]
