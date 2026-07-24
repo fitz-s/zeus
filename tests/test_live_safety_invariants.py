@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-03-31; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-24
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -368,20 +368,16 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
     ("monotonic_values", "expected_count", "expected_reason"),
     (
         ([0.0, 0.0, 1.0], 1, "cycle_budget_exhausted"),
-        (
-            [0.0, 0.0, 0.0, 0.0],
-            2,
-            "positive_budget_progress_limit",
-        ),
+        ([0.0, 0.0, 0.0, 0.0], 3, ""),
     ),
 )
-def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress(
+def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     monkeypatch,
     monotonic_values,
     expected_count,
     expected_reason,
 ):
-    """Persisted monitor progress turns a positive cycle budget into a hard deadline."""
+    """Only the elapsed deadline, not successful progress, may truncate a sweep."""
     from src.engine import cycle_runtime
 
     first = _make_position(
@@ -497,24 +493,24 @@ def test_monitoring_phase_defers_guaranteed_tail_after_persisted_budget_progress
     assert summary["held_monitor_budget_guaranteed_positions"] == 2
     assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
     assert summary["held_monitor_positions_scanned"] == expected_count
-    assert summary["held_monitor_positions_deferred"] == 3 - expected_count
-    assert summary["held_monitor_defer_reason"] == expected_reason
+    assert summary.get("held_monitor_positions_deferred", 0) == 3 - expected_count
+    assert summary.get("held_monitor_defer_reason", "") == expected_reason
     assert summary["monitors"] == expected_count
     assert len(monitor_results) == expected_count
 
 
-def test_monitor_progress_limit_covers_large_held_book_within_three_cycles():
-    """A fixed two-position cap cannot satisfy the ten-minute live freshness SLO."""
+def test_monitor_reservations_cover_large_held_book_within_three_degraded_cycles():
+    """Deadline-degraded cycles still reserve rotating slices of a large book."""
     from src.engine import cycle_runtime
 
-    assert cycle_runtime._held_position_monitor_positive_progress_limit(0) == 2
-    assert cycle_runtime._held_position_monitor_positive_progress_limit(3) == 2
-    assert cycle_runtime._held_position_monitor_positive_progress_limit(9) == 3
-    assert cycle_runtime._held_position_monitor_positive_progress_limit(23) == 8
+    assert cycle_runtime._held_position_monitor_reservation_count(0) == 2
+    assert cycle_runtime._held_position_monitor_reservation_count(3) == 2
+    assert cycle_runtime._held_position_monitor_reservation_count(9) == 3
+    assert cycle_runtime._held_position_monitor_reservation_count(23) == 8
 
 
-def test_monitor_progress_limit_delivers_unique_three_cycle_coverage(monkeypatch):
-    """The throughput limit must rotate the whole book, not repeat its prefix."""
+def test_monitor_full_sweep_keeps_unique_three_cycle_deadline_reservations(monkeypatch):
+    """Normal cycles sweep all positions while degraded reservations still rotate."""
     from src.engine import cycle_runtime
 
     monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
@@ -558,6 +554,7 @@ def test_monitor_progress_limit_delivers_unique_three_cycle_coverage(monkeypatch
     )
 
     per_cycle: list[list[str]] = []
+    reserved_per_cycle: list[list[str]] = []
     for cycle in range(3):
         cycle_start = len(visited)
         summary = {"monitors": 0, "exits": 0}
@@ -575,9 +572,12 @@ def test_monitor_progress_limit_delivers_unique_three_cycle_coverage(monkeypatch
             should_preempt_for_urgent_day0=lambda: False,
         )
         per_cycle.append(visited[cycle_start:])
+        reserved_per_cycle.append(summary["held_monitor_budget_coverage_positions"])
 
-    assert all(len(batch) >= 3 for batch in per_cycle)
+    assert all(len(batch) == 9 for batch in per_cycle)
     assert len(set(visited)) == 9
+    assert all(len(batch) == 3 for batch in reserved_per_cycle)
+    assert len({trade_id for batch in reserved_per_cycle for trade_id in batch}) == 9
 
 
 def test_monitor_progress_limit_covers_mixed_canonical_and_fallback_book(monkeypatch):
@@ -932,9 +932,11 @@ def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
         defer_partial_orderbook_gaps=True,
     )
 
-    assert events == ["network_fetch"]
-    assert summary["held_monitor_progress_limit_reached"] is True
-    assert summary["held_monitor_defer_reason"] == "positive_budget_progress_limit"
+    assert events == [
+        "network_fetch",
+        "refresh:local-active-before-hard-fact",
+    ]
+    assert summary.get("held_monitor_positions_deferred", 0) == 0
     assert summary["held_monitor_partial_orderbook_gaps_scheduled_after_local"] == 2
     assert summary["day0_hard_fact_direct_exit_decisions"] == 2
     assert summary["exits_suppressed_no_submit"] == 2
@@ -1332,8 +1334,8 @@ def test_monitoring_phase_reserves_one_active_network_progress_slot(monkeypatch)
     assert all(summary["held_monitor_positions_deferred"] == 3 for summary in summaries)
 
 
-def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkeypatch):
-    """Urgent successes cannot cancel already-reserved active monitor work."""
+def test_monitoring_phase_positive_budget_sweeps_unreserved_active_tail(monkeypatch):
+    """Urgent successes do not truncate the remaining held book before deadline."""
     from src.engine import cycle_runtime
 
     monkeypatch.setattr(
@@ -1395,7 +1397,7 @@ def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkey
         _monitor_test_artifact(),
         _monitor_test_tracker(),
         summary,
-        deps=_monitor_test_deps("test_monitor_positive_cap_reserved_progress"),
+        deps=_monitor_test_deps("test_monitor_positive_budget_full_sweep"),
         run_exit_preflight=False,
         exit_order_submit_enabled=False,
         held_position_monitor_budget_seconds=10.0,
@@ -1408,11 +1410,10 @@ def test_monitoring_phase_positive_cap_preserves_reserved_active_progress(monkey
         "cap-active-1",
         "cap-active-2",
         "cap-active-3",
+        "cap-active-4",
     }
     assert summary["held_monitor_budget_guaranteed_positions"] == 6
-    assert summary["held_monitor_progress_limit_reached"] is True
-    assert summary["held_monitor_defer_reason"] == "positive_budget_progress_limit"
-    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary.get("held_monitor_positions_deferred", 0) == 0
 
 
 def test_monitor_reservation_attempt_fairness_prevents_sticky_oldest(monkeypatch):

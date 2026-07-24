@@ -129,16 +129,19 @@ _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
-_HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_MIN = 2
-_HELD_POSITION_MONITOR_FULL_COVERAGE_CYCLES = 3
+_HELD_POSITION_MONITOR_RESERVATION_MIN = 2
+_HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
 
 
-def _held_position_monitor_positive_progress_limit(position_count: int) -> int:
-    """Keep one full held book inside three nominal monitor cycles."""
+def _held_position_monitor_reservation_count(position_count: int) -> int:
+    """Reserve one third of the book for deadline-degraded monitor cycles."""
 
     return max(
-        _HELD_POSITION_MONITOR_POSITIVE_BUDGET_PROGRESS_MIN,
-        math.ceil(max(0, int(position_count)) / _HELD_POSITION_MONITOR_FULL_COVERAGE_CYCLES),
+        _HELD_POSITION_MONITOR_RESERVATION_MIN,
+        math.ceil(
+            max(0, int(position_count))
+            / _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES
+        ),
     )
 
 
@@ -5709,7 +5712,7 @@ def execute_monitoring_phase(
     monitor_budget_seconds = _held_position_monitor_budget_seconds(
         held_position_monitor_budget_seconds
     )
-    monitor_progress_limit = _held_position_monitor_positive_progress_limit(
+    monitor_reservation_count = _held_position_monitor_reservation_count(
         len(monitor_positions)
     )
     monitor_deadline = time.monotonic() + monitor_budget_seconds
@@ -5766,7 +5769,7 @@ def execute_monitoring_phase(
         _reserve_held_monitor_positions(
             "bounded_coverage",
             monitor_positions,
-            limit=monitor_progress_limit,
+            limit=monitor_reservation_count,
             priority_key=lambda pos: (
                 -1
                 if id(pos) in dead_bin_position_ids
@@ -5936,7 +5939,7 @@ def execute_monitoring_phase(
     )
     network_prefetch_started = False
     network_prefetch_unavailable = False
-    summary["held_monitor_positive_progress_limit"] = monitor_progress_limit
+    summary["held_monitor_budget_reservation_count"] = monitor_reservation_count
 
     for position_index, pos in enumerate(monitor_positions):
         if urgent_preemption_requested():
@@ -5948,39 +5951,21 @@ def execute_monitoring_phase(
         monitor_deadline_expired = time.monotonic() >= monitor_deadline
         monitor_progress_count = int(summary.get("monitors", 0) or 0)
         monitor_progress_persisted = monitor_progress_count > 0
-        monitor_progress_limit_reached = (
-            monitor_budget_seconds > 0.0
-            and monitor_progress_count
-            >= monitor_progress_limit
-        )
         if (
-            (
-                monitor_progress_limit_reached
-                and id(pos) not in budget_guaranteed_position_ids
-            )
-            or (
-                monitor_deadline_expired
-                and (
-                    id(pos) not in budget_guaranteed_position_ids
-                    or (monitor_budget_seconds > 0.0 and monitor_progress_persisted)
-                )
+            monitor_deadline_expired
+            and (
+                id(pos) not in budget_guaranteed_position_ids
+                or (monitor_budget_seconds > 0.0 and monitor_progress_persisted)
             )
         ):
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:
                 summary["held_monitor_positions_deferred"] = deferred_count
-                summary["held_monitor_defer_reason"] = (
-                    "positive_budget_progress_limit"
-                    if monitor_progress_limit_reached
-                    else "cycle_budget_exhausted"
+                summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
+                summary["held_monitor_deadline_deferred_positions"] = deferred_count
+                summary["held_monitor_deadline_defer_reason"] = (
+                    "MONITOR_DEADLINE_EXPIRED"
                 )
-                if monitor_progress_limit_reached:
-                    summary["held_monitor_progress_limit_reached"] = True
-                if monitor_deadline_expired:
-                    summary["held_monitor_deadline_deferred_positions"] = deferred_count
-                    summary["held_monitor_deadline_defer_reason"] = (
-                        "MONITOR_DEADLINE_EXPIRED"
-                    )
             break
         if monitor_deadline_expired:
             summary["held_monitor_budget_bypass_scanned"] = (
