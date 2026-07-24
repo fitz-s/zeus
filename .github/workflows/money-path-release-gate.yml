@@ -49,6 +49,12 @@ jobs:
             tests/test_single_live_semantics.py \
             tests/test_single_live_semantics_migration.py \
             tests/state/test_table_registry_coherence.py \
+            tests/test_venue_command_repo.py::TestPositionDecisionAttributionAppendHook::test_later_command_inherits_position_entry_certificate \
+            tests/test_venue_command_repo.py::TestPositionDecisionAttributionAppendHook::test_live_exit_without_certificate_is_journaled_unattributable \
+            tests/test_settlement_skill_attribution.py::test_LXE_multiple_entry_certificates_are_explicitly_unattributable \
+            tests/test_settlement_skill_attribution.py::test_LXE_attribution_table_row_takes_precedence_over_legacy_bridge \
+            tests/test_settlement_skill_attribution.py::test_LXE_explicit_unattributable_row_skips_grading_without_legacy_fallback \
+            tests/engine/test_shift_bin_reactor_integration.py::test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease \
             tests/test_replacement_fused_q_shape.py \
             tests/strategy/test_single_count_uncertainty.py \
             tests/engine/test_multiwinner_wealth_composition.py \

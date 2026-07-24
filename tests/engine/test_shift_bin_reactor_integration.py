@@ -636,6 +636,95 @@ def test_post_plan_no_submit_aborts_shift_enter_new_bin_lease():
 
 
 
+def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(monkeypatch):
+    conn = _conn()
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+    sbw.record_entry_submitted(
+        conn,
+        lease,
+        now_iso="t1",
+        reason="SHIFT_BIN_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+    )
+    conn.execute(
+        "INSERT INTO edli_live_cap_usage VALUES "
+        "('u-c','event-c','edli_intent:event-c:tok-C','cmd-c', 4.25, 'RESERVED')"
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-1",
+        causal_snapshot_id="snap-1",
+        proof_accepted=True,
+        decision_proof_bundle=object(),
+        shift_bin_lease_payload={
+            "intent_id": lease,
+            "phase": "ENTER_NEW_BIN",
+            "family_token_ids": ("tok-A", "tok-B", "tok-C"),
+        },
+    )
+    monkeypatch.setattr(era, "_entry_pause_blocks_live_submit", lambda _conn: None)
+    monkeypatch.setattr(
+        era,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: receipt,
+    )
+
+    def _executor_submit(_final_intent, _command):
+        raise AssertionError("executor_submit must not run after final family pending reread")
+
+    submit = era.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        executor_submit=_executor_submit,
+    )
+
+    result = submit(
+        SimpleNamespace(
+            event_id="event-1",
+            causal_snapshot_id="snap-1",
+            event_type="FORECAST_SNAPSHOT_READY",
+        ),
+        datetime(2026, 7, 3, tzinfo=timezone.utc),
+    )
+
+    assert result.submitted is False
+    assert result.proof_accepted is False
+    assert result.reason == "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:family_pending_notional"
+    row = conn.execute(
+        "SELECT status, new_entry_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
+        (lease,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert row["new_entry_command_id"] is None
+    assert row["abort_reason"] == (
+        "SHIFT_BIN_ENTRY_POST_PLAN_NO_SUBMIT:"
+        "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:family_pending_notional"
+    )
+    stuck = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM family_rebalance_intents
+         WHERE status='ENTRY_SUBMITTED'
+           AND (new_entry_command_id IS NULL OR new_entry_command_id = '')
+        """
+    ).fetchone()[0]
+    assert stuck == 0
+    assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
+
+
 def test_shift_bin_submit_exception_unknown_advances_family_lease():
     conn = _conn()
     lease = sbw.acquire_rebalance_lease(
