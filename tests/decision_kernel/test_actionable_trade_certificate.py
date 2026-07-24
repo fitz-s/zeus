@@ -1399,37 +1399,46 @@ def test_actionable_rejects_wrong_cost_source_for_sell_yes():
         verify_actionable_trade(action, parents)
 
 
-def test_actionable_rejects_low_price_yes_below_roi_frontier_confidence_floor():
-    parents, action = actionable_graph(
-        action_payload={
-            "q_live": 0.65,
-            "q_lcb_5pct": 0.55,
-            "c_fee_adjusted": 0.54,
-            "c_cost_95pct": 0.54,
-            "p_fill_lcb": 0.95,
-            "trade_score": 0.01,
-            "action_score": 0.01,
-            "qkernel_execution_economics": {
-                "source": "qkernel_spine",
-                "side": "YES",
-                "payoff_q_point": 0.65,
-                "payoff_q_lcb": 0.55,
-                "cost": 0.54,
-                "edge_lcb": 0.01,
-                "optimal_delta_u": 0.00009152233738979263,
-                "delta_u_at_min": 0.00009152233738979263,
-                "optimal_stake_usd": "1.4412832709285736083984375",
-                "false_edge_rate": 0.05,
-                "direction_law_ok": True,
-                "coherence_allows": True,
-                "selection_guard_basis": "SELECTION_BETA_95",
-                "selection_guard_abstained": False,
-                "selection_guard_q_safe": 0.55,
-            },
-        }
-    )
+def test_actionable_accepts_small_positive_economics_rejects_zero_edge():
+    """One-law update (ultimate_alpha 2026-07-24): the $0.25 absolute
+    profit-LCB floor is deleted — a thin but strictly-positive robust edge
+    (~$0.027 profit-LCB here) is admissible; smallness is the allocator's
+    concern. Zero robust edge still fails the strictly-positive law."""
+    small_positive = {
+        "q_live": 0.65,
+        "q_lcb_5pct": 0.55,
+        "c_fee_adjusted": 0.54,
+        "c_cost_95pct": 0.54,
+        "p_fill_lcb": 0.95,
+        "trade_score": 0.01,
+        "action_score": 0.01,
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.65,
+            "payoff_q_lcb": 0.55,
+            "cost": 0.54,
+            "edge_lcb": 0.01,
+            "optimal_delta_u": 0.00009152233738979263,
+            "delta_u_at_min": 0.00009152233738979263,
+            "optimal_stake_usd": "1.4412832709285736083984375",
+            "false_edge_rate": 0.05,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.55,
+        },
+    }
+    parents, action = actionable_graph(action_payload=small_positive)
+    verify_actionable_trade(action, parents)  # must NOT raise
 
-    with pytest.raises(CertificateVerificationError, match="roi frontier not useful"):
+    zero_edge = dict(small_positive)
+    zero_edge["qkernel_execution_economics"] = dict(
+        small_positive["qkernel_execution_economics"], edge_lcb=0.0
+    )
+    parents, action = actionable_graph(action_payload=zero_edge)
+    with pytest.raises(CertificateVerificationError, match="edge_lcb must be positive"):
         verify_actionable_trade(action, parents)
 
 

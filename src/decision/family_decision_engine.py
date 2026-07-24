@@ -366,11 +366,13 @@ def native_curve_side_for_direction(direction: object) -> str | None:
 
 
 def live_entry_min_price_floor(*, strategy_key: object, direction: object) -> float:
-    if (
-        is_qkernel_exact_yes_strategy(strategy_key)
-        and str(direction or "").strip().lower() == "buy_yes"
-    ):
-        return float(CENTER_BUY_YES_MIN_ENTRY_PRICE)
+    """The universal venue band edge, for every (strategy, direction).
+
+    One-law collapse: the former exact-YES 0.05 vs general 0.10 split is
+    gone — both constants above are the band edge, so the strategy/direction
+    parameters no longer influence the result (kept for call-site stability
+    until PR-2 removes the per-key floor plumbing entirely)."""
+    del strategy_key, direction
     return float(LIVE_ENTRY_MIN_ENTRY_PRICE)
 
 
