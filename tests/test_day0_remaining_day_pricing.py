@@ -740,6 +740,71 @@ class TestRemainingDayMembers:
     def _family(self):
         return SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
 
+    def test_current_state_conditioning_is_causal_and_decays(self):
+        from src.signal.day0_window import (
+            condition_day0_hourly_members_on_current_state,
+        )
+
+        members = np.asarray(
+            [
+                [10.0, 13.0, 14.0, 15.0],
+                [20.0, 18.0, 17.0, 16.0],
+            ]
+        )
+        times = [
+            "2026-06-10T10:00:00+00:00",
+            "2026-06-10T11:00:00+00:00",
+            "2026-06-10T12:00:00+00:00",
+            "2026-06-10T13:00:00+00:00",
+        ]
+
+        result = condition_day0_hourly_members_on_current_state(
+            members,
+            times,
+            observation_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+            current_temp=12.0,
+            e_fold_hours=4.2,
+        )
+
+        assert result is not None
+        conditioned, innovations = result
+        assert innovations.tolist() == [-1.0, -6.0]
+        assert conditioned[:, 0].tolist() == [10.0, 20.0]
+        assert conditioned[:, 1].tolist() == [12.0, 12.0]
+        assert conditioned[:, 2].tolist() == pytest.approx(
+            [
+                14.0 - np.exp(-1.0 / 4.2),
+                17.0 - 6.0 * np.exp(-1.0 / 4.2),
+            ]
+        )
+        assert abs(conditioned[0, 3] - 15.0) < abs(conditioned[0, 2] - 14.0)
+
+    def test_event_bound_market_analysis_constructor_matches_runtime_contract(self):
+        """The live Day0 builder cannot pass retired MarketAnalysis kwargs."""
+        import ast
+        import inspect
+        import textwrap
+
+        import src.engine.event_reactor_adapter as era
+        from src.strategy.market_analysis import MarketAnalysis
+
+        tree = ast.parse(
+            textwrap.dedent(
+                inspect.getsource(era._market_analysis_from_event_snapshot)
+            )
+        )
+        constructor = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "MarketAnalysis"
+        )
+        passed = {keyword.arg for keyword in constructor.keywords if keyword.arg}
+        accepted = set(inspect.signature(MarketAnalysis).parameters)
+
+        assert passed <= accepted
+
     def test_remaining_day_q_is_live_without_setting(self):
         """Remaining-day q is live Day0 law; missing settings cannot restore full-day masked q."""
         from src.engine.event_reactor_adapter import _day0_remaining_day_q_enabled
@@ -1099,8 +1164,10 @@ class TestRemainingDayMembers:
         )
         assert sorted(members.tolist()) == [25.0, 27.5]
 
-    def test_live_members_do_not_transport_instant_error_without_covariance(self, monkeypatch):
-        """A current miss is audit evidence, not a permanent future shift."""
+    def test_live_members_transport_current_error_with_validated_decay(
+        self, monkeypatch
+    ):
+        """Current error moves near hours strongly and distant hours weakly."""
         import src.engine.event_reactor_adapter as era
 
         vector = Day0HourlyVector(
@@ -1145,14 +1212,16 @@ class TestRemainingDayMembers:
         )
 
         assert members is not None
-        # At local 16:00 the model said 26 while reality was 23. Without a
-        # time-covariance law, that -3C instant error cannot erase the model's
-        # still-future 25C peak.
-        assert members.tolist() == [25.0]
+        expected = 24.0 - 3.0 * np.exp(-7.0 / 4.2)
+        assert payload["_edli_day0_unclamped_remaining_extrema_native"] == (
+            pytest.approx([expected])
+        )
+        assert members.tolist() == [24.0]
         assert payload["_edli_day0_model_innovations_c"] == {"ecmwf_ifs": -3.0}
         assert payload["_edli_day0_trajectory_conditioning_basis"] == (
-            "current_state_diagnostic_no_unvalidated_transport_v1"
+            "current_state_exponential_residual_decay_v1"
         )
+        assert payload["_edli_day0_current_state_innovation_e_fold_hours"] == 4.2
         assert payload["_edli_day0_remaining_window_start_utc"] == (
             "2026-06-10T14:00:00+00:00"
         )
@@ -1198,10 +1267,11 @@ class TestRemainingDayMembers:
         )
 
         assert members is not None
-        # The 30C anchor itself has occurred and is excluded; the unobserved
-        # 20C path remains future support. The instant -10C miss is not carried
-        # into that path without a validated transport law.
-        assert members.tolist() == [20.0]
+        # The elapsed 30C model anchor is excluded. Its -10C residual is carried
+        # into unseen hours but decays, so it cannot become a permanent shift.
+        assert members.tolist() == pytest.approx(
+            [20.0 - 10.0 * np.exp(-7.0 / 4.2)]
+        )
 
     def test_current_state_diagnostic_is_persisted_in_probability_authority(self):
         import src.engine.event_reactor_adapter as era
@@ -1220,12 +1290,13 @@ class TestRemainingDayMembers:
                 ),
                 "_edli_day0_current_temperature_source": "wu_icao_history",
                 "_edli_day0_trajectory_conditioning_basis": (
-                    "current_state_diagnostic_no_unvalidated_transport_v1"
+                    "current_state_exponential_residual_decay_v1"
                 ),
                 "_edli_day0_model_innovations_c": {
                     "ecmwf_ifs": -1.3,
                     "icon_global": -3.3,
                 },
+                "_edli_day0_current_state_innovation_e_fold_hours": 4.2,
             }
         )
 
@@ -1235,12 +1306,13 @@ class TestRemainingDayMembers:
         )
         assert authority["current_temperature_source"] == "wu_icao_history"
         assert authority["trajectory_conditioning_basis"] == (
-            "current_state_diagnostic_no_unvalidated_transport_v1"
+            "current_state_exponential_residual_decay_v1"
         )
         assert authority["model_innovations_c"] == {
             "ecmwf_ifs": -1.3,
             "icon_global": -3.3,
         }
+        assert authority["current_state_innovation_e_fold_hours"] == 4.2
 
     def test_f_city_members_are_converted_at_the_seam(self, monkeypatch):
         vectors = [_vector(model="ncep_nbm_conus", temps=[25.0] * 24)]

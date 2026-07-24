@@ -274,7 +274,12 @@ from src.riskguard.risk_level import RiskLevel
 from src.sizing.sizing_context import SizingContext
 from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
-from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
+from src.config import (
+    day0_current_state_innovation_e_fold_hours,
+    edge_n_bootstrap,
+    runtime_cities_by_name,
+    settings,
+)
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
@@ -27147,6 +27152,9 @@ def _live_yes_probabilities(
                     "model_innovations_c": payload.get(
                         "_edli_day0_model_innovations_c"
                     ),
+                    "current_state_innovation_e_fold_hours": payload.get(
+                        "_edli_day0_current_state_innovation_e_fold_hours"
+                    ),
                     "exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
                     "exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
                     "bound_classification": payload.get("_edli_day0_bound_classification"),
@@ -28360,6 +28368,10 @@ def _global_day0_probability_authority_payload(
                 "_edli_day0_trajectory_conditioning_basis",
             ),
             ("model_innovations_c", "_edli_day0_model_innovations_c"),
+            (
+                "current_state_innovation_e_fold_hours",
+                "_edli_day0_current_state_innovation_e_fold_hours",
+            ),
             ("exit_authority_status", "_edli_day0_exit_authority_status"),
             ("exit_authority_reason", "_edli_day0_exit_authority_reason"),
             ("bound_classification", "_edli_day0_bound_classification"),
@@ -29932,6 +29944,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_current_temperature_source",
             "_edli_day0_trajectory_conditioning_basis",
             "_edli_day0_model_innovations_c",
+            "_edli_day0_current_state_innovation_e_fold_hours",
             "_edli_day0_probability_clock_utc",
             "_edli_day0_process_sigma_native",
             "_edli_day0_exit_authority_status",
@@ -29972,6 +29985,9 @@ def _prepare_current_global_probability_family(
             ),
             "model_innovations_c": payload.get(
                 "_edli_day0_model_innovations_c"
+            ),
+            "current_state_innovation_e_fold_hours": payload.get(
+                "_edli_day0_current_state_innovation_e_fold_hours"
             ),
             "process_sigma_native": payload.get(
                 "_edli_day0_process_sigma_native"
@@ -32408,7 +32424,6 @@ def _market_analysis_from_event_snapshot(
         p_raw = np.asarray(_q_vec, dtype=float)
         p_cal = np.asarray(_q_vec, dtype=float)  # EMOS IS the calibrated point distribution
         members = raw_members
-        _bias_corrected = False
         payload["_edli_q_source"] = "emos"
         _emos_sampler = _make_emos_bootstrap_sampler(_emos_mu_native, _emos_sigma_native)
         # Stage-0 spine: EMOS IS the predictive N(mu, sigma); record its native center/dispersion.
@@ -32426,7 +32441,6 @@ def _market_analysis_from_event_snapshot(
         # from N(x̄, floored σ). Conservative: only widens → lower q_lcb. When no EMOS σ-model exists
         # for the cell (truly absent), degrade to the pure raw analytic.
         members = raw_members
-        _bias_corrected = False
         payload["_edli_q_source"] = "raw_honest"
         _hr = None
         try:
@@ -32504,12 +32518,10 @@ def _market_analysis_from_event_snapshot(
                 else _day0_rd_members,
                 dtype=float,
             )
-            _bias_corrected = False
             payload["_edli_q_source"] = "day0_remaining_day"
             payload["_edli_day0_q_mode"] = "remaining_day"
         else:
             members = raw_members
-            _bias_corrected = False
         if _day0_rd_members is None:
             payload["_edli_q_source"] = "platt"
         day0_extra_member_sigma = 0.0
@@ -32766,7 +32778,6 @@ def _market_analysis_from_event_snapshot(
         city_name=family.city,
         season="",
         forecast_source=str(snapshot.get("source_id") or payload.get("source_id") or ""),
-        bias_corrected=_bias_corrected,  # §4.1: propagate correction flag
         market_complete=True,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
@@ -34135,17 +34146,16 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     current_temp_c: float,
     metric: str,
 ) -> tuple[list[float], dict[str, float]]:
-    """Return future model extrema and audit the current-state innovation.
-
-    The current observation defines the causal window and the already observed
-    grid point is excluded. Its model innovation is evidence only: without a
-    validated time-covariance law, transporting one instantaneous error through
-    every future hour would manufacture certainty rather than condition it.
-    """
+    """Return extrema after causal, decaying current-state conditioning."""
 
     from src.data.day0_hourly_vectors import (
         day0_hourly_vector_target_values_utc,
     )
+    from src.signal.day0_window import (
+        condition_day0_hourly_members_on_current_state,
+        remaining_member_extrema_for_day0,
+    )
+    from src.types.metric_identity import MetricIdentity
 
     if metric not in {"high", "low"}:
         raise ValueError(f"unsupported metric: {metric}")
@@ -34153,8 +34163,10 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     if observed_utc > decision_time.astimezone(UTC):
         return [], {}
     target = date.fromisoformat(str(target_date)[:10])
-    out: list[float] = []
-    innovations: dict[str, float] = {}
+    times: list[str] | None = None
+    member_rows: list[list[float]] = []
+    models: list[str] = []
+    timezone_name: str | None = None
     for vector in vectors:
         try:
             tz = ZoneInfo(str(vector.timezone_name))
@@ -34167,28 +34179,44 @@ def _remaining_day_extremes_c_with_current_state_evidence(
         )
         if values is None:
             return [], {}
-        anchors = [
-            (instant, float(temp))
-            for instant, temp in values
-            if instant <= observed_utc
-        ]
-        if not anchors:
+        row_times = [instant.isoformat() for instant, _temp in values]
+        if times is None:
+            times = row_times
+            timezone_name = str(vector.timezone_name)
+        elif row_times != times or str(vector.timezone_name) != timezone_name:
             return [], {}
-        anchor_time, anchor_temp = max(anchors, key=lambda item: item[0])
-        if not timedelta(0) <= observed_utc - anchor_time <= timedelta(hours=1):
-            return [], {}
-        innovation = float(current_temp_c) - anchor_temp
-        future = [float(temp) for instant, temp in values if instant > observed_utc]
-        if not future:
-            local_end = datetime.combine(
-                target + timedelta(days=1), time.min, tzinfo=tz
-            ).astimezone(UTC)
-            if not timedelta(0) < local_end - observed_utc <= timedelta(hours=1):
-                return [], {}
-            future = [float(current_temp_c)]
-        out.append(max(future) if metric == "high" else min(future))
-        innovations[str(vector.model)] = innovation
-    return out, innovations
+        member_rows.append([float(temp) for _instant, temp in values])
+        models.append(str(vector.model))
+    if times is None or timezone_name is None or not member_rows:
+        return [], {}
+    conditioned = condition_day0_hourly_members_on_current_state(
+        np.asarray(member_rows, dtype=float),
+        times,
+        observation_time=observed_utc,
+        current_temp=float(current_temp_c),
+        e_fold_hours=day0_current_state_innovation_e_fold_hours(),
+    )
+    if conditioned is None:
+        return [], {}
+    conditioned_members, innovation_values = conditioned
+    extrema, _hours_remaining = remaining_member_extrema_for_day0(
+        conditioned_members,
+        times,
+        timezone_name,
+        target,
+        now=observed_utc,
+        temperature_metric=MetricIdentity.from_raw(metric),
+    )
+    if extrema is None:
+        return [], {}
+    values = extrema.mins if metric == "low" else extrema.maxes
+    return (
+        [float(value) for value in values.tolist()],
+        {
+            model: float(innovation)
+            for model, innovation in zip(models, innovation_values, strict=True)
+        },
+    )
 
 
 def _day0_remaining_day_members(
@@ -34317,9 +34345,12 @@ def _day0_remaining_day_members(
             )
             payload["_edli_day0_current_temperature_source"] = current_source
             payload["_edli_day0_trajectory_conditioning_basis"] = (
-                "current_state_diagnostic_no_unvalidated_transport_v1"
+                "current_state_exponential_residual_decay_v1"
             )
             payload["_edli_day0_model_innovations_c"] = innovations
+            payload["_edli_day0_current_state_innovation_e_fold_hours"] = (
+                day0_current_state_innovation_e_fold_hours()
+            )
         if not extremes_c:
             payload["_edli_day0_remaining_unavailable_reason"] = (
                 "current_state_aligned_trajectory_unavailable"

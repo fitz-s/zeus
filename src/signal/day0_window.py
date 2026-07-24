@@ -19,6 +19,59 @@ def _parse_forecast_timestamp(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def condition_day0_hourly_members_on_current_state(
+    members_hourly: np.ndarray,
+    times: list[str],
+    *,
+    observation_time: datetime,
+    current_temp: float,
+    e_fold_hours: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Condition future hourly paths on the latest observed model residual.
+
+    The correction is causal and transient: each model's residual at the
+    latest elapsed hourly anchor decays exponentially through unseen hours.
+    The elapsed anchor itself is replaced by the observation so the final
+    sub-hour fallback cannot resurrect the model value.
+    """
+
+    values = np.asarray(members_hourly, dtype=float)
+    if (
+        values.ndim != 2
+        or values.shape[1] != len(times)
+        or not np.isfinite(values).all()
+        or not np.isfinite(float(current_temp))
+        or not np.isfinite(float(e_fold_hours))
+        or float(e_fold_hours) <= 0.0
+        or observation_time.tzinfo is None
+    ):
+        return None
+    try:
+        instants = [_parse_forecast_timestamp(value) for value in times]
+    except (TypeError, ValueError):
+        return None
+    observed_utc = observation_time.astimezone(timezone.utc)
+    elapsed = [index for index, instant in enumerate(instants) if instant <= observed_utc]
+    if not elapsed:
+        return None
+    anchor_idx = max(elapsed, key=lambda index: instants[index])
+    anchor_lag = observed_utc - instants[anchor_idx]
+    if not timedelta(0) <= anchor_lag <= timedelta(hours=1):
+        return None
+
+    conditioned = values.copy()
+    innovations = float(current_temp) - conditioned[:, anchor_idx]
+    conditioned[:, anchor_idx] = float(current_temp)
+    for index, instant in enumerate(instants):
+        if instant <= observed_utc:
+            continue
+        lead_hours = (instant - observed_utc).total_seconds() / 3600.0
+        conditioned[:, index] += innovations * np.exp(
+            -lead_hours / float(e_fold_hours)
+        )
+    return conditioned, innovations
+
+
 def remaining_member_extrema_for_day0(
     members_hourly: np.ndarray,
     times: list[str],
@@ -59,7 +112,7 @@ def remaining_member_extrema_for_day0(
     remaining_idxs = [
         int(idx)
         for idx in target_day_idxs
-        if _parse_forecast_timestamp(times[int(idx)]) >= now_utc
+        if _parse_forecast_timestamp(times[int(idx)]) > now_utc
     ]
     if not remaining_idxs and now_local.date() == target_d:
         day_end = datetime.combine(

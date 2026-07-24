@@ -397,11 +397,12 @@ class Day0ExtremeUpdatedTrigger:
         # rebuilt-spine trigger — to zero claims. Emit ONLY when the family's running
         # extreme ADVANCES beyond what was already emitted: the same monotonic-advance
         # rule scan_authority_rows applies in-batch, but CROSS-cycle (the trigger is
-        # re-instantiated per cycle) via the persisted day0 events. An unchanged extreme
-        # carries no new decision; a price-driven re-decision is EDLI_REDECISION_PENDING,
-        # not a day0 re-emit. The in-call watermark is advanced on each emit so two
-        # source rows for one family in the same batch cannot double-emit one extreme.
-        high_water, low_water = self._emitted_extreme_watermarks(target_floor)
+        # re-instantiated per cycle) via the persisted day0 events. WU's monotone
+        # extreme is unchanged evidence; HKO's provisional cumulative snapshot is
+        # different: a newer source time shortens the remaining physical window even
+        # when its displayed high/low plateaus. The in-call watermarks advance on each
+        # emit so one source version emits at most once per metric.
+        high_water, low_water, hko_times = self._emitted_extreme_watermarks(target_floor)
         for row in reversed(rows):
             for metric in ("high", "low"):
                 try:
@@ -419,15 +420,32 @@ class Day0ExtremeUpdatedTrigger:
                     str(observation.get("settlement_source") or "").strip().lower()
                     == "hko_hourly_accumulator"
                 )
+                hko_time = None
+                if hko_snapshot:
+                    try:
+                        hko_time = _parse_utc(
+                            str(observation.get("observation_time") or ""),
+                            "observation_time",
+                        )
+                    except ValueError:
+                        continue
+                prior_hko_time = hko_times.get((*key, metric))
                 if metric == "high":
                     cur = observation.get("high_so_far")
                     if cur is None:
                         continue
                     cur_value = float(cur)
                     prior = high_water.get(key)
-                    if prior is not None and (
-                        cur_value == prior if hko_snapshot else cur_value <= prior
+                    if (
+                        prior is not None
+                        and hko_snapshot
+                        and cur_value == prior
+                        and hko_time is not None
+                        and prior_hko_time is not None
+                        and hko_time <= prior_hko_time
                     ):
+                        continue
+                    if prior is not None and not hko_snapshot and cur_value <= prior:
                         continue
                 else:
                     cur = observation.get("low_so_far")
@@ -435,9 +453,16 @@ class Day0ExtremeUpdatedTrigger:
                         continue
                     cur_value = float(cur)
                     prior = low_water.get(key)
-                    if prior is not None and (
-                        cur_value == prior if hko_snapshot else cur_value >= prior
+                    if (
+                        prior is not None
+                        and hko_snapshot
+                        and cur_value == prior
+                        and hko_time is not None
+                        and prior_hko_time is not None
+                        and hko_time <= prior_hko_time
                     ):
+                        continue
+                    if prior is not None and not hko_snapshot and cur_value >= prior:
                         continue
                 semantics = settlement_semantics(observation) if callable(settlement_semantics) else settlement_semantics
                 result = self._write_observation_if_admitted(
@@ -452,21 +477,29 @@ class Day0ExtremeUpdatedTrigger:
                     high_water[key] = cur_value
                 else:
                     low_water[key] = cur_value
+                if hko_time is not None:
+                    hko_times[(*key, metric)] = hko_time
         return results
 
     def _emitted_extreme_watermarks(
         self, target_floor: str
-    ) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], float]]:
+    ) -> tuple[
+        dict[tuple[str, str, str], float],
+        dict[tuple[str, str, str], float],
+        dict[tuple[str, str, str, str], datetime],
+    ]:
         """Per (city, target_date, station_id) high-/low-water marks over ALREADY-emitted
         DAY0_EXTREME_UPDATED events, scoped to non-past target dates.
 
         WU/hourly sources retain monotone MAX/MIN watermarks. HKO uses the latest
-        official cumulative snapshot so a provider correction emits once instead
-        of being suppressed forever by an earlier provisional value. Fail-soft:
-        any read fault returns empty marks (no suppression).
+        official cumulative snapshot plus its source time so a correction or a
+        newer physical window emits once instead of being suppressed forever by
+        an earlier provisional value. Fail-soft: any read fault returns empty
+        marks (no suppression).
         """
         high_water: dict[tuple[str, str, str], float] = {}
         low_water: dict[tuple[str, str, str], float] = {}
+        hko_times: dict[tuple[str, str, str, str], datetime] = {}
         try:
             conn = self._writer.conn
             rows = conn.execute(
@@ -476,7 +509,8 @@ class Day0ExtremeUpdatedTrigger:
                        json_extract(payload_json, '$.station_id')  AS st,
                        json_extract(payload_json, '$.settlement_source') AS source,
                        CAST(json_extract(payload_json, '$.high_so_far') AS REAL) AS hi,
-                       CAST(json_extract(payload_json, '$.low_so_far')  AS REAL) AS lo
+                       CAST(json_extract(payload_json, '$.low_so_far')  AS REAL) AS lo,
+                       json_extract(payload_json, '$.observation_time') AS observation_time
                 FROM opportunity_events INDEXED BY idx_opportunity_events_fsr_target_date
                 WHERE event_type = 'DAY0_EXTREME_UPDATED'
                   AND json_extract(payload_json, '$.target_date') >= ?
@@ -488,10 +522,18 @@ class Day0ExtremeUpdatedTrigger:
                 (target_floor,),
             ).fetchall()
         except Exception:  # noqa: BLE001 — fail-soft: no marks => prior always-emit behavior
-            return high_water, low_water
+            return high_water, low_water, hko_times
         hko_latest: set[tuple[str, str, str]] = set()
         for r in rows:
-            c, td, st, source, hi, lo = r[0], r[1], r[2], r[3], r[4], r[5]
+            c, td, st, source, hi, lo, observation_time = (
+                r[0],
+                r[1],
+                r[2],
+                r[3],
+                r[4],
+                r[5],
+                r[6],
+            )
             if c is None or td is None:
                 continue
             key = (str(c), str(td), str(st or ""))
@@ -503,6 +545,13 @@ class Day0ExtremeUpdatedTrigger:
                     high_water[key] = float(hi)
                 if lo is not None:
                     low_water[key] = float(lo)
+                try:
+                    observed_at = _parse_utc(str(observation_time or ""), "observation_time")
+                except ValueError:
+                    observed_at = None
+                if observed_at is not None:
+                    hko_times[(*key, "high")] = observed_at
+                    hko_times[(*key, "low")] = observed_at
                 continue
             if key in hko_latest:
                 continue
@@ -510,7 +559,7 @@ class Day0ExtremeUpdatedTrigger:
                 high_water[key] = max(high_water.get(key, float("-inf")), float(hi))
             if lo is not None:
                 low_water[key] = min(low_water.get(key, float("inf")), float(lo))
-        return high_water, low_water
+        return high_water, low_water, hko_times
 
 
 def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:

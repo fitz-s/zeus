@@ -92,6 +92,8 @@
     }
   },
   "day0": {
+    "current_state_innovation_e_fold_hours": 4.2,
+    "_current_state_innovation_e_fold_hours_note": "Short-horizon Day0 model-state residual persistence. Refit walk-forward; do not interpret as a permanent model translation.",
     "n_mc": 10000,
     "_n_mc_note": "Day0 nowcast Monte Carlo iterations."
   },

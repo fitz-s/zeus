@@ -30,6 +30,7 @@ from src.calibration.manager import get_calibrator, season_from_date
 from src.calibration.platt import calibrate_and_normalize
 from src.config import (
     cities_by_name,
+    day0_current_state_innovation_e_fold_hours,
     day0_n_mc,
     edge_n_bootstrap,
     ensemble_member_count,
@@ -69,7 +70,10 @@ from src.engine.evaluator import (
 )
 from src.engine.time_context import lead_days_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
-from src.signal.day0_window import remaining_member_extrema_for_day0
+from src.signal.day0_window import (
+    condition_day0_hourly_members_on_current_state,
+    remaining_member_extrema_for_day0,
+)
 from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes
 from src.observability.counters import increment as _cnt_inc
 from src.state.chain_reconciliation import resolve_position_metric
@@ -2966,6 +2970,49 @@ def _refresh_day0_observation(
                 "day0_hourly_bundle_authority_gate",
                 hourly_bundle_rejection,
             ]
+        trajectory_current_temp = _finite_day0_observation_float(
+            obs, "current_temp"
+        )
+        if trajectory_current_temp is not None:
+            e_fold_hours = day0_current_state_innovation_e_fold_hours()
+            conditioned = condition_day0_hourly_members_on_current_state(
+                ens_result["members_hourly"],
+                ens_result["times"],
+                observation_time=observation_boundary,
+                current_temp=trajectory_current_temp,
+                e_fold_hours=e_fold_hours,
+            )
+            if conditioned is None:
+                _set_monitor_probability_fresh(position, False)
+                return position.p_posterior, [
+                    "day0_observation",
+                    live_forecast_source,
+                    *forecast_source_validations,
+                    "day0_current_state_conditioning_unavailable",
+                ]
+            conditioned_members, innovations = conditioned
+            ens_result["members_hourly"] = conditioned_members
+            forecast_source_validations.extend(
+                [
+                    "day0_current_state_exponential_residual_decay_v1",
+                    (
+                        "day0_current_state_innovation_e_fold_hours:"
+                        f"{e_fold_hours}"
+                    ),
+                    "day0_current_state_model_innovations_native:"
+                    + json.dumps(
+                        {
+                            str(model): float(innovation)
+                            for model, innovation in zip(
+                                ens_result["source_models"],
+                                innovations,
+                                strict=True,
+                            )
+                        },
+                        sort_keys=True,
+                    ),
+                ]
+            )
         extrema, hours_remaining = remaining_member_extrema_for_day0(
             ens_result["members_hourly"],
             ens_result["times"],

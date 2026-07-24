@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-07-24
 # Authority basis: EDLI v1 implementation prompt §9 Day0 trigger availability and hard-fact gates.
 from __future__ import annotations
 
@@ -878,14 +878,19 @@ def test_scan_hko_snapshot_correction_emits_once_and_replaces_provisional_high()
         decision_time=datetime(2026, 7, 19, 17, 30, tzinfo=timezone.utc),
         received_at="2026-07-19T17:30:00+00:00",
     )
-    assert len(corrected) == 1
-    corrected_payload = json.loads(
-        conn.execute(
-            "SELECT payload_json FROM opportunity_events ORDER BY created_at DESC, event_id DESC LIMIT 1"
-        ).fetchone()[0]
+    assert len(corrected) == 2
+    corrected_payloads = [
+        json.loads(row[0])
+        for row in conn.execute(
+            "SELECT payload_json FROM opportunity_events "
+            "WHERE observed_at = '2026-07-19T17:20:00+00:00'"
+        ).fetchall()
+    ]
+    assert {payload["metric"] for payload in corrected_payloads} == {"high", "low"}
+    assert all(
+        payload["high_so_far"] == pytest.approx(29.7)
+        for payload in corrected_payloads
     )
-    assert corrected_payload["metric"] == "high"
-    assert corrected_payload["high_so_far"] == pytest.approx(29.7)
 
     unchanged = trigger.scan_observation_instants_rows(
         observation_conn=conn,

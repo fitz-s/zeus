@@ -10,6 +10,7 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 
 import json
 import logging
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -566,6 +567,16 @@ def calibration_batch_rebuild_n_mc() -> int:
 
 def day0_n_mc() -> int:
     return int(settings["day0"]["n_mc"])
+
+
+def day0_current_state_innovation_e_fold_hours() -> float:
+    value = float(settings["day0"]["current_state_innovation_e_fold_hours"])
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            "settings['day0']['current_state_innovation_e_fold_hours'] "
+            "must be finite and positive"
+        )
+    return value
 
 
 # Slice P4-1 (PR #19 phase 4 cleanup, 2026-04-26): day0_obs_dominates_

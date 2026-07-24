@@ -4,6 +4,49 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 Day0 continuous-state residual conditioning
+
+The July 22–24 loss reconstruction falsified the diagnostic-only treatment
+below. Across 27 Data-API loss/near-zero positions, no executable SELL command
+was emitted before the bid collapsed; for the subset with a still-positive
+book and `q < bid`, the decision layer selected HOLD. The common probability
+failure was a discontinuity: the current station/model residual was recorded
+but discarded, so the engine combined an observed running extreme with
+unconditioned future hourly paths and moved toward a point mass. When the next
+observation crossed the adjacent bin, q flipped after executable liquidity had
+already disappeared.
+
+The replacement law is a causal short-memory state update, shared by new-entry
+and held-position probability paths. For each current model path, the latest
+elapsed hourly model anchor gives residual `e0 = observed - model`. An unseen
+hour at lead `h` is shifted by `e0 * exp(-h / tau)`; elapsed hours stay
+unchanged, and the anchor becomes the observation for the terminal sub-hour
+fallback. This preserves real future excursions and converges back to the raw
+forecast rather than treating one station print as a permanent model
+translation.
+
+`tau=4.2h` is runtime config, not a per-order patch. It was fit only on the
+available prior seven-day window: training dates 2026-07-21..23 produced
+`tau=4.17h` from 1/2/3/4/6h residual persistence. Frozen 4.2h validation on
+2026-07-24..25 improved mean absolute error at every tested horizon:
+0.584/0.390/0.265/0.181/0.074C respectively. The decision certificate now
+persists the conditioning revision, model residuals, and tau so cache/replay
+identity cannot silently mix the old and new probability meanings.
+
+Money path: source truth -> forecast signal -> continuous Day0 probability ->
+global auction -> Kelly -> entry/held redecision. Re-decision repeats the same
+operator on every fresher observation; no market price is used as probability
+authority.
+
+The same live audit found a separate constructor-contract regression affecting
+12 of 14 open July 25 positions: the Day0 builder still passed retired
+`bias_corrected` state into `MarketAnalysis`, so every refresh raised
+`TypeError` and the monitor accumulated 12–21 stale-belief cycles under
+`EVIDENCE_UNAVAILABLE`. The obsolete argument and its dead local assignments
+are removed. A signature relationship antibody now requires every keyword at
+that live constructor seam to exist in the current runtime contract. This is a
+belief-availability repair, not a relaxation of freshness or source gates.
+
 ## 2026-07-24 HKO trajectory truth-domain correction
 
 The July 24 Hong Kong LOW loss exposed a silent same-table-name split across
@@ -24,7 +67,18 @@ both DBs and proves that a new HKO reading and its trajectory print land only in
 world. This repairs source truth -> Day0 trajectory evidence; it does not use
 market price as probability authority or change settlement extrema semantics.
 
-## 2026-07-24 Day0 trajectory correction
+The follow-on live audit found one remaining time-domain split after DB routing
+was repaired. The Hong Kong July 25 posterior had advanced to the 23:10Z HKO
+snapshot while the latest `DAY0_EXTREME_UPDATED` event remained at 22:10Z
+because the catch-up scanner deduplicated HKO solely by displayed high/low.
+HKO intraday extrema are provisional snapshots, not WU-style monotone bounds:
+an equal value at a newer source time shortens the remaining physical window
+and must refresh both HIGH and LOW probability families. HKO event watermarks
+therefore bind `(value, observation_time)` per metric; an advanced source time
+emits once, while rescanning the same version remains silent. The WU monotone
+extreme firehose gate is unchanged.
+
+## 2026-07-24 Interim Day0 trajectory correction (superseded)
 
 Current live Ankara 28C evidence falsified one probability assumption before
 Kelly or execution. The remaining-path builder transported each model's
@@ -39,12 +93,10 @@ observation time. Rebinding it to the first occurrence would discard valid
 plateau information and contradict continuous-time redecision. That path is
 unchanged.
 
-Current temperature still cuts the remaining window, records the model
-innovation evidence, and participates in the absorbing frontier; its
-innovation is not propagated into unseen hours without a validated temporal
-covariance law. Re-decision behavior is unchanged in shape: the next current
-Day0 auction rebuilds q from the corrected witness, and any resting order whose
-edge disappears is pulled by the existing normal lifecycle.
+At this interim stage, current temperature cut the remaining window and
+recorded model innovation without propagating it into unseen hours. The
+seven-day walk-forward witness in the preceding section subsequently supplied
+the missing temporal law and superseded this diagnostic-only behavior.
 
 Money path: forecast signal -> Day0 current-evidence probability -> global
 auction -> Kelly -> maker lifecycle. Behavioral antibodies cover exclusion of

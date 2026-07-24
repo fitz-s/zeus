@@ -1,3 +1,10 @@
+# Created: 2026-04-01
+# Last reused/audited: 2026-07-24
+# Authority basis: Day0 causal remaining-window selection and local-day/DST law.
+# Lifecycle: created=2026-04-01; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Purpose: Lock causal target-day hourly selection, exact-boundary exclusion, and DST geometry.
+# Reuse: Run when Day0 hourly conditioning or remaining-window selection changes.
+
 from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
@@ -30,7 +37,7 @@ def test_day0_window_respects_target_local_date_for_tokyo():
         now=datetime(2025, 3, 9, 16, 0, tzinfo=timezone.utc),  # 01:00 JST on 03-10
     )
 
-    assert hours == 23.0
+    assert hours == 22.0
     assert remaining.shape == (1,)
     assert remaining[0] == 33.0
 
