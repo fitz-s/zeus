@@ -3340,8 +3340,9 @@ tables:
     notes: >
       Instrument-set-aware coverage upgrade markers (task #32, 2026-06-11):
       idempotency record for PARTIAL->FULL fusion re-materialization enqueues
-      when newly published instruments widen a family's provider set. One row
-      per (city, target_date, metric, source_cycle_time, instrument superset);
+      when newly published instruments widen a family's provider set or replace
+      an exact current input row. One row per scope, cycle, and semantic
+      transition key (family superset or family superset plus changed raw IDs);
       UNIQUE index uq_fusion_upgrade_enqueues_scope_cycle_superset. Writer:
       data-ingest availability poll lane. Lives on zeus-forecasts.db only
       (INV-37 single-DB); not settlement/calibration/order truth.

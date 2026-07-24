@@ -25,9 +25,10 @@ freshness/tradeable-grade, not input revision detection).
 The enqueue (`enqueue_fusion_upgrade_reseeds`) writes a re-materialization seed via the EXISTING
 seed builder + write_seed into the SAME seed_dir the materialize cycle already drains — no new
 daemon, no parallel materialization path. Idempotency is a marker row in fusion_upgrade_enqueues
-UNIQUE on (city, target_date, metric, source_cycle_time, capturable_family_set): a scope is
-re-enqueued AT MOST ONCE per (cycle, capturable-family-superset) transition, so a still-missing
-5th provider (gfs HTTP 400, jma off-cadence) never loops the queue.
+UNIQUE on (city, target_date, metric, source_cycle_time, capturable_family_set): family growth
+uses the canonical family set as its transition key; exact input revisions suffix that key with
+the changed source raw-row ids. A scope is re-enqueued AT MOST ONCE per exact transition while a
+new raw row remains eligible to trigger one new materialization.
 """
 from __future__ import annotations
 
@@ -139,6 +140,18 @@ def decorrelated_provider_families_of(models: "set[str] | frozenset[str] | tuple
 def _family_set_key(families: "frozenset[str] | set[str]") -> str:
     """Canonical, order-independent string key for a family set (marker uniqueness)."""
     return ",".join(sorted(families))
+
+
+def _input_revision_marker_key(
+    capturable_family_key: str,
+    revisions: Mapping[str, int],
+) -> str:
+    """Durable transition key for one exact set of changed CURRENT raw rows."""
+    revision_key = ",".join(
+        f"{source}:{int(raw_id)}"
+        for source, raw_id in sorted(revisions.items())
+    )
+    return f"{capturable_family_key}|input_revision={revision_key}"
 
 
 def _capturable_inputs_for_scope(
@@ -290,7 +303,8 @@ def scope_capture_offers_larger_provider_set(
 
     Returns a dict:
       {is_upgrade, family_upgrade, input_revision_changed, source_cycle_time,
-       served_families, capturable_families, new_families, changed_input_sources}.
+       served_families, capturable_families, new_families, changed_input_sources,
+       changed_input_revisions}.
 
     ``changed_sources`` narrows source-clock commit callbacks to the provider that just landed.
     Periodic catch-up omits it and compares every configured/previously-consumed source. Exact raw
@@ -309,6 +323,7 @@ def scope_capture_offers_larger_provider_set(
             "family_upgrade": False,
             "input_revision_changed": False,
             "changed_input_sources": [],
+            "changed_input_revisions": {},
         }
     capturable_inputs = _capturable_inputs_for_scope(
         conn, city=city, target_date=target_date, metric=metric, source_cycle_iso=source_cycle_iso
@@ -334,7 +349,12 @@ def scope_capture_offers_larger_provider_set(
     # served set with no fusion (empty) is NOT upgraded here — there is no smaller-set posterior
     # to grow (the single-anchor fallback is a separate concern handled by the missing-capture gate).
     family_upgrade = bool(served) and bool(new_families) and served.issubset(capturable_expected)
-    relevant_sources = configured_sources or frozenset(consumed_inputs)
+    station_sources = frozenset(
+        source
+        for source in capturable_inputs
+        if source.startswith(("cwa_", "hko_"))
+    )
+    relevant_sources = (configured_sources or frozenset(consumed_inputs)) | station_sources
     if changed_sources is not None:
         relevant_sources &= frozenset(
             str(source).strip() for source in changed_sources if str(source).strip()
@@ -355,6 +375,9 @@ def scope_capture_offers_larger_provider_set(
         "capturable_families": sorted(capturable_expected),
         "new_families": sorted(new_families),
         "changed_input_sources": changed_inputs,
+        "changed_input_revisions": {
+            source: capturable_inputs[source] for source in changed_inputs
+        },
     }
 
 
@@ -365,12 +388,9 @@ def _already_enqueued(
     target_date: str,
     metric: str,
     source_cycle_iso: str,
-    capturable_family_key: str,
+    transition_key: str,
 ) -> bool:
-    """True iff a re-materialization was already enqueued for this exact (scope, cycle,
-    capturable-family-superset). The marker is the idempotency bound: at most ONE enqueue per
-    (cycle, capturable-family-set) transition. Fail-open toward NOT-enqueued only on read error
-    (the UNIQUE index still prevents a duplicate physical row)."""
+    """True iff this scope/cycle transition already has a durable enqueue marker."""
     try:
         row = conn.execute(
             """
@@ -379,7 +399,7 @@ def _already_enqueued(
               AND source_cycle_time = ? AND capturable_family_set = ?
             LIMIT 1
             """,
-            (city, target_date, metric, source_cycle_iso, capturable_family_key),
+            (city, target_date, metric, source_cycle_iso, transition_key),
         ).fetchone()
     except Exception:
         return False
@@ -394,7 +414,7 @@ def _record_enqueue(
     metric: str,
     source_cycle_iso: str,
     served_family_key: str,
-    capturable_family_key: str,
+    transition_key: str,
     seed_file: str,
 ) -> bool:
     """Write the idempotency marker. Returns True iff this call inserted the row (False = a
@@ -414,7 +434,7 @@ def _record_enqueue(
             metric,
             source_cycle_iso,
             served_family_key,
-            capturable_family_key,
+            transition_key,
             seed_file,
         ),
     )
@@ -601,13 +621,26 @@ def enqueue_fusion_upgrade_reseeds(
             capturable_key = _family_set_key(set(verdict["capturable_families"]))  # type: ignore[arg-type]
             served_key = _family_set_key(set(verdict["served_families"]))  # type: ignore[arg-type]
             revision_update = bool(verdict["input_revision_changed"])
-            if not revision_update and _already_enqueued(
-                conn,
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                source_cycle_iso=source_cycle_iso,
-                capturable_family_key=capturable_key,
+            transition_keys: list[str] = []
+            if verdict["family_upgrade"]:
+                transition_keys.append(capturable_key)
+            if revision_update:
+                transition_keys.append(
+                    _input_revision_marker_key(
+                        capturable_key,
+                        verdict["changed_input_revisions"],  # type: ignore[arg-type]
+                    )
+                )
+            if transition_keys and all(
+                _already_enqueued(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    source_cycle_iso=source_cycle_iso,
+                    transition_key=transition_key,
+                )
+                for transition_key in transition_keys
             ):
                 report["already_enqueued"] = int(report["already_enqueued"]) + 1
                 continue
@@ -642,8 +675,8 @@ def enqueue_fusion_upgrade_reseeds(
             if seed_file is None:
                 report["manifest_missing"] = int(report["manifest_missing"]) + 1
                 continue
-            inserted = True
-            if not revision_update:
+            inserted = False
+            for transition_key in transition_keys:
                 inserted = _record_enqueue(
                     conn,
                     city=city,
@@ -651,9 +684,10 @@ def enqueue_fusion_upgrade_reseeds(
                     metric=metric,
                     source_cycle_iso=source_cycle_iso,
                     served_family_key=served_key,
-                    capturable_family_key=capturable_key,
+                    transition_key=transition_key,
                     seed_file=str(seed_file),
-                )
+                ) or inserted
+            if transition_keys:
                 conn.commit()
             if inserted:
                 enqueued += 1

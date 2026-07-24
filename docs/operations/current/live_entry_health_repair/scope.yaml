@@ -13,6 +13,8 @@ in_scope:
 - src/signal/ensemble_signal.py
 - src/data/polymarket_request_governor.py
 - src/data/station_forecast_adapter.py
+- src/data/replacement_fusion_upgrade_trigger.py
+- src/state/schema/v2_schema.py
 - src/ingest_main.py
 - config/station_forecast_sources.json
 - src/risk_allocator/governor.py
@@ -49,6 +51,8 @@ in_scope:
 - tests/test_command_recovery.py
 - tests/test_fill_synchronizer.py
 - tests/test_station_forecast_live_ingest_wiring.py
+- tests/data/test_fusion_upgrade_trigger.py
+- architecture/db_table_ownership.yaml
 - tests/execution/test_venue_sync_contract.py
 - tests/test_db_writer_lock.py
 allow_companions:
@@ -60,7 +64,7 @@ allow_companions:
 out_of_scope:
 - state/**
 - src/execution/** except src/execution/exit_lifecycle.py, src/execution/executor.py, src/execution/command_recovery.py, and src/execution/venue_sync_contract.py
-- src/state/** except src/state/portfolio.py, src/state/db.py, and src/state/venue_command_repo.py
+- src/state/** except src/state/portfolio.py, src/state/db.py, src/state/venue_command_repo.py, and src/state/schema/v2_schema.py
 - scripts/**
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/kernel_manifest.yaml

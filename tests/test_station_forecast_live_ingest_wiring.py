@@ -332,7 +332,7 @@ def test_availability_poll_is_wired_to_station_ingest():
     ("station_report", "expected_reseeds"),
     [
         ({"hko_fnd": 18}, 1),
-        ({"hko_fnd": 0}, 0),
+        ({"hko_fnd": 0}, 1),
         (None, 0),
     ],
 )
@@ -395,7 +395,9 @@ def test_station_writes_reseed_even_when_openmeteo_clock_is_current(
 
     assert reseeds["count"] == expected_reseeds
     if expected_reseeds:
-        assert changed_sources == [("hko_fnd",)]
+        assert changed_sources == [
+            ("hko_fnd",) if sum(station_report.values()) > 0 else None
+        ]
         assert report["station_forecast_reseed"]["fusion_upgrade_status"] == "ENQUEUED"
     else:
         assert "station_forecast_reseed" not in report

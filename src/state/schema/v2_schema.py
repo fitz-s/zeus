@@ -762,10 +762,10 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # posterior was fused from a STRICTLY SMALLER decorrelated-provider family set than is now
     # capturable at the SAME source_cycle_time, it enqueues ONE re-materialization seed and writes
     # one row here. The UNIQUE index on (city, target_date, metric, source_cycle_time,
-    # capturable_family_set) is the bound: a scope is re-enqueued AT MOST ONCE per
-    # (cycle, capturable-family-superset) transition, so a still-missing 5th provider (gfs HTTP
-    # 400, jma off the 06Z single_runs cadence) can never loop the queue. Audit trigger
-    # only — never an order/training truth table.
+    # capturable_family_set) is the bound. Family growth stores the canonical family set in the
+    # final column; exact input revisions store that set plus the changed source raw-row ids.
+    # Therefore an unchanged family or input revision cannot loop the queue, while a new raw row
+    # can trigger one new materialization. Audit trigger only — never order/training truth.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fusion_upgrade_enqueues (
             enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,

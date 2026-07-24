@@ -1,4 +1,7 @@
 # Created: 2026-06-11
+# Lifecycle: created=2026-06-11; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Purpose: Lock provider-set and exact-input revision reseeding for replacement posteriors.
+# Reuse: Run for fusion upgrade, current-value serving, source callback, or station source changes.
 # Last reused or audited: 2026-07-17
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
@@ -16,6 +19,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src.data import replacement_fusion_upgrade_trigger as trigger
 from src.data.replacement_fusion_upgrade_trigger import (
     SOURCE_ID,
     decorrelated_provider_families_of,
@@ -243,6 +247,226 @@ def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:
 
     assert unchanged["is_upgrade"] is False
     assert unrelated["is_upgrade"] is False
+
+
+def test_new_station_source_is_an_input_revision_before_old_posterior_configures_it() -> None:
+    conn = _conn()
+    grid_cycle = "2026-07-23T18:00:00+00:00"
+    station_cycle = "2026-07-24T03:30:00+00:00"
+    _insert_single_runs(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=grid_cycle,
+        models=[_DWD],
+    )
+    grid_id = int(
+        conn.execute(
+            "SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts"
+        ).fetchone()[0]
+    )
+    _insert_posterior(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=grid_cycle,
+        used_models=[_DWD],
+        computed_at="2026-07-24T03:00:00+00:00",
+        current_value_ids={_DWD: grid_id},
+        configured_sources=[_DWD],
+    )
+    _insert_single_runs(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=station_cycle,
+        models=["hko_fnd"],
+    )
+
+    callback = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        changed_sources=["hko_fnd"],
+    )
+    periodic = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+    )
+
+    for verdict in (callback, periodic):
+        assert verdict["is_upgrade"] is True
+        assert verdict["family_upgrade"] is False
+        assert verdict["input_revision_changed"] is True
+        assert verdict["changed_input_sources"] == ["hko_fnd"]
+
+
+def test_consumed_station_source_revision_returns_to_noop() -> None:
+    conn = _conn()
+    grid_cycle = "2026-07-23T18:00:00+00:00"
+    station_cycle = "2026-07-24T03:30:00+00:00"
+    _insert_single_runs(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=grid_cycle,
+        models=[_DWD],
+    )
+    _insert_single_runs(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=station_cycle,
+        models=["hko_fnd"],
+    )
+    ids = {
+        str(row[0]): int(row[1])
+        for row in conn.execute(
+            """
+            SELECT model, MAX(raw_model_forecast_id)
+            FROM raw_model_forecasts
+            GROUP BY model
+            """
+        )
+    }
+    _insert_posterior(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=grid_cycle,
+        used_models=[_DWD, "hko_fnd"],
+        computed_at="2026-07-24T04:00:00+00:00",
+        current_value_ids=ids,
+        configured_sources=[_DWD],
+    )
+
+    verdict = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        changed_sources=["hko_fnd"],
+    )
+
+    assert verdict["is_upgrade"] is False
+    assert verdict["input_revision_changed"] is False
+    assert verdict["changed_input_sources"] == []
+
+
+def test_station_input_revision_enqueue_is_idempotent_until_raw_id_changes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    grid_cycle = "2026-07-23T18:00:00+00:00"
+    station_cycle = "2026-07-24T03:30:00+00:00"
+    _insert_single_runs(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=grid_cycle,
+        models=[_DWD, _UKMO],
+    )
+    grid_id = int(
+        conn.execute(
+            "SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts"
+        ).fetchone()[0]
+    )
+    _insert_posterior(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=grid_cycle,
+        used_models=[_DWD],
+        computed_at="2026-07-24T03:00:00+00:00",
+        current_value_ids={_DWD: grid_id},
+        configured_sources=[_DWD],
+    )
+    _insert_single_runs(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-25",
+        metric="low",
+        cycle_iso=station_cycle,
+        models=["hko_fnd"],
+    )
+    conn.close()
+
+    built: list[str] = []
+
+    def _build(_conn, **kwargs):
+        path = tmp_path / f"seed-{len(built)}.json"
+        built.append(str(path))
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    kwargs = {
+        "forecast_db": db,
+        "seed_dir": tmp_path / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+        "computed_at": datetime(2026, 7, 24, 4, 0, tzinfo=UTC),
+        "scopes": [("Hong Kong", "2026-07-25", "low")],
+        "changed_sources": ["hko_fnd"],
+        "manifests": (),
+    }
+
+    first = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    duplicate = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts
+            (model, city, target_date, metric, source_cycle_time, source_available_at,
+             captured_at, lead_days, forecast_value_c, endpoint)
+        VALUES ('hko_fnd', 'Hong Kong', '2026-07-25', 'low', ?, ?, ?, 1, 26.0,
+                'single_runs')
+        """,
+        (
+            "2026-07-24T06:30:00+00:00",
+            "2026-07-24T06:30:00+00:00",
+            "2026-07-24T06:31:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    revised = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert first["seeds_enqueued"] == 1
+    assert duplicate["seeds_enqueued"] == 0
+    assert duplicate["already_enqueued"] == 1
+    assert revised["seeds_enqueued"] == 1
+    assert len(built) == 2
+    conn = sqlite3.connect(db)
+    markers = conn.execute(
+        """
+        SELECT capturable_family_set
+        FROM fusion_upgrade_enqueues
+        WHERE city = 'Hong Kong' AND target_date = '2026-07-25' AND metric = 'low'
+        ORDER BY enqueue_id
+        """
+    ).fetchall()
+    conn.close()
+    assert len(markers) == 3
+    assert markers[0][0] == "DWD,UKMO"
+    assert all(
+        "|input_revision=hko_fnd:" in marker[0] for marker in markers[1:]
+    )
+    assert len({marker[0] for marker in markers}) == 3
 
 
 def test_capture_smaller_than_served_is_not_an_upgrade() -> None:
