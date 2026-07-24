@@ -1,5 +1,6 @@
-# Created: 2026-05-17
-# Last reused or audited: 2026-07-17
+# Lifecycle: created=2026-05-17; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Purpose: Relationship coverage for ingest_main scheduler job identity and source-clock timing.
+# Reuse: Run when ingest_main scheduler jobs, trigger times, or startup catch-up wiring change.
 # Authority basis: F35 + F9 structural fixes — oracle bridge and calibration
 #                  auto-promote jobs added to ingest_main APScheduler.
 #                  2026-06-09: oracle snapshot listener promoted to scheduler
@@ -55,6 +56,34 @@ def _build_scheduler_jobs(*, return_jobs: bool = False):
     if return_jobs:
         return job_ids, jobs_by_id
     return job_ids
+
+
+# ---------------------------------------------------------------------------
+# HKO RHRREAD publication-clock relationship
+# ---------------------------------------------------------------------------
+
+def test_daily_obs_runs_after_hko_rhrread_publication_without_duplicate_writer() -> None:
+    """RELATIONSHIP: HKO's hourly :02 publication gets one :05 daily-obs writer."""
+    import src.ingest_main as im
+
+    daily_obs_specs = [
+        (trigger, kwargs)
+        for func, trigger, kwargs in im._ingest_main_job_specs()
+        if func is im._k2_daily_obs_tick
+    ]
+
+    assert daily_obs_specs == [
+        (
+            "cron",
+            {
+                "minute": 5,
+                "id": "ingest_k2_daily_obs",
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 1800,
+            },
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

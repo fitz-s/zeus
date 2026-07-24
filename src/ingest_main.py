@@ -3545,7 +3545,7 @@ def _ingest_main_job_specs() -> list[tuple]:
     day0_metar_poll_seconds = _day0_metar_poll_seconds()
     day0_hko_poll_seconds = _day0_hko_poll_seconds()
     specs: list[tuple] = [
-        (_k2_daily_obs_tick, "cron", dict(minute=0, id="ingest_k2_daily_obs",
+        (_k2_daily_obs_tick, "cron", dict(minute=5, id="ingest_k2_daily_obs",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
         (_k2_hourly_instants_tick, "cron", dict(minute=7, id="ingest_k2_hourly_instants",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
