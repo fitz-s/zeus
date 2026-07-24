@@ -5949,14 +5949,9 @@ def execute_monitoring_phase(
             summary["held_monitor_defer_reason"] = "urgent_day0_wake"
             break
         monitor_deadline_expired = time.monotonic() >= monitor_deadline
-        monitor_progress_count = int(summary.get("monitors", 0) or 0)
-        monitor_progress_persisted = monitor_progress_count > 0
         if (
             monitor_deadline_expired
-            and (
-                id(pos) not in budget_guaranteed_position_ids
-                or (monitor_budget_seconds > 0.0 and monitor_progress_persisted)
-            )
+            and id(pos) not in budget_guaranteed_position_ids
         ):
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:

@@ -367,7 +367,7 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
 @pytest.mark.parametrize(
     ("monotonic_values", "expected_count", "expected_reason"),
     (
-        ([0.0, 0.0, 1.0], 1, "cycle_budget_exhausted"),
+        ([0.0, 0.0, 1.0, 1.0], 2, "cycle_budget_exhausted"),
         ([0.0, 0.0, 0.0, 0.0], 3, ""),
     ),
 )
@@ -578,6 +578,88 @@ def test_monitor_full_sweep_keeps_unique_three_cycle_deadline_reservations(monke
     assert len(set(visited)) == 9
     assert all(len(batch) == 3 for batch in reserved_per_cycle)
     assert len({trade_id for batch in reserved_per_cycle for trade_id in batch}) == 9
+
+
+def test_monitor_deadline_degraded_cycles_execute_rotating_reserved_thirds(monkeypatch):
+    """Expired positive budgets still execute each reserved third before deferring."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_CURSOR_LAST_KEY_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    positions = [
+        _make_position(
+            trade_id=f"deadline-{index}",
+            token_id=f"deadline-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(9)
+    ]
+    for position in positions:
+        position._canonical_monitor_refreshed_at = ""
+    portfolio = _make_portfolio(*positions)
+    visited: list[str] = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: (
+            visited.append(position.trade_id)
+            or _monitor_test_edge_context(position)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    per_cycle: list[list[str]] = []
+    reserved_per_cycle: list[list[str]] = []
+    for cycle in range(3):
+        cycle_start = len(visited)
+        monotonic_values = iter([0.0, *([1.0] * 12)])
+        monkeypatch.setattr(
+            cycle_runtime.time,
+            "monotonic",
+            lambda: next(monotonic_values, 1.0),
+        )
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            object(),
+            portfolio,
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=_monitor_test_deps(f"test_monitor_deadline_coverage_{cycle}"),
+            run_exit_preflight=False,
+            exit_order_submit_enabled=False,
+            held_position_monitor_budget_seconds=0.5,
+            should_preempt_for_urgent_day0=lambda: False,
+        )
+        batch = visited[cycle_start:]
+        per_cycle.append(batch)
+        reserved = summary["held_monitor_budget_coverage_positions"]
+        reserved_per_cycle.append(reserved)
+        assert set(reserved).issubset(batch)
+        assert summary["held_monitor_positions_deferred"] == 9 - len(batch)
+        assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
+
+    assert all(3 <= len(batch) <= 4 for batch in per_cycle)
+    assert all(len(batch) == 3 for batch in reserved_per_cycle)
+    assert len({trade_id for batch in reserved_per_cycle for trade_id in batch}) == 9
+    assert len(set(visited)) == 9
 
 
 def test_monitor_progress_limit_covers_mixed_canonical_and_fallback_book(monkeypatch):
@@ -1017,8 +1099,9 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
     )
     monkeypatch.setattr(
         "src.engine.monitor_refresh.refresh_position",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("expired ordinary local positions must defer")
+        lambda _conn, _clob, position: (
+            events.append(f"refresh:{position.trade_id}")
+            or _monitor_test_edge_context(position)
         ),
     )
     monkeypatch.setattr(
@@ -1059,9 +1142,9 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
         defer_partial_orderbook_gaps=True,
     )
 
-    assert events == ["network_fetch"]
+    assert events == ["network_fetch", "refresh:budget-local-0"]
     assert summary["day0_hard_fact_direct_exit_decisions"] == 1
-    assert summary["held_monitor_positions_deferred"] == 2
+    assert summary["held_monitor_positions_deferred"] == 1
     assert monitor_results[0].position_id == dead_bin.trade_id
     assert monitor_results[0].should_exit is True
 
@@ -1740,10 +1823,13 @@ def test_monitoring_phase_network_pending_exit_precedes_local_active_under_budge
         held_position_monitor_budget_seconds=0.5,
     )
 
-    assert events == ["network_fetch", "refresh:network-pending-exit"]
-    assert summary["held_monitor_positions_scanned"] == 1
-    assert summary["held_monitor_positions_deferred"] == 1
-    assert summary["held_monitor_defer_reason"] == "cycle_budget_exhausted"
+    assert events == [
+        "network_fetch",
+        "refresh:network-pending-exit",
+        "refresh:local-active",
+    ]
+    assert summary["held_monitor_positions_scanned"] == 2
+    assert summary.get("held_monitor_positions_deferred", 0) == 0
 
 
 def test_monitoring_phase_commit_failure_defers_network_without_getter(monkeypatch):
