@@ -3751,6 +3751,12 @@ def init_schema(
     # §唯一决策律). Additive/idempotent; safe to run on every boot.
     _migrate_decision_law_identity_columns(conn)
     _migrate_law_identity_strategy_key_nullable(conn)
+    # The nullable-relaxation rebuild does INSERT DML, opening an implicit
+    # transaction. Commit it so init_schema keeps its historical clean
+    # post-condition (in_transaction=False for a passed conn); otherwise
+    # DDL run after init_schema on the same connection rides this open
+    # transaction and is lost if the caller closes without committing.
+    conn.commit()
 
     # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger table (SCHEMA_VERSION 23).
     from src.state.schema.shoulder_exposure_ledger_schema import ensure_table as _ensure_shoulder_exposure_ledger_table
@@ -6513,6 +6519,10 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # trade.db, both helpers no-op for them). Additive/idempotent.
     _migrate_decision_law_identity_columns(conn)
     _migrate_law_identity_strategy_key_nullable(conn)
+    # Commit the rebuild DML so the passed connection is left with no open
+    # transaction (see init_schema for rationale); downstream DDL on this same
+    # connection must not ride — and be rolled back with — this migration.
+    conn.commit()
 
     # Executable market substrate is live execution evidence. The market
     # discovery scheduler passes this same trade connection to snapshot_repo and
