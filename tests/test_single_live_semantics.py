@@ -116,6 +116,41 @@ def test_gate_rejects_literal_split_dormant_token(tmp_path: Path) -> None:
     assert any(item.startswith("src/bad.py:") for item in violations(tmp_path))
 
 
+def test_cutover_exemption_rejects_arbitrary_retired_assignment(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "RETIRED_RUNTIME_MODE = 'entry_forecast_' + 'rollout'\n"
+        "mode = RETIRED_RUNTIME_MODE\n",
+        encoding="utf-8",
+    )
+    assert any(item.startswith(f"{script.relative_to(tmp_path)}:") for item in violations(tmp_path))
+
+
+def test_cutover_deletion_constant_cannot_flow_into_live_control(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "RETIRED_CONFIG_KEYS = ('entry_forecast_' + 'rollout',)\n"
+        "alias = RETIRED_CONFIG_KEYS[0]\n"
+        "mode = alias\n",
+        encoding="utf-8",
+    )
+    assert any("flows into 'mode'" in item for item in violations(tmp_path))
+
+
+def test_cutover_deletion_constant_is_allowed_only_as_cleanup_target(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "RETIRED_CONFIG_KEYS = ('entry_forecast_' + 'rollout',)\n"
+        "def clean(mapping):\n"
+        "    mapping.pop(RETIRED_CONFIG_KEYS[0], None)\n",
+        encoding="utf-8",
+    )
+    assert violations(tmp_path) == []
+
+
 def test_gate_rejects_retired_runtime_category(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()

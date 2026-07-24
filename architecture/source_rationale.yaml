@@ -264,7 +264,7 @@ package_defaults:
     zone: K3_extension
     authority_role: strategy_math
     gates:
-    - pytest -q tests/test_market_analysis.py tests/test_fdr.py tests/test_kelly.py
+    - pytest -q tests/test_market_analysis.py tests/test_fdr_family_scope.py tests/test_kelly.py
   src/backtest:
     zone: K3_extension
     authority_role: offline_replay
@@ -391,7 +391,6 @@ files:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
     - src/engine/event_reactor_adapter.py
-    - src/engine/replacement_forecast_hook_factory.py
     - src/data/replacement_input_hwm.py
   src/data/replacement_input_hwm.py:
     zone: K2_runtime
@@ -1245,7 +1244,6 @@ files:
     - src/data/day0_hourly_vectors.py
     - src/data/forecasts_append.py
     - src/data/hourly_instants_append.py
-    - src/data/mainstream_forecast_source.py
     - src/data/openmeteo_ecmwf_ifs9_anchor.py
     - src/data/solar_append.py
     - src/data/source_health_probe.py
@@ -1408,7 +1406,7 @@ files:
     - src/state/source_run_repo.py
     - src/state/source_run_coverage_repo.py
     - src/state/readiness_repo.py
-    - tests/test_forecast_live_daemon.py
+    - tests/test_forecast_live_daemon_boot_schema.py
   src/ingest/polymarket_user_channel.py:
     zone: K2_runtime
     authority_role: user_channel_ingest
@@ -1530,7 +1528,7 @@ files:
     - NO_WRITE_PATH
     downstream:
     - scripts/healthcheck.py
-    - tests/test_live_entry_status.py
+    - tests/test_single_live_semantics.py
   src/decision/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -2770,7 +2768,6 @@ files:
     write_routes: []
     downstream:
     - src/strategy/strategy_profile.py
-    - src/analysis/live_readiness_tribunal.py
   src/state/decision_events.py:
     zone: K2_runtime
     authority_role: decision_event_instrumentation
@@ -2924,8 +2921,7 @@ files:
     why: "K1-compliant read-only attribution-drift detector per position. Re-applies the entry-time _strategy_key_for dispatch rule (src/engine/evaluator.py L420-441) on persisted row attributes and flags label/semantics mismatch. ATTRIBUTION_DRIFT packet BATCH 1 per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md L305-308 (no detector existed for silent attribution drift). Reuses canonical surface (query_authoritative_settlement_rows) + STRATEGY_KEYS list + metric_ready filter from edge_observation.py. KNOWN LIMITATIONS in module docstring: discovery_mode not currently surfaced by _normalize_position_settlement_event so clauses 1-2 of dispatch rule cannot be applied (insufficient_signal); bin.is_shoulder inferred heuristically from persisted bin_label string (per AGENTS.md L66 antibody, classifier conservatively returns unknown rather than guess). Recall-limited but precision-favored — every drift it reports is a real label/semantics mismatch on at least one of clauses 3-5."
     hazards:
     - DERIVED_ONLY
-    downstream:
-    - scripts/attribution_drift_weekly.py
+    downstream: []
   src/state/ws_poll_reaction.py:
     zone: K2_runtime
     authority_role: derived_reaction_latency_projection

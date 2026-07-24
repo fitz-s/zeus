@@ -32,6 +32,31 @@ SCAN_FILES = (
 TEXT_SUFFIXES = {".json", ".md", ".plist", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 EXCLUDED = {Path("scripts/check_single_live_semantics.py")}
 CUTOVER_SCRIPT = Path("scripts/migrations/202607_single_live_semantics_cutover.py")
+CUTOVER_RETIRED_ASSIGNMENTS = frozenset(
+    {
+        "RETIRED_AUDIT_INDEX",
+        "RETIRED_AUTHORITY_COLUMN",
+        "RETIRED_CONFIG_KEYS",
+        "RETIRED_CONFIG_NOTES",
+        "RETIRED_CONFIG_PATHS",
+        "RETIRED_CONVERSION_EVENTS",
+        "RETIRED_CONVERSION_TABLE",
+        "RETIRED_ELIGIBILITY_COLUMN",
+        "RETIRED_EPOCH_TABLE",
+        "RETIRED_FILES",
+        "RETIRED_FORCE_EXIT_COLUMN",
+        "RETIRED_LIVE_AUTHORITY_VALUE",
+        "RETIRED_MANIFEST_FIELD",
+        "RETIRED_PRE_SUBMIT_DECISION_CERTIFICATE",
+        "RETIRED_PRE_SUBMIT_MODE",
+        "RETIRED_PRE_SUBMIT_MODE_CERTIFICATE",
+        "RETIRED_RECEIPT_COLUMNS",
+        "RETIRED_REPLAY_MODE",
+        "RETIRED_SIZING_CERTIFICATE",
+        "RETIRED_TRANSFER_TABLE",
+    }
+)
+_LIVE_CONTROL_TARGETS = frozenset({"category", "lane", "mode", "runtime", "semantics"})
 EXCLUDED_SUBTREES = (
     Path("docs/archive"),
     Path("docs/evidence"),
@@ -112,9 +137,18 @@ def violations(
             scan_value += "\n" + "\n".join(
                 _static_python_strings(
                     source,
-                    allow_retired_assignments=rel == CUTOVER_SCRIPT,
+                    allowed_retired_assignments=(
+                        CUTOVER_RETIRED_ASSIGNMENTS
+                        if rel == CUTOVER_SCRIPT
+                        else frozenset()
+                    ),
                 )
             )
+            if rel == CUTOVER_SCRIPT:
+                out.extend(
+                    f"{rel}: {item}"
+                    for item in _retired_assignment_control_violations(source)
+                )
         for token in _CONCEPT_TOKENS:
             if _contains_live_alternate_concept(token, scan_value):
                 out.append(f"{rel}: forbidden alternate-runtime concept {token!r}")
@@ -218,7 +252,7 @@ def _imported_modules(path: Path, root: Path) -> set[str]:
 
 
 def _static_python_strings(
-    source: str, *, allow_retired_assignments: bool = False
+    source: str, *, allowed_retired_assignments: frozenset[str] = frozenset()
 ) -> set[str]:
     """Return strings Python can construct entirely from literals in the AST."""
 
@@ -227,20 +261,21 @@ def _static_python_strings(
     except SyntaxError:
         return set()
     collector = _StaticStringCollector(
-        allow_retired_assignments=allow_retired_assignments
+        allowed_retired_assignments=allowed_retired_assignments
     )
     collector.visit(tree)
     return collector.values
 
 
 class _StaticStringCollector(ast.NodeVisitor):
-    def __init__(self, *, allow_retired_assignments: bool) -> None:
-        self.allow_retired_assignments = allow_retired_assignments
+    def __init__(self, *, allowed_retired_assignments: frozenset[str]) -> None:
+        self.allowed_retired_assignments = allowed_retired_assignments
         self.values: set[str] = set()
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        if self.allow_retired_assignments and all(
-            isinstance(target, ast.Name) and target.id.startswith("RETIRED_")
+        if node.targets and all(
+            isinstance(target, ast.Name)
+            and target.id in self.allowed_retired_assignments
             for target in node.targets
         ):
             return
@@ -248,9 +283,8 @@ class _StaticStringCollector(ast.NodeVisitor):
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if (
-            self.allow_retired_assignments
-            and isinstance(node.target, ast.Name)
-            and node.target.id.startswith("RETIRED_")
+            isinstance(node.target, ast.Name)
+            and node.target.id in self.allowed_retired_assignments
         ):
             return
         self.generic_visit(node)
@@ -260,6 +294,86 @@ class _StaticStringCollector(ast.NodeVisitor):
         if value is not None:
             self.values.add(value.lower())
         super().generic_visit(node)
+
+
+def _retired_assignment_control_violations(source: str) -> list[str]:
+    """Reject use of cutover deletion constants as live control semantics."""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    assignments: list[tuple[list[ast.expr], ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.append((node.targets, node.value))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            assignments.append(([node.target], node.value))
+
+    tainted = set(CUTOVER_RETIRED_ASSIGNMENTS)
+    changed = True
+    while changed:
+        changed = False
+        for targets, value in assignments:
+            if not _expr_uses_names(value, tainted):
+                continue
+            for target in targets:
+                for name in _assigned_names(target):
+                    if name not in tainted:
+                        tainted.add(name)
+                        changed = True
+
+    out: list[str] = []
+    for targets, value in assignments:
+        if not _expr_uses_names(value, tainted):
+            continue
+        for target in targets:
+            control = _control_target(target)
+            if control is not None:
+                out.append(f"retired deletion constant flows into {control!r}")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg in _LIVE_CONTROL_TARGETS:
+            if _expr_uses_names(node.value, tainted):
+                out.append(f"retired deletion constant flows into keyword {node.arg!r}")
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if (
+                    isinstance(key, ast.Constant)
+                    and isinstance(key.value, str)
+                    and key.value.lower() in _LIVE_CONTROL_TARGETS
+                    and _expr_uses_names(value, tainted)
+                ):
+                    out.append(
+                        "retired deletion constant flows into mapping key "
+                        f"{key.value.lower()!r}"
+                    )
+    return sorted(set(out))
+
+
+def _expr_uses_names(node: ast.AST, names: set[str] | frozenset[str]) -> bool:
+    return any(
+        isinstance(child, ast.Name)
+        and isinstance(child.ctx, ast.Load)
+        and child.id in names
+        for child in ast.walk(node)
+    )
+
+
+def _assigned_names(node: ast.AST) -> set[str]:
+    return {
+        child.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)
+    }
+
+
+def _control_target(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name) and node.id.lower() in _LIVE_CONTROL_TARGETS:
+        return node.id.lower()
+    if isinstance(node, ast.Attribute) and node.attr.lower() in _LIVE_CONTROL_TARGETS:
+        return node.attr.lower()
+    return None
 
 
 def _literal_string(node: ast.AST) -> str | None:
