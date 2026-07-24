@@ -850,6 +850,38 @@ tables:
     pk_col: null
     notes: Active forecast cache (world.db table). Not to be confused with the forecasts.db physical file.
 
+  - name: forecast_skill
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Historical settlement-graded forecast-error corpus preserved byte-for-byte
+      by the single-live cutover. Offline/replay evidence only; it is not current
+      probability or live-action authority.
+
+  - name: model_bias
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: null
+    notes: >
+      Retired deterministic-product bias evidence preserved byte-for-byte by the
+      single-live cutover. It is not a live probability input.
+
+  - name: model_bias_ens
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "(city, season, month, metric, live_data_version)"
+    notes: >
+      Retired ENS transport/error-model evidence preserved byte-for-byte by the
+      single-live cutover. The source-clock replacement chain does not consume
+      it as current probability authority.
+
   - name: market_events
     db: world
     schema_class: legacy_archived
@@ -2042,6 +2074,17 @@ tables:
       with caller-supplied world DB connection per INV-37.
       fit(UNKNOWN) raises ValueError (Phase 3 R-1 antibody).
       SCHEMA_VERSION 23→24.
+
+  - name: evidence_tier_assignments
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 26)"
+    pk_col: id
+    notes: >
+      Historical evidence-assignment audit trail preserved byte-for-byte by the
+      single-live cutover. Fresh schemas no longer create it, so it is retained
+      as non-owning evidence rather than required live authority.
 
   - name: regret_decompositions
     db: world
