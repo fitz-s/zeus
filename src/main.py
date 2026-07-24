@@ -4257,12 +4257,10 @@ def _edli_reactor_wake_poll_once() -> bool:
     wake_event_state = None
     if wake_event_ids:
         wake_event_state = _reactor_wake_event_state(wake_event_ids)
-        terminal_day0_monitor_retry = (
-            day0_wake
-            and wake_event_state.finished
-            and wake_event_state.terminal
-        )
-        if wake_event_state.finished and not terminal_day0_monitor_retry:
+        # Entry-event completion does not satisfy the same fact's held-position
+        # redecision. A finished Day0 wake must reach the monitor-before-ack path.
+        finished_day0_monitor = day0_wake and wake_event_state.finished
+        if wake_event_state.finished and not finished_day0_monitor:
             if not _acknowledge_edli_reactor_wake_batch(
                 wake,
                 wakes,
@@ -4279,7 +4277,7 @@ def _edli_reactor_wake_poll_once() -> bool:
                 len(wake_event_ids),
             )
             return True
-        if not wake_event_state.ready and not terminal_day0_monitor_retry:
+        if not wake_event_state.ready and not finished_day0_monitor:
             return False
     day0_target_families = None
     day0_requires_exit_monitor = False

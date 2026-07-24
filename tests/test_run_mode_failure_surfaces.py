@@ -6616,6 +6616,73 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     assert pending.is_set() is True
 
 
+def test_processed_day0_wake_runs_held_monitor_before_ack(monkeypatch) -> None:
+    import threading
+
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    wake = wake_module.ReactorWake(
+        "wake-day0-processed",
+        "2026-07-24T05:01:22+00:00",
+        "day0_extreme_updated_trigger",
+        "day0_extreme_event_committed",
+        ("event-day0-processed",),
+        (("Singapore", "2026-07-24", "high"),),
+    )
+    acknowledgements: list[str] = []
+    monitor_dispatches: list[frozenset[tuple[str, str, str]] | None] = []
+    monitor_complete = False
+    bootstrap_complete = threading.Event()
+    bootstrap_complete.set()
+
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main_module._ReactorWakeEventState(
+            ready=False,
+            finished=True,
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_requires_exit_monitor",
+        lambda _families: True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_day0_exit_monitor_attempt_state",
+        lambda _wake_id: (monitor_complete, True if monitor_complete else None),
+    )
+
+    def dispatch(_wake_id, families):
+        nonlocal monitor_complete
+        monitor_dispatches.append(families)
+        monitor_complete = True
+        return True
+
+    monkeypatch.setattr(main_module, "_dispatch_day0_exit_monitor", dispatch)
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert monitor_dispatches == [
+        frozenset({("Singapore", "2026-07-24", "high")})
+    ]
+    assert acknowledgements == ["wake-day0-processed"]
+
+
 def test_targeted_exit_monitor_filters_positions_without_mutating_full_portfolio() -> None:
     from types import SimpleNamespace
 
