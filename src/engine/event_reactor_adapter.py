@@ -30206,6 +30206,48 @@ def _day0_global_candidate_payoff_q_lcb_caps(
     return tuple(sorted(caps))
 
 
+def _intersect_candidate_payoff_q_lcb_caps(
+    left: tuple[tuple[str, str, str, str, float], ...],
+    right: tuple[tuple[str, str, str, str, float], ...],
+) -> tuple[tuple[str, str, str, str, float], ...]:
+    """Intersect two complete candidate-local lower-bound authorities."""
+
+    def indexed(
+        rows: tuple[tuple[str, str, str, str, float], ...],
+    ) -> dict[tuple[str, str, str, str], float]:
+        out: dict[tuple[str, str, str, str], float] = {}
+        for row in rows:
+            if not isinstance(row, tuple) or len(row) != 5:
+                raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_SHAPE_INVALID")
+            family_key, condition_id, bin_id, side, raw_cap = row
+            key = (
+                str(family_key or "").strip(),
+                str(condition_id or "").strip(),
+                str(bin_id or "").strip(),
+                str(side or "").strip().upper(),
+            )
+            cap = float(raw_cap)
+            if (
+                not all(key)
+                or key[3] not in {"YES", "NO"}
+                or key in out
+                or not math.isfinite(cap)
+                or not 0.0 <= cap <= 1.0
+            ):
+                raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_INVALID")
+            out[key] = cap
+        return out
+
+    left_by_key = indexed(left)
+    right_by_key = indexed(right)
+    if not left_by_key or left_by_key.keys() != right_by_key.keys():
+        raise ValueError("GLOBAL_CANDIDATE_PAYOFF_Q_LCB_CAP_COVERAGE_MISMATCH")
+    return tuple(
+        (*key, min(left_by_key[key], right_by_key[key]))
+        for key in sorted(left_by_key)
+    )
+
+
 def _prepared_candidate_payoff_q_lcb_cap(
     prepared: object,
     candidate: object,
@@ -30366,6 +30408,7 @@ def _prepare_current_global_probability_family(
     final_daily_observation = None
     source_available_at = ""
     bundle = None
+    day0_source_clock_bound_identity = ""
     if is_day0:
         city = runtime_cities_by_name().get(str(family.city))
         if city is None:
@@ -31066,17 +31109,108 @@ def _prepare_current_global_probability_family(
         and final_daily_observation is None
         and not provisional_day0_observation
     ):
-        candidate_payoff_q_lcb_caps = (
-            _day0_global_candidate_payoff_q_lcb_caps(
-                payload=payload,
+        day0_caps = _day0_global_candidate_payoff_q_lcb_caps(
+            payload=payload,
+            family=family,
+            bindings=bindings,
+            samples=samples,
+            point_q=point_q,
+            band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
+            decision_time=decision_time,
+        )
+        candidate_payoff_q_lcb_caps = day0_caps
+        if probability_authority == "day0_remaining_day_global_probability_v1":
+            readiness = _latest_replacement_readiness(
+                forecast_conn,
+                city=family.city,
+                target_date=family.target_date,
+                temperature_metric=family.metric,
+                decision_time=decision_time,
+            )
+            if readiness is None:
+                raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_READINESS_MISSING")
+            bound_result = read_replacement_forecast_bundle(
+                forecast_conn,
+                baseline_bundle=None,
+                readiness=readiness,
+                city=family.city,
+                target_date=family.target_date,
+                temperature_metric=family.metric,
+                decision_time=decision_time,
+                require_baseline_bundle=False,
+                current_bin_topology_hash=current_topology_hash,
+                enforce_raw_input_hwm=True,
+            )
+            if not bound_result.ok or bound_result.bundle is None:
+                raise ValueError(
+                    "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
+                    f"{bound_result.reason_code}"
+                )
+            bound_bundle = bound_result.bundle
+            bound_components = _replacement_global_probability_components(
+                bound_bundle,
+                candidates=family.candidates,
+                bindings=bindings,
+            )
+            if bound_components is None:
+                raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_INVALID")
+            bound_samples, bound_point_q, _bound_basis = bound_components
+            source_clock_caps = _day0_global_candidate_payoff_q_lcb_caps(
+                payload=dict(payload),
                 family=family,
                 bindings=bindings,
-                samples=samples,
-                point_q=point_q,
+                samples=bound_samples,
+                point_q=bound_point_q,
                 band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA,
                 decision_time=decision_time,
             )
-        )
+            candidate_payoff_q_lcb_caps = (
+                _intersect_candidate_payoff_q_lcb_caps(
+                    day0_caps,
+                    source_clock_caps,
+                )
+            )
+            bound_posterior_identity = str(
+                bound_bundle.posterior_identity_hash or ""
+            ).strip()
+            bound_dependency_hash = str(
+                bound_bundle.dependency_hash or ""
+            ).strip()
+            bound_config_hash = str(
+                bound_bundle.posterior_config_hash or ""
+            ).strip()
+            if not all(
+                (
+                    bound_posterior_identity,
+                    bound_dependency_hash,
+                    bound_config_hash,
+                )
+            ):
+                raise ValueError("GLOBAL_DAY0_SOURCE_CLOCK_BOUND_IDENTITY_INCOMPLETE")
+            day0_source_clock_bound_identity = stable_hash(
+                {
+                    "posterior_identity_hash": bound_posterior_identity,
+                    "dependency_hash": bound_dependency_hash,
+                    "posterior_config_hash": bound_config_hash,
+                    "sample_matrix_identity": probability_sample_matrix_identity(
+                        bound_samples
+                    ),
+                    "candidate_payoff_q_lcb_caps": candidate_payoff_q_lcb_caps,
+                }
+            )
+            payload.update(
+                {
+                    "_edli_day0_source_clock_bound_posterior_identity": (
+                        bound_posterior_identity
+                    ),
+                    "_edli_day0_source_clock_bound_identity": (
+                        day0_source_clock_bound_identity
+                    ),
+                    "_edli_day0_source_clock_bound_basis": (
+                        "intersection_with_replacement_current_evidence_v1"
+                    ),
+                }
+            )
     if (
         current_day0_payload is not None
         and final_daily_observation is None
@@ -31103,6 +31237,9 @@ def _prepare_current_global_probability_family(
             "_edli_day0_exit_authority_reason",
             "_edli_day0_bound_classification",
             "_edli_day0_lcb_transform",
+            "_edli_day0_source_clock_bound_posterior_identity",
+            "_edli_day0_source_clock_bound_identity",
+            "_edli_day0_source_clock_bound_basis",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
@@ -31137,6 +31274,9 @@ def _prepare_current_global_probability_family(
             ),
             "process_sigma_native": payload.get(
                 "_edli_day0_process_sigma_native"
+            ),
+            "source_clock_bound_identity": (
+                day0_source_clock_bound_identity or None
             ),
         }
         source_truth_identity = stable_hash(source_truth)

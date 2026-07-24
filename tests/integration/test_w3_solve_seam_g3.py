@@ -3991,7 +3991,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     observations.close()
 
 
-def test_current_day0_global_probability_uses_current_remaining_day_not_full_day_bundle(
+def test_current_day0_global_probability_uses_remaining_day_point_and_source_clock_robust_cap(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -4065,21 +4065,59 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         "city TEXT, target_date TEXT, marker INTEGER)"
     )
 
-    def replacement_readiness_must_not_run(*_args, **_kwargs):
-        raise AssertionError("Day0 must not read full-day replacement readiness")
+    posterior_bins = (
+        ("p0", None, (69.0 - 32.0) * 5.0 / 9.0),
+        ("p1", (70.0 - 32.0) * 5.0 / 9.0, (71.0 - 32.0) * 5.0 / 9.0),
+        ("p2", (72.0 - 32.0) * 5.0 / 9.0, None),
+    )
+    source_clock_q = (0.1, 0.6, 0.3)
+    source_clock_bundle = SimpleNamespace(
+        posterior_id=17,
+        posterior_identity_hash="source-clock-posterior-17",
+        dependency_hash="source-clock-dependency-17",
+        posterior_config_hash="source-clock-config-17",
+        q={
+            key: probability
+            for (key, _lo, _hi), probability in zip(
+                posterior_bins, source_clock_q
+            )
+        },
+        provenance_json={
+            "q_bootstrap_samples_basis": "global_simplex_v1",
+            "q_bootstrap_samples_by_bin": {
+                key: [probability] * 400
+                for (key, _lo, _hi), probability in zip(
+                    posterior_bins, source_clock_q
+                )
+            },
+            "bin_topology": [
+                {"bin_id": key, "lower_c": lower, "upper_c": upper}
+                for key, lower, upper in posterior_bins
+            ],
+        },
+        source_cycle_time="2026-07-11T00:00:00+00:00",
+        source_available_at="2026-07-11T06:00:00+00:00",
+    )
+    replacement_bound_reads = 0
 
-    def replacement_bundle_must_not_run(*_args, **_kwargs):
-        raise AssertionError("Day0 must not read a full-day replacement bundle")
+    def read_source_clock_bound(*_args, **_kwargs):
+        nonlocal replacement_bound_reads
+        replacement_bound_reads += 1
+        return SimpleNamespace(
+            ok=True,
+            bundle=source_clock_bundle,
+            reason_code="READY",
+        )
 
     monkeypatch.setattr(
         hook_factory,
         "_latest_replacement_readiness",
-        replacement_readiness_must_not_run,
+        lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
         bundle_reader,
         "read_replacement_forecast_bundle",
-        replacement_bundle_must_not_run,
+        read_source_clock_bound,
     )
     monkeypatch.setattr(
         era,
@@ -4182,6 +4220,25 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
         day0_payload["probability_authority"]
         == "day0_remaining_day_global_probability_v1"
     )
+    assert replacement_bound_reads == 1
+    caps = {
+        row[:4]: row[4]
+        for row in prepared.candidate_payoff_q_lcb_caps
+    }
+    bin_by_condition = {
+        binding.condition_id: binding.bin_id
+        for binding in witness.bindings
+    }
+    assert caps[
+        (witness.family_key, "c2", bin_by_condition["c2"], "YES")
+    ] == pytest.approx(0.3)
+    assert caps[
+        (witness.family_key, "c1", bin_by_condition["c1"], "NO")
+    ] == pytest.approx(0.4)
+    assert witness.yes_point_q.tolist() == pytest.approx([0.0, 0.2, 0.8])
+    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"] == (
+        "source-clock-posterior-17"
+    )
 
     observed_extreme["value"] = 71.0
     joint_payload: dict[str, object] = {}
@@ -4218,6 +4275,16 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
             joint.probability_witness
         )
     ) == ("c0", "c1", "c2")
+    joint_caps = {
+        row[:4]: row[4]
+        for row in joint.candidate_payoff_q_lcb_caps
+    }
+    assert joint_caps[
+        (witness.family_key, "c0", bin_by_condition["c0"], "YES")
+    ] == pytest.approx(0.0)
+    assert joint_caps[
+        (witness.family_key, "c0", bin_by_condition["c0"], "NO")
+    ] == pytest.approx(1.0)
     assert joint_payload["q_source"] == "day0_remaining_day"
     current_authority = era.current_global_probability_authority(
         forecast,
