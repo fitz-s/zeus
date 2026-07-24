@@ -1862,6 +1862,7 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
         monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
+        monkeypatch.setattr(hv.time, "monotonic", lambda: 60.0)
         hv._LAST_REFRESH_MONOTONIC.clear()
         n = hv.maybe_refresh_day0_hourly_vectors(
             [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)

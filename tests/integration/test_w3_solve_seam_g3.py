@@ -20351,7 +20351,7 @@ def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
     finally:
         executor_fixtures._TEST_CONN = old_test_conn
 
-    assert result.status == "pending"
+    assert result.status == "pending", result.reason
     assert result.venue_call_started is True
     assert result.venue_ack_received is True
     assert result.submitted_order_type == "FAK"
