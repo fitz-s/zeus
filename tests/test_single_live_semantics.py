@@ -289,6 +289,35 @@ def test_cutover_var_kwargs_cannot_launder_deletion_constant_into_control(
     assert any("flows into 'mode'" in item for item in violations(tmp_path))
 
 
+def test_cutover_default_parameter_cannot_launder_deletion_constant(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "RETIRED_CONFIG_KEYS = ('entry_' + 'forecast_rollout',)\n"
+        "config = {}\n"
+        "def apply(value=RETIRED_CONFIG_KEYS[0]):\n"
+        "    config['mode'] = value\n"
+        "apply()\n",
+        encoding="utf-8",
+    )
+    assert any("flows into 'mode'" in item for item in violations(tmp_path))
+
+
+def test_cutover_return_value_cannot_launder_deletion_constant(tmp_path: Path) -> None:
+    script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "RETIRED_CONFIG_KEYS = ('entry_' + 'forecast_rollout',)\n"
+        "def pick():\n"
+        "    return RETIRED_CONFIG_KEYS[0]\n"
+        "mode = pick()\n",
+        encoding="utf-8",
+    )
+    assert any("flows into 'mode'" in item for item in violations(tmp_path))
+
+
 def test_cutover_deletion_constant_is_allowed_only_as_cleanup_target(tmp_path: Path) -> None:
     script = tmp_path / "scripts" / "migrations" / "202607_single_live_semantics_cutover.py"
     script.parent.mkdir(parents=True)
