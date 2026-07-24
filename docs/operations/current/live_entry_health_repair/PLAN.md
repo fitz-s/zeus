@@ -293,6 +293,14 @@ Restore truthful live entry admission after the global auction reached a real wi
   event truthfully expresses a token partition and root/child evidence relation.
   It preserves the pre-existing lifecycle phase and carries exact command,
   trade-fact, topology, certificate, and allocation evidence.
+- Review-block remediation: every command resolves exactly one non-revoked,
+  verifier-backed `ActionableTradeCertificate`; B71 carries that row's hash
+  with the verified payload and never falls back to event context. Because
+  `position_decision_attribution` is unique by `position_id`, a held-token
+  group with multiple commands is review-only rather than choosing one
+  certificate. The migration is non-dry-run: its only apply acknowledgement
+  is `--operator-confirms-fenced`, retaining the base writer fence,
+  checkpoint, backup, and atomic rebuild.
 - Files authorized: `src/execution/command_recovery.py`,
   `src/state/ledger.py`, `src/state/projection.py`, `src/state/venue_command_repo.py`,
   `src/state/db.py`, `src/state/schema/v2_schema.py`, `src/contracts/position_truth.py`,

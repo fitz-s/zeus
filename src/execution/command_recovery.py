@@ -1368,7 +1368,6 @@ def release_stale_rebalance_entry_leases(
         summary["errors"] += 1
         return summary
 
-    terminal_placeholders = ",".join("?" for _ in _SHIFT_BIN_ENTRY_TERMINAL_NO_POSITION_STATES)
     for row in rows:
         summary["shift_entry_scanned"] += 1
         data = _dict_row(row)
@@ -3429,13 +3428,71 @@ def _edli_certificate_payload(
 # ATTACHed by this point via _decision_certificates_ref -> _maybe_attach_world_for_recovery.
 
 
+def _verified_edli_actionable_certificate(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    token_id: str,
+) -> tuple[dict, str]:
+    """Return one exact, verifier-backed Actionable payload and its own hash."""
+
+    ref = _decision_certificates_ref(conn)
+    if ref is None or not event_id:
+        return {}, ""
+    rows = conn.execute(
+        f"""
+        SELECT semantic_key, certificate_hash, payload_json, verifier_status
+          FROM {ref}
+         WHERE certificate_type = 'ActionableTradeCertificate'
+           AND semantic_key LIKE ?
+         ORDER BY created_at DESC
+         LIMIT 50
+        """,
+        (f"%{event_id}%",),
+    ).fetchall()
+    matches: list[tuple[dict, str]] = []
+    for row in rows:
+        record = _dict_row(row)
+        payload = _json_mapping(record.get("payload_json"))
+        if str(payload.get("token_id") or "").strip() != token_id:
+            return {}, ""
+        cert_hash = str(record.get("certificate_hash") or "").strip()
+        if not cert_hash or str(record.get("verifier_status") or "").upper() != "VERIFIED":
+            return {}, ""
+        if _certificate_is_revoked(conn, certificate_hash=cert_hash):
+            logger.warning(
+                "recovery: revoked EDLI Actionable certificate refuses B71 split "
+                "event_id=%s token_id=%s certificate_hash=%s",
+                event_id,
+                token_id,
+                cert_hash,
+            )
+            return {}, ""
+        try:
+            from src.decision_kernel.verifier import _verify_actionable_payload
+
+            _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "recovery: malformed EDLI Actionable certificate refuses B71 split "
+                "event_id=%s token_id=%s certificate_hash=%s error=%s",
+                event_id,
+                token_id,
+                cert_hash,
+                exc,
+            )
+            return {}, ""
+        matches.append((payload, cert_hash))
+    return matches[0] if len(matches) == 1 else ({}, "")
+
+
 def _verified_edli_actionable_payload(
     conn: sqlite3.Connection,
     *,
     event_id: str,
     token_id: str,
 ) -> dict:
-    """Return EDLI Actionable payload only when it is live-consumable now."""
+    """Existing recovery reader; B71 uses the stricter paired helper above."""
 
     ref = _decision_certificates_ref(conn)
     if ref is None or not event_id:
@@ -3462,27 +3519,12 @@ def _verified_edli_actionable_payload(
             continue
         cert_hash = str(record.get("certificate_hash") or "").strip()
         if _certificate_is_revoked(conn, certificate_hash=cert_hash):
-            logger.warning(
-                "recovery: EDLI Actionable certificate is quarantined; refusing "
-                "entry projection authority event_id=%s token_id=%s certificate_hash=%s",
-                event_id,
-                token_id,
-                cert_hash,
-            )
             return {}
         try:
             from src.decision_kernel.verifier import _verify_actionable_payload
 
             _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "recovery: EDLI Actionable certificate fails current verifier; refusing "
-                "entry projection authority event_id=%s token_id=%s certificate_hash=%s error=%s",
-                event_id,
-                token_id,
-                cert_hash,
-                exc,
-            )
+        except Exception:  # noqa: BLE001
             return {}
         return payload
     return {}
@@ -3905,7 +3947,14 @@ def _event_bound_strategy_key_from_payload(payload: dict) -> str:
     return ""
 
 
-def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, client=None) -> dict:
+def _edli_trade_case_for_command(
+    conn: sqlite3.Connection,
+    command: dict,
+    *,
+    client=None,
+    actionable_payload: dict | None = None,
+    forbid_event_context: bool = False,
+) -> dict:
     """Recover a trade_case from EDLI certificates when legacy decision_log is absent."""
 
     decision_id = str(command.get("decision_id") or "")
@@ -3916,16 +3965,11 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         or command.get("snapshot_condition_id")
         or ""
     ).strip()
-    actionable = _verified_edli_actionable_payload(
-        conn,
-        event_id=event_id,
-        token_id=selected_token_id,
+    actionable = actionable_payload or _verified_edli_actionable_payload(
+        conn, event_id=event_id, token_id=selected_token_id
     )
-    event_context = _edli_live_order_event_context(
-        conn,
-        event_id=event_id,
-        token_id=selected_token_id,
-        decision_id=decision_id,
+    event_context = {} if forbid_event_context else _edli_live_order_event_context(
+        conn, event_id=event_id, token_id=selected_token_id, decision_id=decision_id
     )
     final_intent = _edli_certificate_payload(
         conn,
@@ -3933,7 +3977,7 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         event_id=event_id,
         token_id=selected_token_id,
     )
-    if not actionable:
+    if not actionable and not forbid_event_context:
         actionable = dict(event_context)
     if not final_intent and event_context:
         final_intent = dict(event_context)
@@ -5600,30 +5644,6 @@ def _split_child_position_id(root: str, held_token_id: str, command_ids: list[st
     return str(uuid.uuid5(uuid.NAMESPACE_URL, material))
 
 
-def _split_exact_actionable_certificate_hash(
-    conn: sqlite3.Connection, *, decision_id: str, held_token_id: str
-) -> str:
-    event_id = _edli_event_id_from_decision_id(decision_id)
-    ref = _decision_certificates_ref(conn)
-    if not event_id or ref is None:
-        raise ValueError("missing-edli-certificate-reference")
-    matches: set[str] = set()
-    for row in conn.execute(
-        f"SELECT semantic_key, certificate_hash, payload_json FROM {ref} "
-        "WHERE certificate_type = 'ActionableTradeCertificate' AND semantic_key LIKE ?",
-        (f"%{event_id}%",),
-    ).fetchall():
-        record = _dict_row(row)
-        if _edli_certificate_matches_token(
-            _json_mapping(record.get("payload_json")),
-            semantic_key=str(record.get("semantic_key") or ""), token_id=held_token_id,
-        ) and not _certificate_is_revoked(conn, certificate_hash=str(record.get("certificate_hash") or "")):
-            matches.add(str(record.get("certificate_hash") or ""))
-    if len(matches) != 1 or not next(iter(matches), ""):
-        raise ValueError("ambiguous-or-missing-exact-actionable-certificate")
-    return next(iter(matches))
-
-
 def _record_exact_split_attribution(
     conn: sqlite3.Connection,
     *,
@@ -5708,6 +5728,7 @@ def reconcile_mixed_token_entry_position_repairs(conn: sqlite3.Connection, clien
             if conn.execute("SELECT 1 FROM position_events WHERE position_id = ? AND event_type IN ('EXIT_INTENT','EXIT_ORDER_POSTED','EXIT_ORDER_FILLED','SETTLED') LIMIT 1", (root,)).fetchone():
                 raise ValueError("exit-or-settlement-evidence-present")
             positions: list[SimpleNamespace] = []
+            certificate_hash_by_command: dict[str, str] = {}
             for row in rows:
                 candidate = _hydrate_command_execution_identity(conn, row)
                 for env_key, snapshot_key in (
@@ -5731,10 +5752,28 @@ def reconcile_mixed_token_entry_position_repairs(conn: sqlite3.Connection, clien
                     raise ValueError("command-token-not-exact-selected-topology-token")
                 if not _edli_event_id_from_decision_id(str(candidate.get("decision_id") or "")):
                     raise ValueError("missing-edli-certificate-identity")
-                case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
+                actionable, certificate_hash = _verified_edli_actionable_certificate(
+                    conn,
+                    event_id=_edli_event_id_from_decision_id(str(candidate.get("decision_id") or "")),
+                    token_id=str(candidate.get("token_id") or ""),
+                )
+                if not actionable or not certificate_hash:
+                    raise ValueError("missing-revoked-or-malformed-exact-actionable-certificate")
+                case = _edli_trade_case_for_command(
+                    conn,
+                    candidate,
+                    client=client,
+                    actionable_payload=actionable,
+                    forbid_event_context=True,
+                )
+                decision_log_id = None
                 if not case:
                     raise ValueError("missing-or-revoked-exact-certificate")
-                positions.append(_filled_entry_recovery_position(candidate, case, decision_log_id=decision_log_id))
+                position = _filled_entry_recovery_position(
+                    candidate, case, decision_log_id=decision_log_id
+                )
+                positions.append(position)
+                certificate_hash_by_command[str(position.command_id)] = certificate_hash
             grouped: dict[str, list[SimpleNamespace]] = {}
             for position in positions:
                 held = str(position.no_token_id if position.direction == "buy_no" else position.token_id)
@@ -5745,6 +5784,8 @@ def reconcile_mixed_token_entry_position_repairs(conn: sqlite3.Connection, clien
                 conn.execute(f"RELEASE SAVEPOINT {sp}")
                 summary["stayed"] += 1
                 continue
+            if any(len(members) != 1 for members in grouped.values()):
+                raise ValueError("multiple-commands-share-held-token-no-command-exact-attribution")
             # The root belongs to the first authenticated fill, not to the
             # corrupted projection's direction/token columns.
             root_row = rows[0]
@@ -5771,13 +5812,14 @@ def reconcile_mixed_token_entry_position_repairs(conn: sqlite3.Connection, clien
                              size_usd=float(total_cost), entry_price=float(total_cost / total_shares),
                              command_id=str(seed.command_id), order_id=str(seed.order_id), entry_order_id=str(seed.order_id))
                 rebuilt = SimpleNamespace(**attrs)
+                certificate_hash = certificate_hash_by_command.get(str(seed.command_id), "")
+                if not certificate_hash:
+                    raise ValueError("missing-command-exact-actionable-certificate-hash")
                 evidence = [{"command_id": p.command_id, "trade_fact_id": p.source_trade_fact_id,
                              "trade_fact_ids": str(getattr(p, "source_trade_fact_ids", None) or p.source_trade_fact_id).split(","),
-                             "snapshot_id": p.executable_snapshot_id, "held_token_id": held}
+                             "snapshot_id": p.executable_snapshot_id, "held_token_id": held,
+                             "certificate_hash": certificate_hash}
                             for p in members]
-                certificate_hash = _split_exact_actionable_certificate_hash(
-                    conn, decision_id=str(seed.decision_id), held_token_id=held
-                )
                 projection = build_position_current_projection(rebuilt)
                 latest = _latest_position_sequence(conn, target)
                 append_many_and_project(conn, [_split_repair_event(rebuilt, root=root, child=target != root,
@@ -5810,7 +5852,7 @@ def reconcile_mixed_token_entry_position_repairs(conn: sqlite3.Connection, clien
             _split_repair_review(conn, root, rows, str(exc))
             conn.execute(f"RELEASE SAVEPOINT {sp}")
             summary["reviewed"] += 1
-        except Exception as exc:
+        except Exception:
             conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
             conn.execute(f"RELEASE SAVEPOINT {sp}")
             logger.exception("mixed-token position repair failed root=%s", root)

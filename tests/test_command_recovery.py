@@ -145,9 +145,17 @@ def test_mixed_token_entry_repair_splits_authenticated_groups_idempotently_and_r
 
     monkeypatch.setattr(recovery, "_mixed_token_entry_rows", lambda _conn: {"root": rows})
     monkeypatch.setattr(recovery, "_hydrate_command_execution_identity", lambda _conn, row: row)
-    monkeypatch.setattr(recovery, "_decision_log_trade_case_for_command", lambda _conn, candidate, client=None: ({"ok": True}, None))
+    monkeypatch.setattr(
+        recovery,
+        "_verified_edli_actionable_certificate",
+        lambda _conn, *, event_id, token_id: ({"token_id": token_id}, f"cert:{event_id}:{token_id}"),
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_edli_trade_case_for_command",
+        lambda _conn, candidate, **_kwargs: {"ok": True},
+    )
     monkeypatch.setattr(recovery, "_filled_entry_recovery_position", lambda candidate, _case, decision_log_id=None: positions[candidate["command_id"]])
-    monkeypatch.setattr(recovery, "_split_exact_actionable_certificate_hash", lambda *_args, **_kwargs: "cert")
     monkeypatch.setattr("src.engine.lifecycle_events.build_position_current_projection", lambda position: {"position_id": position.trade_id, "shares": position.shares, "cost_basis_usd": position.cost_basis_usd})
     monkeypatch.setattr("src.state.venue_command_repo.record_position_decision_attribution", lambda *_args, **_kwargs: None)
 
@@ -185,6 +193,105 @@ def test_mixed_token_entry_repair_splits_authenticated_groups_idempotently_and_r
     assert conn.execute("SELECT position_id FROM execution_fact WHERE command_id = 'yes-cmd'").fetchone()[0] == "root"
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
 
+    conn.close()
+
+
+@pytest.mark.parametrize("authority_state", ["valid", "revoked", "malformed"])
+def test_b71_actionable_certificate_authority_is_verifier_backed_and_fail_closed(conn, authority_state):
+    """B71 uses its actual verifier and revocation store, never event context."""
+    from src.execution.command_recovery import _verified_edli_actionable_certificate
+
+    cert_hash = _insert_actionable_certificate_for_recovery(
+        conn,
+        event_id="evt-b71-authority",
+        token_id="token-b71",
+        quarantine=authority_state == "revoked",
+    )
+    if authority_state == "malformed":
+        row = conn.execute(
+            "SELECT payload_json FROM decision_certificates WHERE certificate_hash = ?",
+            (cert_hash,),
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload.pop("q_live")
+        conn.execute(
+            "UPDATE decision_certificates SET payload_json = ? WHERE certificate_hash = ?",
+            (json.dumps(payload, sort_keys=True), cert_hash),
+        )
+
+    payload, resolved_hash = _verified_edli_actionable_certificate(
+        conn, event_id="evt-b71-authority", token_id="token-b71"
+    )
+
+    if authority_state == "valid":
+        assert payload["token_id"] == "token-b71"
+        assert resolved_hash == cert_hash
+    else:
+        assert (payload, resolved_hash) == ({}, "")
+
+
+def test_b71_multi_command_held_token_group_is_review_only(monkeypatch):
+    """UNIQUE(position_id) attribution cannot name two commands: never split."""
+    from src.execution import command_recovery as recovery
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE position_events (position_id TEXT, event_type TEXT, sequence_no INTEGER);
+        CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, position_id TEXT);
+        CREATE TABLE execution_fact (intent_id TEXT PRIMARY KEY, command_id TEXT, position_id TEXT);
+        INSERT INTO venue_commands VALUES ('no-cmd', 'root'), ('yes-cmd-1', 'root'), ('yes-cmd-2', 'root');
+        INSERT INTO execution_fact VALUES ('root:no', 'no-cmd', 'root'),
+                                          ('root:yes-1', 'yes-cmd-1', 'root'),
+                                          ('root:yes-2', 'yes-cmd-2', 'root');
+        """
+    )
+    rows = []
+    positions = {}
+    for command_id, token_id, direction, shares, cost in (
+        ("no-cmd", "no", "buy_no", 5.2, 1.768),
+        ("yes-cmd-1", "yes", "buy_yes", 3.0, 2.64),
+        ("yes-cmd-2", "yes", "buy_yes", 3.5, 3.08),
+    ):
+        rows.append({
+            "position_id": "root", "command_id": command_id, "projected_phase": "active",
+            "decision_id": f"edli_exec_cmd:event-{command_id}:x", "token_id": token_id,
+            "env_condition_id": "condition", "snapshot_condition_id": "condition",
+            "env_yes_token_id": "yes", "snapshot_yes_token_id": "yes",
+            "env_no_token_id": "no", "snapshot_no_token_id": "no",
+            "env_selected_outcome_token_id": token_id,
+            "snapshot_selected_outcome_token_id": token_id,
+        })
+        positions[command_id] = SimpleNamespace(
+            trade_id="root", command_id=command_id, direction=direction,
+            token_id="yes", no_token_id="no", shares=shares, cost_basis_usd=cost,
+            entered_at="2026-07-24T00:00:00+00:00", strategy_key="center_buy",
+            decision_id=f"edli_exec_cmd:event-{command_id}:x", decision_snapshot_id="snap",
+            executable_snapshot_id="snap", source_trade_fact_id=1, order_id=f"ord-{command_id}",
+            entry_order_id=f"ord-{command_id}", env="test",
+        )
+
+    monkeypatch.setattr(recovery, "_mixed_token_entry_rows", lambda _conn: {"root": rows})
+    monkeypatch.setattr(recovery, "_hydrate_command_execution_identity", lambda _conn, row: row)
+    monkeypatch.setattr(
+        recovery,
+        "_verified_edli_actionable_certificate",
+        lambda _conn, *, event_id, token_id: ({"token_id": token_id}, f"cert:{event_id}"),
+    )
+    monkeypatch.setattr(recovery, "_edli_trade_case_for_command", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        recovery,
+        "_filled_entry_recovery_position",
+        lambda candidate, _case, decision_log_id=None: positions[candidate["command_id"]],
+    )
+
+    result = recovery.reconcile_mixed_token_entry_position_repairs(conn)
+
+    assert result["reviewed"] == 1 and result["advanced"] == 0, result
+    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    assert {row[0] for row in conn.execute("SELECT position_id FROM venue_commands")} == {"root"}
+    assert {row[0] for row in conn.execute("SELECT position_id FROM execution_fact")} == {"root"}
     conn.close()
 
 

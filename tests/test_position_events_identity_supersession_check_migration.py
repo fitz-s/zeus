@@ -402,6 +402,18 @@ def test_b71_migration_admits_split_reconstruction_literal_and_is_idempotent(tmp
     assert len(list(backup_dir.glob("*"))) == 1
 
 
+def test_b71_migration_is_fenced_apply_only_not_dry_run():
+    with pytest.raises(SystemExit):
+        b71_mig.main(["--dry-run"])
+
+    manifest = (ROOT / "architecture" / "script_manifest.yaml").read_text()
+    entry = manifest.split("  2026_07_position_token_split_reconstructed.py:", 1)[1].split(
+        "\n  measure_wu_obs_latency.py:", 1
+    )[0]
+    assert "dry_run_default: false" in entry
+    assert 'apply_flag: "--operator-confirms-fenced"' in entry
+
+
 def test_migration_no_op_when_db_missing(tmp_path, fixture_env):
     state_dir = tmp_path / "state_never_created"
     rc = mig.main([
