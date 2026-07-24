@@ -955,9 +955,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- Wave 1 forensic audit script (2026-05-27) ---
         "scripts/audit_market_price_semantics.py",  # read_only: bare sqlite3.connect() only via --db-path override; canonical path uses get_trade_connection_read_only(); SELECT-only; never writes
         # --- Zeus #64 SD3: two-phase replay-consumption + gate-aware regen driver (2026-05-28) ---
-        "scripts/selective_refit_from_manifest.py",  # read_only_preflight: _read_stored_gate_hash opens staging DB mode=ro to read gate_set_hash; no writes in that helper; all MC regen writes go through rebuild_calibration_pairs_v2 (already_guarded)
         # --- Zeus #64 SD6: MC entry gate (P0-P3 code gates) (2026-05-28) ---
-        "scripts/mc_entry_gate.py",  # read_only_gate: P0 opens world DB mode=ro; P2 uses an isolated :memory: DB for the reader-behaviour check; never writes any production DB
         # --- one-shot admin: drain stale PARTIAL FSR events from opportunity_events (2026-05-31) ---
         "scripts/purge_partial_fsr_events.py",  # operator_invoked: drops/restores no_delete+no_update triggers; DELETE PARTIAL FSR rows only; ran once 2026-05-31 (941 rows); idempotent
         # --- ThePath P1 (2026-06-07): activate the Day0 nowcast lane / start the obs-timing clock ---
