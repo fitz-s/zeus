@@ -9791,6 +9791,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=22",
             "BLOCKED",
         ),
+        (
+            "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:"
+            "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+            "policy=MAKER_TAKER_FORBIDDEN",
+            "CANDIDATE_BLOCKED",
+        ),
     ),
 )
 def test_global_preflight_block_scope_is_explicit(reason, status):
@@ -10093,6 +10099,44 @@ def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unpr
         "SUBMIT_ABORTED_MODE_FLIPPED:proof_mode=TAKER:fresh_mode=None:"
     )
     assert era._global_preflight_block_status(revalidated.reason) == "CANDIDATE_BLOCKED"
+
+
+def test_global_preflight_falls_through_non_actionable_winner_before_mode_redecision(
+    monkeypatch,
+):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        execution_mode_intent="MAKER",
+        rest_then_cross_policy="MAKER_TAKER_FORBIDDEN",
+        proof_accepted=True,
+    )
+    monkeypatch.setattr(
+        era,
+        "_fresh_rest_then_cross_mode",
+        lambda **_kwargs: pytest.fail("known-impossible proof must re-auction"),
+    )
+
+    rejected = era._global_preflight_candidate_mode_receipt(
+        event,
+        receipt,
+        current_candidate=object(),
+        fresh_best_bid=0.83,
+        fresh_best_ask=0.92,
+        checked_at_utc=at,
+    )
+
+    assert rejected.proof_accepted is False
+    assert rejected.side_effect_status == "NO_SUBMIT"
+    assert rejected.reason == (
+        "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:"
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+        "policy=MAKER_TAKER_FORBIDDEN"
+    )
+    assert era._global_preflight_block_status(rejected.reason) == "CANDIDATE_BLOCKED"
 
 
 def test_global_preflight_falls_through_sub_band_maker_winner(monkeypatch):

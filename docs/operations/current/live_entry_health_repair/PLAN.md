@@ -1019,3 +1019,46 @@ Restore truthful live entry admission after the global auction reached a real wi
   The Guangzhou false winner disappears from a current read-only replay;
   focused wealth/global-auction/preflight tests and the performance evaluator
   run before exact-SHA deployment.
+
+## Slice B72 -- Re-auction a selected candidate whose order policy is impossible
+
+- Live proof: after the Seoul fill, complete auctions repeatedly selected San
+  Francisco Jul25 HIGH NO at a `0.92` ask, but every actuation failed before
+  venue submission with
+  `QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN`.
+  The current probability, book, and wealth epoch were complete; the wide
+  two-sided spread correctly made taker crossing inadmissible, while the
+  already-expired maker lane could no longer rest. Preflight nevertheless
+  returned `STABLE`, so the same known-unexecutable candidate monopolized later
+  epochs instead of comparing the remaining BUY/SELL/HOLD/CASH set.
+- First-principles invariant: a positive capital objective is necessary but not
+  sufficient for an order. A candidate whose own current order-policy
+  certificate permits neither maker nor taker is outside the executable
+  feasible set; that fact invalidates only the exact candidate, not the current
+  probability/book/wealth epoch or its siblings.
+- Minimal repair: make the venue-side-effect-free winner preflight reject an
+  exact `MAKER_TAKER_FORBIDDEN` proof as candidate-local before certificate
+  build, then use the existing same-epoch candidate exclusion and re-auction
+  path. Preserve the spread guard and all q, Kelly, fee, depth, price-band,
+  family exposure, and final submit checks.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, and this packet.
+- Forbidden: force or synthesize an order; turn a wide-spread candidate into a
+  taker; clear an operator pause; alter Wellington; weaken probability, quote,
+  Kelly, price-band, or venue authority; mutate/copy a canonical DB.
+- Acceptance: preflight emits one typed, side-effect-free candidate-local
+  rejection for `MAKER_TAKER_FORBIDDEN`; the existing global batch excludes
+  only that exact candidate and immediately re-auctions its sibling/runner-up
+  in the same epoch. Unknown policy failures remain batch- or family-scoped as
+  already classified. Focused W3, complete W3/evaluator, compilation,
+  planning-lock, and `git diff --check` pass before exact-SHA deployment.
+- Verification: the candidate classifier, early no-mode/no-submit rejection,
+  same-family sibling fallthrough, ordinary fresh-mode redecision, and
+  sub-band maker fallthrough pass `34/34`. Complete W3 passes `272` and retains
+  three failures reproduced unchanged on live `ad655f5f1` (two fake
+  `object()` DB connections and one incomplete in-memory snapshot schema).
+  The broad SOLVE/qkernel/decision-certificate/W3 evaluator passes `1068` and
+  retains those three plus three decision-certificate fixture failures also
+  reproduced unchanged on `ad655f5f1`. Compilation, planning-lock, and
+  `git diff --check` pass; no canonical DB, control override, or venue state
+  changed during worktree verification.

@@ -11494,6 +11494,7 @@ def _global_preflight_block_status(reason: str) -> str:
     if reason.startswith(
         (
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",
+            "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:",
             "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:",
             "GLOBAL_PREFLIGHT_CANDIDATE_UNIT_PRICE_INVALID:",
         )
@@ -11782,6 +11783,19 @@ def _global_preflight_candidate_mode_receipt(
     proof_mode = str(receipt.execution_mode_intent or "").strip().upper()
     if proof_mode not in {"MAKER", "TAKER"}:
         return receipt
+    rest_policy = str(receipt.rest_then_cross_policy or "").strip().upper()
+    if rest_policy == "MAKER_TAKER_FORBIDDEN":
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=(
+                "GLOBAL_PREFLIGHT_CANDIDATE_NOT_ACTIONABLE:"
+                "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:"
+                "policy=MAKER_TAKER_FORBIDDEN"
+            ),
+            proof_accepted=False,
+        )
     proof_bundle = receipt.decision_proof_bundle
     executable_snapshot = getattr(proof_bundle, "executable_snapshot", None)
     snapshot_payload = getattr(executable_snapshot, "payload", None)
