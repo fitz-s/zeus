@@ -5740,15 +5740,24 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
 
 
 @pytest.mark.parametrize(
-    ("condition_a_executable", "expected_book_calls"),
+    ("condition_a_executable", "absent_token", "expected_book_calls"),
     (
-        (True, [("yes-token-a", "no-token-a")]),
-        (False, []),
+        (True, None, [("yes-token-a", "no-token-a")]),
+        (
+            True,
+            "no-token-a",
+            [
+                ("yes-token-a", "no-token-a"),
+                ("no-token-a",),
+            ],
+        ),
+        (False, None, []),
     ),
 )
 def test_live_adapter_day0_binds_tradeability_before_fetching_executable_books(
     monkeypatch,
     condition_a_executable,
+    absent_token,
     expected_book_calls,
 ):
     trade = sqlite3.connect(":memory:")
@@ -5855,6 +5864,7 @@ def test_live_adapter_day0_binds_tradeability_before_fetching_executable_books(
             return {
                 token: {"asset_id": token, "hash": f"hash-{token}"}
                 for token in tokens
+                if token != absent_token
             }
 
     def fake_capture(_trade_conn, **kwargs):
@@ -5863,6 +5873,11 @@ def test_live_adapter_day0_binds_tradeability_before_fetching_executable_books(
             if condition_a_executable
             else set()
         )
+        if absent_token is not None:
+            assert kwargs["prefetched_books"][absent_token] == {
+                "asset_id": absent_token,
+                "_global_confirmed_absent": True,
+            }
         assert kwargs["prefetched_at_utc"].tzinfo is not None
         return SimpleNamespace(
             witness_identity="book-current",
@@ -12548,6 +12563,60 @@ def test_current_global_book_epoch_rejects_one_missing_native_side():
             max_age=_dt.timedelta(seconds=30),
             batch_size=500,
         )
+
+
+def test_current_global_book_epoch_localizes_exact_retry_confirmed_absence():
+    from src.engine.global_auction_universe import (
+        GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD,
+    )
+
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(probability)
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+    tokens = tuple(
+        token
+        for binding in probability.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    )
+    absent = tokens[-1]
+    books = {
+        token: {
+            "asset_id": token,
+            "hash": f"book-{token}",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [],
+            "asks": [{"price": "0.30", "size": "100"}],
+        }
+        for token in tokens[:-1]
+    }
+    books.update(era._global_book_exact_retry_facts((absent,), {}))
+
+    assert books[absent] == {
+        "asset_id": absent,
+        GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD: True,
+    }
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={probability.family_key: probability},
+        get_books=lambda requested: {
+            token: books[token]
+            for token in requested
+        },
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        batch_size=500,
+    )
+
+    absent_state = next(
+        state
+        for state in epoch.asset_states
+        if state[4] == absent
+    )
+    assert absent_state[5] == "VENUE_NOT_EXECUTABLE"
+    assert absent not in {asset.token_id for asset in epoch.assets}
+    assert len(epoch.assets) == len(tokens) - 1
 
 
 def test_current_global_book_epoch_overlaps_chunks_and_preserves_window():

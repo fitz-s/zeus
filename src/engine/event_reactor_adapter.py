@@ -953,6 +953,42 @@ def _global_book_prefetch_tokens(
     )
 
 
+def _global_book_exact_retry_facts(
+    missing_tokens: tuple[str, ...],
+    retry_books: Mapping[str, Mapping[str, object]],
+) -> dict[str, Mapping[str, object]]:
+    """Normalize a successful exact retry into book or confirmed-absence facts."""
+
+    from src.engine.global_auction_universe import (
+        GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD,
+    )
+
+    tokens = tuple(str(token or "").strip() for token in missing_tokens)
+    token_set = set(tokens)
+    if (
+        not tokens
+        or any(not token for token in tokens)
+        or len(token_set) != len(tokens)
+        or not isinstance(retry_books, Mapping)
+        or any(str(token) not in token_set for token in retry_books)
+    ):
+        raise ValueError("GLOBAL_BOOK_EXACT_RETRY_INVALID")
+    facts = {
+        str(token): raw
+        for token, raw in retry_books.items()
+        if isinstance(raw, Mapping)
+    }
+    for token in tokens:
+        facts.setdefault(
+            token,
+            {
+                "asset_id": token,
+                GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD: True,
+            },
+        )
+    return facts
+
+
 def _global_book_actionable_topology(
     probabilities: Mapping[str, object],
     *,
@@ -8506,11 +8542,13 @@ def event_bound_live_adapter_from_trade_conn(
                         else None
                     )
                 if prefetched is None:
-                    return _prefetch_books(
+                    prefetched = _prefetch_books(
                         probability_slice,
                         mode=mode,
                         token_override=exact_tokens,
                     )
+                    if prefetched is None:
+                        return None
                 _, prefetched_books, prefetched_at = prefetched
                 missing_tokens = tuple(
                     token
@@ -8528,7 +8566,12 @@ def event_bound_live_adapter_from_trade_conn(
                     if supplement is None:
                         return None
                     _, supplement_books, supplement_at = supplement
-                    books.update(supplement_books)
+                    books.update(
+                        _global_book_exact_retry_facts(
+                            missing_tokens,
+                            supplement_books,
+                        )
+                    )
                     epoch_at = min(epoch_at, supplement_at)
                 return exact_tokens, books, epoch_at
 
