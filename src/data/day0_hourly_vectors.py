@@ -47,7 +47,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Iterable, Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.data.openmeteo_quota import quota_tracker
 
@@ -390,6 +390,18 @@ def persist_day0_hourly_vectors(
                 conn = get_forecasts_connection(write_class=WriteClass.LIVE)
             _ensure_schema(conn)
             for vector in vectors:
+                if not _vector_covers_target_from_capture(
+                    vector, target_date=target_date
+                ):
+                    logger.warning(
+                        "DAY0_HOURLY_VECTOR_TARGET_COVERAGE_REJECTED "
+                        "city=%s model=%s target_date=%s captured_at=%s",
+                        vector.city,
+                        vector.model,
+                        target_date,
+                        vector.captured_at,
+                    )
+                    continue
                 row_id = _vector_id(vector.model, vector.city, target_date, vector.captured_at)
                 cur = conn.execute(
                     """
@@ -422,6 +434,39 @@ def persist_day0_hourly_vectors(
         if own_conn and conn is not None:
             conn.close()
     return written
+
+
+def _vector_covers_target_from_capture(
+    vector: Day0HourlyVector,
+    *,
+    target_date: str,
+) -> bool:
+    """Require exact target-day support still usable at capture time."""
+
+    try:
+        target = date.fromisoformat(str(target_date)[:10])
+        captured = datetime.fromisoformat(
+            str(vector.captured_at).replace("Z", "+00:00")
+        )
+        tz = ZoneInfo(vector.timezone_name)
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return False
+    if captured.tzinfo is None:
+        return False
+    captured = captured.astimezone(UTC)
+    captured_day = captured.astimezone(tz).date()
+    if captured_day > target:
+        return False
+    boundary = (
+        captured
+        if captured_day == target
+        else datetime.combine(target, datetime_time.min, tzinfo=tz)
+    )
+    return day0_hourly_vectors_cover_remaining_window(
+        [vector],
+        target_date=target_date,
+        window_start=boundary,
+    )
 
 
 def read_freshest_day0_hourly_vectors(
@@ -499,11 +544,24 @@ def read_freshest_day0_hourly_vectors(
                     continue
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
-            freshest[model] = Day0HourlyVector(
+            candidate = Day0HourlyVector(
                 model=model, city=str(row[1]), target_date=str(row[2]),
                 timezone_name=str(row[3]), captured_at=str(row[4]),
                 times=times, temps_c=temps,
             )
+            if (
+                require_complete_remaining_window
+                and (
+                    remaining_window_start is None
+                    or not day0_hourly_vectors_cover_remaining_window(
+                        [candidate],
+                        target_date=target_date,
+                        window_start=remaining_window_start,
+                    )
+                )
+            ):
+                continue
+            freshest[model] = candidate
         if require_expected and expected and any(model not in freshest for model in expected):
             return []
         if (

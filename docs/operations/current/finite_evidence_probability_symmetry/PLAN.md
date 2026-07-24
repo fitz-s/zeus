@@ -1346,3 +1346,27 @@ Acceptance requires:
 - existing known-empty/unknown-chain, multi-lot, pending-exit, canonical
   append/projection, and live-safety reconciliation suites remain green;
 - planning-lock, source compile, and diff checks pass before hot-fix landing.
+
+## 2026-07-24 Day0 target-window coverage at persistence and selection
+
+The loss time-series audit found persisted hourly vectors whose
+`target_date=2026-07-23` but whose provider grid began on July 24. The writer
+stamped one two-day response under both requested dates without proving that
+the response still covered each target's causal remaining window. The reader
+then selected the newest row per model before checking coverage, so one newer
+wrong-day row hid an older, still-fresh and complete target-day trajectory.
+This converts a usable probability refresh into avoidable fail-closed
+unavailability exactly when a held position needs continuous re-decision.
+
+The canonical contract is target-window coverage, not response recency alone.
+A vector may be persisted under the current local target only when it covers
+every hourly grid point from capture through local-day end, and under the next
+target only when it covers that complete local day. The live reader selects
+the newest eligible row per model, skipping target-incomplete rows before
+forming the required model bundle. No target-date rewriting, interpolation,
+forecast fallback, or cross-day reuse is allowed.
+
+Acceptance requires a wrong-day persistence antibody, an existing-row
+fallback antibody, the full Day0 remaining-day suite, compile/diff checks, and
+no weakening of model completeness, capture-skew, freshness, or causal-window
+gates.

@@ -27,7 +27,9 @@ Contracts:
 """
 from __future__ import annotations
 
+import json
 import sqlite3
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -285,6 +287,78 @@ class TestPersistence:
             now=datetime(2026, 6, 10, 9, 30, tzinfo=UTC), conn=conn,
         )
         assert len(out) == 1 and out[0].temps_c[0] == 20.0
+
+    def test_target_date_without_remaining_grid_is_not_persisted(self):
+        conn = _conn()
+        wrong_day = replace(
+            _vector(
+                captured_at=datetime(2026, 6, 10, 10, 0, tzinfo=UTC),
+                temps=[20.0] * 24,
+            ),
+            times=tuple(f"2026-06-11T{hour:02d}:00" for hour in range(24)),
+        )
+
+        assert persist_day0_hourly_vectors(
+            [wrong_day],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:wrong-day",
+            now=PRUNE_NOW,
+        ) == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM day0_hourly_vectors"
+        ).fetchone()[0] == 0
+
+    def test_reader_falls_back_past_newer_target_incomplete_vector(self):
+        conn = _conn()
+        old = _vector(
+            captured_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            temps=[18.0] * 24,
+        )
+        persist_day0_hourly_vectors(
+            [old],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:old-valid",
+            now=PRUNE_NOW,
+        )
+        bad = replace(
+            _vector(
+                captured_at=datetime(2026, 6, 10, 10, 0, tzinfo=UTC),
+                temps=[30.0] * 24,
+            ),
+            times=tuple(f"2026-06-11T{hour:02d}:00" for hour in range(24)),
+        )
+        conn.execute(
+            """
+            INSERT INTO day0_hourly_vectors (
+                vector_id, model, city, target_date, timezone_name,
+                captured_at, endpoint, request_hash, times_json, temps_c_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-bad-row", bad.model, bad.city, "2026-06-10",
+                bad.timezone_name, bad.captured_at,
+                "https://example.invalid", "sha256:legacy-bad",
+                json.dumps(list(bad.times)), json.dumps(list(bad.temps_c)),
+            ),
+        )
+        conn.commit()
+
+        out = read_freshest_day0_hourly_vectors(
+            city="Paris",
+            target_date="2026-06-10",
+            now=datetime(2026, 6, 10, 10, 30, tzinfo=UTC),
+            conn=conn,
+            remaining_window_start=datetime(
+                2026, 6, 10, 10, 30, tzinfo=UTC
+            ),
+            require_complete_remaining_window=True,
+        )
+
+        assert len(out) == 1
+        assert out[0].captured_at == old.captured_at
+        assert out[0].temps_c[0] == 18.0
 
     def test_require_expected_rejects_partial_model_bundle(self):
         """Munich regression: one fresh regional vector is not a complete live bundle."""
