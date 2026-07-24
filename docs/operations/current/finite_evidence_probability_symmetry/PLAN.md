@@ -58,6 +58,50 @@ held slots offered, including throttled/failed slots, and takes modulo the full
 held-capital segment. This preserves the bounded HTTP budget while guaranteeing
 coverage; it increases fairness, not request volume.
 
+## 2026-07-23 Day0 expected-value and maturity composition
+
+The Mexico City 26C NO receipt isolated a downstream category error after its
+fresh held probability fell to 3.73% and its executable bid still paid 20.7c.
+Its entry and current confidence intervals were disjoint, yet the exit evaluator
+priced HOLD with the current 37.33% upper confidence bound. A confidence bound
+is evidence for or against reversal, not the expected terminal payoff. Reusing
+it as payoff blocked thirteen of fourteen executable adverse cuts and stranded
+the leg below the venue's legal exit band.
+
+The 72-hour Ankara 31C YES winner refutes an unconditional point-q liquidation:
+an early-day disjoint reversal at q=10% and bid=42c later settled in the held
+side's favor. The missing discriminator is causal time. The Day0 remaining-day
+builder already emits whether the observed extreme is mature enough to sponsor
+a statistical exit, but the current-global materializer dropped that evidence
+before family redecision.
+
+The correction composes the existing authorities instead of adding a price
+stop. CI separation remains the confidence gate; current point-q supplies the
+Day0 expected HOLD payoff; current-global refresh carries the temporal maturity
+reason; and family redecision blocks an otherwise valid statistical exit until
+that reason clears. Non-Day0 and near-settlement UCB comparisons are unchanged.
+A low-priced claim with high fresh expected value remains held, while a mature
+reversal is monetized before its bid becomes unexecutable.
+
+The downstream global auction exposed a second category error: it independently
+re-scored every held SELL with lower-CVaR parameter draws and could veto the
+local fixed-action expected-value decision. The 72-hour counterfactual set
+contains both sides of the discriminator: Mexico City was a mature mean-positive
+sale stranded by the tail objective, while Ankara and current Cape Town were
+early mean-positive reversals that maturity must exclude. Outcome knowledge is
+not an input to either decision.
+
+The global correction therefore makes three different statements in three
+different types. Temporal authority determines whether a Day0 statistical SELL
+exists in the feasible set and is bound to the exact probability witness.
+Action economics determine size and safe FAK prefixes: mature Day0 SELL uses
+posterior-mean expected log wealth and EV in `expected_*`, while BUY keeps robust
+admission/sizing. Finally, every admitted fixed proposal receives the same
+posterior-mean expected-log-growth comparison for cross-action ranking. Mean
+numbers are never written into `robust_*`; selection-time maturity is rebuilt at
+submit before any venue call. Receipt schema 17 / candidate v11 / holding v2
+make those distinctions auditable.
+
 ## 2026-07-23 loss-to-zero causality correction
 
 The 72-hour loss census and decision-time reconstruction found three defects that

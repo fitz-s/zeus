@@ -222,6 +222,8 @@ class ExitContext:
     position_state: str = ""
     day0_active: bool = False
     day0_zero_probability_exit_authority: bool = False
+    day0_exit_authority_status: str = "not_applicable"
+    day0_exit_authority_reason: str = "non_day0_or_legacy_context"
     whale_toxicity: Optional[bool] = None
     chain_is_fresh: Optional[bool] = None
     divergence_score: float = 0.0
@@ -1132,6 +1134,25 @@ class Position:
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
             applied.append("day0_standard_exit_optimizer")
+            if (
+                not exit_context.day0_zero_probability_exit_authority
+                and exit_context.day0_exit_authority_status
+                in {"immature", "unavailable"}
+            ):
+                applied.append(
+                    "day0_statistical_exit_temporally_"
+                    f"{exit_context.day0_exit_authority_status}"
+                )
+                applied.append(exit_context.day0_exit_authority_reason)
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "DAY0_STATISTICAL_EXIT_AUTHORITY_"
+                    f"{exit_context.day0_exit_authority_status.upper()}",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="DAY0_STATISTICAL_EXIT_TEMPORALLY_BLOCKED",
+                )
 
         current_hold_q_ucb = _held_side_ci_ucb(
             exit_context.current_ci,
@@ -1462,9 +1483,25 @@ class Position:
                         applied_validations=list(self.applied_validations),
                         trigger=hold_reason,
                     )
-                applied.append("hold_value_probability_basis:current_q_ucb")
+                # CI separation is already the confidence gate.  For Day0, the
+                # current observation plus remaining-window model defines the
+                # expected terminal payoff; its UCB is an uncertainty envelope,
+                # not an alternative expectation.  Substituting that optimistic
+                # tail here can strand a reversed leg until its bid is
+                # unexecutable.  Preserve the UCB comparison for non-Day0 cuts,
+                # whose posterior has no Day0 observation authority.
+                hold_probability = (
+                    current_held
+                    if exit_context.day0_active
+                    else current_hold_q_ucb
+                )
+                applied.append(
+                    "hold_value_probability_basis:current_point_q"
+                    if exit_context.day0_active
+                    else "hold_value_probability_basis:current_q_ucb"
+                )
                 sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=current_hold_q_ucb,
+                    current_p_posterior=hold_probability,
                     best_bid=exit_context.best_bid,
                     hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,

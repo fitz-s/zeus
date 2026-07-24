@@ -639,6 +639,58 @@ def test_unobserved_prefix_monitor_uses_global_sample_mean_not_scalar_point() ->
     assert receipt["remaining_window"] is None
 
 
+def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None:
+    import numpy as np
+
+    condition_id = "0x" + "75" * 32
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                bin_id="31C",
+                condition_id=condition_id,
+                yes_token_id="yes-31",
+                no_token_id="no-31",
+            ),
+        ),
+        yes_q_samples=np.array([[0.0], [0.2]]),
+        witness_identity="remaining-window-witness",
+        q_version="remaining-window-q",
+        source_truth_identity="remaining-window-truth",
+        band_basis="current_coherent_day0_remaining_model_bootstrap_v3",
+        band_alpha=0.05,
+    )
+    maturity_reason = (
+        "day0_high_extreme_not_mature:"
+        "daypart=pre_sunrise,post_peak_confidence=0.034"
+    )
+    snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=((condition_id, "yes-31", "no-31"),),
+        deterministic_condition_ids=frozenset(),
+        day0_payload={
+            "_edli_day0_exit_authority_status": "immature",
+            "_edli_day0_exit_authority_reason": maturity_reason,
+        },
+        metric="high",
+    )
+    pos = _make_position()
+    pos.condition_id = condition_id
+    pos.direction = "buy_yes"
+    pos.token_id = "yes-31"
+    pos.no_token_id = "no-31"
+
+    probability, refreshed, fresh = (
+        monitor_refresh_module._materialize_current_global_day0_probability(
+            pos,
+            snapshot,
+        )
+    )
+
+    assert probability == pytest.approx(0.1)
+    assert fresh is True
+    assert maturity_reason in refreshed.applied_validations
+
+
 def test_provisional_day0_monitor_uses_replacement_probability_without_hard_fact_stamp() -> None:
     import numpy as np
 

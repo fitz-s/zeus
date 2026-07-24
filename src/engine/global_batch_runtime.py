@@ -1396,6 +1396,9 @@ def _store_global_auction_receipt(
             Decimal(row.held_shares).quantize(
                 Decimal("0.01"), rounding=ROUND_FLOOR
             ),
+            row.sell_exit_authority_status,
+            row.sell_exit_authority_reason,
+            row.sell_action_authority_identity,
         )
         for row in holding_coverage
         if row.status == "EVALUATED"
@@ -1410,6 +1413,9 @@ def _store_global_auction_receipt(
             str(evaluation.side),
             str(evaluation.token_id),
             Decimal(evaluation.held_shares),
+            str(evaluation.sell_exit_authority_status),
+            str(evaluation.sell_exit_authority_reason),
+            str(evaluation.sell_action_authority_identity),
         )
         for evaluation in evaluations
         if evaluation.action == "SELL"
@@ -1663,7 +1669,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 16,
+        "schema_version": 17,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -1756,7 +1762,7 @@ def _store_global_auction_receipt(
             row.status == "EXCLUDED" for row in holding_coverage
         ),
         "holding_auction_coverage_encoding": (
-            "zlib+base64+canonical-json-v1"
+            "zlib+base64+canonical-json-v2"
         ),
         "holding_auction_coverage_sha256": hashlib.sha256(
             holding_coverage_json
@@ -1770,7 +1776,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v10",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v11",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),

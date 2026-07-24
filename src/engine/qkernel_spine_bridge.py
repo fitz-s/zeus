@@ -360,6 +360,31 @@ class PreparedGlobalFamily:
         tuple[str, str, str, str, float], ...
     ] = ()
     day0_payoff_truth_by_bin_side: tuple[tuple[str, str, str], ...] = ()
+    day0_exit_authority_status: str = "not_applicable"
+    day0_exit_authority_reason: str = "non_day0_family"
+    sell_action_authority_identity: str = "non_day0_default_authority"
+
+
+def sell_action_authority_identity(
+    *,
+    family_key: str,
+    probability_witness_identity: str,
+    status: str,
+    reason: str,
+) -> str:
+    """Bind one statistical SELL permission to the exact served probability."""
+
+    values = tuple(str(value or "").strip() for value in (
+        family_key,
+        probability_witness_identity,
+        status,
+        reason,
+    ))
+    if not all(values):
+        raise ValueError("GLOBAL_SELL_ACTION_AUTHORITY_INCOMPLETE")
+    return hashlib.sha256(
+        "\x1f".join((*values, "sell-temporal-authority-v1")).encode("utf-8")
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -410,6 +435,8 @@ def _prepare_global_family(
     holdings_snapshot: Any | None = None,
     solution_plan: Any | None = None,
     solution_projection: Any | None = None,
+    day0_exit_authority_status: str = "not_applicable",
+    day0_exit_authority_reason: str = "non_day0_family",
 ) -> PreparedGlobalFamily:
     """Bind the full row-simplex q to its ordered condition/token topology."""
 
@@ -421,6 +448,15 @@ def _prepare_global_family(
     )
 
     validate_family_decision_contract(decision)
+    exit_status = str(day0_exit_authority_status or "").strip().lower()
+    exit_reason = str(day0_exit_authority_reason or "").strip()
+    if exit_status not in {
+        "not_applicable",
+        "mature",
+        "immature",
+        "unavailable",
+    } or not exit_reason:
+        raise ValueError("GLOBAL_DAY0_EXIT_AUTHORITY_INVALID")
     if decision.joint_q is None or decision.band is None:
         raise ValueError("GLOBAL_PROBABILITY_AUTHORITY_MISSING")
     if not str(posterior_identity_hash or "").strip():
@@ -468,6 +504,12 @@ def _prepare_global_family(
         max_age=max_age,
         witness_identity=witness_identity,
     )
+    sell_authority_identity = sell_action_authority_identity(
+        family_key=decision.case.family_id,
+        probability_witness_identity=witness_identity,
+        status=exit_status,
+        reason=exit_reason,
+    )
     seeds: list[PreparedGlobalCandidateSeed] = []
     for key, candidate in sorted(native_candidates.items()):
         if (
@@ -501,6 +543,9 @@ def _prepare_global_family(
         holdings_snapshot=holdings_snapshot,
         solution_plan=solution_plan,
         solution_projection=solution_projection,
+        day0_exit_authority_status=exit_status,
+        day0_exit_authority_reason=exit_reason,
+        sell_action_authority_identity=sell_authority_identity,
         day0_payoff_truth_by_bin_side=tuple(
             (
                 str(bin_id),
@@ -1980,6 +2025,22 @@ def decide_family_via_spine(
                     holdings_snapshot=holdings_snapshot,
                     solution_plan=solution_plan,
                     solution_projection=solution_projection,
+                    day0_exit_authority_status=(
+                        str(
+                            payload.get("_edli_day0_exit_authority_status")
+                            or "unavailable"
+                        )
+                        if is_day0_family
+                        else "not_applicable"
+                    ),
+                    day0_exit_authority_reason=(
+                        str(
+                            payload.get("_edli_day0_exit_authority_reason")
+                            or "day0_extreme_maturity_unavailable:missing"
+                        )
+                        if is_day0_family
+                        else "non_day0_family"
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 - legacy family decision remains usable
                 global_prepare_reason = (

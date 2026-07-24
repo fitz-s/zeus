@@ -1365,7 +1365,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16}
+            schema_version not in {12, 13, 14, 15, 16, 17}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -11038,14 +11038,45 @@ def _submit_current_global_sell(
         )
     now = decision_time.astimezone(UTC)
     try:
-        _current_global_actuation_prepared_family(
-            event,
-            global_actuation=global_actuation,
-            forecast_conn=forecast_conn,
-            topology_conn=topology_conn,
-            observation_conn=calibration_conn,
-            decision_time=now,
+        current_prepared, current_day0_payload = (
+            _current_global_actuation_prepared_family(
+                event,
+                global_actuation=global_actuation,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                observation_conn=calibration_conn,
+                decision_time=now,
+            )
         )
+        if getattr(candidate, "exit_authority_status", None) == "mature":
+            current_status = str(
+                getattr(
+                    current_prepared,
+                    "day0_exit_authority_status",
+                    current_day0_payload.get(
+                        "_edli_day0_exit_authority_status"
+                    ),
+                )
+                or ""
+            ).strip().lower()
+            if current_status != "mature":
+                raise ValueError(
+                    "GLOBAL_SELL_DAY0_EXIT_AUTHORITY_SUPERSEDED:"
+                    f"{current_status or 'missing'}"
+                )
+            if str(
+                getattr(
+                    current_prepared,
+                    "sell_action_authority_identity",
+                    "",
+                )
+                or ""
+            ) != str(
+                getattr(candidate, "sell_action_authority_identity", "") or ""
+            ):
+                raise ValueError(
+                    "GLOBAL_SELL_DAY0_EXIT_AUTHORITY_IDENTITY_SUPERSEDED"
+                )
         wealth_block = _global_actuation_current_wealth_block_reason(
             trade_conn,
             global_actuation=global_actuation,
@@ -11164,6 +11195,55 @@ def _submit_current_global_sell(
                 actuation=global_actuation,
                 jit_candidate=current_candidate,
             )
+            expected_growth = getattr(decision, "expected_growth", None)
+            expected_terminal = getattr(
+                decision,
+                "expected_terminal_wealth",
+                None,
+            )
+            if expected_growth is None:
+                raise ValueError("GLOBAL_SELL_EXPECTED_COMPARISON_MISSING")
+            if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
+                if expected_terminal is None:
+                    raise ValueError("GLOBAL_SELL_EXPECTED_ECONOMICS_MISSING")
+                held_q = float(expected_terminal.held_probability_mean)
+                capital_economics = {
+                    "held_probability_mean": float(
+                        expected_terminal.held_probability_mean
+                    ),
+                    "favorable_sell_probability_mean": float(
+                        expected_terminal.favorable_sell_probability_mean
+                    ),
+                    "expected_sell_delta_log_wealth": float(
+                        expected_terminal.expected_delta_log_wealth
+                    ),
+                    "expected_sell_ev_usd": float(
+                        expected_terminal.expected_ev_usd
+                    ),
+                }
+            else:
+                capital_economics = {
+                    "sell_favorable_probability_lcb": float(
+                        getattr(decision.terminal_wealth, "win_probability_lcb")
+                    ),
+                    "robust_delta_log_wealth": float(
+                        getattr(decision, "robust_delta_log_wealth")
+                    ),
+                    "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
+                }
+            capital_economics.update(
+                {
+                    "expected_comparison_delta_log_wealth": float(
+                        expected_growth.expected_delta_log_wealth
+                    ),
+                    "expected_comparison_ev_usd": float(
+                        expected_growth.expected_ev_usd
+                    ),
+                    "expected_comparison_log_growth_per_hour": float(
+                        expected_growth.expected_log_growth_per_hour
+                    ),
+                }
+            )
             exit_context = ExitContext(
                 exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
                 fresh_prob=held_q,
@@ -11204,6 +11284,23 @@ def _submit_current_global_sell(
                     "probability_witness_identity": str(
                         getattr(candidate, "probability_witness_identity", "") or ""
                     ),
+                    "sell_probability_functional": str(
+                        getattr(candidate, "probability_functional", "") or ""
+                    ),
+                    "sell_exit_authority_status": str(
+                        getattr(candidate, "exit_authority_status", "") or ""
+                    ),
+                    "sell_exit_authority_reason": str(
+                        getattr(candidate, "exit_authority_reason", "") or ""
+                    ),
+                    "sell_action_authority_identity": str(
+                        getattr(
+                            candidate,
+                            "sell_action_authority_identity",
+                            "",
+                        )
+                        or ""
+                    ),
                     "selection_epoch_identity": str(
                         getattr(global_actuation, "selection_epoch_identity", "") or ""
                     ),
@@ -11218,13 +11315,10 @@ def _submit_current_global_sell(
                         current_candidate.execution_curve_identity
                     ),
                     "held_probability_point": held_q,
-                    "sell_favorable_probability_lcb": float(
-                        getattr(decision.terminal_wealth, "win_probability_lcb")
+                    "sell_favorable_probability_functional": str(
+                        getattr(candidate, "probability_functional", "") or ""
                     ),
-                    "robust_delta_log_wealth": float(
-                        getattr(decision, "robust_delta_log_wealth")
-                    ),
-                    "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
+                    **capital_economics,
                     "held_shares": str(getattr(position, "effective_shares", "")),
                     "sellable_shares": str(getattr(candidate, "held_shares", "")),
                     "selected_shares": str(getattr(decision, "shares", "")),
@@ -12975,8 +13069,25 @@ def _current_global_actuation_prepared_family(
             current_day0_payload,
             selected,
         )
+    rebound = dataclass_replace(current, probability_witness=selected)
+    if str(getattr(rebound, "day0_exit_authority_status", "") or "") == "mature":
+        from src.engine.qkernel_spine_bridge import (
+            sell_action_authority_identity,
+        )
+
+        rebound = dataclass_replace(
+            rebound,
+            sell_action_authority_identity=sell_action_authority_identity(
+                family_key=str(getattr(selected, "family_key", "") or ""),
+                probability_witness_identity=str(
+                    getattr(selected, "witness_identity", "") or ""
+                ),
+                status=str(rebound.day0_exit_authority_status),
+                reason=str(rebound.day0_exit_authority_reason),
+            ),
+        )
     return (
-        dataclass_replace(current, probability_witness=selected),
+        rebound,
         current_day0_payload,
     )
 
@@ -30160,6 +30271,7 @@ def _prepare_current_global_probability_family(
         _event_resolution_identity,
         build_forecast_case,
         build_outcome_space,
+        sell_action_authority_identity,
     )
     from src.engine.replacement_forecast_hook_factory import (
         _latest_replacement_readiness,
@@ -30844,6 +30956,18 @@ def _prepare_current_global_probability_family(
                     ),
                     probability_witness=witness,
                     candidate_seeds=(),
+                    day0_exit_authority_status="mature",
+                    day0_exit_authority_reason=(
+                        "day0_deterministic_bin_payoff"
+                    ),
+                    sell_action_authority_identity=(
+                        sell_action_authority_identity(
+                            family_key=family.family_id,
+                            probability_witness_identity=witness_identity,
+                            status="mature",
+                            reason="day0_deterministic_bin_payoff",
+                        )
+                    ),
                     day0_payoff_truth_by_bin_side=(
                         _day0_payoff_truth_rows(
                             event_type=event.event_type,
@@ -31051,6 +31175,25 @@ def _prepare_current_global_probability_family(
         max_age=max_age,
         witness_identity=witness_identity,
     )
+    exit_status = (
+        "mature"
+        if final_daily_observation is not None
+        else str(
+            payload.get("_edli_day0_exit_authority_status") or "unavailable"
+        )
+        if is_day0
+        else "not_applicable"
+    )
+    exit_reason = (
+        "final_daily_observation_exact"
+        if final_daily_observation is not None
+        else str(
+            payload.get("_edli_day0_exit_authority_reason")
+            or "day0_extreme_maturity_unavailable:missing"
+        )
+        if is_day0
+        else "non_day0_family"
+    )
     return PreparedGlobalFamily(
         decision_id=stable_hash(
             {
@@ -31062,6 +31205,14 @@ def _prepare_current_global_probability_family(
         candidate_seeds=(),
         posterior_id=(int(bundle.posterior_id) if bundle is not None else None),
         probability_authority=("replacement_0_1" if bundle is not None else None),
+        day0_exit_authority_status=exit_status,
+        day0_exit_authority_reason=exit_reason,
+        sell_action_authority_identity=sell_action_authority_identity(
+            family_key=family.family_id,
+            probability_witness_identity=witness_identity,
+            status=exit_status,
+            reason=exit_reason,
+        ),
         candidate_payoff_q_lcb_caps=candidate_payoff_q_lcb_caps,
         day0_payoff_truth_by_bin_side=_day0_payoff_truth_rows(
             event_type=event.event_type,

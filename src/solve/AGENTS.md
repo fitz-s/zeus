@@ -64,16 +64,18 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   native entry-price floor removes unlicensed longshots from the feasible set. Inside that set,
   admission is `q_lcb > fee-inclusive executable cost` plus positive robust delta-log wealth and
   EV, never a price-independent `q > 0.5` wall; the terminal median follows the probability branch.
-  A reduce-only SELL is scored against HOLD instead: its
-  robust incremental log-growth and EV must both be positive for the full order and every possible
-  FAK fill prefix, even when the favorable SELL branch itself is below one half.
-  A full-size and every-FAK-prefix positive reduce-only SELL remains eligible, but direction does
-  not override the capital objective: rank all positive BUY and SELL alternatives by
-  current-family lower-CVaR Δlog-wealth per remaining family-resolution hour. The horizon is
+  A reduce-only SELL is scored against HOLD instead. Non-Day0 SELL retains the
+  lower-CVaR action gate until future-information option value has an explicit
+  model. Day0 statistical SELL first requires a current maturity authority bound
+  to its probability witness; once mature, fixed-action size and every FAK prefix
+  use posterior-mean expected log-growth and EV. Mean economics live only in
+  `expected_*` certificates and may never be written into `robust_*` or LCB/UCB
+  fields. After BUY robust admission/sizing and SELL action-law admission, rank
+  every fixed proposal by one posterior-mean expected Δlog-wealth rate. The horizon is
   derived from the immutable family city and target local date plus the configured settlement
   timezone, and is bound into the current scope/universe witness identity — never authored by a
-  candidate. Numerical ties prefer higher robust Δlog, then robust Δlog per dollar, then lower
-  cash. Expected value remains diagnostic and must never be named realized capital gain.
+  candidate. Numerical ties prefer higher expected Δlog, then expected Δlog per dollar, then lower
+  cash. Expected value is decision-time expectation and must never be named realized capital gain.
   This is not multi-order portfolio optimality.
 - **κ single-owner, typed.** κ=1.0 throughout W3/W4 (the downstream haircut still shades);
   `KappaPolicy.__post_init__` makes a κ<1 with the haircut alive unconstructable. κ is a

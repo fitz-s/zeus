@@ -192,9 +192,18 @@ Durable trading rules:
   and batch paths, must have a finite unit price inside inclusive `[0.05, 0.95]`.
   Anything below `0.05` or above `0.95` is rejected at command persistence,
   the submission envelope, and an independent final SDK boundary. Current
-  tick/range, minimum size, identity, tradeability, fees, depth, robust
-  delta-log-wealth/EV, and Kelly remain cumulative requirements; none may waive
+  tick/range, minimum size, identity, tradeability, fees, depth, action-law
+  economics, and Kelly remain cumulative requirements; none may waive
   this absolute band. There are no strategy, side, lifecycle, or exit exceptions.
+- Statistical SELL authority is temporally typed. A Day0 statistical SELL may
+  enter the feasible set only under a current maturity certificate bound to the
+  exact probability witness; submit-time revalidation must reproduce that
+  authority. Posterior parameter bounds are confidence evidence, not fixed-action
+  expected payoff. Mature Day0 SELL sizes and fill-prefixes therefore use
+  posterior-predictive-mean expected log wealth and EV, never values relabeled as
+  `robust_*`. BUY retains robust admission/sizing. After each action passes its
+  own law, globally ranked fixed proposals share one posterior-mean expected-log-
+  growth comparison; direction never licenses incomparable objective scores.
 - Holding or buying multiple outcome tokens in the same weather family is not
   categorically forbidden. Every sibling-bin BUY must be evaluated against the
   exact current same-family portfolio and unresolved entry commitments through

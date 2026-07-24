@@ -4493,6 +4493,21 @@ def _materialize_current_global_day0_probability(
         )
     else:
         _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
+        maturity_status = str(
+            snapshot.day0_payload.get("_edli_day0_exit_authority_status")
+            or "unavailable"
+        ).strip().lower()
+        maturity_reason = str(
+            snapshot.day0_payload.get("_edli_day0_exit_authority_reason") or ""
+        ).strip()
+        setattr(refreshed, "_day0_exit_authority_status", maturity_status)
+        setattr(
+            refreshed,
+            "_day0_exit_authority_reason",
+            maturity_reason or "day0_extreme_maturity_unavailable:missing",
+        )
+        if maturity_reason:
+            _append_monitor_validation(refreshed, maturity_reason)
     _set_monitor_probability_fresh(refreshed, True)
     _set_day0_zero_probability_exit_authority(refreshed, False)
     setattr(refreshed, _GLOBAL_MONITOR_SAMPLES_ATTR, held_samples)
@@ -5390,6 +5405,13 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 _GLOBAL_MONITOR_ALPHA_ATTR,
                 getattr(refresh_pos, _GLOBAL_MONITOR_ALPHA_ATTR),
             )
+        for attr in (
+            "_day0_exit_authority_status",
+            "_day0_exit_authority_reason",
+        ):
+            value = getattr(refresh_pos, attr, None)
+            if value is not None:
+                setattr(pos, attr, value)
         _set_day0_zero_probability_exit_authority(
             pos,
             bool(

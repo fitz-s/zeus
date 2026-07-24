@@ -24,6 +24,7 @@ from src.solve.solver import (
     CandidatePortfolioEndowment,
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
+    DeterministicBinPayoffWitness,
     FamilyPortfolioEndowment,
     GlobalSingleOrderAnyCandidate,
     GlobalSingleOrderDecision,
@@ -60,6 +61,9 @@ class GlobalHoldingAuctionCoverage:
     bin_label: str | None = None
     canonical_bin_identity: str | None = None
     sell_book_witness_identity: str | None = None
+    sell_exit_authority_status: str = "not_applicable"
+    sell_exit_authority_reason: str = "non_day0_family"
+    sell_action_authority_identity: str = "non_day0_default_authority"
 
     def __post_init__(self) -> None:
         evaluated = self.status == "EVALUATED"
@@ -86,6 +90,9 @@ class GlobalHoldingAuctionCoverage:
                     self.selection_epoch_identity,
                     self.book_epoch_identity,
                     canonical_bin_identity,
+                    self.sell_exit_authority_status,
+                    self.sell_exit_authority_reason,
+                    self.sell_action_authority_identity,
                 )
             )
             or not (
@@ -172,6 +179,57 @@ class PreparedGlobalAuctionResult:
             raise ValueError("global auction holding coverage is not position-unique")
 
 
+def _global_decision_economics_identity(
+    decision: GlobalSingleOrderDecision,
+) -> tuple[object, ...]:
+    growth = decision.expected_growth
+    if growth is None:
+        raise ValueError("global decision lacks common expected-growth economics")
+    if decision.expected_terminal_wealth is not None:
+        terminal = decision.expected_terminal_wealth
+        action_economics = (
+            "EXPECTED_SELL",
+            terminal.probability_basis,
+            repr(terminal.held_probability_mean),
+            repr(terminal.favorable_sell_probability_mean),
+            terminal.loss_payoff_usd,
+            terminal.win_payoff_usd,
+            terminal.wealth_after_loss_usd,
+            terminal.wealth_after_win_usd,
+            repr(terminal.expected_delta_log_wealth),
+            repr(terminal.expected_ev_usd),
+        )
+    elif decision.terminal_wealth is not None:
+        terminal = decision.terminal_wealth
+        action_economics = (
+            "ROBUST_ACTION",
+            repr(decision.robust_delta_log_wealth),
+            repr(decision.robust_ev_usd),
+            repr(decision.capital_efficiency),
+            repr(terminal.win_probability_lcb),
+            repr(terminal.loss_probability_ucb),
+            terminal.loss_payoff_usd,
+            terminal.win_payoff_usd,
+            terminal.median_payoff_usd,
+            terminal.wealth_after_loss_usd,
+            terminal.wealth_after_win_usd,
+            repr(terminal.expected_value_diagnostic_usd),
+        )
+    else:
+        raise ValueError("global decision lacks action economics")
+    return (
+        *action_economics,
+        "COMMON_EXPECTED_GROWTH",
+        growth.probability_basis,
+        growth.probability_witness_identity,
+        repr(growth.expected_delta_log_wealth),
+        repr(growth.expected_ev_usd),
+        repr(growth.capital_lock_hours),
+        repr(growth.expected_log_growth_per_hour),
+        repr(growth.expected_capital_efficiency),
+    )
+
+
 def global_single_order_actuation_identity(
     *,
     decision: GlobalSingleOrderDecision,
@@ -183,9 +241,9 @@ def global_single_order_actuation_identity(
     decision_at_utc: datetime,
 ) -> str:
     candidate = decision.candidate
-    terminal = decision.terminal_wealth
-    if candidate is None or terminal is None:
+    if candidate is None:
         raise ValueError("global actuation requires a trade decision")
+    economics_identity = _global_decision_economics_identity(decision)
     action = str(getattr(candidate, "action", "BUY") or "BUY")
     curve = (
         candidate.executable_sell_curve
@@ -193,7 +251,16 @@ def global_single_order_actuation_identity(
         else candidate.executable_cost_curve
     )
     sell_identity = (
-        (action, candidate.position_id, candidate.held_shares, decision.cash_proceeds_usd)
+        (
+            action,
+            candidate.position_id,
+            candidate.held_shares,
+            candidate.probability_functional,
+            candidate.exit_authority_status,
+            candidate.exit_authority_reason,
+            candidate.sell_action_authority_identity,
+            decision.cash_proceeds_usd,
+        )
         if action == "SELL"
         else ()
     )
@@ -237,17 +304,7 @@ def global_single_order_actuation_identity(
         decision.full_kelly_target_shares,
         decision.fractional_kelly_target_shares,
         *buy_sizing_identity,
-        repr(decision.robust_delta_log_wealth),
-        repr(decision.robust_ev_usd),
-        repr(decision.capital_efficiency),
-        repr(terminal.win_probability_lcb),
-        repr(terminal.loss_probability_ucb),
-        terminal.loss_payoff_usd,
-        terminal.win_payoff_usd,
-        terminal.median_payoff_usd,
-        terminal.wealth_after_loss_usd,
-        terminal.wealth_after_win_usd,
-        repr(terminal.expected_value_diagnostic_usd),
+        *economics_identity,
     ):
         digest.update(str(value).encode("utf-8"))
         digest.update(b"\x1f")
@@ -263,13 +320,12 @@ def global_single_order_economic_identity(
     """Bind one order's economics without observation or epoch clocks."""
 
     candidate = decision.candidate
-    terminal = decision.terminal_wealth
     if (
         candidate is None
-        or terminal is None
         or not str(wealth_economic_identity or "").strip()
     ):
         raise ValueError("global economic identity requires a trade and current wealth")
+    economics_identity = _global_decision_economics_identity(decision)
     if getattr(probability_witness, "family_key", None) != candidate.family_key:
         raise ValueError("global economic identity probability family mismatch")
     action = str(getattr(candidate, "action", "BUY") or "BUY")
@@ -279,7 +335,16 @@ def global_single_order_economic_identity(
         else candidate.executable_cost_curve
     )
     sell_identity = (
-        (action, candidate.position_id, candidate.held_shares, decision.cash_proceeds_usd)
+        (
+            action,
+            candidate.position_id,
+            candidate.held_shares,
+            candidate.probability_functional,
+            candidate.exit_authority_status,
+            candidate.exit_authority_reason,
+            candidate.sell_action_authority_identity,
+            decision.cash_proceeds_usd,
+        )
         if action == "SELL"
         else ()
     )
@@ -325,17 +390,7 @@ def global_single_order_economic_identity(
         decision.full_kelly_target_shares,
         decision.fractional_kelly_target_shares,
         *buy_sizing_identity,
-        repr(decision.robust_delta_log_wealth),
-        repr(decision.robust_ev_usd),
-        repr(decision.capital_efficiency),
-        repr(terminal.win_probability_lcb),
-        repr(terminal.loss_probability_ucb),
-        terminal.loss_payoff_usd,
-        terminal.win_payoff_usd,
-        terminal.median_payoff_usd,
-        terminal.wealth_after_loss_usd,
-        terminal.wealth_after_win_usd,
-        repr(terminal.expected_value_diagnostic_usd),
+        *economics_identity,
     ):
         digest.update(str(value).encode("utf-8"))
         digest.update(b"\x1f")
@@ -632,6 +687,7 @@ def select_prepared_global_auction(
     event_by_family: dict[str, str] = {}
     candidates: list[GlobalSingleOrderAnyCandidate] = []
     holdings_by_family = {}
+    prepared_by_family = {}
     holding_coverage: list[GlobalHoldingAuctionCoverage] = []
     for event_id, prepared in sorted(prepared_by_event.items()):
         event_key = str(event_id or "").strip()
@@ -643,6 +699,7 @@ def select_prepared_global_auction(
             return _no_trade("GLOBAL_FAMILY_EVENT_AMBIGUOUS")
         event_by_family[family_key] = event_key
         probability_witnesses[family_key] = probability
+        prepared_by_family[family_key] = prepared
         holdings = getattr(prepared, "holdings_snapshot", None)
         if book_epoch is not None:
             if (
@@ -717,6 +774,7 @@ def select_prepared_global_auction(
             sell_book_witness_identity: str | None = None,
         ) -> GlobalHoldingAuctionCoverage:
             binding = holding_binding(holding, probability)
+            prepared = prepared_by_family[holding.family_key]
             return GlobalHoldingAuctionCoverage(
                 position_id=str(holding.position_id),
                 family_key=str(holding.family_key),
@@ -737,6 +795,15 @@ def select_prepared_global_auction(
                 candidate_id=candidate_id,
                 reason=reason,
                 sell_book_witness_identity=sell_book_witness_identity,
+                sell_exit_authority_status=str(
+                    prepared.day0_exit_authority_status
+                ),
+                sell_exit_authority_reason=str(
+                    prepared.day0_exit_authority_reason
+                ),
+                sell_action_authority_identity=str(
+                    prepared.sell_action_authority_identity
+                ),
             )
 
         candidates = []
@@ -779,6 +846,7 @@ def select_prepared_global_auction(
                 )
         for family_key, holdings in holdings_by_family.items():
             probability = probability_witnesses[family_key]
+            prepared = prepared_by_family[family_key]
             for holding in holdings.holdings:
                 if family_key in excluded:
                     holding_coverage.append(
@@ -793,6 +861,49 @@ def select_prepared_global_auction(
                         )
                     )
                     continue
+                if isinstance(probability, DeterministicBinPayoffWitness):
+                    sell_functional = "DETERMINISTIC_PAYOFF"
+                    exit_status = "deterministic"
+                    exit_reason = "day0_deterministic_bin_payoff"
+                else:
+                    prepared_status = str(
+                        getattr(
+                            prepared,
+                            "day0_exit_authority_status",
+                            "not_applicable",
+                        )
+                        or ""
+                    ).strip().lower()
+                    prepared_reason = str(
+                        getattr(
+                            prepared,
+                            "day0_exit_authority_reason",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                    if prepared_status == "not_applicable":
+                        sell_functional = "LOWER_CVAR_PARAMETER_DRAWS"
+                        exit_status = "not_applicable"
+                        exit_reason = prepared_reason or "non_day0_family"
+                    elif prepared_status == "mature":
+                        sell_functional = "POSTERIOR_PREDICTIVE_MEAN"
+                        exit_status = "mature"
+                        exit_reason = prepared_reason
+                    else:
+                        holding_coverage.append(
+                            coverage_row(
+                                holding,
+                                probability,
+                                status="EXCLUDED",
+                                reason=(
+                                    "DAY0_STATISTICAL_EXIT_AUTHORITY_"
+                                    f"{prepared_status.upper() or 'UNAVAILABLE'}:"
+                                    f"{prepared_reason or 'missing_reason'}"
+                                ),
+                            )
+                        )
+                        continue
                 asset = book_epoch.sell_asset_by_key.get(
                     (
                         family_key,
@@ -836,6 +947,12 @@ def select_prepared_global_auction(
                         ledger_snapshot_id=holdings.ledger_snapshot_id,
                         executable_sell_curve=asset.curve,
                         book_captured_at_utc=asset.captured_at_utc,
+                        probability_functional=sell_functional,
+                        exit_authority_status=exit_status,
+                        exit_authority_reason=exit_reason,
+                        sell_action_authority_identity=(
+                            prepared.sell_action_authority_identity
+                        ),
                     )
                     if candidate is not None:
                         candidates.append(candidate)

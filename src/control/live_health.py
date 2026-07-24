@@ -5108,13 +5108,15 @@ def _decode_global_auction_candidate_payload(
     return payload, raw
 
 
-def _global_auction_reference_summary(
+def _global_auction_component_reference_summary(
     conn: object,
     *,
     row_id: int,
     mode: str,
     receipt_hash: str,
     component_sha256: str,
+    payload_field: str,
+    sha256_field: str,
 ) -> Mapping[str, object]:
     if mode not in _GLOBAL_AUCTION_RECEIPT_MODES:
         raise ValueError("REFERENCE_MODE")
@@ -5128,12 +5130,207 @@ def _global_auction_reference_summary(
     summary = artifact["summary"]
     if (
         str(summary.get("receipt_hash") or "") != receipt_hash
-        or str(summary.get("candidate_evaluations_sha256") or "")
-        != component_sha256
-        or "candidate_evaluations_zlib_b64" not in summary
+        or str(summary.get(sha256_field) or "") != component_sha256
+        or payload_field not in summary
     ):
         raise ValueError("REFERENCE_IDENTITY")
     return summary
+
+
+def _global_auction_reference_summary(
+    conn: object,
+    *,
+    row_id: int,
+    mode: str,
+    receipt_hash: str,
+    component_sha256: str,
+) -> Mapping[str, object]:
+    return _global_auction_component_reference_summary(
+        conn,
+        row_id=row_id,
+        mode=mode,
+        receipt_hash=receipt_hash,
+        component_sha256=component_sha256,
+        payload_field="candidate_evaluations_zlib_b64",
+        sha256_field="candidate_evaluations_sha256",
+    )
+
+
+def _decode_global_auction_holding_payload(
+    summary: Mapping[str, object],
+) -> list[dict[str, object]]:
+    compressed = base64.b64decode(
+        str(summary["holding_auction_coverage_zlib_b64"]),
+        validate=True,
+    )
+    if len(compressed) > 2_000_000:
+        raise ValueError("HOLDING_COMPRESSED_PAYLOAD_TOO_LARGE")
+    raw = zlib.decompress(compressed)
+    if len(raw) > 10_000_000:
+        raise ValueError("HOLDING_PAYLOAD_TOO_LARGE")
+    if hashlib.sha256(raw).hexdigest() != str(
+        summary["holding_auction_coverage_sha256"]
+    ):
+        raise ValueError("HOLDING_HASH_MISMATCH")
+    payload = json.loads(raw)
+    if not isinstance(payload, list) or any(
+        not isinstance(item, dict) for item in payload
+    ):
+        raise ValueError("HOLDING_PAYLOAD_SHAPE")
+    return payload
+
+
+def _current_global_auction_holding_payload(
+    conn: object,
+    summary: Mapping[str, object],
+) -> list[dict[str, object]]:
+    prefix = "holding_auction_coverage"
+    field = f"{prefix}_zlib_b64"
+    sha_field = f"{prefix}_sha256"
+    encoding_field = f"{prefix}_encoding"
+    if field in summary:
+        return _decode_global_auction_holding_payload(summary)
+
+    delta_field = f"{prefix}_delta_zlib_b64"
+    if delta_field in summary:
+        if summary.get(f"{prefix}_delta_encoding") != (
+            "zlib+base64+keyed-canonical-json-delta-v1"
+        ):
+            raise ValueError("HOLDING_DELTA_ENCODING")
+        base_summary = _global_auction_component_reference_summary(
+            conn,
+            row_id=int(summary[f"{prefix}_base_decision_log_id"]),
+            mode=str(summary[f"{prefix}_base_mode"]),
+            receipt_hash=str(summary[f"{prefix}_base_receipt_hash"]),
+            component_sha256=str(summary[f"{prefix}_base_sha256"]),
+            payload_field=field,
+            sha256_field=sha_field,
+        )
+        if base_summary.get(encoding_field) != summary.get(encoding_field):
+            raise ValueError("HOLDING_DELTA_BASE_ENCODING")
+        base = _decode_global_auction_holding_payload(base_summary)
+        compressed = base64.b64decode(str(summary[delta_field]), validate=True)
+        if len(compressed) > 2_000_000:
+            raise ValueError("HOLDING_DELTA_COMPRESSED_PAYLOAD_TOO_LARGE")
+        delta_raw = zlib.decompress(compressed)
+        if len(delta_raw) > 10_000_000:
+            raise ValueError("HOLDING_DELTA_PAYLOAD_TOO_LARGE")
+        if hashlib.sha256(delta_raw).hexdigest() != str(
+            summary[f"{prefix}_delta_sha256"]
+        ):
+            raise ValueError("HOLDING_DELTA_HASH_MISMATCH")
+        delta = json.loads(delta_raw)
+        if not isinstance(delta, dict):
+            raise ValueError("HOLDING_DELTA_PAYLOAD_SHAPE")
+        from src.engine.global_batch_runtime import (
+            _apply_keyed_object_list_delta,
+        )
+
+        payload = _apply_keyed_object_list_delta(base, delta)
+        raw = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if hashlib.sha256(raw).hexdigest() != str(summary[sha_field]):
+            raise ValueError("HOLDING_DELTA_RECONSTRUCTION_HASH_MISMATCH")
+        return payload
+
+    if field not in set(summary.get("payload_reference_fields", ())):
+        raise ValueError("HOLDING_PAYLOAD_REFERENCE_MISSING")
+    references = summary.get("payload_reference_components", {})
+    component = references.get(field, {}) if isinstance(references, dict) else {}
+    if not isinstance(component, dict) or not component:
+        raise ValueError("HOLDING_PAYLOAD_REFERENCE_COMPONENT_MISSING")
+    component_sha256 = str(component["sha256"])
+    if component_sha256 != str(summary[sha_field]):
+        raise ValueError("HOLDING_PAYLOAD_REFERENCE_HASH_MISMATCH")
+    reference_summary = _global_auction_component_reference_summary(
+        conn,
+        row_id=int(component["decision_log_id"]),
+        mode=str(component["mode"]),
+        receipt_hash=str(component["receipt_hash"]),
+        component_sha256=component_sha256,
+        payload_field=field,
+        sha256_field=sha_field,
+    )
+    if reference_summary.get(encoding_field) != summary.get(encoding_field):
+        raise ValueError("HOLDING_PAYLOAD_REFERENCE_ENCODING")
+    return _decode_global_auction_holding_payload(reference_summary)
+
+
+def _global_auction_holding_authority_matches(
+    candidate_payload: Mapping[str, object],
+    holding_payload: list[dict[str, object]],
+    summary: Mapping[str, object],
+) -> bool:
+    if summary.get("held_position_coverage_complete") is not True:
+        return False
+    try:
+        expected_count = int(summary["held_position_expected_count"])
+        evaluated_count = int(summary["held_position_evaluated_count"])
+        excluded_count = int(summary["held_position_excluded_count"])
+        detailed = candidate_payload["detailed"]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not isinstance(detailed, list):
+        return False
+    positions = tuple(str(row.get("position_id") or "") for row in holding_payload)
+    evaluated_rows = [row for row in holding_payload if row.get("status") == "EVALUATED"]
+    excluded_rows = [row for row in holding_payload if row.get("status") == "EXCLUDED"]
+    if (
+        expected_count != len(holding_payload)
+        or evaluated_count != len(evaluated_rows)
+        or excluded_count != len(excluded_rows)
+        or evaluated_count + excluded_count != expected_count
+        or any(not position for position in positions)
+        or len(set(positions)) != len(positions)
+        or any(
+            not str(row.get(field) or "").strip()
+            for row in holding_payload
+            for field in (
+                "sell_exit_authority_status",
+                "sell_exit_authority_reason",
+                "sell_action_authority_identity",
+            )
+        )
+        or any(not str(row.get("reason") or "").strip() for row in excluded_rows)
+    ):
+        return False
+    evaluated_by_candidate = {
+        str(row.get("candidate_id") or ""): row for row in evaluated_rows
+    }
+    sell_by_candidate = {
+        str(row.get("candidate_id") or ""): row
+        for row in detailed
+        if isinstance(row, dict) and row.get("action") == "SELL"
+    }
+    if (
+        "" in evaluated_by_candidate
+        or "" in sell_by_candidate
+        or len(evaluated_by_candidate) != len(evaluated_rows)
+        or len(sell_by_candidate)
+        != sum(
+            isinstance(row, dict) and row.get("action") == "SELL"
+            for row in detailed
+        )
+        or set(evaluated_by_candidate) != set(sell_by_candidate)
+    ):
+        return False
+    return all(
+        str(holding.get("position_id") or "")
+        == str(sell.get("position_id") or "")
+        and all(
+            str(holding.get(field) or "") == str(sell.get(field) or "")
+            for field in (
+                "sell_exit_authority_status",
+                "sell_exit_authority_reason",
+                "sell_action_authority_identity",
+            )
+        )
+        for candidate_id, holding in evaluated_by_candidate.items()
+        for sell in (sell_by_candidate[candidate_id],)
+    )
 
 
 def _current_global_auction_candidate_payload(
@@ -5280,13 +5477,15 @@ def _latest_global_auction_candidate_counts(
     try:
         artifact = json.loads(str(row["artifact_json"] or ""))
         summary = artifact["summary"]
-        if int(summary.get("schema_version") or 0) < 5:
+        schema_version = int(summary.get("schema_version") or 0)
+        if schema_version < 5:
             return invalid("SCHEMA_VERSION")
         if summary.get("candidate_coverage_complete") is not True:
             return invalid("COVERAGE_INCOMPLETE")
         if summary.get("candidate_condition_index_complete") is not True:
             return invalid("CONDITION_INDEX_INCOMPLETE")
-        if summary.get("candidate_evaluation_encoding") not in {
+        candidate_encoding = summary.get("candidate_evaluation_encoding")
+        if candidate_encoding not in {
             "zlib+base64+canonical-json-v4",
             "zlib+base64+canonical-json-v5",
             "zlib+base64+canonical-json-v6",
@@ -5294,8 +5493,21 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v8",
             "zlib+base64+canonical-json-v9",
             "zlib+base64+canonical-json-v10",
+            "zlib+base64+canonical-json-v11",
         }:
             return invalid("ENCODING")
+        holding_payload = None
+        if candidate_encoding == "zlib+base64+canonical-json-v11":
+            if schema_version != 17:
+                return invalid("SCHEMA_VERSION_CONTRACT")
+            if summary.get("holding_auction_coverage_encoding") != (
+                "zlib+base64+canonical-json-v2"
+            ):
+                return invalid("HOLDING_AUTHORITY_ENCODING")
+            holding_payload = _current_global_auction_holding_payload(
+                conn,
+                summary,
+            )
         payload = _current_global_auction_candidate_payload(conn, summary)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError, zlib.error) as exc:
         return invalid(type(exc).__name__)
@@ -5303,12 +5515,69 @@ def _latest_global_auction_candidate_counts(
     yes: dict[str, int] = {}
     no: dict[str, int] = {}
     covered = 0
+    if candidate_encoding == "zlib+base64+canonical-json-v11" and (
+        holding_payload is None
+        or not _global_auction_holding_authority_matches(
+            payload,
+            holding_payload,
+            summary,
+        )
+    ):
+        return invalid("HOLDING_AUTHORITY_PAYLOAD")
     try:
         for group in payload["rejected_groups"]:
             candidate_ids = group["candidate_ids"]
             covered += len(candidate_ids)
         for evaluation in payload["detailed"]:
             covered += 1
+            if (
+                candidate_encoding == "zlib+base64+canonical-json-v11"
+                and evaluation.get("action") == "SELL"
+            ):
+                functional = evaluation.get("sell_probability_functional")
+                status = evaluation.get("sell_exit_authority_status")
+                if (
+                    functional
+                    not in {
+                        "LOWER_CVAR_PARAMETER_DRAWS",
+                        "POSTERIOR_PREDICTIVE_MEAN",
+                        "DETERMINISTIC_PAYOFF",
+                    }
+                    or not str(
+                        evaluation.get("sell_exit_authority_reason") or ""
+                    ).strip()
+                    or not str(
+                        evaluation.get("sell_action_authority_identity") or ""
+                    ).strip()
+                    or (
+                        functional == "POSTERIOR_PREDICTIVE_MEAN"
+                        and status != "mature"
+                    )
+                    or (
+                        evaluation.get("status") in {"SCORED", "SELECTED"}
+                        and not isinstance(
+                            evaluation.get("expected_growth"), dict
+                        )
+                    )
+                    or (
+                        functional == "POSTERIOR_PREDICTIVE_MEAN"
+                        and evaluation.get("status") in {"SCORED", "SELECTED"}
+                        and (
+                            not isinstance(
+                                evaluation.get("expected_terminal_wealth"),
+                                dict,
+                            )
+                            or evaluation.get("terminal_wealth") is not None
+                            or float(
+                                evaluation.get("robust_delta_log_wealth") or 0.0
+                            )
+                            != 0.0
+                            or float(evaluation.get("robust_ev_usd") or 0.0)
+                            != 0.0
+                        )
+                    )
+                ):
+                    return invalid("SELL_EXPECTED_AUTHORITY")
         seen_conditions: set[str] = set()
         for condition_id, raw_mask in payload["buy_condition_side_masks"]:
             condition_id = str(condition_id or "")

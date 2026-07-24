@@ -5649,7 +5649,7 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
     raw = zlib.decompress(
         base64.b64decode(first["holding_auction_coverage_zlib_b64"])
     )
-    assert first["schema_version"] == 16
+    assert first["schema_version"] == 17
     assert "holding_auction_coverage" not in first
     assert json.loads(raw) == [
         {
@@ -12108,6 +12108,270 @@ def test_day0_overlap_uses_current_expected_value_not_optimistic_ucb(
     assert second.should_exit is True
     assert second.trigger == "EDGE_REVERSAL"
     assert "hold_value_probability_basis:current_point_q" in second.applied_validations
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_day0_separated_reversal_monetizes_expected_value_before_ucb_strands_leg(
+    monkeypatch,
+    direction,
+):
+    """A disjoint belief reversal compares SELL with expected HOLD payoff.
+
+    This is the Mexico City 26C loss shape: q collapsed to 3.73%, the
+    executable bid still paid 20.7c, but the 37.33% CI upper envelope was
+    substituted for expected settlement value and blocked every exit.
+    """
+
+    pos = _make_position(
+        direction=direction,
+        p_posterior=0.9438666668912,
+        entry_price=0.192,
+        entry_ci_width=0.714400000449067,
+        shares=22.5,
+        cost_basis_usd=4.32,
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
+    monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.05)
+    monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.0001)
+    monkeypatch.setattr(
+        "src.state.portfolio._compute_exit_correlation_crowding",
+        lambda **_kwargs: 0.0,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.037333333333333336,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.207,
+            current_market_price_is_fresh=True,
+            best_bid=0.207,
+            best_ask=0.22,
+            hours_to_settlement=10.0,
+            position_state="day0_window",
+            day0_active=True,
+            entry_posterior=0.9438666668912,
+            entry_ci=(0.5866666666666667, 1.0),
+            current_ci=(0.0, 0.3733333333333334),
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "CI_SEPARATED_REVERSAL"
+    assert "hold_value_probability_basis:current_point_q" in decision.applied_validations
+    assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
+    assert "exit_fee_applied_to_sell_value" in decision.applied_validations
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, direction):
+    """Low price alone cannot liquidate a fresh high-value held claim."""
+
+    pos = _make_position(
+        direction=direction,
+        p_posterior=0.90,
+        entry_price=0.13,
+        entry_ci_width=0.10,
+        shares=100.0,
+        cost_basis_usd=13.0,
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.4939,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.004,
+            current_market_price_is_fresh=True,
+            best_bid=0.004,
+            best_ask=0.006,
+            hours_to_settlement=10.0,
+            position_state="day0_window",
+            day0_active=True,
+            entry_posterior=0.90,
+            entry_ci=(0.80, 1.0),
+            current_ci=(0.20, 0.70),
+        )
+    )
+
+    assert decision.should_exit is False
+    assert decision.trigger == "CI_SEPARATED_POSITIVE_EDGE_HOLD"
+
+
+def test_day0_point_q_reversal_waits_for_temporal_maturity(monkeypatch):
+    """An Ankara-shaped early reversal cannot outrun Day0 maturity authority."""
+    from src.engine import cycle_runtime
+
+    maturity_reason = (
+        "day0_high_extreme_not_mature:"
+        "daypart=pre_sunrise,post_peak_confidence=0.034"
+    )
+    pos = _make_position(
+        trade_id="ankara-early-separated-reversal",
+        city="Ankara",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        bin_label="31C",
+        direction="buy_yes",
+        p_posterior=0.8042,
+        entry_price=0.27,
+        entry_ci_width=0.43,
+        shares=43.22,
+        cost_basis_usd=11.67,
+        state="day0_window",
+        applied_validations=[maturity_reason],
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.10,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.42,
+            current_market_price_is_fresh=True,
+            best_bid=0.42,
+            best_ask=0.43,
+            hours_to_settlement=20.0,
+            position_state="day0_window",
+            day0_active=True,
+            entry_posterior=0.8042,
+            entry_ci=(0.57, 1.0),
+            current_ci=(0.0, 0.4533),
+        )
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "CI_SEPARATED_REVERSAL"
+    assert "hold_value_probability_basis:current_point_q" in decision.applied_validations
+
+    pos.last_monitor_prob = 0.10
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.42
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.42
+    pos.last_monitor_best_ask = 0.43
+    pos._monitor_current_held_ci = (0.0, 0.4533)
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=decision,
+        should_exit=decision.should_exit,
+        exit_reason=decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
+
+
+def test_current_global_day0_maturity_survives_refresh_to_exit_overlay(monkeypatch):
+    """The current-global temporal verdict must survive every monitor seam."""
+    from src.engine import cycle_runtime, monitor_refresh
+
+    condition_id = "0x" + "75" * 32
+    maturity_reason = (
+        "day0_high_extreme_not_mature:"
+        "daypart=pre_sunrise,post_peak_confidence=0.034"
+    )
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                bin_id="31C",
+                condition_id=condition_id,
+                yes_token_id="yes-31",
+                no_token_id="no-31",
+            ),
+        ),
+        yes_q_samples=np.array([[0.0], [0.2]], dtype=np.float64),
+        witness_identity="remaining-window-witness",
+        q_version="remaining-window-q",
+        source_truth_identity="remaining-window-truth",
+        band_basis="current_coherent_day0_remaining_model_bootstrap_v3",
+        band_alpha=0.05,
+    )
+    snapshot = monitor_refresh._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=((condition_id, "yes-31", "no-31"),),
+        deterministic_condition_ids=frozenset(),
+        day0_payload={
+            "_edli_day0_exit_authority_status": "immature",
+            "_edli_day0_exit_authority_reason": maturity_reason,
+        },
+        metric="high",
+    )
+    pos = _make_position(
+        trade_id="ankara-current-global-seam",
+        city="Ankara",
+        target_date="2026-07-22",
+        temperature_metric="high",
+        bin_label="31C",
+        direction="buy_yes",
+        p_posterior=0.8042,
+        entry_price=0.27,
+        entry_ci_width=0.43,
+        shares=43.22,
+        cost_basis_usd=11.67,
+        state="day0_window",
+        token_id="yes-31",
+        no_token_id="no-31",
+    )
+    pos.condition_id = condition_id
+    probability, refreshed, fresh = (
+        monitor_refresh._materialize_current_global_day0_probability(pos, snapshot)
+    )
+    assert fresh is True
+    assert probability == pytest.approx(0.1)
+    monitor_refresh._replace_probability_validations_preserving_exit_confirmation(
+        pos,
+        refreshed,
+    )
+    pos._day0_exit_authority_status = refreshed._day0_exit_authority_status
+    pos._day0_exit_authority_reason = refreshed._day0_exit_authority_reason
+    assert maturity_reason in pos.applied_validations
+
+    pos.last_monitor_prob = probability
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.42
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.42
+    pos.last_monitor_best_ask = 0.43
+    edge_lo, edge_hi = monitor_refresh._current_global_monitor_edge_band(
+        witness.yes_q_samples[:, 0],
+        alpha=witness.band_alpha,
+        current_p_market=0.42,
+    )
+    edge_ctx = SimpleNamespace(
+        p_market=np.array([0.42]),
+        p_posterior=probability,
+        confidence_band_lower=edge_lo,
+        confidence_band_upper=edge_hi,
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+    )
+    context = cycle_runtime._build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=20.0,
+        ExitContext=ExitContext,
+        portfolio=_make_portfolio(pos),
+    )
+    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
+    decision = pos.evaluate_exit(context)
+
+    assert decision.should_exit is False
+    assert decision.trigger == "DAY0_STATISTICAL_EXIT_TEMPORALLY_BLOCKED"
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=decision,
+        should_exit=decision.should_exit,
+        exit_reason=decision.reason,
+        summary={},
+    )
+    assert should_exit is False
+    assert reason == decision.reason
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])

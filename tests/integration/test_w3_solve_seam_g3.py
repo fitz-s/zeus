@@ -87,6 +87,8 @@ from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
     DeterministicBinPayoffWitness,
     ExecutableSellCurve,
+    ExpectedGrowthComparison,
+    ExpectedTerminalWealthCertificate,
     GlobalBuyMinimumMarketableRepair,
     GlobalSingleOrderCandidate,
     GlobalSingleOrderCandidateEvaluation,
@@ -211,6 +213,15 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             expected_value_diagnostic_usd=7.532,
         ),
     )
+    buy_expected_growth = ExpectedGrowthComparison(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        probability_witness_identity="q-buy",
+        expected_delta_log_wealth=0.0008,
+        expected_ev_usd=0.08,
+        capital_lock_hours=24.0,
+        expected_log_growth_per_hour=0.0008 / 24.0,
+        expected_capital_efficiency=0.0008 / 5.88,
+    )
     evaluations = (
         GlobalSingleOrderCandidateEvaluation(
             candidate_id="buy-repaired",
@@ -238,6 +249,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             full_kelly_target_shares=Decimal("40"),
             fractional_kelly_target_shares=Decimal("10"),
             terminal_wealth=terminal,
+            expected_growth=buy_expected_growth,
             buy_minimum_marketable_repair=repair,
         ),
         GlobalSingleOrderCandidateEvaluation(
@@ -297,6 +309,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         full_kelly_target_shares=Decimal("40"),
         fractional_kelly_target_shares=Decimal("10"),
         terminal_wealth=terminal,
+        expected_growth=buy_expected_growth,
         buy_minimum_marketable_repair=repair,
         rejection_reasons={
             evaluation.candidate_id: str(evaluation.rejection_reason)
@@ -481,9 +494,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         ),
     )
 
-    row_id = global_batch_runtime._store_global_auction_receipt(
-        conn,
-        selected=selected,
+    receipt_kwargs = dict(
         selection_epoch_identity="epoch-current",
         selection_cut_at_utc=at,
         decision_at_utc=at + _dt.timedelta(seconds=1),
@@ -530,6 +541,32 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             ): "jit depth insufficient"
         },
     )
+    row_id = global_batch_runtime._store_global_auction_receipt(
+        conn,
+        selected=selected,
+        **receipt_kwargs,
+    )
+    forged_selected = SimpleNamespace(
+        **{
+            **vars(selected),
+            "holding_coverage": (
+            replace(
+                selected.holding_coverage[0],
+                sell_action_authority_identity="forged-temporal-authority",
+            ),
+            selected.holding_coverage[1],
+            ),
+        },
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_HELD_POSITION_COVERAGE_INCOMPLETE",
+    ):
+        global_batch_runtime._store_global_auction_receipt(
+            conn,
+            selected=forged_selected,
+            **receipt_kwargs,
+        )
 
     row = conn.execute(
         "SELECT mode, artifact_json FROM decision_log WHERE id = ?", (row_id,)
@@ -537,13 +574,13 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 16
+    assert summary["schema_version"] == 17
     assert summary["held_position_coverage_complete"] is True
     assert summary["held_position_expected_count"] == 2
     assert summary["held_position_evaluated_count"] == 1
     assert summary["held_position_excluded_count"] == 1
     assert summary["holding_auction_coverage_encoding"] == (
-        "zlib+base64+canonical-json-v1"
+        "zlib+base64+canonical-json-v2"
     )
     holding_coverage_json = zlib.decompress(
         base64.b64decode(summary["holding_auction_coverage_zlib_b64"])
@@ -727,7 +764,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v10"
+        "zlib+base64+canonical-json-v11"
     )
     assert summary["sell_point_counterfactual_count"] == 1
     assert summary["sell_point_counterfactual_positive_count"] == 1
@@ -2311,16 +2348,27 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
         **content,
         yes_point_q=point_q,
         authority_certificate_hash="selected-cert",
+        witness_identity="selected-witness",
     )
     refreshed = SimpleNamespace(
         **content,
         yes_point_q=np.array(point_q, copy=True),
         authority_certificate_hash="fresh-cert",
+        witness_identity="fresh-witness",
     )
+    maturity_reason = "day0_high_extreme_mature:post_peak_confidence=0.97"
     current_family = bridge.PreparedGlobalFamily(
         decision_id="fresh-decision",
         probability_witness=refreshed,
         candidate_seeds=(),
+        day0_exit_authority_status="mature",
+        day0_exit_authority_reason=maturity_reason,
+        sell_action_authority_identity=bridge.sell_action_authority_identity(
+            family_key=refreshed.family_key,
+            probability_witness_identity=refreshed.witness_identity,
+            status="mature",
+            reason=maturity_reason,
+        ),
     )
     required_conditions: list[str] = []
 
@@ -2348,6 +2396,14 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
     )
     assert rebound.probability_witness is selected
     assert rebound.decision_id == "fresh-decision"
+    assert rebound.sell_action_authority_identity == (
+        bridge.sell_action_authority_identity(
+            family_key=selected.family_key,
+            probability_witness_identity=selected.witness_identity,
+            status="mature",
+            reason=maturity_reason,
+        )
+    )
     assert current_day0_payload == {}
     assert required_conditions == ["c0"]
 
@@ -6596,7 +6652,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             (row_id,),
         ).fetchone()[0]
     )["summary"]
-    assert stored["schema_version"] == 16
+    assert stored["schema_version"] == 17
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",
@@ -13882,6 +13938,82 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         if evaluation.action == "SELL"
     }
     assert sell_evaluations == {"position-evaluated"}
+    non_day0_sell = next(
+        evaluation
+        for evaluation in book_selected.decision.candidate_evaluations
+        if evaluation.action == "SELL"
+        and evaluation.position_id == "position-evaluated"
+    )
+    assert non_day0_sell.sell_probability_functional == (
+        "LOWER_CVAR_PARAMETER_DRAWS"
+    )
+    assert non_day0_sell.sell_exit_authority_status == "not_applicable"
+
+    immature_reason = (
+        "day0_high_extreme_not_mature:post_peak_confidence=0.12"
+    )
+    immature_prepared = dict(prepared_with_holdings)
+    immature_prepared[held_event_id] = replace(
+        immature_prepared[held_event_id],
+        day0_exit_authority_status="immature",
+        day0_exit_authority_reason=immature_reason,
+    )
+    immature_selected = select_prepared_global_auction(
+        immature_prepared,
+        **{
+            **auction_kwargs,
+            "venue_universe_identity": book_venue_identity,
+            "current_venue_universe_identity_resolver": lambda: book_venue_identity,
+            "book_epoch": held_book_epoch,
+            "current_capital_limit_resolver": current_capital_limit,
+        },
+    )
+    immature_rows = {
+        row.position_id: (row.status, row.reason)
+        for row in immature_selected.holding_coverage
+    }
+    assert immature_rows == {
+        "position-evaluated": (
+            "EXCLUDED",
+            f"DAY0_STATISTICAL_EXIT_AUTHORITY_IMMATURE:{immature_reason}",
+        ),
+        "position-missing-book": (
+            "EXCLUDED",
+            f"DAY0_STATISTICAL_EXIT_AUTHORITY_IMMATURE:{immature_reason}",
+        ),
+    }
+    assert not any(
+        evaluation.action == "SELL"
+        and evaluation.family_key == held_probability.family_key
+        for evaluation in immature_selected.decision.candidate_evaluations
+    )
+
+    mature_reason = "day0_high_extreme_mature:post_peak_confidence=0.97"
+    mature_prepared = dict(prepared_with_holdings)
+    mature_prepared[held_event_id] = replace(
+        mature_prepared[held_event_id],
+        day0_exit_authority_status="mature",
+        day0_exit_authority_reason=mature_reason,
+    )
+    mature_selected = select_prepared_global_auction(
+        mature_prepared,
+        **{
+            **auction_kwargs,
+            "venue_universe_identity": book_venue_identity,
+            "current_venue_universe_identity_resolver": lambda: book_venue_identity,
+            "book_epoch": held_book_epoch,
+            "current_capital_limit_resolver": current_capital_limit,
+        },
+    )
+    mature_sell = next(
+        evaluation
+        for evaluation in mature_selected.decision.candidate_evaluations
+        if evaluation.action == "SELL"
+        and evaluation.position_id == "position-evaluated"
+    )
+    assert mature_sell.sell_probability_functional == "POSTERIOR_PREDICTIVE_MEAN"
+    assert mature_sell.sell_exit_authority_status == "mature"
+    assert mature_sell.sell_exit_authority_reason == mature_reason
     held_only_selected = select_prepared_global_auction(
         prepared_with_holdings,
         **{
@@ -15822,6 +15954,16 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         no_trade_reason=None,
         buy_sizing_mode="FRACTIONAL_TARGET",
         buy_minimum_marketable_repair=None,
+        expected_terminal_wealth=None,
+        expected_growth=SimpleNamespace(
+            probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+            probability_witness_identity=witness_b.witness_identity,
+            expected_delta_log_wealth=0.012,
+            expected_ev_usd=2.4,
+            capital_lock_hours=24.0,
+            expected_log_growth_per_hour=0.0005,
+            expected_capital_efficiency=0.003,
+        ),
         terminal_wealth=SimpleNamespace(
             win_probability_lcb=0.60,
             loss_probability_ucb=0.40,
@@ -18750,7 +18892,14 @@ def test_g3_off_path_does_not_import_src_solve():
     assert "ISOLATION_OK" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
 
 
-def _adapter_sell_actuation(event, *, selected_shares="10"):
+def _adapter_sell_actuation(
+    event,
+    *,
+    selected_shares="10",
+    probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
+    exit_authority_status="not_applicable",
+    exit_authority_reason="non_day0_family",
+):
     at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
     curve = ExecutableSellCurve(
         token_id="yes-token",
@@ -18782,6 +18931,9 @@ def _adapter_sell_actuation(event, *, selected_shares="10"):
         ledger_snapshot_id="ledger-1",
         executable_sell_curve=curve,
         resolution_identity="resolution-1",
+        probability_functional=probability_functional,
+        exit_authority_status=exit_authority_status,
+        exit_authority_reason=exit_authority_reason,
     )
     selected = Decimal(selected_shares)
     proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(selected)
@@ -18793,27 +18945,59 @@ def _adapter_sell_actuation(event, *, selected_shares="10"):
         float(win_after / Decimal("100"))
     )
     robust_ev = float(proceeds) - (1.0 - robust_q) * float(selected)
+    expected_growth = ExpectedGrowthComparison(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        probability_witness_identity="probability-1",
+        expected_delta_log_wealth=float(robust_du),
+        expected_ev_usd=robust_ev,
+        capital_lock_hours=24.0,
+        expected_log_growth_per_hour=float(robust_du) / 24.0,
+        expected_capital_efficiency=float(robust_du) / float(loss_at_risk),
+    )
+    mean_sell = probability_functional == "POSTERIOR_PREDICTIVE_MEAN"
+    robust_terminal = BinaryTerminalWealthCertificate(
+        win_probability_lcb=robust_q,
+        loss_probability_ucb=1.0 - robust_q,
+        loss_payoff_usd=-loss_at_risk,
+        win_payoff_usd=proceeds,
+        median_payoff_usd=proceeds,
+        wealth_after_loss_usd=loss_after,
+        wealth_after_win_usd=win_after,
+        expected_value_diagnostic_usd=robust_ev,
+    )
+    expected_terminal = ExpectedTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        held_probability_mean=1.0 - robust_q,
+        favorable_sell_probability_mean=robust_q,
+        loss_payoff_usd=-loss_at_risk,
+        win_payoff_usd=proceeds,
+        wealth_after_loss_usd=loss_after,
+        wealth_after_win_usd=win_after,
+        expected_delta_log_wealth=float(robust_du),
+        expected_ev_usd=robust_ev,
+    )
     decision = GlobalSingleOrderDecision(
         candidate=candidate,
         shares=selected,
         cost_usd=loss_at_risk,
-        robust_delta_log_wealth=float(robust_du),
-        robust_ev_usd=robust_ev,
-        capital_efficiency=float(robust_du) / float(loss_at_risk),
+        robust_delta_log_wealth=(0.0 if mean_sell else float(robust_du)),
+        robust_ev_usd=(0.0 if mean_sell else robust_ev),
+        capital_efficiency=(
+            0.0 if mean_sell else float(robust_du) / float(loss_at_risk)
+        ),
         no_trade_reason=None,
+        capital_action_mode="IMMEDIATE_REDUCE_ONLY_SELL",
+        resolution_at_utc=at + _dt.timedelta(hours=24),
+        capital_lock_hours=24.0,
+        robust_log_growth_per_hour=(
+            None if mean_sell else float(robust_du) / 24.0
+        ),
         limit_price=limit_price,
         expected_fill_price_before_fee=expected_fill_price,
         cash_proceeds_usd=proceeds,
-        terminal_wealth=BinaryTerminalWealthCertificate(
-            win_probability_lcb=robust_q,
-            loss_probability_ucb=1.0 - robust_q,
-            loss_payoff_usd=-loss_at_risk,
-            win_payoff_usd=proceeds,
-            median_payoff_usd=proceeds,
-            wealth_after_loss_usd=loss_after,
-            wealth_after_win_usd=win_after,
-            expected_value_diagnostic_usd=robust_ev,
-        ),
+        terminal_wealth=(None if mean_sell else robust_terminal),
+        expected_terminal_wealth=(expected_terminal if mean_sell else None),
+        expected_growth=expected_growth,
     )
     witness = SimpleNamespace(
         family_key="Alpha|2026-07-14|high",
@@ -18859,6 +19043,49 @@ def _adapter_sell_actuation(event, *, selected_shares="10"):
     )
 
 
+def test_global_sell_jit_rejects_regressed_day0_maturity(monkeypatch):
+    event = _global_scope_event(city="Alpha", source_run_id="run-maturity-jit")
+    actuation = _adapter_sell_actuation(
+        event,
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="mature",
+        exit_authority_reason="day0_high_extreme_mature:post_peak_confidence=0.97",
+    )
+    monkeypatch.setattr(
+        era,
+        "_current_global_actuation_prepared_family",
+        lambda *_, **__: (
+            SimpleNamespace(day0_exit_authority_status="immature"),
+            {
+                "_edli_day0_exit_authority_status": "immature",
+                "_edli_day0_exit_authority_reason": (
+                    "day0_high_extreme_not_mature:post_peak_confidence=0.12"
+                ),
+            },
+        ),
+    )
+
+    receipt = era._submit_current_global_sell(
+        event,
+        decision_time=_dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc),
+        global_actuation=actuation,
+        trade_conn=sqlite3.connect(":memory:"),
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        real_order_submit_enabled=True,
+        preflight_only=True,
+        preflight_receipt=None,
+    )
+
+    assert receipt.proof_accepted is False
+    assert receipt.submitted is False
+    assert receipt.reason == (
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+        "GLOBAL_SELL_DAY0_EXIT_AUTHORITY_SUPERSEDED:immature"
+    )
+
+
 def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     monkeypatch,
 ):
@@ -18884,7 +19111,12 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         positions=[position],
     )
     monkeypatch.setattr(
-        era, "_current_global_actuation_prepared_family", lambda *_, **__: object()
+        era,
+        "_current_global_actuation_prepared_family",
+        lambda *_, **__: (
+            SimpleNamespace(day0_exit_authority_status="not_applicable"),
+            {},
+        ),
     )
     monkeypatch.setattr(
         era,
@@ -19149,6 +19381,12 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         "actuation_identity": actuation.actuation_identity,
         "economic_identity": actuation.economic_identity,
         "probability_witness_identity": candidate.probability_witness_identity,
+        "sell_probability_functional": candidate.probability_functional,
+        "sell_exit_authority_status": candidate.exit_authority_status,
+        "sell_exit_authority_reason": candidate.exit_authority_reason,
+        "sell_action_authority_identity": (
+            candidate.sell_action_authority_identity
+        ),
         "selection_epoch_identity": actuation.selection_epoch_identity,
         "wealth_witness_identity": actuation.wealth_witness_identity,
         "execution_authority_identity": authority.authority_identity,
@@ -19156,6 +19394,10 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         "jit_curve_identity": jit.execution_curve_identity,
         "robust_delta_log_wealth": decision.robust_delta_log_wealth,
         "robust_ev_usd": decision.robust_ev_usd,
+        "expected_comparison_delta_log_wealth": (
+            decision.expected_growth.expected_delta_log_wealth
+        ),
+        "expected_comparison_ev_usd": decision.expected_growth.expected_ev_usd,
         "held_shares": str(candidate.held_shares),
         "sellable_shares": str(candidate.held_shares),
         "selected_shares": str(decision.shares),

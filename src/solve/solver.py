@@ -1414,6 +1414,18 @@ class GlobalSingleOrderSellCandidate:
     resolution_identity: str
     action: Literal["SELL"] = "SELL"
     eligibility_reason: GlobalEligibilityReason | None = None
+    probability_functional: Literal[
+        "LOWER_CVAR_PARAMETER_DRAWS",
+        "POSTERIOR_PREDICTIVE_MEAN",
+        "DETERMINISTIC_PAYOFF",
+    ] = "LOWER_CVAR_PARAMETER_DRAWS"
+    exit_authority_status: Literal[
+        "not_applicable",
+        "mature",
+        "deterministic",
+    ] = "not_applicable"
+    exit_authority_reason: str = "non_day0_family"
+    sell_action_authority_identity: str = "non_day0_default_authority"
 
     def __post_init__(self) -> None:
         if self.side not in {"YES", "NO"}:
@@ -1444,6 +1456,29 @@ class GlobalSingleOrderSellCandidate:
             raise ValueError("sell candidate must use its held token's native bid curve")
         if self.book_captured_at_utc.tzinfo is None:
             raise ValueError("book_captured_at_utc must be timezone-aware")
+        functional = self.probability_functional
+        status = self.exit_authority_status
+        if (
+            not str(self.exit_authority_reason or "").strip()
+            or not str(self.sell_action_authority_identity or "").strip()
+            or functional
+            not in {
+                "LOWER_CVAR_PARAMETER_DRAWS",
+                "POSTERIOR_PREDICTIVE_MEAN",
+                "DETERMINISTIC_PAYOFF",
+            }
+            or status not in {"not_applicable", "mature", "deterministic"}
+            or (
+                functional == "POSTERIOR_PREDICTIVE_MEAN"
+                and status != "mature"
+            )
+            or (functional == "DETERMINISTIC_PAYOFF" and status != "deterministic")
+            or (
+                functional == "LOWER_CVAR_PARAMETER_DRAWS"
+                and status != "not_applicable"
+            )
+        ):
+            raise ValueError("global sell probability functional is incoherent")
         if (
             self.book_snapshot_id != curve.snapshot_id
             or self.execution_curve_identity != executable_curve_identity(curve)
@@ -1458,6 +1493,18 @@ def global_sell_candidate_from_holding(
     ledger_snapshot_id: str,
     executable_sell_curve: ExecutableSellCurve,
     book_captured_at_utc: datetime,
+    probability_functional: Literal[
+        "LOWER_CVAR_PARAMETER_DRAWS",
+        "POSTERIOR_PREDICTIVE_MEAN",
+        "DETERMINISTIC_PAYOFF",
+    ] = "LOWER_CVAR_PARAMETER_DRAWS",
+    exit_authority_status: Literal[
+        "not_applicable",
+        "mature",
+        "deterministic",
+    ] = "not_applicable",
+    exit_authority_reason: str = "non_day0_family",
+    sell_action_authority_identity: str = "non_day0_default_authority",
 ) -> GlobalSingleOrderSellCandidate | None:
     """Materialize the venue-legal reducible part of an exact ledger holding."""
 
@@ -1498,6 +1545,10 @@ def global_sell_candidate_from_holding(
             str(expected_token),
             str(ledger_shares),
             str(sellable_shares),
+            probability_functional,
+            exit_authority_status,
+            exit_authority_reason,
+            sell_action_authority_identity,
         ),
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
@@ -1514,6 +1565,10 @@ def global_sell_candidate_from_holding(
         executable_sell_curve=executable_sell_curve,
         resolution_identity=probability_witness.resolution_identity,
         eligibility_reason=eligibility_reason,
+        probability_functional=probability_functional,
+        exit_authority_status=exit_authority_status,
+        exit_authority_reason=exit_authority_reason,
+        sell_action_authority_identity=sell_action_authority_identity,
     )
 
 
@@ -1565,6 +1620,109 @@ class BinaryTerminalWealthCertificate:
             or not math.isfinite(self.expected_value_diagnostic_usd)
         ):
             raise ValueError("terminal-wealth certificate is not branch coherent")
+
+
+@dataclass(frozen=True)
+class ExpectedTerminalWealthCertificate:
+    """Fixed-action SELL economics under the posterior predictive mean."""
+
+    probability_basis: Literal["POSTERIOR_PREDICTIVE_MEAN"]
+    held_probability_mean: float
+    favorable_sell_probability_mean: float
+    loss_payoff_usd: Decimal
+    win_payoff_usd: Decimal
+    wealth_after_loss_usd: Decimal
+    wealth_after_win_usd: Decimal
+    expected_delta_log_wealth: float
+    expected_ev_usd: float
+
+    def __post_init__(self) -> None:
+        held_q = float(self.held_probability_mean)
+        favorable_q = float(self.favorable_sell_probability_mean)
+        loss_base = self.wealth_after_loss_usd - self.loss_payoff_usd
+        win_base = self.wealth_after_win_usd - self.win_payoff_usd
+        if (
+            self.probability_basis != "POSTERIOR_PREDICTIVE_MEAN"
+            or not all(
+                math.isfinite(value)
+                for value in (
+                    held_q,
+                    favorable_q,
+                    self.expected_delta_log_wealth,
+                    self.expected_ev_usd,
+                )
+            )
+            or not math.isclose(held_q + favorable_q, 1.0, abs_tol=1e-12)
+            or not 0.0 <= held_q <= 1.0
+            or not 0.0 <= favorable_q <= 1.0
+            or self.loss_payoff_usd >= 0
+            or self.win_payoff_usd <= 0
+            or min(
+                loss_base,
+                win_base,
+                self.wealth_after_loss_usd,
+                self.wealth_after_win_usd,
+            )
+            <= 0
+        ):
+            raise ValueError("expected terminal-wealth certificate is incoherent")
+        expected_du = held_q * math.log(
+            float(self.wealth_after_loss_usd / loss_base)
+        ) + favorable_q * math.log(
+            float(self.wealth_after_win_usd / win_base)
+        )
+        expected_ev = held_q * float(self.loss_payoff_usd) + favorable_q * float(
+            self.win_payoff_usd
+        )
+        if not math.isclose(
+            expected_du,
+            self.expected_delta_log_wealth,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ) or not math.isclose(
+            expected_ev,
+            self.expected_ev_usd,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("expected terminal-wealth objective disagrees")
+
+
+@dataclass(frozen=True)
+class ExpectedGrowthComparison:
+    """Common cross-action score after each action passes its own admission law."""
+
+    probability_basis: Literal["POSTERIOR_PREDICTIVE_MEAN"]
+    probability_witness_identity: str
+    expected_delta_log_wealth: float
+    expected_ev_usd: float
+    capital_lock_hours: float
+    expected_log_growth_per_hour: float
+    expected_capital_efficiency: float
+
+    def __post_init__(self) -> None:
+        if (
+            self.probability_basis != "POSTERIOR_PREDICTIVE_MEAN"
+            or not str(self.probability_witness_identity or "").strip()
+            or not all(
+                math.isfinite(value)
+                for value in (
+                    self.expected_delta_log_wealth,
+                    self.expected_ev_usd,
+                    self.capital_lock_hours,
+                    self.expected_log_growth_per_hour,
+                    self.expected_capital_efficiency,
+                )
+            )
+            or self.capital_lock_hours <= 0.0
+            or not math.isclose(
+                self.expected_log_growth_per_hour,
+                self.expected_delta_log_wealth / self.capital_lock_hours,
+                rel_tol=0.0,
+                abs_tol=1e-15,
+            )
+        ):
+            raise ValueError("expected-growth comparison is incoherent")
 
 
 @dataclass(frozen=True)
@@ -1908,6 +2066,10 @@ class GlobalSingleOrderCandidateEvaluation:
     status: Literal["REJECTED", "SCORED", "SELECTED"]
     position_id: str | None = None
     held_shares: Decimal = Decimal("0")
+    sell_probability_functional: str | None = None
+    sell_exit_authority_status: str | None = None
+    sell_exit_authority_reason: str | None = None
+    sell_action_authority_identity: str | None = None
     rejection_reason: str | None = None
     shares: Decimal = Decimal("0")
     cost_usd: Decimal = Decimal("0")
@@ -1936,11 +2098,42 @@ class GlobalSingleOrderCandidateEvaluation:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
+    expected_terminal_wealth: ExpectedTerminalWealthCertificate | None = None
+    expected_growth: ExpectedGrowthComparison | None = None
     sell_point_counterfactual: GlobalSellPointCounterfactual | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
     buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
 
     def __post_init__(self) -> None:
+        if self.action == "SELL" and all(
+            value is None
+            for value in (
+                self.sell_probability_functional,
+                self.sell_exit_authority_status,
+                self.sell_exit_authority_reason,
+                self.sell_action_authority_identity,
+            )
+        ):
+            object.__setattr__(
+                self,
+                "sell_probability_functional",
+                "LOWER_CVAR_PARAMETER_DRAWS",
+            )
+            object.__setattr__(
+                self,
+                "sell_exit_authority_status",
+                "not_applicable",
+            )
+            object.__setattr__(
+                self,
+                "sell_exit_authority_reason",
+                "non_day0_family",
+            )
+            object.__setattr__(
+                self,
+                "sell_action_authority_identity",
+                "non_day0_default_authority",
+            )
         if (
             not all(
                 str(value).strip()
@@ -1957,7 +2150,12 @@ class GlobalSingleOrderCandidateEvaluation:
         ):
             raise ValueError("global candidate evaluation identity is incomplete")
         if self.action == "BUY" and (
-            self.position_id is not None or self.held_shares != 0
+            self.position_id is not None
+            or self.held_shares != 0
+            or self.sell_probability_functional is not None
+            or self.sell_exit_authority_status is not None
+            or self.sell_exit_authority_reason is not None
+            or self.sell_action_authority_identity is not None
         ):
             raise ValueError("BUY evaluation cannot carry a held-position binding")
         if self.sell_point_counterfactual is not None and self.action != "SELL":
@@ -1972,6 +2170,30 @@ class GlobalSingleOrderCandidateEvaluation:
             or not Decimal(self.held_shares).is_finite()
             or Decimal(self.held_shares) <= 0
             or Decimal(self.held_shares) % Decimal("0.01") != 0
+            or self.sell_probability_functional
+            not in {
+                "LOWER_CVAR_PARAMETER_DRAWS",
+                "POSTERIOR_PREDICTIVE_MEAN",
+                "DETERMINISTIC_PAYOFF",
+            }
+            or self.sell_exit_authority_status
+            not in {"not_applicable", "mature", "deterministic"}
+            or not str(self.sell_exit_authority_reason or "").strip()
+            or not str(self.sell_action_authority_identity or "").strip()
+            or (
+                self.sell_probability_functional
+                == "POSTERIOR_PREDICTIVE_MEAN"
+                and self.sell_exit_authority_status != "mature"
+            )
+            or (
+                self.sell_probability_functional == "DETERMINISTIC_PAYOFF"
+                and self.sell_exit_authority_status != "deterministic"
+            )
+            or (
+                self.sell_probability_functional
+                == "LOWER_CVAR_PARAMETER_DRAWS"
+                and self.sell_exit_authority_status != "not_applicable"
+            )
         ):
             raise ValueError("SELL evaluation requires an exact held-position binding")
         if self.status == "REJECTED":
@@ -1985,6 +2207,8 @@ class GlobalSingleOrderCandidateEvaluation:
                     self.limit_price != 0,
                     self.expected_fill_price_before_fee != 0,
                     self.terminal_wealth is not None,
+                    self.expected_terminal_wealth is not None,
+                    self.expected_growth is not None,
                     self.capital_action_mode != "UNSCORED",
                     self.resolution_at_utc is not None,
                     self.capital_lock_hours is not None,
@@ -2088,35 +2312,61 @@ class GlobalSingleOrderCandidateEvaluation:
             if self.action == "BUY"
             else "IMMEDIATE_REDUCE_ONLY_SELL"
         )
+        mean_sell = (
+            self.action == "SELL"
+            and self.sell_probability_functional
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        )
         if (
             self.capital_action_mode != expected_action_mode
             or self.resolution_at_utc is None
             or self.resolution_at_utc.tzinfo is None
             or self.capital_lock_hours is None
-            or self.robust_log_growth_per_hour is None
             or not math.isfinite(self.capital_lock_hours)
-            or not math.isfinite(self.robust_log_growth_per_hour)
             or self.capital_lock_hours <= 0.0
-            or self.robust_log_growth_per_hour <= 0.0
-            or not math.isclose(
-                self.robust_log_growth_per_hour,
-                self.robust_delta_log_wealth / self.capital_lock_hours,
-                rel_tol=0.0,
-                abs_tol=1e-15,
+            or self.expected_growth is None
+            or self.expected_growth.capital_lock_hours != self.capital_lock_hours
+            or self.expected_growth.expected_delta_log_wealth <= 0.0
+            or self.expected_growth.expected_ev_usd <= _ROBUST_EV_EPS_USD
+            or self.expected_growth.expected_capital_efficiency <= 0.0
+            or (
+                not mean_sell
+                and (
+                    self.robust_log_growth_per_hour is None
+                    or not math.isfinite(self.robust_log_growth_per_hour)
+                    or self.robust_log_growth_per_hour <= 0.0
+                    or not math.isclose(
+                        self.robust_log_growth_per_hour,
+                        self.robust_delta_log_wealth / self.capital_lock_hours,
+                        rel_tol=0.0,
+                        abs_tol=1e-15,
+                    )
+                )
             )
         ):
             raise ValueError("global evaluation lacks a coherent capital-time rate")
+        expected_economics_invalid = (
+            self.expected_terminal_wealth is None
+            or self.terminal_wealth is not None
+            or self.robust_delta_log_wealth != 0.0
+            or self.robust_ev_usd != 0.0
+            or self.capital_efficiency != 0.0
+            or self.robust_log_growth_per_hour is not None
+        ) if mean_sell else (
+            self.expected_terminal_wealth is not None
+            or self.terminal_wealth is None
+            or self.robust_delta_log_wealth <= 0.0
+            or self.robust_ev_usd <= _ROBUST_EV_EPS_USD
+            or self.capital_efficiency <= 0.0
+        )
         if (
             self.status not in {"SCORED", "SELECTED"}
             or self.rejection_reason is not None
             or self.shares <= 0
             or self.cost_usd <= 0
-            or self.robust_delta_log_wealth <= 0.0
-            or self.robust_ev_usd <= _ROBUST_EV_EPS_USD
-            or self.capital_efficiency <= 0.0
+            or expected_economics_invalid
             or self.limit_price <= 0
             or self.expected_fill_price_before_fee <= 0
-            or self.terminal_wealth is None
         ):
             raise ValueError("scored candidate evaluation lacks positive economics")
         if self.action == "BUY":
@@ -2170,6 +2420,16 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.shares > self.held_shares
             or self.buy_minimum_marketable_repair is not None
             or self.buy_sizing_mode != "NOT_APPLICABLE"
+            or (
+                mean_sell
+                and (
+                    self.expected_terminal_wealth is None
+                    or self.expected_terminal_wealth.loss_payoff_usd
+                    != -self.cost_usd
+                    or self.expected_terminal_wealth.win_payoff_usd
+                    != self.cash_proceeds_usd
+                )
+            )
         ):
             raise ValueError(
                 "SELL evaluation must reduce no more than its bound holding"
@@ -2209,6 +2469,8 @@ class GlobalSingleOrderDecision:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
+    expected_terminal_wealth: ExpectedTerminalWealthCertificate | None = None
+    expected_growth: ExpectedGrowthComparison | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
     buy_rejection_economics: GlobalBuyRejectionEconomics | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
@@ -2258,6 +2520,9 @@ class GlobalSingleOrderDecision:
                     or winner.capital_lock_hours != self.capital_lock_hours
                     or winner.robust_log_growth_per_hour
                     != self.robust_log_growth_per_hour
+                    or winner.expected_terminal_wealth
+                    != self.expected_terminal_wealth
+                    or winner.expected_growth != self.expected_growth
                     or winner.current_token_shares
                     != self.current_token_shares
                     or winner.full_kelly_target_shares
@@ -2299,6 +2564,8 @@ class GlobalSingleOrderDecision:
                 or self.full_kelly_target_shares != 0
                 or self.fractional_kelly_target_shares != 0
                 or self.terminal_wealth is not None
+                or self.expected_terminal_wealth is not None
+                or self.expected_growth is not None
                 or self.capital_action_mode != "UNSCORED"
                 or self.resolution_at_utc is not None
                 or self.capital_lock_hours is not None
@@ -2308,7 +2575,43 @@ class GlobalSingleOrderDecision:
             return
         if self.buy_rejection_economics is not None:
             raise ValueError("selected global order cannot carry rejection economics")
+        if not internal_score and not self.rejection_reasons and (
+            self.expected_growth is None
+            or self.capital_lock_hours is None
+            or self.expected_growth.capital_lock_hours != self.capital_lock_hours
+            or self.expected_growth.expected_delta_log_wealth <= 0.0
+            or self.expected_growth.expected_ev_usd <= _ROBUST_EV_EPS_USD
+            or self.expected_growth.expected_capital_efficiency <= 0.0
+        ):
+            raise ValueError("global order lacks a positive common expected-growth score")
         if getattr(self.candidate, "action", "BUY") == "SELL":
+            mean_sell = (
+                self.candidate.probability_functional
+                == "POSTERIOR_PREDICTIVE_MEAN"
+            )
+            expected_terminal = self.expected_terminal_wealth
+            robust_terminal = self.terminal_wealth
+            economics_invalid = (
+                expected_terminal is None
+                or robust_terminal is not None
+                or self.robust_delta_log_wealth != 0.0
+                or self.robust_ev_usd != 0.0
+                or self.capital_efficiency != 0.0
+                or self.robust_log_growth_per_hour is not None
+                or expected_terminal.loss_payoff_usd != -self.cost_usd
+                or expected_terminal.win_payoff_usd != self.cash_proceeds_usd
+            ) if mean_sell else (
+                expected_terminal is not None
+                or robust_terminal is None
+                or robust_terminal.loss_payoff_usd != -self.cost_usd
+                or robust_terminal.win_payoff_usd != self.cash_proceeds_usd
+                or not math.isclose(
+                    robust_terminal.expected_value_diagnostic_usd,
+                    self.robust_ev_usd,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            )
             if (
                 self.no_trade_reason is not None
                 or self.shares <= 0
@@ -2324,9 +2627,7 @@ class GlobalSingleOrderDecision:
                 or self.fractional_kelly_target_shares != 0
                 or self.buy_minimum_marketable_repair is not None
                 or self.buy_sizing_mode != "NOT_APPLICABLE"
-                or self.terminal_wealth is None
-                or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
-                or self.terminal_wealth.win_payoff_usd != self.cash_proceeds_usd
+                or economics_invalid
                 or (
                     not internal_score
                     and (
@@ -2335,24 +2636,25 @@ class GlobalSingleOrderDecision:
                         or self.resolution_at_utc is None
                         or self.resolution_at_utc.tzinfo is None
                         or self.capital_lock_hours is None
-                        or self.robust_log_growth_per_hour is None
                         or not math.isfinite(self.capital_lock_hours)
-                        or not math.isfinite(self.robust_log_growth_per_hour)
                         or self.capital_lock_hours <= 0.0
-                        or not math.isclose(
-                            self.robust_log_growth_per_hour,
-                            self.robust_delta_log_wealth
-                            / self.capital_lock_hours,
-                            rel_tol=0.0,
-                            abs_tol=1e-15,
+                        or (
+                            not mean_sell
+                            and (
+                                self.robust_log_growth_per_hour is None
+                                or not math.isfinite(
+                                    self.robust_log_growth_per_hour
+                                )
+                                or not math.isclose(
+                                    self.robust_log_growth_per_hour,
+                                    self.robust_delta_log_wealth
+                                    / self.capital_lock_hours,
+                                    rel_tol=0.0,
+                                    abs_tol=1e-15,
+                                )
+                            )
                         )
                     )
-                )
-                or not math.isclose(
-                    self.terminal_wealth.expected_value_diagnostic_usd,
-                    self.robust_ev_usd,
-                    rel_tol=0.0,
-                    abs_tol=1e-12,
                 )
             ):
                 raise ValueError("global sell decision is not held-position coherent")
@@ -2421,6 +2723,7 @@ class GlobalSingleOrderDecision:
             or self.fractional_kelly_target_shares
             > self.full_kelly_target_shares
             or self.terminal_wealth is None
+            or self.expected_terminal_wealth is not None
             or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
             or self.terminal_wealth.win_payoff_usd != self.shares - self.cost_usd
             or (
@@ -2503,6 +2806,20 @@ def _global_candidate_evaluations(
                     status="REJECTED",
                     position_id=position_id,
                     held_shares=held_shares,
+                    sell_probability_functional=(
+                        candidate.probability_functional if is_sell else None
+                    ),
+                    sell_exit_authority_status=(
+                        candidate.exit_authority_status if is_sell else None
+                    ),
+                    sell_exit_authority_reason=(
+                        candidate.exit_authority_reason if is_sell else None
+                    ),
+                    sell_action_authority_identity=(
+                        candidate.sell_action_authority_identity
+                        if is_sell
+                        else None
+                    ),
                     rejection_reason=reason,
                     sell_point_counterfactual=sell_point_by_id.get(
                         candidate.candidate_id
@@ -2532,6 +2849,18 @@ def _global_candidate_evaluations(
                 ),
                 position_id=position_id,
                 held_shares=held_shares,
+                sell_probability_functional=(
+                    candidate.probability_functional if is_sell else None
+                ),
+                sell_exit_authority_status=(
+                    candidate.exit_authority_status if is_sell else None
+                ),
+                sell_exit_authority_reason=(
+                    candidate.exit_authority_reason if is_sell else None
+                ),
+                sell_action_authority_identity=(
+                    candidate.sell_action_authority_identity if is_sell else None
+                ),
                 rejection_reason=rejection_reason,
                 shares=score.shares,
                 cost_usd=score.cost_usd,
@@ -2556,6 +2885,8 @@ def _global_candidate_evaluations(
                     score.fractional_kelly_target_shares
                 ),
                 terminal_wealth=score.terminal_wealth,
+                expected_terminal_wealth=score.expected_terminal_wealth,
+                expected_growth=score.expected_growth,
                 sell_point_counterfactual=sell_point_by_id.get(
                     candidate.candidate_id
                 ),
@@ -4300,6 +4631,124 @@ def _score_global_single_order_sell(
     return scored
 
 
+def _score_global_single_order_sell_expected(
+    candidate: GlobalSingleOrderSellCandidate,
+    *,
+    point_held_payoff_q: float,
+    sample_count: int,
+    band_alpha: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+) -> GlobalSingleOrderDecision:
+    """Score a mature fixed SELL without relabeling mean economics as robust."""
+
+    point_q = float(point_held_payoff_q)
+    if not math.isfinite(point_q) or not 0.0 <= point_q <= 1.0:
+        raise ValueError("SELL expected probability must lie in [0, 1]")
+    internal_candidate = replace(
+        candidate,
+        probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
+        exit_authority_status="not_applicable",
+        exit_authority_reason="expected_sell_internal_fixed_probability",
+    )
+    internal = _score_global_single_order_sell(
+        internal_candidate,
+        held_payoff_q_samples=np.full(
+            sample_count,
+            point_q,
+            dtype=np.float64,
+        ),
+        band_alpha=band_alpha,
+        wealth_floor_usd=wealth_floor_usd,
+        wealth_ceiling_usd=wealth_ceiling_usd,
+    )
+    if internal.candidate is None:
+        return internal
+    terminal = internal.terminal_wealth
+    assert terminal is not None
+    expected_terminal = ExpectedTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        held_probability_mean=point_q,
+        favorable_sell_probability_mean=1.0 - point_q,
+        loss_payoff_usd=terminal.loss_payoff_usd,
+        win_payoff_usd=terminal.win_payoff_usd,
+        wealth_after_loss_usd=terminal.wealth_after_loss_usd,
+        wealth_after_win_usd=terminal.wealth_after_win_usd,
+        expected_delta_log_wealth=internal.robust_delta_log_wealth,
+        expected_ev_usd=internal.robust_ev_usd,
+    )
+    reason_map = {
+        "NON_POSITIVE_ROBUST_OBJECTIVE": "NON_POSITIVE_EXPECTED_OBJECTIVE",
+        "NON_POSITIVE_ROBUST_FILL_PREFIX": "NON_POSITIVE_EXPECTED_FILL_PREFIX",
+    }
+    return replace(
+        internal,
+        candidate=candidate,
+        robust_delta_log_wealth=0.0,
+        robust_ev_usd=0.0,
+        capital_efficiency=0.0,
+        terminal_wealth=None,
+        expected_terminal_wealth=expected_terminal,
+        rejection_reasons={
+            candidate_id: reason_map.get(reason, reason)
+            for candidate_id, reason in internal.rejection_reasons.items()
+        },
+    )
+
+
+def _expected_growth_comparison(
+    score: GlobalSingleOrderDecision,
+    *,
+    probability_witness: FamilyPayoffWitness,
+    capital_lock_hours: float,
+) -> ExpectedGrowthComparison:
+    """Evaluate one action-law-sized proposal on a common posterior-mean axis."""
+
+    candidate = score.candidate
+    if candidate is None:
+        raise ValueError("expected comparison requires an executable candidate")
+    if score.expected_terminal_wealth is not None:
+        expected_du = score.expected_terminal_wealth.expected_delta_log_wealth
+        expected_ev = score.expected_terminal_wealth.expected_ev_usd
+    else:
+        terminal = score.terminal_wealth
+        point_q = family_payoff_point_q(
+            probability_witness,
+            bin_id=candidate.bin_id,
+            side=candidate.side,
+        )
+        if terminal is None or point_q is None:
+            raise ValueError("posterior-mean comparison authority is unavailable")
+        held_q = float(point_q)
+        favorable_q = (
+            1.0 - held_q
+            if isinstance(candidate, GlobalSingleOrderSellCandidate)
+            else held_q
+        )
+        loss_q = 1.0 - favorable_q
+        loss_base = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+        win_base = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+        if min(loss_base, win_base) <= 0:
+            raise ValueError("posterior-mean comparison baseline is non-positive")
+        expected_du = loss_q * math.log(
+            float(terminal.wealth_after_loss_usd / loss_base)
+        ) + favorable_q * math.log(
+            float(terminal.wealth_after_win_usd / win_base)
+        )
+        expected_ev = loss_q * float(terminal.loss_payoff_usd) + favorable_q * float(
+            terminal.win_payoff_usd
+        )
+    return ExpectedGrowthComparison(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        probability_witness_identity=probability_witness.witness_identity,
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=expected_ev,
+        capital_lock_hours=capital_lock_hours,
+        expected_log_growth_per_hour=expected_du / capital_lock_hours,
+        expected_capital_efficiency=expected_du / float(score.cost_usd),
+    )
+
+
 def _score_global_sell_point_counterfactual(
     candidate: GlobalSingleOrderSellCandidate,
     *,
@@ -4649,6 +5098,25 @@ def select_global_single_order(
         ).total_seconds() / 3600.0
         if not math.isfinite(capital_lock_hours) or capital_lock_hours <= 0.0:
             return None, "CAPITAL_HORIZON_NON_POSITIVE"
+        candidate = score.candidate
+        if candidate is None:
+            return None, "EXPECTED_COMPARISON_CANDIDATE_MISSING"
+        probability_witness = probability_witnesses.get(family_key)
+        if probability_witness is None:
+            return None, "EXPECTED_COMPARISON_PROBABILITY_MISSING"
+        try:
+            expected_growth = _expected_growth_comparison(
+                score,
+                probability_witness=probability_witness,
+                capital_lock_hours=capital_lock_hours,
+            )
+        except Exception:
+            return None, "EXPECTED_COMPARISON_UNAVAILABLE"
+        mean_sell = (
+            isinstance(candidate, GlobalSingleOrderSellCandidate)
+            and candidate.probability_functional
+            == "POSTERIOR_PREDICTIVE_MEAN"
+        )
         return (
             replace(
                 score,
@@ -4656,8 +5124,11 @@ def select_global_single_order(
                 resolution_at_utc=resolution_at,
                 capital_lock_hours=capital_lock_hours,
                 robust_log_growth_per_hour=(
-                    score.robust_delta_log_wealth / capital_lock_hours
+                    None
+                    if mean_sell
+                    else score.robust_delta_log_wealth / capital_lock_hours
                 ),
+                expected_growth=expected_growth,
             ),
             None,
         )
@@ -4853,14 +5324,36 @@ def select_global_single_order(
             sell_point_counterfactuals_by_id[candidate.candidate_id] = (
                 point_counterfactual
             )
-            score = _score_global_single_order_sell(
-                candidate,
-                held_payoff_q_samples=q_samples,
-                band_alpha=band_alpha,
-                wealth_floor_usd=wealth_witness.wealth_floor_usd,
-                wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
-            )
+            if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
+                if point_q is None:
+                    rejections[candidate.candidate_id] = (
+                        "POINT_PROBABILITY_UNAVAILABLE"
+                    )
+                    continue
+                score = _score_global_single_order_sell_expected(
+                    candidate,
+                    point_held_payoff_q=point_q,
+                    sample_count=q_samples.size,
+                    band_alpha=band_alpha,
+                    wealth_floor_usd=wealth_witness.wealth_floor_usd,
+                    wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+                )
+            else:
+                score = _score_global_single_order_sell(
+                    candidate,
+                    held_payoff_q_samples=q_samples,
+                    band_alpha=band_alpha,
+                    wealth_floor_usd=wealth_witness.wealth_floor_usd,
+                    wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+                )
             if score.candidate is None:
+                rejections.update(score.rejection_reasons)
+                continue
+            if (
+                candidate.probability_functional
+                == "POSTERIOR_PREDICTIVE_MEAN"
+                and score.rejection_reasons
+            ):
                 rejections.update(score.rejection_reasons)
                 continue
             score, horizon_reason = bind_capital_horizon(
@@ -5136,26 +5629,19 @@ def select_global_single_order(
                     fixed.no_trade_reason or "FAMILY_JOINT_PRIMARY_REPAIR_FAILED"
                 )
                 continue
-            resolution_at = universe_witness.resolution_at_by_family.get(family_key)
-            if resolution_at is None:
-                rejections[primary_id] = "CAPITAL_HORIZON_AUTHORITY_MISSING"
-                continue
-            capital_lock_hours = (
-                resolution_at - decision_at_utc.astimezone(timezone.utc)
-            ).total_seconds() / 3600.0
-            if not math.isfinite(capital_lock_hours) or capital_lock_hours <= 0.0:
-                rejections[primary_id] = "CAPITAL_HORIZON_NON_POSITIVE"
+            fixed, horizon_reason = bind_capital_horizon(
+                fixed,
+                family_key=family_key,
+                action_mode="SETTLEMENT_LOCKED_BUY",
+            )
+            if fixed is None:
+                rejections[primary_id] = str(
+                    horizon_reason or "EXPECTED_COMPARISON_UNAVAILABLE"
+                )
                 continue
             scored.append(
                 replace(
                     fixed,
-                    capital_action_mode="SETTLEMENT_LOCKED_BUY",
-                    resolution_at_utc=resolution_at,
-                    capital_lock_hours=capital_lock_hours,
-                    robust_log_growth_per_hour=(
-                        fixed.robust_delta_log_wealth
-                        / capital_lock_hours
-                    ),
                     current_token_shares=target.current_token_shares,
                     full_kelly_target_shares=target.full_kelly_target_shares,
                     fractional_kelly_target_shares=(
@@ -5170,8 +5656,9 @@ def select_global_single_order(
         for score in scored
         if score.candidate is not None
         and score.candidate.candidate_id not in rejections
-        and score.robust_delta_log_wealth > 0.0
-        and score.robust_ev_usd > _ROBUST_EV_EPS_USD
+        and score.expected_growth is not None
+        and score.expected_growth.expected_delta_log_wealth > 0.0
+        and score.expected_growth.expected_ev_usd > _ROBUST_EV_EPS_USD
     )
     if not positive_scored:
         no_trade_reason = (
@@ -5199,18 +5686,18 @@ def select_global_single_order(
             candidate_input_count=len(candidates),
         )
 
-    # BUY and SELL are alternative one-order changes to the current endowment.
-    # Execution direction does not change the objective: compare each certified
-    # terminal improvement over its authority-bound family-resolution horizon.
+    # Each action first passes its own admission/sizing law.  Rank the resulting
+    # fixed proposals on one posterior-mean expected-growth axis; robust BUY
+    # admission remains mandatory but cannot become an incommensurate score.
     winner = min(
         positive_scored,
         key=lambda score: (
             -round(
-                float(score.robust_log_growth_per_hour or 0.0),
+                float(score.expected_growth.expected_log_growth_per_hour),
                 15,
             ),
-            -round(score.robust_delta_log_wealth, 15),
-            -round(score.capital_efficiency, 15),
+            -round(score.expected_growth.expected_delta_log_wealth, 15),
+            -round(score.expected_growth.expected_capital_efficiency, 15),
             score.cost_usd,
             score.candidate.candidate_id if score.candidate is not None else "",
         ),
@@ -5239,6 +5726,8 @@ def select_global_single_order(
         ),
         buy_sizing_mode=winner.buy_sizing_mode,
         terminal_wealth=winner.terminal_wealth,
+        expected_terminal_wealth=winner.expected_terminal_wealth,
+        expected_growth=winner.expected_growth,
         buy_minimum_marketable_repair=(
             winner.buy_minimum_marketable_repair
         ),

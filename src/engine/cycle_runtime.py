@@ -3719,6 +3719,17 @@ _DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES = (
 
 def _day0_immature_exit_authority_reason(*sources) -> str | None:
     for source in sources:
+        status = str(
+            getattr(source, "day0_exit_authority_status", None)
+            or getattr(source, "_day0_exit_authority_status", None)
+            or ""
+        ).strip().lower()
+        if status in {"immature", "unavailable"}:
+            return str(
+                getattr(source, "day0_exit_authority_reason", None)
+                or getattr(source, "_day0_exit_authority_reason", None)
+                or f"day0_extreme_maturity_unavailable:status={status}"
+            )
         for validation in getattr(source, "applied_validations", []) or []:
             text = str(validation or "")
             if text.startswith(_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES):
@@ -5125,6 +5136,18 @@ def _build_exit_context(
         day0_active=position_state == "day0_window",
         day0_zero_probability_exit_authority=bool(
             getattr(pos, "_day0_zero_probability_exit_authority", False)
+        ),
+        day0_exit_authority_status=str(
+            getattr(pos, "_day0_exit_authority_status", None)
+            or ("unavailable" if position_state == "day0_window" else "not_applicable")
+        ),
+        day0_exit_authority_reason=str(
+            getattr(pos, "_day0_exit_authority_reason", None)
+            or (
+                "day0_extreme_maturity_unavailable:typed_authority_missing"
+                if position_state == "day0_window"
+                else "non_day0_family"
+            )
         ),
         whale_toxicity=getattr(pos, "last_monitor_whale_toxicity", None),
         chain_is_fresh=pos.chain_state == "synced",
