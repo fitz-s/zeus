@@ -1,8 +1,25 @@
-# Strategy Profile Registry
+# Strategy Profile Registry — ARCHIVED FROM THE MONEY PATH (2026-07-24)
+#
+# ultimate_alpha_2026-07-23 COLLISION.md group B / FINAL_SPEC.md §What remains:
+# per-key ECONOMICS in this file no longer govern live decisions. The one
+# decision law (src/decision/predicted_bin_law.py) + one global Kelly fraction
+# (src/strategy/kelly.py GLOBAL_KELLY_FRACTION) own sizing and admission; the
+# universal price law is the venue submit band [0.05, 0.95]
+# (assert_live_order_unit_price). What this file still authoritatively carries:
+#   - live_status (boot/runtime allowlists: live_safe_keys/live_allowed_keys —
+#     an operator PERMISSION surface, not economics)
+#   - historical decoding of strategy_key-era rows (kelly_for_phase and the
+#     economic fields below are a frozen record of what past decisions used)
+# kelly multipliers / phase overrides / min_entry_price / min_expected_profit /
+# edge density on LIVE keys have been collapsed to the universal law values;
+# blocked keys' tombstones keep their historical values. PR-2 removes the
+# remaining live reads entirely.
 #
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-21
-# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4
+# Last reused/audited: 2026-07-24
+# Authority basis: docs/operations/current/plans/ultimate_alpha_2026-07-23/
+#                  (COLLISION.md wins) — superseding for economics:
+#                  docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4
 #                  + Bug review §D (KNOWN_STRATEGIES / STRATEGY_KELLY_MULTIPLIERS scattered)
 #                  + Bug review §E (LIVE_SAFE_STRATEGIES vs _LIVE_ALLOWED_STRATEGIES divergence).
 #
@@ -134,10 +151,10 @@ settlement_capture:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.10
+  min_entry_price: 0.05   # one-law collapse 2026-07-24: universal venue band edge
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 1.00
-  min_submit_edge_density: 0.05
+  min_expected_profit_usd: 0.00   # one-law collapse 2026-07-24: absolute floor deleted
+  min_submit_edge_density: 0.00   # one-law collapse 2026-07-24: density floor deleted
   allow_ultra_low_tail: false
 
 day0_nowcast_entry:
@@ -169,10 +186,10 @@ day0_nowcast_entry:
     resolved: 0.0
   min_settled_decisions: 20
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.10
+  min_entry_price: 0.05   # one-law collapse 2026-07-24: universal venue band edge
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 1.00
-  min_submit_edge_density: 0.05
+  min_expected_profit_usd: 0.00   # one-law collapse 2026-07-24: absolute floor deleted
+  min_submit_edge_density: 0.00   # one-law collapse 2026-07-24: density floor deleted
   allow_ultra_low_tail: false
   partial_source_run_allowed: false
   complete_required_for_tail_orders: true
@@ -205,8 +222,8 @@ center_buy:
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
   min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.25
-  min_submit_edge_density: 0.05
+  min_expected_profit_usd: 0.00   # one-law collapse 2026-07-24: absolute floor deleted
+  min_submit_edge_density: 0.00   # one-law collapse 2026-07-24: density floor deleted
   allow_ultra_low_tail: false
 
 forecast_qkernel_entry:
@@ -237,10 +254,10 @@ forecast_qkernel_entry:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.10
+  min_entry_price: 0.05   # one-law collapse 2026-07-24: universal venue band edge
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 1.00
-  min_submit_edge_density: 0.05
+  min_expected_profit_usd: 0.00   # one-law collapse 2026-07-24: absolute floor deleted
+  min_submit_edge_density: 0.00   # one-law collapse 2026-07-24: density floor deleted
   allow_ultra_low_tail: false
 
 opening_inertia:
@@ -269,10 +286,10 @@ opening_inertia:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.10
+  min_entry_price: 0.05   # one-law collapse 2026-07-24: universal venue band edge
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 1.00
-  min_submit_edge_density: 0.05
+  min_expected_profit_usd: 0.00   # one-law collapse 2026-07-24: absolute floor deleted
+  min_submit_edge_density: 0.00   # one-law collapse 2026-07-24: density floor deleted
   allow_ultra_low_tail: false
 
 shoulder_sell:
@@ -383,10 +400,10 @@ imminent_open_capture:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: null
-  min_entry_price: 0.10
+  min_entry_price: 0.05   # one-law collapse 2026-07-24: universal venue band edge
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 1.00
-  min_submit_edge_density: 0.05
+  min_expected_profit_usd: 0.00   # one-law collapse 2026-07-24: absolute floor deleted
+  min_submit_edge_density: 0.00   # one-law collapse 2026-07-24: density floor deleted
   allow_ultra_low_tail: false
 
 shoulder_buy:

@@ -287,42 +287,44 @@ def test_kelly_for_phase_None_returns_default():
 
 
 def test_live_quality_floors_are_registry_backed() -> None:
+    """One-law collapse (ultimate_alpha 2026-07-24): live keys carry the
+    universal law values — venue band edge 0.05, zero absolute profit/density
+    floors. min_strategy_notional stays (the venue's real minimum order)."""
     profile = sp.get("opening_inertia")
-    assert profile.min_entry_price == pytest.approx(0.10)
+    assert profile.min_entry_price == pytest.approx(0.05)
     assert profile.min_strategy_notional_usd == pytest.approx(1.0)
-    assert profile.min_expected_profit_usd == pytest.approx(1.0)
-    assert profile.min_submit_edge_density == pytest.approx(0.05)
+    assert profile.min_expected_profit_usd == pytest.approx(0.0)
+    assert profile.min_submit_edge_density == pytest.approx(0.0)
     assert profile.allow_ultra_low_tail is False
 
 
-def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
-    """Fast-decay live entry profiles must not admit sub-dollar thin-edge churn."""
+def test_live_entry_quality_floors_collapsed_to_one_law() -> None:
+    """One-law collapse: EVERY live key carries identical universal values —
+    a per-key economic difference reappearing here is the label-economics
+    regression this pins against."""
 
-    expected_min_entry_prices = {
-        "settlement_capture": 0.10,
-        "day0_nowcast_entry": 0.10,
-        "center_buy": 0.05,
-        "opening_inertia": 0.10,
-        "imminent_open_capture": 0.10,
-    }
-    for strategy_key, expected_min_entry_price in expected_min_entry_prices.items():
+    for strategy_key in (
+        "settlement_capture",
+        "day0_nowcast_entry",
+        "center_buy",
+        "forecast_qkernel_entry",
+        "opening_inertia",
+        "imminent_open_capture",
+    ):
         profile = sp.get(strategy_key)
-        assert profile.min_entry_price == pytest.approx(expected_min_entry_price)
-        assert profile.min_submit_edge_density == pytest.approx(0.05)
-    assert sp.get("settlement_capture").min_expected_profit_usd == pytest.approx(1.0)
-    assert sp.get("day0_nowcast_entry").min_expected_profit_usd == pytest.approx(1.0)
-    assert sp.get("forecast_qkernel_entry").min_expected_profit_usd == pytest.approx(1.0)
-    assert sp.get("opening_inertia").min_expected_profit_usd == pytest.approx(1.0)
-    assert sp.get("imminent_open_capture").min_expected_profit_usd == pytest.approx(1.0)
+        assert profile.min_entry_price == pytest.approx(0.05), strategy_key
+        assert profile.min_expected_profit_usd == pytest.approx(0.0), strategy_key
+        assert profile.min_submit_edge_density == pytest.approx(0.0), strategy_key
 
 
 def test_center_buy_profit_floor_aligns_with_qkernel_roi_frontier() -> None:
-    """Center-buy uses qkernel ROI frontier quality, not a flat $1 submit cliff."""
+    """One-law collapse: center_buy carries the same universal values as every
+    other live key (its former 0.25 frontier floor is deleted with the rest)."""
 
     profile = sp.get("center_buy")
-    assert profile.min_expected_profit_usd == pytest.approx(0.25)
+    assert profile.min_expected_profit_usd == pytest.approx(0.0)
     assert profile.min_entry_price == pytest.approx(0.05)
-    assert profile.min_submit_edge_density == pytest.approx(0.05)
+    assert profile.min_submit_edge_density == pytest.approx(0.0)
 
 
 def test_center_buy_live_floor_blocks_tail_lottery_prices() -> None:

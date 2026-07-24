@@ -2019,15 +2019,22 @@ def test_global_current_entry_feasibility_enforces_owner_strategy_floor(side):
             ),
         )
 
+    # One-law update (ultimate_alpha 2026-07-24): the per-strategy 0.10 floor
+    # collapsed to the universal venue band edge 0.05 — same floor for every
+    # key, inclusive at the edge, rejecting below it.
     assert era._global_current_entry_feasibility_rejection_reason(
-        candidate("0.099"),
+        candidate("0.049"),
         strategy_key="forecast_qkernel_entry",
     ) == (
         "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
-        "strategy=forecast_qkernel_entry:ask=0.099:floor=0.1"
+        "strategy=forecast_qkernel_entry:ask=0.049:floor=0.05"
     )
     assert era._global_current_entry_feasibility_rejection_reason(
-        candidate("0.10"),
+        candidate("0.05"),
+        strategy_key="forecast_qkernel_entry",
+    ) is None
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate("0.099"),
         strategy_key="forecast_qkernel_entry",
     ) is None
 
@@ -3012,12 +3019,13 @@ def test_qkernel_actual_submit_floor_uses_actual_stake_not_cert_optimal_size():
         actual_cost=0.65733,
     )
 
-    assert reason is not None
-    assert reason.startswith(
-        "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_profit_below_strategy_floor:"
-    )
-    assert "strategy=forecast_qkernel_entry" in reason
-    assert "floor=1.000000" in reason
+    # One-law update (ultimate_alpha 2026-07-24): the per-strategy $1.00
+    # absolute profit floor is deleted. A small stake with positive robust
+    # economics (~$0.45 profit-LCB here) is admissible — smallness is the
+    # allocator's concern, not an absolute-$ cliff. Negative/zero-profit
+    # submissions are still rejected by the positive-robust-value law
+    # (covered by the degraded-economics tests below).
+    assert reason is None
 
 
 def test_qkernel_actual_submit_floor_accepts_price_relative_positive_economics():
