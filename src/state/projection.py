@@ -113,10 +113,23 @@ def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in rows}
 
 
+# Nullable write-once identity columns: absence in a caller-built payload means
+# NULL (unstamped — historical/foreign/recovery rows), NOT a malformed payload.
+# Every other canonical column stays strictly required.
+_OPTIONAL_IDENTITY_COLUMNS = frozenset({"decision_law_id", "position_origin"})
+
+
 def require_payload_fields(payload: dict, columns: tuple[str, ...], *, label: str) -> None:
-    missing = [column for column in columns if column not in payload]
+    missing = [
+        column
+        for column in columns
+        if column not in payload and column not in _OPTIONAL_IDENTITY_COLUMNS
+    ]
     if missing:
         raise ValueError(f"{label} missing fields: {missing}")
+    for column in _OPTIONAL_IDENTITY_COLUMNS:
+        if column in columns:
+            payload.setdefault(column, None)
 
 
 def validate_event_projection_pair(event: dict, projection: dict) -> None:
