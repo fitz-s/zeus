@@ -279,13 +279,16 @@ class Walker:
     def bundle_read(self) -> None:
         try:
             from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
-            from src.engine.replacement_forecast_hook_factory import _latest_replacement_readiness
+            from src.data.replacement_forecast_readiness import (
+                latest_replacement_readiness,
+            )
 
             conn = _ro(FORECASTS)
             try:
-                readiness = _latest_replacement_readiness(
+                readiness = latest_replacement_readiness(
                     conn, city=self.city, target_date=self.target_date,
                     temperature_metric=self.metric,
+                    decision_time=self.now,
                 )
                 if readiness is None:
                     self.add("8 bundle_read", "FAIL", "readiness decision unloadable")

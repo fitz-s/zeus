@@ -17,18 +17,6 @@ an unwired alternate calibration/fine-tune path whose names and activation
 semantics could otherwise seed a second probability authority.
 
 Still outside this antibody's module-path boundary:
-  - src/data/ecmwf_aifs_sampled_2t_localday.py (AifsSampledLocalDayExtraction/AifsInstantSample)
-    and src/strategy/ecmwf_aifs_sampled_2t_probabilities.py (AifsTemperatureBin) turned out to be
-    de facto GENERIC value types reused by ~8 test files across the whole replacement-forecast /
-    bayes-precision-fusion test suite (test_hk_settlement_preimage_contract.py,
-    test_replacement_sigma_scale_k_c.py, test_bayes_precision_fusion_history_provider_
-    materializer_wiring.py, etc.) that have nothing to do with AIFS data ingestion --
-    `replacement_forecast_materializer.py`'s own `bins` field is `Sequence[object]` (fully
-    duck-typed, zero AIFS coupling). Relocating that shared type off the AIFS module name is a
-    real rename touching 8+ files, not a mechanical deletion; left in place rather than risk
-    money-path-adjacent test collateral. src/strategy/openmeteo_ecmwf_ifs9_aifs_soft_anchor.py
-    and scripts/validate_member_vote_smoothing_3way.py are downstream of the same two types and
-    were restored alongside them for the same reason.
   - src/data/forecast_source_registry.py's "ecmwf_aifs_ens" source spec / "A1" product spec:
     ~12 test files (test_replacement_forecast_metric_identity.py, _product_window.py,
     _cycle_phase_admission.py, _bundle_reader_staleness.py, _bundle_reader_tradeable_latest.py,
