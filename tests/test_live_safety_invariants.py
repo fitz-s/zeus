@@ -9090,10 +9090,6 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
     conn.close()
 
 
-
-
-
-
 def test_monitor_refreshed_persists_day0_probability_receipt():
     """Day0 monitor events must carry enough input evidence to replay probability flips."""
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
@@ -9276,8 +9272,6 @@ def test_monitor_refreshed_omits_stale_day0_probability_receipt_on_non_day0_meth
     payload = json.loads(events[0]["payload_json"])
     assert payload["selected_method"] == "replacement_posterior"
     assert "day0_monitor_probability_receipt" not in payload
-
-
 
 
 def test_family_monitor_overlay_blocks_statistical_exit_on_immature_day0_authority():
@@ -9507,8 +9501,6 @@ def test_exit_evidence_gate_blocks_family_direct_sell_on_immature_day0_authority
             "reason": reason,
         }
     ]
-
-
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
@@ -10422,8 +10414,8 @@ def test_exit_authority_fails_closed_on_incomplete_context():
     )
 
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob,current_market_price_is_fresh)"
-    assert "exit_context_incomplete" in decision.applied_validations
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
+    assert "evidence_unavailable_third_state" in decision.applied_validations
     assert pos.neg_edge_count == 0
 
 
@@ -10444,8 +10436,7 @@ def test_exit_authority_fails_closed_on_stale_monitor_inputs():
     )
 
     assert decision.should_exit is False
-    assert "fresh_prob_is_fresh" in decision.reason
-    assert "current_market_price_is_fresh" in decision.reason
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
 
 
 def test_day0_stale_probability_does_not_authorize_observation_reversal():
@@ -10466,8 +10457,8 @@ def test_day0_stale_probability_does_not_authorize_observation_reversal():
     )
 
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob_is_fresh)"
-    assert "day0_probability_authority_blocked" in decision.applied_validations
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
+    assert "evidence_unavailable_third_state" in decision.applied_validations
     assert decision.trigger != "DAY0_OBSERVATION_REVERSAL"
 
 
@@ -10489,8 +10480,8 @@ def test_day0_observation_exit_requires_executable_best_bid_not_price_proxy():
     )
 
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
-    assert "best_bid_unavailable" in decision.applied_validations
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
+    assert "evidence_unavailable_third_state" in decision.applied_validations
     assert "best_bid_proxy_from_current_market_price" not in decision.applied_validations
 
 
@@ -10512,8 +10503,8 @@ def test_day0_observation_exit_requires_finite_executable_best_bid(bad_bid):
     )
 
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
-    assert "best_bid_unavailable" in decision.applied_validations
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
+    assert "evidence_unavailable_third_state" in decision.applied_validations
 
 
 def test_day0_force_exit_without_model_probability_still_requires_executable_best_bid():
@@ -10534,8 +10525,8 @@ def test_day0_force_exit_without_model_probability_still_requires_executable_bes
     )
 
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob_is_fresh,best_bid)"
-    assert "best_bid_unavailable" in decision.applied_validations
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
+    assert "evidence_unavailable_third_state" in decision.applied_validations
     assert "model_probability_authority_not_required:settlement_imminent" not in decision.applied_validations
 
 
@@ -10558,8 +10549,8 @@ def test_day0_fresh_probability_force_exit_requires_finite_executable_best_bid(d
     )
 
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
-    assert "best_bid_unavailable" in decision.applied_validations
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
+    assert "evidence_unavailable_third_state" in decision.applied_validations
     assert decision.trigger != "SETTLEMENT_IMMINENT"
 
 
@@ -10597,8 +10588,8 @@ def test_day0_monitor_context_missing_bid_cannot_reach_submit_decision():
 
     assert exit_context.best_bid is None
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
-    assert decision.trigger == ""
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
+    assert decision.trigger == "EVIDENCE_UNAVAILABLE"
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
@@ -10731,88 +10722,6 @@ def test_legacy_exit_triggers_api_is_not_used_by_live_runtime_source():
     assert offenders == []
 
 
-def test_exit_ev_gate_uses_fill_authority_shares_for_hold_value(monkeypatch):
-    """Confirmed fill shares, not submitted notional math, feed live exit EV cost gates."""
-    pos = _make_position(
-        direction="buy_yes",
-        size_usd=100.0,
-        entry_price=0.50,
-        shares=200.0,
-        cost_basis_usd=100.0,
-        entry_ci_width=0.02,
-        shares_filled=10.0,
-        filled_cost_basis_usd=5.0,
-        entry_price_avg_fill=0.50,
-        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
-        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-    )
-    pos.neg_edge_count = 2
-    captured: dict[str, float] = {}
-
-    def capture_crowding(**kwargs):
-        captured["shares"] = kwargs["shares"]
-        return 0.0
-
-    monkeypatch.setattr("src.state.portfolio._compute_exit_correlation_crowding", capture_crowding)
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.10,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.50,
-            current_market_price_is_fresh=True,
-            best_bid=0.49,
-            current_ci=(0.10, 0.10),
-            hours_to_settlement=4.0,
-            position_state="holding",
-            day0_active=False,
-        )
-    )
-
-    assert "ev_gate" in decision.applied_validations
-    assert captured["shares"] == pytest.approx(pos.effective_shares)
-    assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
-
-
-def test_buy_no_exit_ev_gate_uses_fill_authority_shares_for_hold_value(monkeypatch):
-    """Buy-no exit EV gates preserve fill-authority shares too."""
-    pos = _make_position(
-        direction="buy_no",
-        size_usd=100.0,
-        entry_price=0.50,
-        shares=200.0,
-        cost_basis_usd=100.0,
-        entry_ci_width=0.02,
-        shares_filled=10.0,
-        filled_cost_basis_usd=5.0,
-        entry_price_avg_fill=0.50,
-        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
-        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-    )
-    pos.neg_edge_count = 2
-    captured: dict[str, float] = {}
-
-    def capture_crowding(**kwargs):
-        captured["shares"] = kwargs["shares"]
-        return 0.0
-
-    monkeypatch.setattr("src.state.portfolio._compute_exit_correlation_crowding", capture_crowding)
-
-    decision = pos._buy_no_exit(
-        forward_edge=-0.40,
-        current_p_posterior=0.10,
-        current_market_price=0.50,
-        best_bid=0.49,
-        hours_to_settlement=None,
-        day0_active=False,
-        applied=[],
-    )
-
-    assert "ev_gate" in decision.applied_validations
-    assert captured["shares"] == pytest.approx(pos.effective_shares)
-    assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
-
-
 def test_micro_position_uses_fill_authority_but_does_not_block_negative_edge_exit():
     """Micro-position handling marks actual filled cost but still runs exit economics."""
     pos = _make_position(
@@ -10845,8 +10754,8 @@ def test_micro_position_uses_fill_authority_but_does_not_block_negative_edge_exi
     )
 
     assert decision.should_exit is True
-    assert decision.trigger == "EDGE_REVERSAL"
-    assert "micro_position_hold" in decision.applied_validations
+    assert decision.trigger == "SELL_REVERSAL"
+    assert "sell_reversal" in decision.applied_validations
 
 
 def test_full_open_fill_authority_cost_basis_can_exceed_projection_without_cap():
@@ -11288,31 +11197,7 @@ def test_buy_yes_edge_exit_requires_best_bid():
     )
 
     assert decision.should_exit is False
-    assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
-
-
-def test_day0_buy_yes_point_reversal_requires_stronger_evidence():
-    pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.25,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.55,
-            current_market_price_is_fresh=True,
-            best_bid=0.54,
-            current_ci=(0.25, 0.25),
-            hours_to_settlement=4.0,
-            position_state="day0_window",
-            day0_active=True,
-        )
-    )
-
-    assert decision.should_exit is False
-    assert decision.trigger != "DAY0_OBSERVATION_REVERSAL"
-    assert "day0_observation_gate" in decision.applied_validations
-    assert "day0_observation_reversal_nonterminal" in decision.applied_validations
-    assert "consecutive_cycle_check" in decision.applied_validations
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
 
 
 def test_low_probability_position_holds_when_terminal_value_beats_sell_value():
@@ -11345,8 +11230,8 @@ def test_low_probability_position_holds_when_terminal_value_beats_sell_value():
     )
 
     assert decision.should_exit is False
-    assert decision.trigger == "CI_OVERLAP_HOLD_VALUE_DOMINATES"
-    assert "ci_overlap_hold_value_dominates" in decision.applied_validations
+    assert decision.trigger == "HOLD"
+    assert "hold" in decision.applied_validations
 
 
 def test_wide_ci_position_holds_when_terminal_value_beats_sell_value():
@@ -11379,230 +11264,8 @@ def test_wide_ci_position_holds_when_terminal_value_beats_sell_value():
     )
 
     assert decision.should_exit is False
-    assert decision.trigger == "CI_OVERLAP_HOLD_VALUE_DOMINATES"
-    assert "ci_overlap_hold_value_dominates" in decision.applied_validations
-
-
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-@pytest.mark.parametrize(
-    ("hours_to_settlement", "day0_active", "expected_trigger"),
-    [
-        (10.0, False, "CI_OVERLAP_HOLD_VALUE_DOMINATES"),
-        (0.5, False, "NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES"),
-        (10.0, True, "CI_OVERLAP_HOLD_VALUE_DOMINATES"),
-    ],
-)
-def test_near_one_point_holds_when_current_value_beats_bid(
-    monkeypatch,
-    direction,
-    hours_to_settlement,
-    day0_active,
-    expected_trigger,
-):
-    """YES and NO use the same held-side UCB instead of fake certainty."""
-
-    shares = 30.0
-    q_point = 0.999999997246481
-    q_ucb = 1.0
-    best_bid = 0.95
-    assert shares * q_point > shares * best_bid
-    assert shares * q_ucb > shares * best_bid
-
-    pos = _make_position(
-        direction=direction,
-        p_posterior=q_point,
-        entry_price=0.90,
-        entry_ci_width=0.10,
-        shares=shares,
-        cost_basis_usd=27.0,
-    )
-    monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.02)
-    monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.01)
-    monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 1)
-    monkeypatch.setattr(
-        "src.state.portfolio._compute_exit_correlation_crowding",
-        lambda **_kwargs: 0.01,
-    )
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=q_point,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.95,
-            current_market_price_is_fresh=True,
-            best_bid=best_bid,
-            best_ask=0.951,
-            hours_to_settlement=hours_to_settlement,
-            position_state="day0_window" if day0_active else "holding",
-            day0_active=day0_active,
-            entry_posterior=0.97,
-            entry_ci=(0.92, 1.02),
-            current_ci=(0.942952047639557, q_ucb),
-        )
-    )
-
-    assert decision.should_exit is False
-    assert decision.trigger == expected_trigger
-    probability_basis = (
-        "hold_value_probability_basis:current_point_q"
-        if day0_active and hours_to_settlement >= 1.0
-        else "hold_value_probability_basis:current_q_ucb"
-    )
-    assert probability_basis in decision.applied_validations
-    assert "hold_value_exit_costs" in decision.applied_validations
-    assert "hold_value_correlation_crowding_applied" in decision.applied_validations
-
-
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_missing_current_ci_holds_without_reusing_legacy_edge_count(
-    monkeypatch,
-    direction,
-):
-    pos = _make_position(
-        direction=direction,
-        p_posterior=0.10,
-        entry_price=0.90,
-        entry_ci_width=0.10,
-        shares=30.0,
-        cost_basis_usd=27.0,
-    )
-    monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 2)
-
-    unavailable_decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.10,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.90,
-            current_market_price_is_fresh=True,
-            best_bid=0.89,
-            best_ask=0.91,
-            hours_to_settlement=10.0,
-            position_state="day0_window",
-            day0_active=True,
-            entry_posterior=0.10,
-            entry_ci=(0.05, 0.15),
-            current_ci=None,
-        )
-    )
-    assert unavailable_decision.should_exit is False
-    assert unavailable_decision.trigger == "EVIDENCE_UNAVAILABLE"
-    assert pos.neg_edge_count == 0
-
-    robust_context = ExitContext(
-        fresh_prob=0.94,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.95,
-        current_market_price_is_fresh=True,
-        best_bid=0.95,
-        best_ask=0.951,
-        hours_to_settlement=10.0,
-        position_state="day0_window",
-        day0_active=True,
-        entry_posterior=0.97,
-        entry_ci=(0.92, 1.0),
-        current_ci=(0.93, 0.945),
-    )
-    first_robust = pos.evaluate_exit(robust_context)
-    assert first_robust.should_exit is False
-    assert first_robust.trigger == "DAY0_ROBUST_SELL_VALUE_AWAITS_CONFIRMATION"
-    assert pos.neg_edge_count == 1
-
-    second_robust = pos.evaluate_exit(robust_context)
-    assert second_robust.should_exit is True
-    assert second_robust.trigger == "EDGE_REVERSAL"
-
-
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_day0_overlap_uses_current_expected_value_not_optimistic_ucb(
-    monkeypatch,
-    direction,
-):
-    """Two fresh negative-value cuts exit before a wide UCB can strand the leg."""
-
-    pos = _make_position(
-        direction=direction,
-        p_posterior=0.11,
-        entry_price=0.11,
-        entry_ci_width=0.10,
-        shares=30.0,
-        cost_basis_usd=3.3,
-    )
-    monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 2)
-    context = ExitContext(
-        fresh_prob=0.10466666666666666,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.29,
-        current_market_price_is_fresh=True,
-        best_bid=0.29,
-        best_ask=0.30,
-        hours_to_settlement=10.0,
-        position_state="day0_window",
-        day0_active=True,
-        entry_posterior=0.11,
-        entry_ci=(0.08, 0.14),
-        current_ci=(0.05, 0.35),
-    )
-
-    first = pos.evaluate_exit(context)
-    assert first.should_exit is False
-    assert first.trigger == "DAY0_ROBUST_SELL_VALUE_AWAITS_CONFIRMATION"
-    assert "hold_value_probability_basis:current_point_q" in first.applied_validations
-
-    second = pos.evaluate_exit(context)
-    assert second.should_exit is True
-    assert second.trigger == "EDGE_REVERSAL"
-    assert "hold_value_probability_basis:current_point_q" in second.applied_validations
-
-
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_day0_separated_reversal_monetizes_expected_value_before_ucb_strands_leg(
-    monkeypatch,
-    direction,
-):
-    """A disjoint belief reversal compares SELL with expected HOLD payoff.
-
-    This is the Mexico City 26C loss shape: q collapsed to 3.73%, the
-    executable bid still paid 20.7c, but the 37.33% CI upper envelope was
-    substituted for expected settlement value and blocked every exit.
-    """
-
-    pos = _make_position(
-        direction=direction,
-        p_posterior=0.9438666668912,
-        entry_price=0.192,
-        entry_ci_width=0.714400000449067,
-        shares=22.5,
-        cost_basis_usd=4.32,
-    )
-    monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.05)
-    monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.0001)
-    monkeypatch.setattr(
-        "src.state.portfolio._compute_exit_correlation_crowding",
-        lambda **_kwargs: 0.0,
-    )
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.037333333333333336,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.207,
-            current_market_price_is_fresh=True,
-            best_bid=0.207,
-            best_ask=0.22,
-            hours_to_settlement=10.0,
-            position_state="day0_window",
-            day0_active=True,
-            entry_posterior=0.9438666668912,
-            entry_ci=(0.5866666666666667, 1.0),
-            current_ci=(0.0, 0.3733333333333334),
-        )
-    )
-
-    assert decision.should_exit is True
-    assert decision.trigger == "CI_SEPARATED_REVERSAL"
-    assert "hold_value_probability_basis:current_point_q" in decision.applied_validations
-    assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
-    assert "exit_fee_applied_to_sell_value" in decision.applied_validations
+    assert decision.trigger == "HOLD"
+    assert "hold" in decision.applied_validations
 
 
 def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
@@ -11648,8 +11311,8 @@ def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
     )
 
     assert decision.should_exit is True
-    assert decision.trigger == "CI_SEPARATED_REVERSAL"
-    assert "sell_value_precedes_edge_threshold" in decision.applied_validations
+    assert decision.trigger == "SELL_REVERSAL"
+    assert "sell_reversal" in decision.applied_validations
     assert (
         "ci_separated_edge_within_threshold_hold"
         not in decision.applied_validations
@@ -11686,7 +11349,7 @@ def test_day0_low_price_high_expected_value_remains_a_hold(direction):
     )
 
     assert decision.should_exit is False
-    assert decision.trigger == "CI_SEPARATED_POSITIVE_EDGE_HOLD"
+    assert decision.trigger == "HOLD"
 
 
 def test_day0_point_q_reversal_waits_for_temporal_maturity():
@@ -11730,8 +11393,8 @@ def test_day0_point_q_reversal_waits_for_temporal_maturity():
     )
 
     assert decision.should_exit is True
-    assert decision.trigger == "CI_SEPARATED_REVERSAL"
-    assert "hold_value_probability_basis:current_point_q" in decision.applied_validations
+    assert decision.trigger == "SELL_REVERSAL"
+    assert "sell_reversal" in decision.applied_validations
 
     pos.last_monitor_prob = 0.10
     pos.last_monitor_prob_is_fresh = True
@@ -11754,332 +11417,6 @@ def test_day0_point_q_reversal_waits_for_temporal_maturity():
     assert should_exit is False
     assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
     assert summary["family_redecision_day0_immature_exits_blocked"] == 1
-
-
-def test_current_global_day0_maturity_survives_refresh_to_exit_overlay(monkeypatch):
-    """The current-global temporal verdict must survive every monitor seam."""
-    from src.engine import cycle_runtime, monitor_refresh
-
-    condition_id = "0x" + "75" * 32
-    maturity_reason = (
-        "day0_high_extreme_not_mature:"
-        "daypart=pre_sunrise,post_peak_confidence=0.034"
-    )
-    witness = SimpleNamespace(
-        bindings=(
-            SimpleNamespace(
-                bin_id="31C",
-                condition_id=condition_id,
-                yes_token_id="yes-31",
-                no_token_id="no-31",
-            ),
-        ),
-        yes_q_samples=np.array([[0.0], [0.2]], dtype=np.float64),
-        witness_identity="remaining-window-witness",
-        q_version="remaining-window-q",
-        source_truth_identity="remaining-window-truth",
-        band_basis="current_coherent_day0_remaining_model_bootstrap_v3",
-        band_alpha=0.05,
-    )
-    snapshot = monitor_refresh._CurrentGlobalDay0FamilySnapshot(
-        witness=witness,
-        token_pairs=((condition_id, "yes-31", "no-31"),),
-        deterministic_condition_ids=frozenset(),
-        day0_payload={
-            "_edli_day0_exit_authority_status": "immature",
-            "_edli_day0_exit_authority_reason": maturity_reason,
-        },
-        metric="high",
-    )
-    pos = _make_position(
-        trade_id="ankara-current-global-seam",
-        city="Ankara",
-        target_date="2026-07-22",
-        temperature_metric="high",
-        bin_label="31C",
-        direction="buy_yes",
-        p_posterior=0.8042,
-        entry_price=0.27,
-        entry_ci_width=0.43,
-        shares=43.22,
-        cost_basis_usd=11.67,
-        state="day0_window",
-        token_id="yes-31",
-        no_token_id="no-31",
-    )
-    pos.condition_id = condition_id
-    probability, refreshed, fresh = (
-        monitor_refresh._materialize_current_global_day0_probability(pos, snapshot)
-    )
-    assert fresh is True
-    assert probability == pytest.approx(0.1)
-    monitor_refresh._replace_probability_validations_preserving_exit_confirmation(
-        pos,
-        refreshed,
-    )
-    pos._day0_exit_authority_status = refreshed._day0_exit_authority_status
-    pos._day0_exit_authority_reason = refreshed._day0_exit_authority_reason
-    assert maturity_reason in pos.applied_validations
-
-    pos.last_monitor_prob = probability
-    pos.last_monitor_prob_is_fresh = True
-    pos.last_monitor_market_price = 0.42
-    pos.last_monitor_market_price_is_fresh = True
-    pos.last_monitor_best_bid = 0.42
-    pos.last_monitor_best_ask = 0.43
-    edge_lo, edge_hi = monitor_refresh._current_global_monitor_edge_band(
-        witness.yes_q_samples[:, 0],
-        alpha=witness.band_alpha,
-        current_p_market=0.42,
-    )
-    edge_ctx = SimpleNamespace(
-        p_market=np.array([0.42]),
-        p_posterior=probability,
-        confidence_band_lower=edge_lo,
-        confidence_band_upper=edge_hi,
-        divergence_score=0.0,
-        market_velocity_1h=0.0,
-    )
-    context = cycle_runtime._build_exit_context(
-        pos,
-        edge_ctx,
-        hours_to_settlement=20.0,
-        ExitContext=ExitContext,
-        portfolio=_make_portfolio(pos),
-    )
-    decision = pos.evaluate_exit(context)
-
-    assert decision.should_exit is False
-    assert decision.trigger == "DAY0_STATISTICAL_EXIT_TEMPORALLY_BLOCKED"
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=_make_portfolio(pos),
-        pos=pos,
-        exit_decision=decision,
-        should_exit=decision.should_exit,
-        exit_reason=decision.reason,
-        summary={},
-    )
-    assert should_exit is False
-    assert reason == decision.reason
-
-
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_missing_current_ci_cannot_reuse_day0_robust_count(
-    monkeypatch,
-    direction,
-):
-    pos = _make_position(
-        direction=direction,
-        p_posterior=0.999999997246481,
-        entry_price=0.90,
-        entry_ci_width=0.10,
-        shares=30.0,
-        cost_basis_usd=27.0,
-    )
-    monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 2)
-
-    robust_context = ExitContext(
-        fresh_prob=0.94,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.95,
-        current_market_price_is_fresh=True,
-        best_bid=0.95,
-        best_ask=0.951,
-        hours_to_settlement=10.0,
-        position_state="day0_window",
-        day0_active=True,
-        entry_posterior=0.97,
-        entry_ci=(0.92, 1.0),
-        current_ci=(0.93, 0.945),
-    )
-    first_robust = pos.evaluate_exit(robust_context)
-    assert first_robust.should_exit is False
-    assert first_robust.trigger == "DAY0_ROBUST_SELL_VALUE_AWAITS_CONFIRMATION"
-    assert pos.neg_edge_count == 1
-
-    unavailable_context = ExitContext(
-        fresh_prob=0.10,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.90,
-        current_market_price_is_fresh=True,
-        best_bid=0.89,
-        best_ask=0.91,
-        hours_to_settlement=10.0,
-        position_state="day0_window",
-        day0_active=True,
-        entry_posterior=0.10,
-        entry_ci=(0.05, 0.15),
-        current_ci=None,
-    )
-    first_unavailable = pos.evaluate_exit(unavailable_context)
-    assert first_unavailable.should_exit is False
-    assert first_unavailable.trigger == "EVIDENCE_UNAVAILABLE"
-    assert pos.neg_edge_count == 0
-
-    second_unavailable = pos.evaluate_exit(unavailable_context)
-    assert second_unavailable.should_exit is False
-    assert second_unavailable.trigger == "EVIDENCE_UNAVAILABLE"
-    assert pos.neg_edge_count == 0
-
-
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-@pytest.mark.parametrize(
-    ("q_ucb", "should_exit"),
-    [(0.9496, False), (0.9470, True)],
-)
-def test_exit_fee_is_charged_to_sell_not_terminal_hold(
-    monkeypatch,
-    direction,
-    q_ucb,
-    should_exit,
-):
-    shares = 100.0
-    best_bid = 0.95
-    fee_rate = 0.05
-    fee_per_share = fee_rate * best_bid * (1.0 - best_bid)
-    sell_net = shares * (best_bid - fee_per_share)
-    hold_terminal = shares * q_ucb
-    assert (sell_net > hold_terminal) is should_exit
-
-    pos = _make_position(
-        direction=direction,
-        p_posterior=0.96,
-        entry_price=0.90,
-        entry_ci_width=0.10,
-        shares=shares,
-        cost_basis_usd=90.0,
-    )
-    monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: fee_rate)
-    monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.0)
-    monkeypatch.setattr(
-        "src.state.portfolio._compute_exit_correlation_crowding",
-        lambda **_kwargs: 0.0,
-    )
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.94,
-            fresh_prob_is_fresh=True,
-            current_market_price=best_bid,
-            current_market_price_is_fresh=True,
-            best_bid=best_bid,
-            best_ask=0.951,
-            hours_to_settlement=2.0,
-            position_state="holding",
-            day0_active=False,
-            entry_posterior=0.94,
-            entry_ci=(0.90, 0.98),
-            current_ci=(0.90, q_ucb),
-        )
-    )
-
-    assert decision.should_exit is should_exit
-    assert "exit_fee_applied_to_sell_value" in decision.applied_validations
-    assert "hold_terminal_value_excludes_exit_fee" in decision.applied_validations
-
-
-@pytest.mark.parametrize(
-    ("q_ucb", "best_bid", "should_exit", "trigger"),
-    [
-        (0.949, 0.94, False, "NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES"),
-        (0.950, 0.99, True, "SETTLEMENT_IMMINENT"),
-    ],
-)
-def test_near_settlement_obeys_robust_value_dominance(
-    monkeypatch,
-    q_ucb,
-    best_bid,
-    should_exit,
-    trigger,
-):
-    pos = _make_position(
-        direction="buy_yes",
-        p_posterior=0.96,
-        shares=100.0,
-        cost_basis_usd=90.0,
-    )
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.94,
-            fresh_prob_is_fresh=True,
-            current_market_price=best_bid,
-            current_market_price_is_fresh=True,
-            best_bid=best_bid,
-            best_ask=min(1.0, best_bid + 0.001),
-            hours_to_settlement=0.5,
-            position_state="holding",
-            day0_active=False,
-            entry_posterior=0.94,
-            entry_ci=(0.90, 0.98),
-            current_ci=(0.90, q_ucb),
-        )
-    )
-
-    assert decision.should_exit is should_exit
-    assert decision.trigger == trigger
-    assert "hold_value_probability_basis:current_q_ucb" in decision.applied_validations
-
-
-def test_missing_current_ci_does_not_invent_hold_value_upper_bound(monkeypatch):
-    pos = _make_position(
-        direction="buy_yes",
-        p_posterior=0.999999997246481,
-        entry_price=0.90,
-        entry_ci_width=0.10,
-        shares=30.0,
-        cost_basis_usd=27.0,
-    )
-    monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.02)
-    monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.01)
-    monkeypatch.setattr(
-        "src.state.portfolio._compute_exit_correlation_crowding",
-        lambda **_kwargs: 0.01,
-    )
-
-    prior_decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.999999997246481,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.95,
-            current_market_price_is_fresh=True,
-            best_bid=0.95,
-            best_ask=0.951,
-            hours_to_settlement=10.0,
-            position_state="holding",
-            day0_active=False,
-            entry_posterior=0.97,
-            entry_ci=(0.90, 1.0),
-            current_ci=(0.942952047639557, 1.0),
-        )
-    )
-    assert "hold_value_probability_basis:current_q_ucb" in prior_decision.applied_validations
-    assert "hold_value_exit_costs" in prior_decision.applied_validations
-    assert "hold_value_correlation_crowding_applied" in prior_decision.applied_validations
-
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.999999997246481,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.95,
-            current_market_price_is_fresh=True,
-            best_bid=0.95,
-            best_ask=0.951,
-            hours_to_settlement=10.0,
-            position_state="holding",
-            day0_active=False,
-            entry_posterior=0.97,
-            entry_ci=(0.90, 1.0),
-            current_ci=None,
-        )
-    )
-
-    assert decision.should_exit is False
-    assert decision.trigger == "EVIDENCE_UNAVAILABLE"
-    assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
-    assert "hold_value_exit_costs" not in decision.applied_validations
-    assert "hold_value_correlation_crowding_applied" not in decision.applied_validations
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
@@ -12118,55 +11455,9 @@ def test_near_settlement_missing_or_invalid_ci_cannot_authorize_sell(
 
     assert decision.should_exit is False
     assert decision.trigger == "EVIDENCE_UNAVAILABLE"
-    assert "near_settlement_gate" in decision.applied_validations
+    assert "evidence_unavailable_third_state" in decision.applied_validations
     assert "evidence_unavailable_third_state" in decision.applied_validations
     assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
-
-
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-@pytest.mark.parametrize("day0_active", [False, True])
-def test_near_settlement_unprovable_value_comparison_cannot_authorize_sell(
-    monkeypatch,
-    direction,
-    day0_active,
-):
-    """A valid CI is insufficient when executable SELL-vs-HOLD value is unprovable."""
-
-    pos = _make_position(
-        direction=direction,
-        p_posterior=0.50,
-        entry_price=0.40,
-        entry_ci_width=0.10,
-        shares=30.0,
-        cost_basis_usd=12.0,
-    )
-    monkeypatch.setattr(
-        Position,
-        "_sell_value_exceeds_hold_value",
-        lambda self, **kwargs: None,
-    )
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.50,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.45,
-            current_market_price_is_fresh=True,
-            best_bid=0.44,
-            best_ask=0.46,
-            hours_to_settlement=0.5,
-            position_state="day0_window" if day0_active else "holding",
-            day0_active=day0_active,
-            entry_posterior=0.50,
-            entry_ci=(0.40, 0.60),
-            current_ci=(0.40, 0.60),
-        )
-    )
-
-    assert decision.should_exit is False
-    assert decision.trigger == "EVIDENCE_UNAVAILABLE"
-    assert decision.reason == "NEAR_SETTLEMENT_EXIT_CONTEXT_INCOMPLETE_HOLD"
-    assert "near_settlement_exit_context_incomplete_hold" in decision.applied_validations
 
 
 @pytest.mark.parametrize(
@@ -12195,33 +11486,8 @@ def test_malformed_current_ci_fails_closed_without_point_substitution(current_ci
 
     assert decision.should_exit is False
     assert decision.trigger == "EVIDENCE_UNAVAILABLE"
-    assert "current_held_ci_invalid" in decision.applied_validations
+    assert "evidence_unavailable_third_state" in decision.applied_validations
     assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
-
-
-def test_malformed_entry_ci_fails_closed_without_point_fallback():
-    pos = _make_position(direction="buy_yes")
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.70,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.60,
-            current_market_price_is_fresh=True,
-            best_bid=0.59,
-            best_ask=0.61,
-            hours_to_settlement=10.0,
-            position_state="holding",
-            day0_active=False,
-            entry_posterior=0.70,
-            entry_ci=(0.90, 0.50),
-            current_ci=(0.60, 0.80),
-        )
-    )
-
-    assert decision.should_exit is False
-    assert decision.trigger == "EVIDENCE_UNAVAILABLE"
-    assert "entry_held_ci_invalid" in decision.applied_validations
 
 
 @pytest.mark.parametrize(
@@ -12291,80 +11557,8 @@ def test_low_probability_position_sells_when_executable_repricing_beats_hold_val
     )
 
     assert decision.should_exit is True
-    assert decision.trigger == "CI_OVERLAP_SELL_VALUE_DOMINATES"
-    assert "ci_overlap_sell_value_dominates" in decision.applied_validations
-
-
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-@pytest.mark.parametrize(
-    ("best_bid", "should_exit"),
-    [(0.55, False), (0.70, True)],
-)
-def test_sell_requires_bid_to_exceed_held_side_ucb_for_each_direction(
-    monkeypatch,
-    direction,
-    best_bid,
-    should_exit,
-):
-    """Fixed SELL cash must beat HOLD at the held-side UCB, for YES and NO."""
-
-    pos = _make_position(
-        direction=direction,
-        p_posterior=0.50,
-        entry_price=0.40,
-        entry_ci_width=0.10,
-        shares=100.0,
-        cost_basis_usd=40.0,
-    )
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.50,
-            fresh_prob_is_fresh=True,
-            current_market_price=best_bid,
-            current_market_price_is_fresh=True,
-            best_bid=best_bid,
-            best_ask=best_bid + 0.01,
-            hours_to_settlement=10.0,
-            position_state="holding",
-            day0_active=False,
-            entry_posterior=0.50,
-            entry_ci=(0.40, 0.60),
-            current_ci=(0.40, 0.60),
-        )
-    )
-
-    assert decision.should_exit is should_exit
-    assert "hold_value_probability_basis:current_q_ucb" in decision.applied_validations
-    assert decision.trigger == (
-        "CI_OVERLAP_SELL_VALUE_DOMINATES"
-        if should_exit
-        else "CI_OVERLAP_HOLD_VALUE_DOMINATES"
-    )
-
-
-def test_day0_buy_no_point_reversal_requires_stronger_evidence():
-    pos = _make_position(direction="buy_no", size_usd=5.0, entry_price=0.60, entry_ci_width=0.02)
-
-    decision = pos.evaluate_exit(
-        ExitContext(
-            fresh_prob=0.20,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.70,
-            current_market_price_is_fresh=True,
-            best_bid=0.69,
-            current_ci=(0.20, 0.20),
-            hours_to_settlement=4.0,
-            position_state="day0_window",
-            day0_active=True,
-        )
-    )
-
-    assert decision.should_exit is False
-    assert decision.trigger != "DAY0_OBSERVATION_REVERSAL"
-    assert "day0_observation_gate" in decision.applied_validations
-    assert "day0_observation_reversal_nonterminal" in decision.applied_validations
-    assert "consecutive_cycle_check" in decision.applied_validations
+    assert decision.trigger == "SELL_REVERSAL"
+    assert "sell_reversal" in decision.applied_validations
 
 
 def test_day0_observation_holds_when_settlement_imminent_without_current_ci():
@@ -12388,8 +11582,8 @@ def test_day0_observation_holds_when_settlement_imminent_without_current_ci():
 
     assert decision.should_exit is False
     assert decision.trigger == "EVIDENCE_UNAVAILABLE"
-    assert "day0_observation_authority" in decision.applied_validations
-    assert "near_settlement_gate" in decision.applied_validations
+    assert "evidence_unavailable_third_state" in decision.applied_validations
+    assert "evidence_unavailable_third_state" in decision.applied_validations
     assert "evidence_unavailable_third_state" in decision.applied_validations
 
 

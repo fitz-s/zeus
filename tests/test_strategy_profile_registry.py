@@ -221,20 +221,21 @@ def test_is_strategy_enabled_blocks_shoulder_sell_runtime_entry():
 # ── kelly.py cutover ───────────────────────────────────────────────── #
 
 
-def test_kelly_strategy_kelly_multiplier_routes_through_registry():
-    """The pre-A4 dict literal is gone; ``strategy_kelly_multiplier``
-    delegates to the registry. Behavior is identical for known keys.
+def test_kelly_strategy_kelly_multiplier_one_law():
+    """One-law form (ultimate_alpha 2026-07-23): every LIVE key sizes at
+    GLOBAL_KELLY_FRACTION — labels carry identity/permission, not economics.
+    Blocked/refuted keys (shoulder_sell) and unknown identity stay 0.0.
     """
-    from src.strategy.kelly import strategy_kelly_multiplier
+    from src.strategy.kelly import GLOBAL_KELLY_FRACTION, strategy_kelly_multiplier
 
-    assert strategy_kelly_multiplier("settlement_capture") == 1.0
-    assert strategy_kelly_multiplier("opening_inertia") == 0.5
-    assert strategy_kelly_multiplier("shoulder_sell") == 0.0
+    assert strategy_kelly_multiplier("settlement_capture") == GLOBAL_KELLY_FRACTION
+    assert strategy_kelly_multiplier("opening_inertia") == GLOBAL_KELLY_FRACTION
+    assert strategy_kelly_multiplier("shoulder_sell") == 0.0  # live_status: blocked
     assert strategy_kelly_multiplier("nonexistent") == 0.0
     assert strategy_kelly_multiplier(None) == 0.0
     assert strategy_kelly_multiplier("") == 0.0
     # Whitespace handling preserved from pre-A4.
-    assert strategy_kelly_multiplier("  settlement_capture  ") == 1.0
+    assert strategy_kelly_multiplier("  settlement_capture  ") == GLOBAL_KELLY_FRACTION
 
 
 # ── ProfileNotFound contract ───────────────────────────────────────── #
@@ -260,69 +261,45 @@ def test_ProfileNotFound_is_a_KeyError():
     assert issubclass(ProfileNotFound, KeyError)
 
 
-# ── phase override resolution (A6 preview) ──────────────────────────── #
-
-
-def test_settlement_capture_phase_overrides_match_PLAN_A6():
-    """PLAN.md §A6 phase-aware Kelly values, pinned by registry."""
-    profile = sp.get("settlement_capture")
-    assert profile.kelly_for_phase("pre_trading") == 0.0
-    assert profile.kelly_for_phase("pre_settlement_day") == 0.5
-    assert profile.kelly_for_phase("settlement_day") == 1.0
-    assert profile.kelly_for_phase("post_trading") == 0.0
-    assert profile.kelly_for_phase("resolved") == 0.0
-
-
-def test_kelly_for_phase_falls_back_to_default_for_unknown_phase():
-    """A made-up phase name should not crash; should return the default."""
-    profile = sp.get("settlement_capture")
-    assert profile.kelly_for_phase("not_a_real_phase") == profile.kelly_default_multiplier
-
-
-def test_kelly_for_phase_None_returns_default():
-    """Pre-A6 callers that don't yet pass market_phase get the legacy
-    per-strategy default — no behavior change from the pre-A6 path."""
-    profile = sp.get("settlement_capture")
-    assert profile.kelly_for_phase(None) == profile.kelly_default_multiplier
-
-
 def test_live_quality_floors_are_registry_backed() -> None:
+    """One-law collapse (ultimate_alpha 2026-07-24): live keys carry the
+    universal law values — venue band edge 0.05, zero absolute profit/density
+    floors. min_strategy_notional stays (the venue's real minimum order)."""
     profile = sp.get("opening_inertia")
-    assert profile.min_entry_price == pytest.approx(0.10)
+    assert profile.min_entry_price == pytest.approx(0.05)
     assert profile.min_strategy_notional_usd == pytest.approx(1.0)
-    assert profile.min_expected_profit_usd == pytest.approx(1.0)
-    assert profile.min_submit_edge_density == pytest.approx(0.05)
+    assert profile.min_expected_profit_usd == pytest.approx(0.0)
+    assert profile.min_submit_edge_density == pytest.approx(0.0)
     assert profile.allow_ultra_low_tail is False
 
 
-def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
-    """Fast-decay live entry profiles must not admit sub-dollar thin-edge churn."""
+def test_live_entry_quality_floors_collapsed_to_one_law() -> None:
+    """One-law collapse: EVERY live key carries identical universal values —
+    a per-key economic difference reappearing here is the label-economics
+    regression this pins against."""
 
-    expected_min_entry_prices = {
-        "settlement_capture": 0.10,
-        "day0_nowcast_entry": 0.10,
-        "center_buy": 0.05,
-        "opening_inertia": 0.10,
-        "imminent_open_capture": 0.10,
-    }
-    for strategy_key, expected_min_entry_price in expected_min_entry_prices.items():
+    for strategy_key in (
+        "settlement_capture",
+        "day0_nowcast_entry",
+        "center_buy",
+        "forecast_qkernel_entry",
+        "opening_inertia",
+        "imminent_open_capture",
+    ):
         profile = sp.get(strategy_key)
-        assert profile.min_entry_price == pytest.approx(expected_min_entry_price)
-        assert profile.min_submit_edge_density == pytest.approx(0.05)
-    assert sp.get("settlement_capture").min_expected_profit_usd == pytest.approx(1.0)
-    assert sp.get("day0_nowcast_entry").min_expected_profit_usd == pytest.approx(1.0)
-    assert sp.get("forecast_qkernel_entry").min_expected_profit_usd == pytest.approx(1.0)
-    assert sp.get("opening_inertia").min_expected_profit_usd == pytest.approx(1.0)
-    assert sp.get("imminent_open_capture").min_expected_profit_usd == pytest.approx(1.0)
+        assert profile.min_entry_price == pytest.approx(0.05), strategy_key
+        assert profile.min_expected_profit_usd == pytest.approx(0.0), strategy_key
+        assert profile.min_submit_edge_density == pytest.approx(0.0), strategy_key
 
 
 def test_center_buy_profit_floor_aligns_with_qkernel_roi_frontier() -> None:
-    """Center-buy uses qkernel ROI frontier quality, not a flat $1 submit cliff."""
+    """One-law collapse: center_buy carries the same universal values as every
+    other live key (its former 0.25 frontier floor is deleted with the rest)."""
 
     profile = sp.get("center_buy")
-    assert profile.min_expected_profit_usd == pytest.approx(0.25)
+    assert profile.min_expected_profit_usd == pytest.approx(0.0)
     assert profile.min_entry_price == pytest.approx(0.05)
-    assert profile.min_submit_edge_density == pytest.approx(0.05)
+    assert profile.min_submit_edge_density == pytest.approx(0.0)
 
 
 def test_center_buy_live_floor_blocks_tail_lottery_prices() -> None:
@@ -510,7 +487,7 @@ def test_dispatch_matrix_per_strategy_constraint_combinations(
     profile = sp.get(key)
     direction_ok = profile.is_direction_allowed(direction)
     topology_ok = profile.is_bin_topology_allowed(topology)
-    phase_ok = profile.is_phase_allowed(phase)
+    phase_ok = phase in profile.allowed_market_phases
     actual_allowed = direction_ok and topology_ok and phase_ok
     assert actual_allowed is expected_allowed, (
         f"{key} (dir={direction}, topo={topology}, phase={phase}): "
@@ -527,6 +504,6 @@ def test_center_buy_supports_low_buy_yes_live_metric():
     assert profile.is_runtime_live()
     assert profile.is_direction_allowed("buy_yes")
     assert profile.is_bin_topology_allowed("finite_range")
-    assert profile.is_phase_allowed("pre_settlement_day")
+    assert "pre_settlement_day" in profile.allowed_market_phases
     assert profile.metric_is_live("high")
     assert profile.metric_is_live("low")

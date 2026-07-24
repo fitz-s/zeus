@@ -408,20 +408,11 @@ def test_family_preselection_rejections_stamp_strategy_identity_before_runtime_p
     assert {"edge_source", "strategy_key"} <= target
 
 
-def test_imminent_open_capture_kelly_phase_diverges_from_opening_inertia() -> None:
-    """IOC and opening_inertia have distinct Kelly profiles — the C-2 fix reveals intended sizing.
-
-    Critic verdict (C2_CRITIC_VERDICT.md):
-    - opening_inertia: kelly_phase_overrides[settlement_day]=0.0 (alpha decayed by then)
-    - imminent_open_capture: kelly_phase_overrides[settlement_day]=0.5 (0-24h window IS settlement_day)
-
-    Under live-default flag ZEUS_MARKET_PHASE_DISPATCH=1 the IOC settlement_day=0.5 override
-    is unreachable (dispatch.py intercepts settlement_day → settlement_capture first). It is a
-    deliberate flag-OFF fallback added in commit f83db10008 (#205, 2026-05-19, operator urgency).
-    VERDICT: CORRECT_DESIGN (C2_DESIGN_HOMEWORK.md).
+def test_imminent_open_capture_and_opening_inertia_phase_allowlists_diverge() -> None:
+    """IOC and opening_inertia have distinct market-phase allowlists.
 
     This test is NON-VACUOUS: if strategy_key reverts to "opening_inertia" for IOC mode,
-    the settlement_day assertion fails (0.0 != 0.5).
+    the settlement_day membership assertion fails.
     """
     from src.strategy.strategy_profile import try_get as _try_get_profile
 
@@ -429,15 +420,6 @@ def test_imminent_open_capture_kelly_phase_diverges_from_opening_inertia() -> No
     oi_profile = _try_get_profile("opening_inertia")
     assert ioc_profile is not None, "imminent_open_capture profile missing from registry"
     assert oi_profile is not None, "opening_inertia profile missing from registry"
-
-    # Core divergence: settlement_day Kelly
-    assert ioc_profile.kelly_for_phase("settlement_day") == 0.5
-    assert oi_profile.kelly_for_phase("settlement_day") == 0.0
-    assert ioc_profile.kelly_for_phase("settlement_day") != oi_profile.kelly_for_phase("settlement_day")
-
-    # pre_settlement_day Kelly is equal (both 0.5) — only settlement_day diverges
-    assert ioc_profile.kelly_for_phase("pre_settlement_day") == 0.5
-    assert oi_profile.kelly_for_phase("pre_settlement_day") == 0.5
 
     # IOC's allowed_market_phases includes settlement_day; opening_inertia's does not
     assert "settlement_day" in ioc_profile.allowed_market_phases

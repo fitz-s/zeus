@@ -31,6 +31,7 @@ from src.state.db import (
     refresh_strategy_health,
 )
 from src.state.portfolio import (
+    CANONICAL_STRATEGY_KEYS,
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     PortfolioState,
@@ -3253,6 +3254,27 @@ class TestStrategyPolicyResolver:
         assert policy.threshold_multiplier == pytest.approx(1.0)
         assert policy.exit_only is False
         assert policy.sources == []
+        conn.close()
+
+    def test_resolve_strategy_policy_defaults_identity_for_every_strategy_key(
+        self, monkeypatch,
+    ):
+        """One-kappa pin: with no operator rows, strategy_key alone must not
+        change admission or size for ANY strategy. threshold_multiplier and
+        allocation_multiplier must be identity (1.0) and gated/exit_only must
+        be False across the whole canonical registry, not just one key."""
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+
+        assert CANONICAL_STRATEGY_KEYS, "canonical strategy registry must be non-empty"
+        for strategy_key in sorted(CANONICAL_STRATEGY_KEYS):
+            policy = policy_module.resolve_strategy_policy(conn, strategy_key, now)
+            assert policy.gated is False, strategy_key
+            assert policy.exit_only is False, strategy_key
+            assert policy.allocation_multiplier == pytest.approx(1.0), strategy_key
+            assert policy.threshold_multiplier == pytest.approx(1.0), strategy_key
+            assert policy.sources == [], strategy_key
         conn.close()
 
     def test_resolve_strategy_policy_gates_only_one_strategy(self, monkeypatch):

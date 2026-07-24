@@ -237,9 +237,20 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
     }
 )
 DAY0_REMAINING_DAY_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
-_ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
+# One-law collapse (ultimate_alpha_2026-07-23 group B / FINAL_SPEC §What
+# remains): the absolute $0.25 profit floor and the per-label entry-price
+# floors (0.10 general / 0.05 center-YES) are DELETED as economic gates — a
+# low-q claim is valuable whenever its executable all-in cost is lower still,
+# and genuine fixed costs belong in the all-in cost C⁺, not in an absolute
+# preference. What survives here is validity, not economics: finiteness,
+# positive stake/Δ-U, and the reliability authority that decides whether
+# q_lcb is servable. The universal price law is the venue submit band
+# assert_live_order_unit_price([0.05, 0.95] inclusive) — already enforced at
+# every executor boundary — so the per-label floor resolution now returns
+# that single band edge for every (strategy, direction).
+_ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.0
 _ROI_FRONTIER_MIN_PAYOFF_Q_LCB = qkernel_center_yes_quality_floor()
-LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+LIVE_ENTRY_MIN_ENTRY_PRICE = 0.05
 CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.05
 
 
@@ -305,6 +316,15 @@ def roi_frontier_useful_values(
     stake: float,
     delta_u_at_min: float,
 ) -> bool:
+    """Validity (finiteness + strictly positive robust value), not economics.
+
+    One-law form: the absolute-$ profit floor is gone (constant 0.0 above),
+    so this reduces to: finite inputs, positive stake, positive robust Δ-U,
+    profit-LCB strictly positive (the entry law's G⁻>0), and a finite growth
+    density. Absolute q floors stay delegated to
+    ``roi_frontier_min_payoff_q_lcb`` (0.0 — executable economics own
+    admission).
+    """
     min_payoff_q_lcb = roi_frontier_min_payoff_q_lcb(side=side, cost=cost)
     return bool(
         np.isfinite(stake)
@@ -318,7 +338,7 @@ def roi_frontier_useful_values(
             cost=cost,
             edge_lcb=edge_lcb,
         )
-        >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
+        > _ROI_FRONTIER_MIN_PROFIT_LCB_USD
         and np.isfinite(
             roi_frontier_growth_density(
                 cost=cost,
@@ -338,12 +358,11 @@ def native_curve_side_for_direction(direction: object) -> str | None:
     return None
 
 
-def live_entry_min_price_floor(*, strategy_key: object, direction: object) -> float:
-    if (
-        is_qkernel_exact_yes_strategy(strategy_key)
-        and str(direction or "").strip().lower() == "buy_yes"
-    ):
-        return float(CENTER_BUY_YES_MIN_ENTRY_PRICE)
+def live_entry_min_price_floor() -> float:
+    """The universal venue band edge, for every (strategy, direction).
+
+    One-law collapse: the former exact-YES 0.05 vs general 0.10 split is
+    gone — both constants above are the band edge."""
     return float(LIVE_ENTRY_MIN_ENTRY_PRICE)
 
 
@@ -368,10 +387,7 @@ def entry_price_floor_decision(
     q_lcb: object,
     limit_price: object,
 ) -> EntryPriceFloorDecision:
-    candidate_live_floor = live_entry_min_price_floor(
-        strategy_key=strategy_key,
-        direction=direction,
-    )
+    candidate_live_floor = live_entry_min_price_floor()
     qkernel_floor_candidate = bool(
         is_qkernel_exact_yes_strategy(strategy_key)
         and str(direction or "").strip().lower() == "buy_yes"

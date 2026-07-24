@@ -247,6 +247,9 @@ class HeldTokenMonitorQuote:
     ask_size: float
     mark_price: float
     source_timestamp: str
+    # Held-side depth ladder (top rungs, price-descending) for the depth-honest
+    # exit stopping law. Empty when the book was unavailable (one-sided/degraded).
+    bid_ladder: tuple[tuple[float, float], ...] = ()
 
 
 def _compute_divergence_score(p_posterior: float, p_market: float, *, available: bool) -> float:
@@ -2638,6 +2641,8 @@ def _day0_one_sided_monitor_quote(
         if bid_f <= 0.0 and ask_f is None:
             return None
         source_timestamp = datetime.now(timezone.utc).isoformat()
+        from src.data.market_scanner import _bid_ladder_from_book
+
         return HeldTokenMonitorQuote(
             token_id=token_id,
             best_bid=bid_f,
@@ -2646,6 +2651,7 @@ def _day0_one_sided_monitor_quote(
             ask_size=ask_sz_f,
             mark_price=bid_f,
             source_timestamp=source_timestamp,
+            bid_ladder=_bid_ladder_from_book(book) if isinstance(book, dict) else (),
         )
     except Exception as exc:
         logger.debug("Day0 one-sided quote refresh failed for %s: %s", pos.trade_id, exc)
@@ -2707,6 +2713,8 @@ def monitor_quote_refresh(
             else float(vwmp(bid_f, ask_f, bid_sz_f, ask_sz_f))
         )
         source_timestamp = datetime.now(timezone.utc).isoformat()
+        from src.data.market_scanner import _bid_ladder_from_book
+
         return HeldTokenMonitorQuote(
             token_id=tid,
             best_bid=bid_f,
@@ -2715,6 +2723,7 @@ def monitor_quote_refresh(
             ask_size=ask_sz_f,
             mark_price=mark_price,
             source_timestamp=source_timestamp,
+            bid_ladder=_bid_ladder_from_book(book) if isinstance(book, dict) else (),
         )
     except Exception as e:
         if book is not None:
@@ -3790,9 +3799,6 @@ def _append_monitor_validation(position: Position, validation: str) -> None:
     position.applied_validations = validations
 
 
-_DAY0_ROBUST_SELL_CONFIRMATION = "day0_robust_sell_value_awaits_confirmation"
-
-
 def _clone_for_probability_refresh(position: Position) -> Position:
     """Start one probability cut without inheriting prior-cut evidence."""
 
@@ -3801,35 +3807,8 @@ def _clone_for_probability_refresh(position: Position) -> Position:
         delattr(refreshed, "_replacement_current_evidence_held_bounds")
     except AttributeError:
         pass
-    refreshed.applied_validations = (
-        [_DAY0_ROBUST_SELL_CONFIRMATION]
-        if _DAY0_ROBUST_SELL_CONFIRMATION
-        in (getattr(position, "applied_validations", []) or [])
-        else []
-    )
+    refreshed.applied_validations = []
     return refreshed
-
-
-def _replace_probability_validations_preserving_exit_confirmation(
-    position: Position,
-    refresh_position: Position,
-) -> None:
-    """Replace probability evidence without erasing a pending exit confirmation.
-
-    Probability validations are current-cut evidence and must replace the prior cut.  The
-    Day0 robust-sell marker is different: it identifies what ``neg_edge_count`` is counting
-    across cuts.  Dropping it before ``Position.evaluate_exit`` resets every qualifying cycle
-    to confirmation one, making the required second confirmation unreachable.
-    """
-
-    pending = _DAY0_ROBUST_SELL_CONFIRMATION in (
-        getattr(position, "applied_validations", []) or []
-    )
-    position.applied_validations = list(
-        getattr(refresh_position, "applied_validations", []) or []
-    )
-    if pending:
-        _append_monitor_validation(position, _DAY0_ROBUST_SELL_CONFIRMATION)
 
 
 def _bin_sort_key(outcome: dict) -> tuple[int, float]:
@@ -5159,6 +5138,8 @@ def refresh_exact_zero_position(
     pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
     pos.last_monitor_best_bid = None
     pos.last_monitor_best_ask = None
+    pos.last_monitor_bid_size = None
+    pos.last_monitor_bid_ladder = ()
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = False
     pos.last_monitor_market_price_is_fresh = False
@@ -5182,6 +5163,8 @@ def refresh_exact_zero_position(
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
+        pos.last_monitor_bid_size = quote.bid_size
+        pos.last_monitor_bid_ladder = quote.bid_ladder
         current_p_market = quote.mark_price
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
@@ -5247,6 +5230,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     pos.last_monitor_best_bid = None
     pos.last_monitor_best_ask = None
+    pos.last_monitor_bid_size = None
+    pos.last_monitor_bid_ladder = ()
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = None
     pos.last_monitor_market_price_is_fresh = False
@@ -5268,6 +5253,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
+        pos.last_monitor_bid_size = quote.bid_size
+        pos.last_monitor_bid_ladder = quote.bid_ladder
         current_p_market = quote.mark_price
         market_refreshed = True
         pos.last_monitor_market_price = current_p_market
@@ -5295,7 +5282,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             day0_family_cache=day0_family_cache,
         )
         pos.selected_method = refresh_pos.selected_method
-        _replace_probability_validations_preserving_exit_confirmation(pos, refresh_pos)
+        pos.applied_validations = list(getattr(refresh_pos, "applied_validations", []) or [])
         # A1: Propagate bootstrap context from refresh_pos (may differ from pos for day0_window)
         _bootstrap_ctx = getattr(refresh_pos, "_bootstrap_context", None)
         if _bootstrap_ctx is not None:

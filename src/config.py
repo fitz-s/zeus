@@ -11,6 +11,7 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -144,6 +145,12 @@ class Settings:
         return dict(self._data["feature_flags"])
 
 
+class EntryForecastRolloutMode(StrEnum):
+    BLOCKED = "blocked"
+    CANARY = "canary"
+    LIVE = "live"
+
+
 class EntryForecastSourceTransport(StrEnum):
     ENSEMBLE_SNAPSHOTS_V2_DB_READER = "ensemble_snapshots_db_reader"
 
@@ -162,6 +169,7 @@ class EntryForecastConfig:
     target_horizon_days: int
     warm_horizon_days: int
     source_cycle_policy: str
+    rollout_mode: EntryForecastRolloutMode
     calibration_policy_id: EntryForecastCalibrationPolicyId
 
     def __post_init__(self) -> None:
@@ -203,6 +211,8 @@ def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig
 
     cfg = config or settings
     data = cfg["entry_forecast"]
+    settings_mode_raw = data["rollout_mode"]
+    rollout_mode = _resolve_rollout_mode(settings_mode_raw)
     return EntryForecastConfig(
         source_id=str(data["source_id"]).strip(),
         source_transport=EntryForecastSourceTransport(data["source_transport"]),
@@ -212,8 +222,54 @@ def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig
         target_horizon_days=int(data["target_horizon_days"]),
         warm_horizon_days=int(data["warm_horizon_days"]),
         source_cycle_policy=str(data["source_cycle_policy"]).strip(),
+        rollout_mode=rollout_mode,
         calibration_policy_id=EntryForecastCalibrationPolicyId(data["calibration_policy_id"]),
     )
+
+
+# Operator escape hatch: ZEUS_ENTRY_FORECAST_ROLLOUT_MODE overrides the
+# settings.json value for the lifetime of the process. Used by flip-mode
+# rehearsals and emergency demotion when editing settings.json + restarting
+# the daemon would be too slow. The override is logged to stderr once per
+# resolution so it never silently changes behavior. Invalid env values fail
+# closed (raise ValueError) — they do NOT silently fall back to settings.
+ROLLOUT_MODE_ENV_VAR = "ZEUS_ENTRY_FORECAST_ROLLOUT_MODE"
+_ROLLOUT_MODE_OVERRIDE_LOGGED: set[tuple[str, str]] = set()
+
+
+def _resolve_rollout_mode(settings_mode_raw: str) -> EntryForecastRolloutMode:
+    """Resolve effective rollout_mode from settings + env override.
+
+    Order:
+      1. ``ZEUS_ENTRY_FORECAST_ROLLOUT_MODE`` env var (if set and non-empty).
+      2. settings.json ``entry_forecast.rollout_mode``.
+
+    Invalid env values raise ``ValueError`` (fail-closed). Env value equal to
+    the settings value is a no-op (no log line).
+    """
+    settings_mode = EntryForecastRolloutMode(settings_mode_raw)
+    env_raw = os.environ.get(ROLLOUT_MODE_ENV_VAR, "").strip()
+    if not env_raw:
+        return settings_mode
+    try:
+        env_mode = EntryForecastRolloutMode(env_raw)
+    except ValueError as exc:
+        valid = sorted(m.value for m in EntryForecastRolloutMode)
+        raise ValueError(
+            f"{ROLLOUT_MODE_ENV_VAR}={env_raw!r} is not a valid rollout mode "
+            f"(valid: {valid}). Unset the env var or set a valid value."
+        ) from exc
+    if env_mode is settings_mode:
+        return settings_mode
+    key = (settings_mode.value, env_mode.value)
+    if key not in _ROLLOUT_MODE_OVERRIDE_LOGGED:
+        _ROLLOUT_MODE_OVERRIDE_LOGGED.add(key)
+        print(
+            f"ROLLOUT_MODE_ENV_OVERRIDE: settings={settings_mode.value} "
+            f"env={env_mode.value} (env wins)",
+            file=sys.stderr,
+        )
+    return env_mode
 
 
 def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:
@@ -625,27 +681,11 @@ def exit_daily_hurdle_rate() -> float:
     return rate
 
 
-def exit_correlation_crowding_rate() -> float:
-    """T6.4-phase2 correlation-crowding cost rate.
-
-    Cost model: crowding_cost_usd = rate × exposure_ratio × shares × best_bid
-    where exposure_ratio is the output of
-    src.strategy.correlation.correlated_exposure over OTHER held positions.
-    rate=0.01 means 1% of exit notional per unit of correlated exposure.
-
-    Default 0.0 = no-op (correlation crowding adds zero cost; feature is
-    plumbed but disabled). Operator raises after measuring should_exit
-    sensitivity via T6.3-followup-1 replay harness.
-
-    Bounds [0.0, 0.1] — values above 0.1 imply >10% of exit notional per
-    unit-exposure which would aggressively exit any correlated book.
-    """
-    rate = float(settings["exit"]["correlation_crowding_rate"])
-    if not (0.0 <= rate <= 0.1):
-        raise ValueError(
-            f"exit.correlation_crowding_rate={rate} out of sane range "
-            f"[0.0, 0.1]. Values above 0.1 would force near-immediate exit "
-            f"of any correlated book. Check config/settings.json "
-            f"exit.correlation_crowding_rate."
-        )
-    return rate
+def hold_value_exit_costs_enabled() -> bool:
+    """T6.4 feature flag: when False (default), _buy_yes_exit /
+    _buy_no_exit call HoldValue.compute with fee=0/time=0 (pre-T6.4
+    behavior preserved until activation). When True, exit
+    decisions include fee + time opportunity cost via
+    HoldValue.compute_with_exit_costs. See config/settings.json
+    feature_flags.HOLD_VALUE_EXIT_COSTS for flip protocol."""
+    return bool(settings["feature_flags"].get("HOLD_VALUE_EXIT_COSTS", False))

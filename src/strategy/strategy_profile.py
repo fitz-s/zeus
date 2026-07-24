@@ -13,9 +13,11 @@ Before A4 the per-strategy authority was scattered across 5 hardcoded sites:
   - ``src/engine/cycle_runner.py:77``          KNOWN_STRATEGIES (buildable universe)
   - ``src/engine/evaluator.py``                hardcoded direction/bin checks
 
-Every authority reads ``strategy_profile.get(key)`` and the boot/runtime gates
-derive from the same registry. Only live strategies may be registered;
-retired, proposed, and rejected keys are absent and fail closed as unknown.
+The two control_plane sets diverged: shoulder_sell was in LIVE_SAFE but not
+_LIVE_ALLOWED. Bug review §E flagged the divergence as the canonical "two
+allowlists, one drift" failure. Post-A4 every authority reads
+``strategy_profile.get(key)`` and the boot/runtime gates derive uniformly
+from ``live_status`` — the divergence becomes un-constructable.
 
 How callers use it
 ------------------
@@ -25,8 +27,6 @@ How callers use it
 
     profile = get("settlement_capture")          # ProfileNotFound if unknown
     profile.kelly_default_multiplier             # 1.0
-    profile.kelly_for_phase("settlement_day")    # 1.0 (override) or default
-    profile.is_phase_allowed("post_trading")     # False
     profile.is_runtime_live()                    # True for live_status=="live"
 
     live_safe_keys()        # frozenset of boot-allowable strategies
@@ -47,6 +47,7 @@ from typing import Optional
 
 import yaml
 
+from src.contracts.evidence_tier import EvidenceTier
 from src.state.paths import REPO_ROOT
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,11 @@ DEFAULT_STRATEGY_MIN_ENTRY_PRICE = 0.05
 # ── live status ────────────────────────────────────────────────────── #
 
 
-_VALID_LIVE_STATUSES: frozenset[str] = frozenset({"live"})
+_VALID_LIVE_STATUSES: frozenset[str] = frozenset({
+    "live",        # boot-OK + runtime-OK
+    "blocked",     # boot-rejected + runtime-blocked
+    "deprecated",  # synonym for blocked, kept for grep history
+})
 
 
 _VALID_METRIC_SUPPORTS: frozenset[str] = frozenset({"live", "blocked"})
@@ -103,6 +108,12 @@ class StrategyProfile:
     metric_support: dict[str, str]
     kelly_default_multiplier: float
     kelly_phase_overrides: dict[str, float]
+    min_settled_decisions: int
+    promotion_evidence_ref: Optional[str]
+    # Phase 6 T1: evidence ladder fields
+    evidence_tier: EvidenceTier = EvidenceTier.IDEA
+    evidence_tier_required_for_live: EvidenceTier = EvidenceTier.LIVE_PILOT_TINY
+    promotion_blockers: tuple[str, ...] = ()
     min_entry_price: float = DEFAULT_STRATEGY_MIN_ENTRY_PRICE
     min_strategy_notional_usd: float = 1.0
     min_expected_profit_usd: float = 0.05
@@ -112,23 +123,26 @@ class StrategyProfile:
     complete_required_for_tail_orders: bool = True
     partial_run_kelly_haircut: float = 0.5
 
-    def is_runtime_live(self) -> bool:
-        """True iff this explicitly live strategy may place entries."""
-        return self.live_status == "live"
+    def is_runtime_live(self, *, effective_evidence_tier: EvidenceTier | None = None) -> bool:
+        """True iff entries placed by this strategy hit the live order book.
+
+        Phase 6: requires live_status=="live" AND the effective tier to meet
+        this strategy's configured required tier. Static registry tier is the
+        baseline; callers may pass a DB-reduced effective tier.
+        Equivalent pre-Phase-6: live_status == "live" only.
+        """
+        tier = effective_evidence_tier if effective_evidence_tier is not None else self.evidence_tier
+        return (
+            self.live_status == "live"
+            and tier >= self.evidence_tier_required_for_live
+            and not self.promotion_blockers
+        )
 
     def is_boot_allowed(self) -> bool:
         """True iff the daemon may have this strategy enabled at boot.
 
         Equivalent to the pre-A4 ``key in LIVE_SAFE_STRATEGIES``."""
         return self.live_status == "live"
-
-    def is_phase_allowed(self, market_phase: str) -> bool:
-        """True iff the strategy is semantically valid in this market phase.
-
-        ``market_phase`` is the lowercase enum value
-        (``MarketPhase.SETTLEMENT_DAY.value`` etc.). Empty allow-list = no
-        phase passes."""
-        return market_phase in self.allowed_market_phases
 
     def is_mode_allowed(self, discovery_mode: str) -> bool:
         return discovery_mode in self.allowed_discovery_modes
@@ -139,21 +153,9 @@ class StrategyProfile:
     def is_bin_topology_allowed(self, topology: str) -> bool:
         return topology in self.allowed_bin_topology
 
-    def kelly_for_phase(self, market_phase: Optional[str]) -> float:
-        """Phase-aware Kelly multiplier (PLAN.md §A6 resolver input).
-
-        Pre-A6 callers pass ``market_phase=None`` to get the legacy
-        per-strategy default. A6 layers this through a richer resolver
-        that also accounts for oracle status, observed_target_day_fraction,
-        and phase_source quality.
-        """
-        if market_phase is None:
-            return self.kelly_default_multiplier
-        return self.kelly_phase_overrides.get(market_phase, self.kelly_default_multiplier)
-
     def metric_is_live(self, temperature_metric: str) -> bool:
         """True iff entries on this metric reach the live order book.
-        A per-metric block returns False."""
+        ``blocked`` returns False."""
         return self.metric_support.get(temperature_metric) == "live"
 
 
@@ -265,6 +267,8 @@ _REQUIRED_FIELDS = {
     "metric_support",
     "kelly_default_multiplier",
     "kelly_phase_overrides",
+    "min_settled_decisions",
+    "promotion_evidence_ref",
 }
 
 _OPTIONAL_FIELDS = {
@@ -276,6 +280,10 @@ _OPTIONAL_FIELDS = {
     "partial_source_run_allowed",
     "complete_required_for_tail_orders",
     "partial_run_kelly_haircut",
+    # Phase 6 T1: evidence ladder fields (optional for backward compat)
+    "evidence_tier",
+    "evidence_tier_required_for_live",
+    "promotion_blockers",
 }
 
 
@@ -357,6 +365,40 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         upper_bound=1.0,
     )
 
+    # Phase 6 T1: evidence tier parsing (optional; default IDEA for backward compat)
+    _raw_tier = raw.get("evidence_tier", None)
+    if _raw_tier is None:
+        evidence_tier = EvidenceTier.IDEA
+    else:
+        try:
+            evidence_tier = EvidenceTier[str(_raw_tier)]
+        except KeyError:
+            raise RegistrySchemaError(
+                f"{key}.evidence_tier={_raw_tier!r}: unknown tier; "
+                f"must be one of {[t.name for t in EvidenceTier]}"
+            )
+    _raw_tier_req = raw.get("evidence_tier_required_for_live", None)
+    if _raw_tier_req is None:
+        evidence_tier_required_for_live = EvidenceTier.LIVE_PILOT_TINY
+    else:
+        try:
+            evidence_tier_required_for_live = EvidenceTier[str(_raw_tier_req)]
+        except KeyError:
+            raise RegistrySchemaError(
+                f"{key}.evidence_tier_required_for_live={_raw_tier_req!r}: unknown tier; "
+                f"must be one of {[t.name for t in EvidenceTier]}"
+            )
+    _raw_blockers = raw.get("promotion_blockers", None)
+    if _raw_blockers is None:
+        promotion_blockers: tuple[str, ...] = ()
+    elif isinstance(_raw_blockers, list):
+        promotion_blockers = tuple(str(b) for b in _raw_blockers)
+    else:
+        raise RegistrySchemaError(
+            f"{key}.promotion_blockers: must be a list of strings, "
+            f"got {type(_raw_blockers).__name__}"
+        )
+
     cycle_axis_mode = raw["cycle_axis_dispatch_mode"]
     if cycle_axis_mode is not None:
         if not isinstance(cycle_axis_mode, str):
@@ -390,6 +432,14 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         metric_support=_coerce_metric_support(raw["metric_support"], key=key),
         kelly_default_multiplier=float(kelly_default),
         kelly_phase_overrides=_coerce_phase_overrides(raw["kelly_phase_overrides"], key=key),
+        min_settled_decisions=int(raw["min_settled_decisions"]),
+        promotion_evidence_ref=(
+            None if raw["promotion_evidence_ref"] in (None, "null", "")
+            else str(raw["promotion_evidence_ref"])
+        ),
+        evidence_tier=evidence_tier,
+        evidence_tier_required_for_live=evidence_tier_required_for_live,
+        promotion_blockers=promotion_blockers,
         min_entry_price=min_entry_price,
         min_strategy_notional_usd=min_strategy_notional_usd,
         min_expected_profit_usd=min_expected_profit_usd,
@@ -475,8 +525,23 @@ def live_allowed_keys(*, conn=None) -> frozenset[str]:
     ``_LIVE_ALLOWED_STRATEGIES`` in control_plane. Strict subset of
     live_safe_keys (every live entry is also boot-allowed; not every
     boot-allowed strategy enters live)."""
-    del conn  # retained for call-site compatibility; no hidden DB override exists.
-    return frozenset(k for k, p in _ensure_loaded().items() if p.is_runtime_live())
+    profiles = _ensure_loaded()
+    if conn is None:
+        return frozenset(k for k, p in profiles.items() if p.is_runtime_live())
+
+    from src.state.evidence_tier_assignments import effective_evidence_tier
+
+    return frozenset(
+        k
+        for k, p in profiles.items()
+        if p.is_runtime_live(
+            effective_evidence_tier=effective_evidence_tier(
+                k,
+                baseline=p.evidence_tier,
+                conn=conn,
+            )
+        )
+    )
 
 
 def historical_attribution_keys() -> frozenset[str]:
@@ -508,7 +573,7 @@ def cycle_axis_dispatch_inverse() -> dict[str, frozenset[str]]:
     ``STRATEGY_KEYS_BY_DISCOVERY_MODE`` in cycle_runtime.py — H2 critic R6
     finding (no hardcoded inverse map outside the registry).
 
-    Strategies whose ``cycle_axis_dispatch_mode`` is None are
+    Strategies whose ``cycle_axis_dispatch_mode`` is None (blocked) are
     omitted from the returned map.
     """
     out: dict[str, set[str]] = {}
@@ -535,7 +600,8 @@ def allowed_discovery_modes_inverse() -> dict[str, frozenset[str]]:
     in only one was phase-mismatched in the other; and strategies with
     ``cycle_axis_dispatch_mode: null`` were excluded from every mode's allowed set.
 
-    Strategies with an empty ``allowed_discovery_modes`` contribute nothing.
+    Strategies with an empty ``allowed_discovery_modes`` (blocked) contribute
+    nothing, matching the prior fail-closed posture for blocked strategies.
     """
     out: dict[str, set[str]] = {}
     for key, profile in _ensure_loaded().items():

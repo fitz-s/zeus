@@ -311,22 +311,26 @@ def test_entry_economics_rejects_day0_without_qkernel_at_strategy_floor():
     assert "qkernel_execution_economics" in verdict["details"]["missing"]
 
 
-def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
+def test_entry_economics_blocks_price_below_universal_band_floor():
+    """One-law update (ultimate_alpha 2026-07-24): the live floor is the
+    universal venue band edge 0.05 for every key — a declared per-intent
+    floor below it cannot lower it, and a limit price under the band is
+    blocked. A price AT the band edge is legal (inclusive [0.05, 0.95])."""
     verdict = _entry_economics_component(
         _intent(
-            limit_price=0.05,
+            limit_price=0.04,
             q_live=0.82,
             q_lcb_5pct=0.72,
-            expected_edge=0.67,
+            expected_edge=0.68,
             min_entry_price=0.005,
-            min_expected_profit_usd=1.0,
-            min_submit_edge_density=0.05,
+            min_expected_profit_usd=0.0,
+            min_submit_edge_density=0.0,
             selection_authority_applied=None,
             qkernel_execution_economics=_econ(
                 payoff_q_point=0.82,
                 payoff_q_lcb=0.72,
-                cost=0.05,
-                edge_lcb=0.67,
+                cost=0.04,
+                edge_lcb=0.68,
                 selection_guard_q_safe=0.72,
             ),
         ),
@@ -334,8 +338,10 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "min_entry_price_below_live_floor"
-    assert verdict["details"]["live_min_entry_price"] == 0.10
+    # The universal venue band law fires FIRST — a sub-band price is rejected
+    # as out-of-bounds before any per-intent floor comparison is reached,
+    # proving the band is the single price authority.
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
 def test_entry_economics_micro_tail_still_requires_strategy_economics():

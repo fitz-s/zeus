@@ -45,6 +45,8 @@ test_trust_policy:
     tests/test_checkpoint_backstop_alert.py: {created: "2026-07-21", last_used: "2026-07-22", note: "WAL-checkpoint alert fires on un-checkpointed backlog (bytes, actual page_size), not total-log size."}
     tests/test_sqlite_version_gate.py: {created: "2026-07-22", last_used: "2026-07-22", note: "SQLite version boot gate blocks <3.51.3 (WAL-reset bug) with an emergency override."}
     tests/test_archive_pre_epoch_trades.py: {created: "2026-07-23", last_used: "2026-07-23", note: "pre-epoch trade archive tool: dry-run default, FK-safe child-first delete, trigger drop/restore, open-position precondition abort, archive==delete reconciliation."}
+    tests/decision/test_predicted_bin_law.py: {created: "2026-07-23", last_used: "2026-07-23", note: "predicted-bin decision law (PR-1, ΔJ≡0): native NO lower-bound trap (1−q⁺_YES), lock folding, strict entry break-even, exit precedence RED>lock>evidence>value, partial-exit argmax, hysteresis non-overlap, sunk-cost-free signatures, Decimal purity."}
+    tests/test_decision_law_identity_migration.py: {created: "2026-07-24", last_used: "2026-07-24", note: "COLLISION.md A2 decision-law identity migration: decision_law_id/position_origin additive nullable columns on the 10 strategy-identity tables, strategy_key NOT NULL relaxed on the 5 tables that still declared it, idempotent, registry-clean."}
     tests/state/test_chain_mirror_settlement_preserves_booked_close_economics.py: {created: "2026-07-19", last_used: "2026-07-19", note: "Chain-mirror settlement preserves real EXIT fill economics for already economically_closed positions and refuses to invent missing booked PnL or exit price."}
     tests/engine/test_day0_coverage_gate.py: {created: "2026-05-24", last_used: "2026-07-19", note: "Day0 executable coverage fails closed on incomplete start or a metric-attributed interior gap, including the WU HTTP fallback."}
     tests/engine/test_day0_monitor_gap_and_stale_margin.py: {created: "2026-07-18", last_used: "2026-07-19", note: "Day0 monitor gap attribution and stale one-sided extreme-bound uncertainty antibodies; incomplete evidence cannot become exit authority."}
@@ -190,6 +192,7 @@ test_trust_policy:
     tests/engine/test_quote_feasibility_wrong_book_identity_wall.py: {created: "2026-06-12", last_used: "2026-07-22", note: "Passive-maker book identity and price-seam antibodies, including a same-midpoint/different-touch TAKER-to-MAKER relationship proof spanning fresh-priced final intent, PRE_SUBMIT verifier, exact shares, post-only command, and executor recapture."}
     tests/engine/test_cert_calibration_bridge.py: {created: "2026-06-10", last_used: "2026-07-19", note: "Calibration credential relationship matrix; Day0 observation facts alone fail closed while replacement bounds and selected deterministic exact-payoff witnesses use their own typed authorities."}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-06-17"}
+    tests/events/test_certificate_validity.py: {created: "2026-07-24", last_used: "2026-07-24", note: "certificate validity across forecast issues (ultimate_alpha group D): τ_next composition from release-calendar cycle_hours+lag, RECONSTRUCTED-tier fail-closed, DST-immunity, CachedBelief valid_until fields."}
     tests/events/test_continuous_redecision_resurrection.py: {created: "2026-06-12", last_used: "2026-06-26", note: "Continuous redecision resurrection/deadlock antibodies; extended 2026-06-26 to prove open-maker token->condition resolution reads executable_market_snapshot_latest without append scans when latest rows exist."}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-07-17"}
     tests/events/test_continuous_redecision_exit.py: {created: "2026-05-31", last_used: "2026-05-31"}
@@ -230,7 +233,7 @@ test_trust_policy:
     tests/test_oracle_evidence_status.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_strategy_profile_registry.py: {created: "2026-05-04", last_used: "2026-07-15", note: "Strategy registry law for strategy-specific entry economics; it does not define the venue binary-contract price domain."}
     tests/test_market_phase_evidence.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_phase_aware_kelly_live.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_phase_aware_kelly_live.py: {created: "2026-05-04", last_used: "2026-07-24", note: "Rewritten 2026-07-24 (ultimate_alpha group B): pins the one-law resolver — GLOBAL_KELLY_FRACTION for every known key, fail-closed identity/lifecycle/hard-oracle veto, retired A6 multiplier stages absent."}
     tests/test_authority_rebuild_invariants.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/engine/test_monitor_held_belief_readthrough.py: {created: "2026-06-21", last_used: "2026-06-21", note: "LAYER 2 monitor wiring antibodies: a non-day0 held position with stale/missing cached belief attempts a same-authority read-through recompute BEFORE fail-closing — fresh recompute restores probability authority (is_fresh True), insufficient inputs fail-close + durable retryable belief_debt marker + reseed, and the monitor never itself decides an exit (no false exit). RED-on-revert verified."}
     tests/state/test_review_work_items.py: {created: "2026-07-11", last_used: "2026-07-11", note: "Quarantine excision foundation antibody: owner-local ReviewWorkItem protocol — schema (partial unique OPEN index, bounded/unbounded XOR CHECK, status CHECK), idempotent open (double-open = one row, concurrent-connection race via real threads on a file DB), CAS resolve (stale authority_revision refused, double-resolve refused), supersede-on-new-revision, due-work priority+time ordering and LIMIT, open_unbounded_count, open_items_by_family, and blocked_family_keys (open family-blocking work items + blocking ChainOnlyFacts off a fake portfolio, non-blocking reason codes and non-blocking facts excluded)."}
@@ -553,7 +556,6 @@ test_trust_policy:
     tests/test_charter_mandatory_evidence.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_charter_sunset_required.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_check_pr_identity_collisions.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_city_kelly_multiplier.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_collateral_ledger_global_path_backed.py: {created: "2026-05-13", last_used: "2026-06-17"}
     tests/test_companion_loop_break.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_contract_source_fields_baseline.py: {created: "2026-05-01", last_used: "2026-05-01"}
@@ -1195,7 +1197,6 @@ categories:
     - tests/test_check_data_pipeline_live_e2e.py
     - tests/test_check_live_order_e2e.py
     - tests/test_check_pr_identity_collisions.py
-    - tests/test_city_kelly_multiplier.py
     - tests/test_collateral_ledger_global_path_backed.py
     - tests/test_companion_loop_break.py
     - tests/test_contract_source_fields_baseline.py

@@ -668,11 +668,14 @@ def test_executor_expressibility_rejects_size_below_min_order():
 
 
 def test_executor_expressibility_rejects_price_below_final_intent_live_floor():
+    """One-law update (ultimate_alpha 2026-07-24): the live floor is the
+    universal band edge 0.05 for every intent — 0.07 (formerly below the
+    non-qkernel 0.10 floor) is now expressible; below the band still rejects."""
     parents, expressibility = executor_expressibility_graph(
         final_payload={
-            "limit_price": 0.07,
-            "min_entry_price": 0.05,
-            "notional_usd": 0.70,
+            "limit_price": 0.04,
+            "min_entry_price": 0.04,
+            "notional_usd": 0.40,
             "selection_authority_applied": None,
         }
     )

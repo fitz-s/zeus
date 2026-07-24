@@ -848,7 +848,9 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"expected_edge": 0.25}, "expected_edge exceeds"),
         ({"size": 0.0}, "positive size"),
         ({"min_entry_price": -0.01}, "min_entry_price"),
-        ({"min_entry_price": 0.05}, "min_entry_price below live floor"),
+        # One-law 2026-07-24: the live floor is the universal band edge 0.05,
+        # so a declared 0.05 sits AT the floor (legal); 0.04 is below it.
+        ({"min_entry_price": 0.04}, "min_entry_price below live floor"),
         ({"limit_price": 0.09, "min_entry_price": 0.10}, "entry price below strategy floor"),
         ({"min_expected_profit_usd": 10.0}, "expected profit below"),
         ({"min_submit_edge_density": 0.75}, "submit edge density below"),

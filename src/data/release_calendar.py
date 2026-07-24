@@ -19,6 +19,16 @@ from typing import Any, Mapping
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CALENDAR_PATH = PROJECT_ROOT / "config" / "source_release_calendar.yaml"
 
+# Authority tiers whose next-issue schedule is trustworthy enough to bound a live
+# decision certificate's validity (τ_next). These are the AvailabilityProvenance
+# names minus RECONSTRUCTED: heuristic (reconstructed) dissemination lag is not a
+# verified issue boundary, so FINAL_SPEC fails closed on it for new
+# forecast-conditioned exposure. Kept as plain strings to avoid coupling this
+# read-only calendar module to src.backtest.decision_time_truth.
+_AUTHORITATIVE_ISSUE_TIERS: frozenset[str] = frozenset(
+    {"DERIVED_FROM_DISSEMINATION", "FETCH_TIME", "RECORDED"}
+)
+
 
 class FetchDecision(str, Enum):
     FETCH_ALLOWED = "FETCH_ALLOWED"
@@ -408,6 +418,64 @@ def select_source_run_for_target_horizon(
         "reason": "no cycle profile can cover required target horizon",
         "required_max_step_hours": required_max_step_hours,
     }
+
+
+def _next_cycle_utc(cycle_hours_utc: tuple[int, ...], now: datetime) -> datetime:
+    """Smallest configured UTC cycle instant strictly after ``now``, rolling to the
+    next UTC day when ``now`` is at/after the last cycle of the day.
+
+    DST-immune by construction: cycle hours are UTC and every instant built here is
+    UTC, so the answer never shifts across a civil DST transition."""
+    today = now.date()
+    for hour in sorted(set(cycle_hours_utc)):
+        candidate = datetime(today.year, today.month, today.day, hour, tzinfo=timezone.utc)
+        if candidate > now:
+            return candidate
+    next_day = (now + timedelta(days=1)).date()
+    first_hour = min(cycle_hours_utc)
+    return datetime(next_day.year, next_day.month, next_day.day, first_hour, tzinfo=timezone.utc)
+
+
+def next_authoritative_issue_at(
+    source_id: str,
+    track: str,
+    now_utc: datetime,
+    *,
+    path: Path = DEFAULT_CALENDAR_PATH,
+    entries: Mapping[tuple[str, str], ReleaseCalendarEntry] | None = None,
+) -> datetime | None:
+    """Instant at which the NEXT authoritative forecast issue for ``(source_id, track)``
+    becomes available (τ_next), or ``None`` when that cannot be established from
+    verified metadata.
+
+    Composition (no new schedule surface is invented — the release calendar is the
+    single authority that keys the live forecast source): the next cycle instant is
+    the smallest ``cycle_hours_utc`` strictly after ``now_utc``; the availability lag
+    is that cycle's ``default_lag_minutes`` (composed from the release calendar, the
+    same quantity ``dissemination_schedules.derive_availability`` encodes for
+    name-aligned sources). The release calendar's ``authority_tier`` carries the same
+    provenance vocabulary as ``AvailabilityProvenance`` — RECONSTRUCTED (or any
+    unknown) tier is unverified and fails closed to ``None``.
+
+    Returns ``None`` when: no calendar entry exists for the key; the entry has no
+    cycle hours; the entry's authority tier is not verified; or the cycle lag
+    metadata is absent. Callers fail closed on ``None`` for NEW forecast-conditioned
+    exposure (FINAL_SPEC certificate validity: missing next-issue metadata → fail
+    closed). Existing positions (exit / monitor) must never be blocked by this.
+
+    DST-immune: cycle hours are UTC and every instant here is UTC."""
+    now = _to_utc(now_utc, "now_utc")
+    entry = get_entry(source_id, track, path=path, entries=entries)
+    if entry is None or not entry.cycle_hours_utc:
+        return None
+    if entry.authority_tier not in _AUTHORITATIVE_ISSUE_TIERS:
+        return None
+    next_cycle = _next_cycle_utc(entry.cycle_hours_utc, now)
+    profile = cycle_profile_for_hour(entry, next_cycle.hour)
+    lag_minutes = profile.default_lag_minutes if profile is not None else entry.default_lag_minutes
+    if lag_minutes is None:
+        return None
+    return next_cycle + timedelta(minutes=int(lag_minutes))
 
 
 def source_has_live_authorization(
