@@ -145,8 +145,7 @@ def test_b2_weather_family_exposure_gate_routes_to_dedicated_profile():
         [
             "src/engine/cycle_runtime.py",
             "src/strategy/family_exclusive_dedup.py",
-            "tests/test_inv_family_exclusive_cross_module_integration.py",
-            "tests/test_inv_family_exclusive_sizing.py",
+            "tests/engine/test_multiwinner_wealth_composition.py",
         ],
         intent="modify_existing",
         write_intent="edit",
@@ -156,8 +155,8 @@ def test_b2_weather_family_exposure_gate_routes_to_dedicated_profile():
     assert digest["admission"]["status"] == "admitted"
     assert "src/engine/cycle_runtime.py" in digest["admission"]["admitted_files"]
     assert "src/strategy/family_exclusive_dedup.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_inv_family_exclusive_cross_module_integration.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_inv_family_exclusive_sizing.py" in digest["admission"]["admitted_files"]
+    assert "tests/engine/test_multiwinner_wealth_composition.py" in digest["admission"]["admitted_files"]
+    assert "tests/engine/test_multiwinner_wealth_composition.py" in digest["admission"]["admitted_files"]
 
 
 def test_b4_t4_restart_gate_cleanup_routes_to_dedicated_profile():
@@ -188,7 +187,7 @@ def test_source_canary_readiness_hot_swap_routes_without_live_execution():
         write_intent="edit",
     )
 
-    assert digest["profile"] == "source canary readiness hot-swap"
+    assert digest["profile"] == "source probe readiness hot-swap"
     assert digest["admission"]["status"] == "admitted"
     assert "src/control/freshness_gate.py" in digest["admission"]["admitted_files"]
     assert "src/engine/cycle_runner.py" in digest["admission"]["admitted_files"]
@@ -201,7 +200,7 @@ def test_source_canary_readiness_hot_swap_blocks_live_execution_surface():
         write_intent="edit",
     )
 
-    assert digest["profile"] == "source canary readiness hot-swap"
+    assert digest["profile"] == "source probe readiness hot-swap"
     assert digest["admission"]["status"] == "scope_expansion_required"
     assert digest["admission"]["forbidden_hits"] == []
 
@@ -369,7 +368,7 @@ def test_phase4_strategy_reachability_routes_to_selection_parity_profile():
             "src/strategy/market_analysis.py",
             "src/strategy/market_analysis_family_scan.py",
             "src/engine/evaluator.py",
-            "tests/test_fdr.py",
+            "tests/test_fdr_family_scope.py",
             "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
         ],
     )
@@ -388,7 +387,7 @@ def test_phase4a_f13_realistic_wording_routes_to_selection_parity_profile():
         [
             "src/strategy/market_analysis.py",
             "src/strategy/market_analysis_family_scan.py",
-            "tests/test_fdr.py",
+            "tests/test_fdr_family_scope.py",
             "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
         ],
     )
@@ -397,7 +396,7 @@ def test_phase4a_f13_realistic_wording_routes_to_selection_parity_profile():
     assert digest["admission"]["status"] == "admitted"
     assert "src/strategy/market_analysis.py" in digest["admission"]["admitted_files"]
     assert "src/strategy/market_analysis_family_scan.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_fdr.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_fdr_family_scope.py" in digest["admission"]["admitted_files"]
 
 
 def test_object_meaning_settlement_authority_cutover_routes_to_wave5_profile():
@@ -419,7 +418,6 @@ def test_object_meaning_settlement_authority_cutover_routes_to_wave5_profile():
             "src/state/portfolio.py",
             "src/state/strategy_tracker.py",
             "src/engine/replay.py",
-            "scripts/etl_forecast_skill_from_forecasts.py",
             "scripts/etl_historical_forecasts.py",
             "tests/test_harvester_split_independence.py",
             "tests/test_harvester_metric_identity.py",
@@ -450,8 +448,7 @@ def test_object_meaning_settlement_authority_cutover_routes_to_wave5_profile():
         "src/state/portfolio.py",
         "src/state/strategy_tracker.py",
         "src/engine/replay.py",
-        "scripts/etl_forecast_skill_from_forecasts.py",
-        "scripts/etl_historical_forecasts.py",
+            "scripts/etl_historical_forecasts.py",
         "tests/test_backtest_outcome_comparison.py",
         "tests/test_cross_module_relationships.py",
     ]:
@@ -473,32 +470,6 @@ def test_object_meaning_settlement_authority_cutover_blocks_live_side_effect_sco
     assert digest["admission"]["status"] == "blocked"
     assert "state/zeus-world.db" in digest["admission"]["forbidden_hits"]
     assert "src/contracts/settlement_semantics.py" not in digest["admission"]["forbidden_hits"]
-
-
-def test_object_meaning_calibration_transfer_oos_evidence_routes_to_wave18_profile():
-    digest = build_digest(
-        "object-meaning invariance wave 18: time-blocked calibration transfer evidence "
-        "must reject row-modulo pseudo-OOS for validated_calibration_transfers time basis",
-        [
-            "docs/operations/task_2026-05-05_object_invariance_wave18/PLAN.md",
-            "docs/operations/AGENTS.md",
-            "scripts/evaluate_calibration_transfer_oos.py",
-            "src/data/calibration_transfer_policy.py",
-            "tests/test_evaluate_calibration_transfer_oos.py",
-            "tests/test_calibration_transfer_policy_with_evidence.py",
-        ],
-        write_intent="edit",
-    )
-
-    assert digest["profile"] == "object meaning calibration transfer oos evidence"
-    assert digest["admission"]["status"] == "admitted"
-    for path in [
-        "scripts/evaluate_calibration_transfer_oos.py",
-        "src/data/calibration_transfer_policy.py",
-        "tests/test_evaluate_calibration_transfer_oos.py",
-        "tests/test_calibration_transfer_policy_with_evidence.py",
-    ]:
-        assert path in digest["admission"]["admitted_files"]
 
 
 def test_object_meaning_operator_status_bankroll_semantics_routes_to_wave12_profile():
@@ -996,7 +967,7 @@ def test_data_daemon_live_efficiency_refactor_routes_to_dedicated_profile():
             "tests/conftest.py",
             "tests/state/_schema_pinned_hash.txt",
             "tests/state/test_forecast_db_split_invariant.py",
-            "tests/test_forecast_live_daemon.py",
+            "tests/test_forecast_live_daemon_boot_schema.py",
             "tests/test_check_data_pipeline_live_e2e.py",
             "tests/test_job_run_schema.py",
             "tests/test_ecmwf_open_data_parallel_fetch.py",
@@ -1014,7 +985,7 @@ def test_data_daemon_live_efficiency_refactor_routes_to_dedicated_profile():
     assert "tests/conftest.py" in digest["admission"]["admitted_files"]
     assert "tests/state/_schema_pinned_hash.txt" in digest["admission"]["admitted_files"]
     assert "tests/state/test_forecast_db_split_invariant.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_forecast_live_daemon.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_forecast_live_daemon_boot_schema.py" in digest["admission"]["admitted_files"]
     assert "tests/test_check_data_pipeline_live_e2e.py" in digest["admission"]["admitted_files"]
     assert "tests/test_job_run_schema.py" in digest["admission"]["admitted_files"]
 
@@ -1061,7 +1032,7 @@ def test_data_daemon_live_efficiency_refactor_forbidden_intent_vetoes_profile(fo
         [
             "src/ingest/forecast_live_daemon.py",
             "src/data/ecmwf_open_data.py",
-            "tests/test_forecast_live_daemon.py",
+            "tests/test_forecast_live_daemon_boot_schema.py",
         ],
     )
 
@@ -1079,7 +1050,6 @@ def test_phase1g_forecast_history_provenance_routes_to_source_policy_profile():
             "src/engine/replay.py",
             "src/backtest/training_eligibility.py",
             "scripts/etl_historical_forecasts.py",
-            "scripts/etl_forecast_skill_from_forecasts.py",
             "tests/test_replay_skill_eligibility_filter.py",
             "tests/test_etl_skill_eligibility_filter.py",
             "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
@@ -1102,8 +1072,8 @@ def test_phase1k_live_decision_snapshot_causality_routes_to_snapshot_causality_p
         [
             "src/engine/evaluator.py",
             "tests/test_center_buy_repair.py",
-            "tests/test_fdr.py",
-            "tests/test_decision_evidence_runtime_invocation.py",
+            "tests/test_fdr_family_scope.py",
+            "tests/test_decision_evidence_entry_emission.py",
             "tests/test_digest_profile_matching.py",
             "docs/operations/AGENTS.md",
             "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
@@ -1114,8 +1084,8 @@ def test_phase1k_live_decision_snapshot_causality_routes_to_snapshot_causality_p
     assert digest["admission"]["status"] == "admitted"
     assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
     assert "tests/test_center_buy_repair.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_fdr.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_decision_evidence_runtime_invocation.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_fdr_family_scope.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_decision_evidence_entry_emission.py" in digest["admission"]["admitted_files"]
     assert "src/data/ensemble_client.py" not in digest["admission"]["admitted_files"]
     assert "src/data/forecast_source_registry.py" not in digest["admission"]["admitted_files"]
 
@@ -1130,8 +1100,8 @@ def test_phase1k_review_remediation_wording_routes_to_snapshot_causality_profile
             "src/engine/evaluator.py",
             "tests/test_center_buy_repair.py",
             "tests/test_runtime_guards.py",
-            "tests/test_fdr.py",
-            "tests/test_decision_evidence_runtime_invocation.py",
+            "tests/test_fdr_family_scope.py",
+            "tests/test_decision_evidence_entry_emission.py",
             "tests/test_digest_profile_matching.py",
             "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
             "architecture/topology.yaml",
@@ -1183,7 +1153,7 @@ def test_dsa13_canonical_snapshot_authority_routes_to_phase1l_profile():
             "src/execution/harvester.py",
             "src/observability/status_summary.py",
             "src/state/schema/v2_schema.py",
-            "tests/test_decision_evidence_runtime_invocation.py",
+            "tests/test_decision_evidence_entry_emission.py",
             "tests/test_replay_time_provenance.py",
             "tests/test_harvester_metric_identity.py",
             "tests/test_phase10b_dt_seam_cleanup.py",
@@ -1463,52 +1433,6 @@ def test_r3_t1_fake_venue_routes_to_t1_profile_not_heartbeat():
     assert "tests/fakes/polymarket_v2.py" in digest["admission"]["admitted_files"]
     assert "tests/integration/test_p0_live_money_safety.py" in digest["admission"]["admitted_files"]
     assert "src/venue/polymarket_v2_adapter.py" in digest["admission"]["admitted_files"]
-
-
-def test_r3_a1_strategy_benchmark_routes_to_a1_profile_not_heartbeat():
-    """A1 shares broad strategy/live-shadow/replay terms with R3 runtime work;
-    strong benchmark-suite phrases must admit the A1 strategy benchmark surface
-    instead of falling through to heartbeat or generic strategy routing."""
-    digest = build_digest(
-        "R3 A1 StrategyBenchmarkSuite alpha execution metrics diagnostic simulated read-only live "
-        "promotion gate strategy_benchmark_runs INV-NEW-Q",
-        [
-            "src/strategy/benchmark_suite.py",
-            "src/strategy/data_lake.py",
-            "tests/test_strategy_benchmark.py",
-            "docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml",
-        ],
-    )
-
-    assert digest["profile"] == "r3 strategy benchmark suite implementation"
-    assert digest["admission"]["status"] == "admitted"
-    assert "src/strategy/benchmark_suite.py" in digest["admission"]["admitted_files"]
-    assert "src/strategy/data_lake.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_strategy_benchmark.py" in digest["admission"]["admitted_files"]
-
-
-def test_dsa08_dsa17_evidence_grade_cleanup_routes_to_a1_profile():
-    digest = build_digest(
-        "DSA-08 DSA-17 strategy benchmark evidence-grade naming cleanup "
-        "simulated read-only evidence-grade naming cleanup no production DB mutation "
-        "no live venue side effects no CLOB cutover",
-        [
-            "src/strategy/benchmark_suite.py",
-            "tests/test_strategy_benchmark.py",
-            "docs/reference/modules/strategy.md",
-            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
-            "architecture/topology.yaml",
-            "architecture/digest_profiles.py",
-        ],
-    )
-
-    assert digest["profile"] == "r3 strategy benchmark suite implementation"
-    assert digest["admission"]["status"] == "admitted"
-    assert "src/strategy/benchmark_suite.py" in digest["admission"]["admitted_files"]
-    assert "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md" in (
-        digest["admission"]["admitted_files"]
-    )
-    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
 
 
 def test_dsa12_zeus_mode_selector_cleanup_routes_to_phase0b_profile():

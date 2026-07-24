@@ -7,7 +7,7 @@ Authority basis: live incident 2026-06-04 (zeus-world.db WAL 488MB→1GB+ lock-s
 
 ## The finding (one design flaw, N symptoms)
 The process-global zeus-world.db write mutex (`src/state/db.py::world_write_mutex` / `world_write_lock`) is held **across blocking network/on-chain I/O** at MANY sites. Each holds the WAL write lock for the full I/O duration → every world write serializes behind it → lock-starvation wedge + unbounded WAL. Sites found so far:
-- mainstream forecast fetch — FIXED (STEP-7, warm-cache, commit 5638cf59c6)
+- retired-reference forecast fetch — FIXED (STEP-7, warm-cache, commit 5638cf59c6)
 - JIT `/book` HTTP + order POST — FIXED (#95)
 - market-channel seed on **connect** — FIXED (0ee7a80dc5, pre-capture)
 - market-channel seed on **reconnect** — FIXED (8215ab341e, pre-capture)

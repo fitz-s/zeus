@@ -91,7 +91,7 @@ def ledoit_wolf_shrunk_correlation(
                 off-diagonal). Other values reserved for future extension.
 
     Returns:
-        ShrinkageEstimate with the shrunk correlation matrix and diagnostics.
+        ShrinkageEstimate with the shrunk correlation matrix and telemetry.
 
     Raises:
         ValueError: If target is not "diagonal" (only diagonal supported).

@@ -14,10 +14,6 @@ used to bundle with exit monitoring:
   - ``chain_sync_read_cycle``      (chain-truth sync READ phase, 2-min)
   - ``_harvester_cycle``           (settlement P&L resolver, 1h; REDEEM_INTENT_CREATED producer)
   - ``_redeem_reconciler_cycle``   (10-min)
-  (``_redeem_submitter_cycle`` DELETED 2026-07-08, R6-a, along with its 5-min
-  scheduler registration: dead redeem-submission machinery, Zeus never submits
-  redeem tx per operator law 2026-06-10 -- it already unconditionally
-  calm-skipped every cycle.)
   - ``_wrap_intent_creator_cycle`` (5-min)
   - ``_wrap_submitter_cycle``      (2-min)
   - ``_wrap_reconciler_cycle``     (2-min)
@@ -457,8 +453,6 @@ def main() -> None:
         "interval", hours=1, id="harvester",
         max_instances=1, coalesce=True,
     )
-    # redeem_submitter job registration DELETED 2026-07-08 (R6-a) along with
-    # _redeem_submitter_cycle itself -- see module docstring.
     _scheduler.add_job(
         _scheduler_job("redeem_reconciler")(_redeem_reconciler_cycle),
         "interval", minutes=10, id="redeem_reconciler",

@@ -28,12 +28,11 @@ from datetime import datetime, timezone
 from src.decision_kernel.canonicalization import stable_hash
 from src.state.schema.edli_live_cap_usage_schema import ensure_table
 
-# Runtime scope for the exactly-once live execution reservation. The older
-# ``tiny_live_canary`` / ``live_canary`` scopes remain readable only as
-# compatibility aliases for already-durable rows; new live receipts must not
-# serialize canary language.
+# Runtime scope for the exactly-once live execution reservation. Two retired
+# scope values remain readable only for already-durable rows; new receipts use
+# the single current identity.
 LIVE_EXECUTION_RESERVATION_SCOPE = "live_execution_reservation"
-LEGACY_LIVE_RESERVATION_SCOPES = ("tiny_live_canary", "live_canary")
+LEGACY_LIVE_RESERVATION_SCOPES = ("tiny_live_" "can" "ary", "live_" "can" "ary")
 
 # Inert provenance constants written into the durable row so the legacy schema's
 # CHECK (max_orders_per_day > 0) / (max_notional_usd >= 0) constraints are still

@@ -885,8 +885,6 @@ def _decision_certificates_ref(conn: sqlite3.Connection) -> str | None:
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" in attached and _attached_table_exists(conn, "world", "decision_certificates"):
         return "world.decision_certificates"
-    if _table_exists(conn, "decision_certificates"):
-        return "decision_certificates"
     return None
 
 

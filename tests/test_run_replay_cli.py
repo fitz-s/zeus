@@ -305,7 +305,7 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     assert relaxed.n_replayed == 1
     assert relaxed.outcomes[0].snapshot_id.startswith("forecast_rows:Ankara")
     assert relaxed.limitations["decision_reference_source_counts"] == {"forecasts_table_synthetic": 1}
-    assert relaxed.limitations["diagnostic_replay_subjects"] == 1
+    assert relaxed.limitations["telemetry_replay_subjects"] == 1
     assert relaxed.limitations["diagnostic_replay_subject_rate"] == 1.0
     assert any(
         "diagnostic_reference" in decision.applied_validations
@@ -876,7 +876,7 @@ def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path
     }
     assert summary.limitations["hours_since_open_fallback_subjects"] == 1
     assert summary.limitations["hours_since_open_fallback_rate"] == 0.5
-    assert summary.limitations["diagnostic_replay_subjects"] == 0
+    assert summary.limitations["telemetry_replay_subjects"] == 0
     assert summary.limitations["diagnostic_replay_subject_rate"] == 0.0
 
     sources = {outcome.decision_reference_source for outcome in summary.outcomes}
@@ -935,7 +935,7 @@ def test_cli_prints_replay_provenance_counts(tmp_path, monkeypatch, capsys):
                     "decision_log.no_trade_cases": 1,
                     "trade_decisions": 1,
                 },
-                "diagnostic_replay_subjects": 1,
+                "telemetry_replay_subjects": 1,
                 "hours_since_open_source_counts": {
                     "fallback_48.0": 1,
                     "market_hours_open": 1,
@@ -972,7 +972,7 @@ def test_cli_prints_replay_provenance_counts(tmp_path, monkeypatch, capsys):
     assert "Replay provenance:" in output
     assert "decision reference sources: decision_log.no_trade_cases=1, trade_decisions=1" in output
     assert "hours-since-open sources: fallback_48.0=1, market_hours_open=1" in output
-    assert "diagnostic replay references: 1/2 replayed subjects" in output
+    assert "reference-only replay inputs: 1/2 replayed subjects" in output
     assert "hours-since-open fallback: 1/2 replayed subjects" in output
 
 

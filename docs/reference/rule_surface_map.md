@@ -17,7 +17,7 @@ Precedence order is stated in [root AGENTS.md §1](../../AGENTS.md): direct inst
 | **`architecture/invariants.yaml`** | Machine-checkable runtime invariants (INV-##): lifecycle sequencing, cross-DB write boundaries, settlement semantics, advisory-only risk prohibition | When adding code near settlement, lifecycle, or cross-DB writes; CI enforces these |
 | **`architecture/negative_constraints.yaml`** | Prohibited patterns (NC-##): cross-zone patch rules, no JSON-to-authority promotion, structural anti-patterns | Before any cross-zone or K0/K3 co-edit |
 | **`docs/authority/**`** | Durable architecture and delivery law: replacement chain, regime unification, statistical calibration, exit authority, change-control constitution | When changing or verifying strategy, probability, settlement, or delivery posture; conflicts resolve toward code/manifests/runtime over dated prose |
-| **`CLAUDE.md`** (root + `.claude/CLAUDE.md`) | Global and project-level agent preferences: tool routing, subagent tiers, operator laws (no caps, no shadow, no over-engineering), memory index | Agent behavior rules — not Zeus trading law |
+| **`CLAUDE.md`** (root + `.claude/CLAUDE.md`) | Global and project-level agent preferences: tool routing, subagent tiers, operator laws (no caps, no parallel observe-only, no over-engineering), memory index | Agent behavior rules — not Zeus trading law |
 
 ---
 

@@ -2,7 +2,7 @@
 
 ```
 # Created: 2026-06-17
-# Authority: docs/rebuild/source_truth_upgrade/{e2e_upgrade_plan.md, source_roles_v1.json, city_routing_v1.csv}
+# Authority: docs/rebuild/source_truth_upgrade/{e2e_upgrade_plan.md, source_roles_v1.json.md, city_routing_v1.csv.md}
 #   (operator package zeus_polyweather_upgrade_package_v1). Reconciled against live tree
 #   /Users/leofitz/zeus @ live/iteration-2026-06-13 (committed HEAD c62d53b190 + operator WIP).
 # Method: read-only. Every spec claim verified against live source/DB before any build.
@@ -19,9 +19,9 @@
 | 5 | day0 observation layer (new) | `src/forecast/day0_conditioner.py` exists (live day0 path). `q_engine` mx2t3 coupling: day0 q currently seeds members off `ensemble_snapshots` (the cold-member coupling being decoupled by agent a9878e06a2a4ae67d, in flight). | Day0 layer must **compose with / supersede** day0_conditioner — reconcile against it (see obs-infra locate report). The mx2t3 decouple (clean forecast prior) is a **prerequisite** that lands first. |
 | 6 | DB-home: spec is silent on which split DB | K1 law: zeus-world / zeus-forecasts / zeus_trades | resolved → zeus-forecasts.db (row 2). |
 
-## Routing-table facts (city_routing_v1.csv, 54 cities)
+## Routing-table facts (city_routing_v1.csv.md, 54 cities)
 - 50 `wu_icao` (settlement_airport_exact) · 1 `hko` (hong-kong, official_city_center_exact) · 3 `noaa` timeseries (istanbul=LTFM, moscow=UUWW, tel-aviv=LLBG).
-- Restricted/excluded-from-live families (source_roles_v1.json): amsc_awos, aeroweb, ncm_current, ncm_forecast, ims_observation_api → math_weight 0 in live; shadow residual only.
+- Restricted/excluded-from-live families (source_roles_v1.json.md): amsc_awos, aeroweb, ncm_current, ncm_forecast, ims_observation_api → math_weight 0 in live; historical residual only.
 - Day0 primary obs: AviationWeather METAR (all), MADIS HF-METAR (US: atlanta/austin/chicago/dallas/denver/houston/la/miami/nyc/sf/seattle), HKO realtime (hong-kong).
 
 ## Resolved — existing live infra (obs_infra_locate.md) → targeted-extend scope (operator chose extend)

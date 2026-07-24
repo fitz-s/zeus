@@ -4,7 +4,7 @@ predicate (gated on the fail-soft trade_decisions projection) vs the NEW predica
 (gated on canonical fill authority only). Removing a restrictive clause can only ADD
 candidates, so OLD must be a subset of NEW; NEW\\OLD is exactly the post-07-02 gap the
 re-anchor is meant to repair. Proves no over-repair and characterizes the delta.
-Not in the live process; one-shot diagnostic; no writes."""
+Not in the live process; one-shot evidence; no writes."""
 import sqlite3
 
 DB = "/Users/leofitz/zeus/state/zeus_trades.db"

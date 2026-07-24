@@ -254,7 +254,7 @@ def run_audit() -> dict:
                 "parseable_bin_subjects": len(snapshot_parseable_bin_subjects),
                 "snapshot_vector_compatible_subjects": len(snapshot_vector_compatible_subjects),
                 "strict_decision_reference_subjects": len(strict_decision_ref_subjects),
-                "diagnostic_snapshot_reference_subjects": len(snapshot_only_ref_subjects),
+                "reference_only_snapshot_subjects": len(snapshot_only_ref_subjects),
             },
             "trade_history_audit": {
                 "trade_history_subjects": trade_history_subjects,

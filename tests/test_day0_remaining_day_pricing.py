@@ -893,7 +893,6 @@ class TestRemainingDayMembers:
             bins=bins,
             members=np.asarray(future, dtype=float),
             payload=payload,
-            members_already_corrected=True,
         )
 
         assert q[winning_index] == pytest.approx(1.0)
@@ -921,7 +920,6 @@ class TestRemainingDayMembers:
                 "rounded_value": 26.0,
                 "_edli_q_source": "day0_remaining_day",
             },
-            members_already_corrected=True,
         )
 
         assert q[2] > 0.99
@@ -996,7 +994,6 @@ class TestRemainingDayMembers:
             bins=bins,
             members=np.array([12.0, 12.0, 12.0], dtype=float),
             payload=payload,
-            members_already_corrected=True,
             extra_member_sigma=extra_sigma,
         )
 
@@ -1600,10 +1597,7 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
         monkeypatch.setattr(era, "_day0_remaining_day_members", lambda **kw: None)
 
-        def _legacy_fallback_called(*args, **kwargs):
-            raise AssertionError("legacy Day0 full-day fallback was called")
-
-        monkeypatch.setattr(era, "_maybe_apply_edli_bias_correction", _legacy_fallback_called)
+        assert not hasattr(era, "_maybe_apply_edli_bias_correction")
 
         with pytest.raises(ValueError, match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"):
             era._market_analysis_from_event_snapshot(
@@ -1752,10 +1746,7 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
         monkeypatch.setattr(era, "_day0_remaining_day_members", lambda **kw: None)
 
-        def _legacy_fallback_called(*args, **kwargs):
-            raise AssertionError("legacy Day0 full-day fallback was called")
-
-        monkeypatch.setattr(era, "_maybe_apply_edli_bias_correction", _legacy_fallback_called)
+        assert not hasattr(era, "_maybe_apply_edli_bias_correction")
 
         with pytest.raises(ValueError, match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"):
             era._market_analysis_from_event_snapshot(
@@ -1871,6 +1862,7 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
         monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
+        monkeypatch.setattr(hv.time, "monotonic", lambda: 60.0)
         hv._LAST_REFRESH_MONOTONIC.clear()
         n = hv.maybe_refresh_day0_hourly_vectors(
             [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
@@ -2282,3 +2274,102 @@ class TestRequestHashProvenance:
             ("wellington", "2026-06-26", "high"),
             ("london", "2026-06-25", "high"),
         ]
+
+
+def test_global_day0_plateau_advances_clock_without_promoting_proxy_value():
+    """A same-value fast print advances time, never settlement value authority."""
+    import src.engine.event_reactor_adapter as era
+    from src.events.opportunity_event import make_opportunity_event
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            local_timestamp TEXT, utc_timestamp TEXT, imported_at TEXT,
+            temp_unit TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Paris", "2026-07-14", "wu_icao_history", "LFPB",
+            "2026-07-14T16:00:00+02:00", "2026-07-14T14:00:00+00:00",
+            "2026-07-14T14:05:00+00:00", "C", 35.0, 25.0,
+            "VERIFIED", 1, "OK", "historical_hourly",
+        ),
+    )
+    ensure_table(conn)
+    for published, fetched in (
+        ("2026-07-14T14:30:00+00:00", "2026-07-14T14:34:00+00:00"),
+        ("2026-07-14T15:00:00+00:00", "2026-07-14T16:00:00+00:00"),
+    ):
+        append_print(
+            conn,
+            city="Paris",
+            station_id="LFPB",
+            source_channel="aviationweather_metar",
+            publish_ts_utc=published,
+            value_native=35.0,
+            unit="C",
+            fetched_at_utc=fetched,
+            raw_report="METAR LFPB 141430Z 35/14",
+        )
+    carrier = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Paris|2026-07-14|high|LFPB",
+        source="global_auction_winner_target:old-carrier",
+        observed_at="2026-07-14T14:00:00+00:00",
+        available_at="2026-07-14T14:05:00+00:00",
+        received_at="2026-07-14T14:05:00+00:00",
+        payload={
+            "city": "Paris",
+            "target_date": "2026-07-14",
+            "metric": "high",
+            "station_id": "LFPB",
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "C",
+            "observation_time": "2026-07-14T14:00:00+00:00",
+            "observation_available_at": "2026-07-14T14:05:00+00:00",
+            "raw_value": 35.0,
+            "rounded_value": 35,
+            "high_so_far": 35.0,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        },
+        causal_snapshot_id="old-day0-carrier",
+    )
+    decision_time = datetime(2026, 7, 14, 15, 30, tzinfo=UTC)
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(city="Paris", target_date="2026-07-14", metric="high"),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="LFPB"),
+        conditioning=None,
+        observation_conn=conn,
+        decision_time=decision_time,
+        posterior_id=29914,
+    )
+    conn.close()
+
+    assert rebound["observation_time"] == "2026-07-14T14:00:00+00:00"
+    assert rebound["settlement_source"] == "wu_icao_history"
+    assert rebound["rounded_value"] == 35
+    assert rebound["_edli_day0_physical_frontier_observation_time"] == (
+        "2026-07-14T14:30:00+00:00"
+    )
+    assert rebound["_edli_day0_physical_frontier_source"] == "aviationweather_metar"
+    assert era._day0_observation_age_minutes(rebound, decision_time) == 60.0
+    assert rebound["_edli_global_day0_binding"]["physical_frontier_clock"][
+        "value_role"
+    ] == "clock_only_equal_settlement_frontier"

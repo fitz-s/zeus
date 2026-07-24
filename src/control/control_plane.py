@@ -44,10 +44,7 @@ TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 # G6 antibody (2026-04-26): typed boot/catalog allowlist of strategies that
 # may be enabled when the live-only daemon starts. Post-A4 (PLAN.md §A4 +
 # Bug review §E) this is derived from the StrategyProfile registry —
-# strategies with live_status == "live". The pre-A4 hardcoded
-# frozenset diverged from _LIVE_ALLOWED_STRATEGIES (shoulder_sell was in
-# LIVE_SAFE but not _LIVE_ALLOWED); resolving the divergence in a single
-# source is the §A4 cutover invariant.
+# Only registered live strategies exist on this surface.
 #
 # ``LIVE_SAFE_STRATEGIES`` and ``_LIVE_ALLOWED_STRATEGIES`` remain
 # importable names (backward compat for tests/test_live_safe_strategies.py

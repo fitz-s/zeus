@@ -56,11 +56,10 @@ file_naming:
         _yaml_bootstrap.py: import bootstrap helper for script entrypoints
         _tigge_common.py: shared helpers for extract_tigge_* extractors (Phase 7B-followup extraction)
         _zpkt_scope.py: shared scope helper for Packet Runtime (zpkt) CLI and pre-commit hook
-        antibody_scan.py: established operator diagnostic name
+        antibody_scan.py: established operator telemetry name
         apply_recommended_controls.py: established control-plane repair entrypoint
-        attribution_drift_weekly.py: packet-reviewed weekly drift-rate runner; noun-first name retained to match `attribution_drift` package/operator terminology
-        automation_analysis.py: established automation diagnostic report
-        baseline_experiment.py: established diagnostic baseline report
+        automation_analysis.py: established automation telemetry report
+        baseline_experiment.py: established telemetry baseline report
         cleanup_ghost_positions.py: established repair command name
 
         data_completeness_audit.py: legacy word-order exception; keep until renamed
@@ -72,8 +71,7 @@ file_naming:
         bridge_oracle_to_calibration.py: oracle penalty bridge writer retained under data artifact contract
         code_review_graph_mcp_readonly.py: Zeus-safe Code Review Graph MCP facade; intentionally omits source-writing apply_refactor
         edge_observation_weekly.py: packet-reviewed weekly edge-observation runner; noun-first name retained to match `edge_observation` package/operator terminology
-        equity_curve.py: established diagnostic report command
-        evaluate_calibration_transfer_oos.py: established calibration-transfer OOS evidence writer name retained to match validated_calibration_transfers and operator-facing policy terminology
+        equity_curve.py: established telemetry report command
         force_lifecycle.py: established repair command name; dangerous and packet-gated
         fill_obs_dst_gaps.py: established obs_v2 targeted fill helper; fill_ prefix kept for explicit gap-repair semantics
         fit_bias_scale.py: joint per-city bias + global scale calibration fitter; fit_ prefix retained to mirror fit_sigma_scale.py / fit_settlement_sigma_floor.py operator-facing calibration artifact terminology (statistical_calibration_authority_2026-06-12 Task 1.1)
@@ -85,7 +83,6 @@ file_naming:
         healthcheck.py: established operator entrypoint
         heartbeat_dispatcher.py: established runtime dispatcher
         history_lore_audit.py: harness-debate audit utility; word order retained to match the audited `history_lore.yaml` surface
-        investigate_ecmwf_bias.py: established diagnostic report name
         live_readiness_check.py: R3 G1 readiness gate name fixed by operator-facing live-readiness packet contract; script remains read-only and operator-gated
         live_smoke_test.py: established runtime smoke entrypoint
         module_manifest_audit.py: harness-debate audit utility; word order retained to match the audited `module_manifest.yaml` surface
@@ -100,7 +97,7 @@ file_naming:
         r3_drift_check.py: R3 packet drift shim name fixed by existing packet/runbook references; read-only validation utility.
         refit_platt.py: established repair command name (canonical)
         regenerate_registries.py: harness-debate manifest audit/update helper; verb retained because docs already cite this command and safe use is audit-only
-        replay_parity.py: established diagnostic command
+        replay_parity.py: established telemetry command
         semantic_linter.py: established enforcement tool
         snapshot_checksum.py: established rollback snapshot integrity command; noun-first name retained because checksum is the operator object
         source_contract_auto_convert.py: source-contract transition controller retained under noun-first name to match the established source_contract_block and source_contract_transition_history runtime surfaces

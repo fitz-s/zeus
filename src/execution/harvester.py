@@ -11,7 +11,6 @@ Spec §8.1: Hourly cycle:
 import json
 import logging
 import math
-import os
 import re
 import sqlite3
 import time
@@ -63,7 +62,6 @@ from src.state.portfolio import (
     ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
     ENTRY_ECONOMICS_SUBMITTED_LIMIT,
     PortfolioState,
-    compute_settlement_close,
     load_portfolio,
     save_portfolio,
     void_position,
@@ -120,24 +118,6 @@ def _settlement_economics_for_position(pos) -> tuple[float, float]:
     shares = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0.0
     cost_basis = float(getattr(pos, "cost_basis_usd", 0.0) or getattr(pos, "size_usd", 0.0) or 0.0)
     return float(shares), cost_basis
-
-
-def _get_canonical_exit_flag() -> bool:
-    """Read CANONICAL_EXIT_PATH feature flag from settings.
-
-    B043: typed error taxonomy (SD-B). A broad ``except Exception``
-    would silently disable the canonical exit path on any fault
-    (TypeError/RuntimeError from a regression in ``feature_flags``),
-    indistinguishable from the flag being legitimately False. Narrow
-    to the two legitimate "settings surface missing" cases only;
-    anything else is a code defect and must propagate.
-    """
-    try:
-        from src.config import settings
-        flags = settings.feature_flags
-    except (ImportError, AttributeError):
-        return False
-    return flags.get("CANONICAL_EXIT_PATH", False)
 
 
 def _next_canonical_sequence_no(conn, position_id: str) -> int:
@@ -213,7 +193,7 @@ def _unsupported_calibration_source_id(
     forecast_source: object,
     data_version: object,
 ) -> str:
-    """Explicit non-bucket source_id for audit-only calibration-pair rows."""
+    """Explicit non-bucket source_id for unsupported calibration-pair rows."""
     raw = str(forecast_source or data_version or "unknown").strip().lower()
     token = "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
     token = "_".join(part for part in token.split("_") if part)
@@ -890,23 +870,7 @@ def run_harvester() -> dict:
 
     Returns: harvester counts plus stage2_status / stage2 preflight details.
 
-    Feature flag: ``ZEUS_HARVESTER_LIVE_ENABLED`` must equal ``"1"`` for the
-    cycle to actually fetch Gamma + write settlements. Default OFF (DR-33-A
-    staged rollout per plan.md §3.1). OFF state short-circuits BEFORE any
-    data-plane call; no DB connection is acquired, no HTTP request is made.
     """
-    if os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED", "0") != "1":
-        logger.info(
-            "harvester_live disabled by ZEUS_HARVESTER_LIVE_ENABLED flag (DR-33-A default-OFF); "
-            "cycle skipped; no data-plane calls"
-        )
-        return {
-            "status": "disabled_by_feature_flag",
-            "disabled_by_flag": True,
-            "settled_events": 0,
-            "positions_settled": 0,
-            "total_pairs": 0,
-        }
     # INV-37 (ChatGPT PR#408 review B1, 2026-06-14): use a SINGLE connection with
     # forecasts.db as MAIN and zeus_trades.db ATTACHed as 'trades'. A single
     # SAVEPOINT wraps all writes so the entire settlement cycle is all-or-nothing.
@@ -1210,8 +1174,6 @@ def rediscover_disputed_settlements(
     primary settled_events cycle. Fail-soft: any exception is caught and reported, never
     raised — a rediscovery hiccup must not break the harvester tick that calls it.
     """
-    if os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED", "0") != "1":
-        return {"status": "disabled_by_feature_flag"}
     try:
         from scripts.drain_settlement_disputes import drain as _drain_disputes
         from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection
@@ -2394,7 +2356,7 @@ def harvest_settlement(
     # the correct stratified bucket.
     #
     # Object-meaning invariant (Wave7): schema/helper defaults are not source
-    # evidence. Unsupported data_version rows are audit-only evidence and must
+    # evidence. Unsupported data_version rows are non-bucket evidence and must
     # carry an explicit non-bucket source_id, never the TIGGE schema default.
     _phase2_cycle: Optional[str] = None
     _phase2_source_id_field: Optional[str] = None
@@ -2560,7 +2522,6 @@ def _settle_positions(
 ) -> int:
     """Settle held positions that match this market. Log P&L."""
     settled = 0
-    _canonical_exit = _get_canonical_exit_flag()
     settlement_records = settlement_records if settlement_records is not None else []
     settlement_metric = str(settlement_temperature_metric or "high").strip().lower()
     if settlement_metric not in {"high", "low"}:
@@ -2758,12 +2719,8 @@ def _settle_positions(
 
         phase_before = _canonical_phase_before_for_settlement(pos)
 
-        # F1: Route settlement close through exit_lifecycle when flag is on
-        if _canonical_exit:
-            from src.execution.exit_lifecycle import mark_settled
-            closed = mark_settled(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
-        else:
-            closed = compute_settlement_close(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
+        from src.execution.exit_lifecycle import mark_settled
+        closed = mark_settled(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
         pnl = closed.pnl if closed is not None else round(shares * exit_price - settlement_cost_basis, 2)
         outcome = 1 if exit_price > 0 else 0
 

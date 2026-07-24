@@ -226,7 +226,7 @@ def query_no_trade_cases(
     *,
     not_before: str | None = None,
 ) -> list[dict]:
-    """Query recent NoTradeCase entries for diagnostics."""
+    """Query recent NoTradeCase entries for telemetry."""
     query_env = get_mode()
     if not_before:
         try:

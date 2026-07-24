@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-03
+# Last reused/audited: 2026-07-23
 # Authority basis: ELEVATION S3 (task #111) — variance-required Kelly;
 #   task #107 (portfolio/multi Kelly) — correlation-aware pressure context.
 """Typed sizing context that carries the variance inputs Kelly requires.
@@ -11,7 +11,11 @@ UNCARRIED. ``dynamic_kelly_mult`` already knows how to haircut on CI
 width and forecast lead, but the no-submit money-path adapter never fed
 it those inputs.
 
-``SizingContext`` is the typed carrier for exactly those two inputs:
+``SizingContext`` is the typed carrier for those modifier inputs.  On the
+current-q global-solver path, the conservative q-band already carries the
+same posterior uncertainty into terminal wealth.  That path therefore moves
+the observed width to ``counted_ci_width`` and presents ``ci_width=0`` to the
+legacy dynamic multiplier so the uncertainty is counted exactly once.
 
 - ``ci_width``  — the posterior-credible-interval width that feeds the
   ``dynamic_kelly_mult`` ci_width haircut. By construction (see
@@ -41,7 +45,7 @@ variance already present on the proof into the sizing multiplier.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 def effective_bankroll(
@@ -157,6 +161,9 @@ class SizingContext:
             reservation_usd``. Used by ``evaluate_kelly`` as soft raw heat
             pressure; it must not become a hard total-portfolio cap. Default
             0.0 (no portfolio context).
+        counted_ci_width: CI width already consumed by the current-q global
+            solver's conservative q-band. It is offline provenance only and
+            must not feed another Kelly multiplier haircut.
     """
 
     ci_width: float
@@ -164,6 +171,7 @@ class SizingContext:
     bankroll_usd: float = 0.0
     corr_committed_usd: float = 0.0
     raw_committed_usd: float = 0.0
+    counted_ci_width: float = 0.0
 
     def __post_init__(self) -> None:
         # Fail-closed on nonsense inputs so a corrupted upstream value
@@ -178,19 +186,22 @@ class SizingContext:
         bankroll = float(self.bankroll_usd)
         corr_committed = float(self.corr_committed_usd)
         raw_committed = float(self.raw_committed_usd)
+        counted_ci = float(self.counted_ci_width)
         if not (
             math.isfinite(ci)
             and math.isfinite(lead)
             and math.isfinite(bankroll)
             and math.isfinite(corr_committed)
             and math.isfinite(raw_committed)
+            and math.isfinite(counted_ci)
         ):
             raise ValueError(
                 f"SizingContext requires finite inputs (no NaN, no inf); got "
                 f"ci_width={self.ci_width!r}, lead_days={self.lead_days!r}, "
                 f"bankroll_usd={self.bankroll_usd!r}, "
                 f"corr_committed_usd={self.corr_committed_usd!r}, "
-                f"raw_committed_usd={self.raw_committed_usd!r}"
+                f"raw_committed_usd={self.raw_committed_usd!r}, "
+                f"counted_ci_width={self.counted_ci_width!r}"
             )
         if ci < 0.0:
             raise ValueError(f"SizingContext.ci_width must be >= 0; got {ci}")
@@ -210,6 +221,10 @@ class SizingContext:
                 f"SizingContext.raw_committed_usd must be >= 0; "
                 f"got {raw_committed}"
             )
+        if counted_ci < 0.0:
+            raise ValueError(
+                f"SizingContext.counted_ci_width must be >= 0; got {counted_ci}"
+            )
 
     @property
     def has_portfolio_context(self) -> bool:
@@ -221,6 +236,24 @@ class SizingContext:
         raw bankroll, preserving exact single-Kelly behaviour.
         """
         return self.bankroll_usd > 0.0
+
+    def for_current_q_global_solver(self) -> "SizingContext":
+        """Move CI width from the Kelly modifier into q-band provenance.
+
+        The global solver has already optimized terminal wealth against the
+        conservative current-q band.  Reapplying the same width through
+        ``dynamic_kelly_mult`` would be a second uncertainty haircut.  Lead,
+        portfolio heat, bankroll, and committed-capital fields are preserved.
+        """
+
+        return replace(
+            self,
+            ci_width=0.0,
+            counted_ci_width=max(
+                float(self.counted_ci_width),
+                float(self.ci_width),
+            ),
+        )
 
     @classmethod
     def from_candidate_proof(

@@ -33,7 +33,7 @@ class ExecutableEVReplayInput:
     bankroll_usd: float
     kelly_multiplier: float
     decision_time_truth: DecisionTimeTruth
-    purpose: BacktestPurpose = BacktestPurpose.DIAGNOSTIC
+    purpose: BacktestPurpose = BacktestPurpose.AUDIT_REPLAY
     min_order_usd: float = 1.0
     slippage_per_share: float = 0.0
 

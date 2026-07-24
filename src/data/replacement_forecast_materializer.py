@@ -59,9 +59,6 @@ from src.data.replacement_forecast_readiness import (
     ReplacementForecastDependency,
     build_replacement_forecast_readiness,
 )
-from src.data.replacement_forecast_runtime_policy import (
-    REQUIRED_FLAGS,
-)
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.state.readiness_repo import get_readiness_state_for_scope, write_readiness_state
@@ -76,15 +73,11 @@ UTC = timezone.utc
 # A posterior row's `replacement_q_mode` is DERIVED at materialization time (never guessed)
 # and recorded in provenance_json. The live gate (event_reactor_adapter) admits ONLY the two
 # fused-Normal modes; every other mode is a deterministic no-submit. This kills the silent
-# degradation category: with all flags on, a row that used anchor-only current surrogate,
-# fused-center-only q, fused-q build failure, or flag-off path used
-# to differ ONLY by a WARNING log + a q_shape string — live EDLI could size Kelly under a
-# different probability regime than the release evidence assumes. The mode is a fail-closed
-# data-class label.
+# degradation category: a fused-q build failure differs from a certified current-evidence
+# posterior by a fail-closed data-class label, never a second probability regime.
 # ---------------------------------------------------------------------------
 REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
 REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
-REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
 REPLACEMENT_Q_MODE_BAYES_PRECISION_FUSION_CAPTURE_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
 # PR#403 FIX (2026-06-09) — fused-q succeeded but the bounds failed. DISTINCT from
@@ -94,18 +87,9 @@ REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
 # live-eligible, letting buy_yes fall back to legacy bounds — exactly the two-measures
 # disease (fused-Normal q point + legacy LCB authority) that the Milan incident root-caused.
 REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING = "FUSED_NORMAL_BOUNDS_MISSING"
-# The fused CENTER materialized q purely from N(mu*, sigma), but the certified fused-q
-# SHAPE/BOUNDS bootstrap did not run (flag-off / fused-q build failure / predictive_sigma thin).
-# This replaces the old cold fail-closed path. The live gate licenses solely
-# FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this mode never carries, so a
-# fused-center-only row is materialized for experiment accrual but is NOT live-tradeable. Diagnosably
-# distinct from FUSED_Q_BUILD_FAILED (which produced NO center q).
-REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL = "FUSED_CENTER_ONLY_NORMAL"
-
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
 REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
-REPLACEMENT_CAPTURE_STATUS_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
 REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
@@ -291,13 +275,7 @@ def _replacement_is_live_layer(
     )
     if not live_q_carrier:
         return False
-    try:
-        from src.config import settings  # noqa: PLC0415
-
-        feature_flags = settings["feature_flags"]
-        return all(bool(feature_flags.get(key, False)) for key in REQUIRED_FLAGS)
-    except Exception:
-        return False
+    return True
 
 
 def _registered_source_clock_entry_ineligible(sources: Sequence[str]) -> tuple[str, ...]:
@@ -387,26 +365,6 @@ def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
             """
         )
         columns.add("runtime_layer")
-    if "trade_authority_status" in columns:
-        has_legacy_live_rows = conn.execute(
-            """
-            SELECT 1
-              FROM forecast_posteriors
-             WHERE runtime_layer IS NULL
-               AND trade_authority_status = 'LIVE_AUTHORITY'
-             LIMIT 1
-            """
-        ).fetchone()
-        if has_legacy_live_rows is not None:
-            conn.execute(
-                """
-                UPDATE forecast_posteriors
-                   SET runtime_layer = ?
-                 WHERE runtime_layer IS NULL
-                   AND trade_authority_status = 'LIVE_AUTHORITY'
-                """,
-                (LIVE_RUNTIME_LAYER,),
-            )
     has_non_live_rows = conn.execute(
         """
         SELECT 1
@@ -426,8 +384,6 @@ def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
             """,
             (LIVE_RUNTIME_LAYER,),
         )
-    if "trade_authority_status" in columns:
-        conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
 
 
 def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
@@ -1020,25 +976,6 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["anchor_id"])
 
 
-def _replacement_fused_q_shape_enabled() -> bool:
-    """Flag gate for the FUSED-Q SHAPE replacement.
-
-    When ``replacement_0_1_fused_q_shape_enabled`` is true AND the BAYES_PRECISION_FUSION fusion produced an
-    override with a predictive sigma, the posterior q is built DIRECTLY from
-    N(mu*, sigma_pred) via the ONE settlement bin integrator (bin_probability_settlement).
-    Settlement-cell experiment verdict: the old member-vote shape put EXACTLY ZERO probability
-    on the winning bin in 11/39 cells; fused-N reduced LogLoss 11.07 -> 1.51.
-    A Normal has full support: the zero-coverage CATEGORY is unconstructable under this shape.
-    FAIL-CLOSED: any config error -> False.
-    """
-    try:
-        from src.config import settings  # noqa: PLC0415
-
-        return bool(settings["edli"].get("replacement_0_1_fused_q_shape_enabled", False))
-    except Exception:
-        return False
-
-
 def _replacement_settlement_sigma_floor_lookup(
     request: "ReplacementForecastMaterializeRequest",
     *,
@@ -1331,13 +1268,6 @@ class _BayesPrecisionFusionFusionOverride:
     # Source-clock vNext fixed city basket (2026-06-25): present when the per-city one-scheme
     # artifact supplied the served center. This is the live replacement upgrade surface.
     source_clock_one_scheme: Mapping[str, object] | None = None
-    # EMOS/NGR affine center calibration (2026-07-01): μ'=a+b·μ ALREADY applied to anchor_value_c.
-    # (a,b)=(0.0,1.0) is IDENTITY (no city/metric served → byte-identical center). ``emos_center_delta_c``
-    # is the applied shift (a + (b−1)·μ) recorded for reconstructibility; RAW center = anchor_value_c −
-    # emos_center_delta_c. Temperature-dependent (slope b) — NOT a constant offset. σ untouched.
-    emos_center_a: float = 0.0
-    emos_center_b: float = 1.0
-    emos_center_delta_c: float = 0.0
     # Decision-time-only probability shape used by the live source-clock route.
     # This is intentionally distinct from historical residual calibration: the
     # within component comes from the latest causal ECMWF ENS members for this
@@ -1799,77 +1729,13 @@ def served_predictive_sigma_c(sigma_realized_c: float, *, floor_c: float = 1.0) 
     return max(float(floor_c), s)
 
 
-def _anchor_only_current_override(
-    request: ReplacementForecastMaterializeRequest,
-    *,
-    metric: str,
-    anchor_value_corrected_c: float,
-) -> _BayesPrecisionFusionFusionOverride | None:
-    """Current-cycle anchor-only carrier used when BPF extras are temporarily absent.
-
-    This is not the legacy soft-anchor/member-vote fallback. It keeps the live posterior on the
-    same settlement-preimage Normal + certified bootstrap q_lcb seam as fused rows, but records
-    that only the current OM9 anchor was available. The wider ``anchor_sigma_c`` is used as both
-    predictive spread and center uncertainty, making the lower bound conservative until extras heal.
-    """
-    sigma = float(request.anchor_sigma_c)
-    if not math.isfinite(sigma) or sigma <= 0.0:
-        return None
-    return _BayesPrecisionFusionFusionOverride(
-        anchor_value_c=float(anchor_value_corrected_c),
-        anchor_sigma_c=sigma,
-        method="anchor_only_current",
-        used_models=("openmeteo_ecmwf_ifs9_anchor",),
-        model_set_hash=_json_hash(["openmeteo_ecmwf_ifs9_anchor"]),
-        resolution_mix_hash=_json_hash({"models": ["openmeteo_ecmwf_ifs9_anchor"], "regional": []}),
-        lead_bucket="anchor_only",
-        dropped_models=(),
-        excluded_regionals=(),
-        dropped_aliases=(),
-        raw_model_forecast_ids=(),
-        anchor_bridge=None,
-        predictive_sigma_c=sigma,
-        decorrelated_providers_complete=False,
-        decorrelated_providers_served=1,
-        decorrelated_providers_expected=1,
-        current_value_serving=None,
-        precision_center_basis={
-            "openmeteo_ecmwf_ifs9_anchor": {
-                "raw_m2": float("nan"),
-                "n": 0.0,
-                "repr_m2": 0.0,
-                "weight": 1.0,
-            }
-        },
-        precision_basis_hash=_json_hash(
-            {
-                "openmeteo_ecmwf_ifs9_anchor": {
-                    "raw_m2": None,
-                    "n": 0,
-                    "repr_m2": 0.0,
-                    "weight": 1.0,
-                }
-            }
-        ),
-        low_n_prior_weighted_models=(),
-    )
-
-
 @dataclass(frozen=True)
 class _PosteriorComputeResult:
     """The pure (no-DB-write) product of the posterior compute.
 
-    Extracted from ``_insert_posterior`` so the SAME canonical fusion compute can
-    be reused on a READ-ONLY path (the monitor held-belief read-through, LAYER 2
-    of the 2026-06-21 freeze fix) without writing ``forecast_posteriors``.
-
     Contract: this struct is returned by ``_compute_posterior_payload`` ALWAYS
-    (even when not live-eligible) so a read-only caller can distinguish
-    "computed a fresh but non-live-eligible posterior" from "compute blocked".
-    ``_insert_posterior`` maps ``not live_eligible -> None`` to preserve the
-    historical write-path contract byte-for-byte. Every field below is exactly a
-    value the INSERT (or its identity hash / provenance payload) consumes; nothing
-    here is recomputed by the caller.
+    (even when not live-eligible), and every field below is consumed by the
+    live write path's INSERT, identity hash, or provenance payload.
     """
 
     live_eligible: bool
@@ -1877,12 +1743,11 @@ class _PosteriorComputeResult:
     q: dict[str, float]
     q_lcb_map: dict[str, float] | None
     q_ucb_map: dict[str, float] | None
-    # The fused center (mu*) and predictive spread — carried so a read-only caller
-    # can audit belief WIDTH (honestly wider when fewer providers). None when no
-    # multi-model fused center was produced (single-anchor fallback).
+    # The fused center (mu*) and predictive spread. None when fusion evidence
+    # is missing and materialization is blocked.
     mu_star: float | None
     predictive_sigma_c: float | None
-    # K3 provider completeness so the caller sees when the CI is honestly wider.
+    # K3 provider completeness for provenance.
     decorrelated_providers_complete: bool
     decorrelated_providers_served: int
     decorrelated_providers_expected: int
@@ -1999,26 +1864,20 @@ def _replacement_bayes_precision_fusion_override(
     anchor_value_corrected_c: float,
     conn: "sqlite3.Connection | None" = None,
 ) -> _BayesPrecisionFusionFusionOverride | None:
-    """Flag-gated BAYES_PRECISION_FUSION-Bayes multi-model fusion override (the_path replacement_0_1_bayes_precision_fusion).
+    """Current BAYES_PRECISION_FUSION-Bayes multi-model fusion.
 
     Returns the fused (anchor_value_c, anchor_sigma_c) that REPLACE the single OM9 9km anchor
-    center/spread in the soft-anchor construction, ONLY when ``replacement_0_1_bayes_precision_fusion_enabled``
-    is true AND at least one decorrelated extra survives the fail-soft capture. Returns None when
-    the flag is OFF (default) OR all extras are absent -> the existing single-anchor path runs
-    BYTE-IDENTICALLY. This is the ONE place the flag is read; the fusion itself is the ported
+    center/spread in the soft-anchor construction when at least one decorrelated extra survives
+    current-input validation. The fusion itself is the ported
     proof C1 (src/forecast/bayes_precision_fusion.py — no parallel fusion).
 
     LAYERING (BAYES_PRECISION_FUSION_SPEC.md §6 integration): the override is computed from the ALREADY
     EB-bias-corrected anchor center (so it composes AFTER the EB bias layer); it replaces only
-    the anchor center/spread. FAIL-SOFT / FAIL-CLOSED:
-    any error, missing config, or zero surviving extras -> None (never raises, never blocks).
+    the anchor center/spread. Any missing current input, history, or source-clock shape returns
+    ``None`` so the caller records a non-live result rather than serving another live regime.
     """
     try:
-        from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
-
-        edli_cfg = settings["edli"]
-        if not bool(edli_cfg.get("replacement_0_1_bayes_precision_fusion_enabled", False)):
-            return None
+        from src.config import runtime_cities_by_name  # noqa: PLC0415
 
         city_obj = runtime_cities_by_name().get(request.city)
         if city_obj is None:
@@ -2045,8 +1904,8 @@ def _replacement_bayes_precision_fusion_override(
         # history provider reading the PERSISTED previous-runs raw_model_forecasts JOINed to
         # VERIFIED settlement on the SAME zeus-forecasts.db connection (intra-DB, INV-37; no-leak
         # target_date<decision, IRON RULE #3). This assignment is THE switch that lets
-        # fuse_bayes_precision_posterior reach T2_BAYES once n_train>=MIN_TRAIN (else EQUAL_WEIGHT). Fail-soft:
-        # the provider NEVER raises (returns {} on any error) -> anchor fallback / equal-weight.
+        # fuse_bayes_precision_posterior reach T2_BAYES once n_train>=MIN_TRAIN. The provider
+        # never raises, but an empty result is fail-closed below.
         history_provider = getattr(_replacement_bayes_precision_fusion_override, "_history_provider", None)
         if history_provider is None and conn is not None:
             from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider  # noqa: PLC0415
@@ -2057,8 +1916,8 @@ def _replacement_bayes_precision_fusion_override(
         # rows the download job wrote — NEVER a network fetch inside the q path. Read them by
         # (city, metric, target_date, lead, source_cycle_time) on the SAME connection so the q is
         # reconstructable to the exact persisted inputs. If the current capture is MISSING (the
-        # download did not run / failed), fall back to the single-anchor posterior (return None)
-        # WITH a logged reason — never silently network-fetch.
+        # download did not run / failed), block materialization with a logged reason — never
+        # silently network-fetch or substitute a single-anchor posterior.
         source_cycle_iso = _to_utc(
             request.source_cycle_time, field_name="source_cycle_time"
         ).isoformat()
@@ -2111,7 +1970,7 @@ def _replacement_bayes_precision_fusion_override(
         # PROOF OF POSSESSION = the served row's captured_at, routed through the canonical producer
         # (no nominal — captured_at is the real possession wall-clock). Models with no served row are
         # absent from the map -> the capture's guard fail-OPENs (admits) them. decision_utc is the
-        # materialization decision instant (computed_at). Shadow-q-staged: expected to exclude ~0 in
+        # materialization decision instant (computed_at). Expected to exclude ~0 in
         # production (extras' captured_at lands hours after the cycle, before any decision).
         model_available_at: dict[str, str] = {}
         for _m, _served in served_current.items():
@@ -2148,17 +2007,23 @@ def _replacement_bayes_precision_fusion_override(
             decision_utc=computed_at,
             model_available_at=model_available_at,
         )
+        if not capture.has_history:
+            import logging  # noqa: PLC0415
+
+            logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                "replacement_0_1 BAYES_PRECISION_FUSION history MISSING for %s %s %s -> "
+                "live posterior blocked (no alternate authority)",
+                request.city, metric, target_date,
+            )
+            return None
         if not capture.has_extras:
-            # K3 ANTIBODY (2026-06-09): all multi-model extras absent. We only reach here when
-            # replacement_0_1_bayes_precision_fusion_enabled is True, so ZERO extras is a WIRING failure (e.g.
-            # the lead-calendar mismatch that silently reverted ALL fusion to cold soft-anchor for
-            # ~30h) — NOT a benign inert path. Make it LOUD so a repeat can never hide as a
-            # transient drop. (Behaviour unchanged: still single-anchor fallback.)
+            # K3 ANTIBODY (2026-06-09): all multi-model extras absent. This is a wiring failure
+            # (for example, a lead-calendar mismatch), not permission to revive the old anchor path.
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "replacement_0_1 BAYES_PRECISION_FUSION fusion fired with ZERO multi-model extras (flag ON) -> "
-                    "single-anchor fallback for %s %s %s cycle=%s. Check the single_runs capture "
+                    "replacement_0_1 BAYES_PRECISION_FUSION fusion has ZERO multi-model extras -> "
+                    "live posterior blocked for %s %s %s cycle=%s. Check the single_runs capture "
                     "+ natural-key match.", request.city, metric, target_date,
                     _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat(),
                 )
@@ -2382,7 +2247,7 @@ def _replacement_bayes_precision_fusion_override(
         _source_clock_center_sigma_c: float | None = None
         _source_clock_predictive_sigma_c: float | None = None
         _source_clock_current_shape: _CurrentEvidenceShape | None = None
-        _source_clock_shape_required = False
+        _source_clock_shape_required = True
         _station_live_omitted = False
         _source_clock_current_value_serving: dict[str, Mapping[str, object]] = {}
         _source_clock_dep_ids: set[int] = set()
@@ -2394,7 +2259,6 @@ def _replacement_bayes_precision_fusion_override(
             )
 
             _scheme = scheme_for_city(request.city, metric=metric)
-            _source_clock_shape_required = _scheme is not None
             # ADD-DATA (operator directive 2026-06-28 "加数据不禁数据"): a station-calibrated
             # source (cwa_*/hko_* family) that is LIVE in the precision fusion but absent from the
             # frozen grid_aware scheme must be ADDED, never banned by the frozen snapshot. When such
@@ -2545,7 +2409,8 @@ def _replacement_bayes_precision_fusion_override(
                     # target-specific evidence.  A missing/invalid ENS carrier is
                     # represented by predictive_sigma=None and therefore cannot
                     # materialize a live posterior; historical residual/floor
-                    # values above remain diagnostics only.
+                    # values above are retained solely for offline historical
+                    # analysis and are not a live probability authority.
                     if _source_clock_current_shape is None:
                         _source_clock_predictive_sigma_c = None
                     else:
@@ -2569,13 +2434,11 @@ def _replacement_bayes_precision_fusion_override(
                             ),
                         }
                     )
-            elif _station_live_omitted:
-                # The station-augmented center intentionally leaves the frozen
-                # one-scheme weights, but it remains a source-clock live route.
-                # Build its width from the same current ENS + simultaneous
-                # provider values; never let the older residual width become a
-                # tradeable surrogate merely because a new station source was
-                # added to the center.
+            else:
+                # A station-augmented center intentionally leaves frozen one-scheme
+                # weights; a city without such a scheme uses the current fusion weights.
+                # Both remain source-clock routes: build their width from the same
+                # current ENS + simultaneous provider values, never historical width.
                 _source_clock_used_models = tuple(str(model) for model in _weights)
                 _source_clock_current_shape = _read_current_evidence_shape(
                     conn,
@@ -2635,6 +2498,21 @@ def _replacement_bayes_precision_fusion_override(
             # Returning no override leaves the materialized row explicitly
             # non-live (CAPTURE_MISSING) and preserves blocked-candidate
             # observability without creating an alternate tradeable q.
+            return None
+
+        if _source_clock_current_shape is None:
+            try:
+                import logging  # noqa: PLC0415
+
+                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                    "replacement_0_1 BAYES_PRECISION_FUSION current ENS shape MISSING for %s %s %s -> "
+                    "live posterior blocked (no historical-width substitute)",
+                    request.city,
+                    metric,
+                    target_date,
+                )
+            except Exception:
+                pass
             return None
 
         used_models = _source_clock_used_models or tuple(
@@ -2787,47 +2665,8 @@ def _replacement_bayes_precision_fusion_override(
             }
         ) or None
 
-        # EMOS/NGR affine CENTER calibration (2026-07-01, consult REQ-20260701-010328): apply the
-        # fitted, walk-forward, shrunk-to-identity affine μ'=a+b·μ to the SERVED runtime center. Applied
-        # HERE — the single authoritative _mu_diagonal feeding the q point, the q_lcb/q_ucb bounds,
-        # provenance.anchor_value_c (the reactor's ENTRY belief read), and the bpf sub-dict — so entry
-        # and exit stay unified (no #135 two-center re-split). Identity (0.0,1.0) is used only when no
-        # city/metric affine is served by state/emos_center_calibration.json; the center is then byte-
-        # identical to the uncalibrated fused center. The slope b captures the temperature-
-        # dependent representativeness bias a constant offset cannot. σ is untouched (center-only).
-        # LEAD-GATED + RANGE-GUARDED (consult REQ-20260701-063727): the affine is fit on ONE served
-        # center per date at the day-ahead decision lead, so it is served ONLY at that lead (applying
-        # it at L0/L2/… would extrapolate across the lead-dependent bias regime) and only WITHIN the
-        # observed temperature support (the tilt is held flat outside [x_lo,x_hi], guarding a strong
-        # slope from unearned extrapolation). Lead uncomputable -> identity (fail-closed).
-        from src.calibration.emos_center_calibration import (  # noqa: PLC0415
-            apply_affine_in_support,
-            lookup_affine,
-        )
-        try:
-            _emos_lead = (
-                date.fromisoformat(_date_text(request.target_date))
-                - _to_utc(request.source_cycle_time, field_name="source_cycle_time").date()
-            ).days
-        except Exception:
-            _emos_lead = None
-        if _source_clock_current_shape is not None:
-            # A historical affine would contaminate the decision-time-only
-            # current-evidence authority.  The current provider center is served
-            # directly; calibration remains diagnostic provenance elsewhere.
-            _emos_a, _emos_b, _emos_xlo, _emos_xhi = 0.0, 1.0, None, None
-        elif _emos_lead is None:
-            _emos_a, _emos_b, _emos_xlo, _emos_xhi = 0.0, 1.0, None, None
-        else:
-            _emos_a, _emos_b, _emos_xlo, _emos_xhi = lookup_affine(request.city, metric, _emos_lead)
-        _mu_served = apply_affine_in_support(_mu_diagonal, _emos_a, _emos_b, _emos_xlo, _emos_xhi)
-        _emos_delta_c = _mu_served - _mu_diagonal
-
         return _BayesPrecisionFusionFusionOverride(
-            anchor_value_c=_mu_served,
-            emos_center_a=_emos_a,
-            emos_center_b=_emos_b,
-            emos_center_delta_c=_emos_delta_c,
+            anchor_value_c=_mu_diagonal,
             anchor_sigma_c=float(_source_clock_center_sigma_c if _source_clock_center_sigma_c is not None else fused.sd),
             method="SOURCE_CLOCK_FIXED_WEIGHT" if _source_clock_payload is not None else fused.method,
             used_models=used_models,
@@ -3920,7 +3759,7 @@ def _compute_posterior_payload(
     # Catch-all (open-ended bin) sigma-floor exemption (2026-06-10, Paris >=26C incident). Records
     # which open-ended bins had their floored mass capped at the un-floored predictive-sigma mass
     # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
-    # bin away from center). Defaults defined here so the fail-closed / flag-off paths stay coherent.
+    # bin away from center). Defaults keep fail-closed compute results coherent.
     settlement_sigma_floor_catchall_capped: tuple[str, ...] = ()
     # CAPITAL-GATED PER-CITY rho-MIX provenance (2026-06-29). The served q is a non-inferiority MIXTURE
     # q_serve = (1-rho)*q_global + rho*q_city with rho = 1-exp(-C/W), C = the city's earned OOS score
@@ -3959,13 +3798,9 @@ def _compute_posterior_payload(
     _day0_center_delta_c: float = 0.0
     _day0_center_vector_id: str | None = None
     _day0_center_hours_remaining: float | None = None
-    if bayes_precision_fusion_override is not None:
-        # An override exists. Default mode while we attempt the fused-q build below.
-        replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
     if (
         bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
-        and _replacement_fused_q_shape_enabled()
     ):
         try:
             from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
@@ -4343,16 +4178,14 @@ def _compute_posterior_payload(
             # point + Wilson LCB authority = two incompatible regimes, exactly the Milan root cause.
             if q_lcb_map is None or q_ucb_map is None:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING
-            elif bayes_precision_fusion_override.method == "anchor_only_current":
-                replacement_q_mode = REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT
             elif bayes_precision_fusion_override.decorrelated_providers_complete:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL
             else:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL
         except Exception as _exc:
             # FIX 1 — the fused-q construction itself raised and fails CLOSED.
-            # This is DISTINCT from flag-off / predictive_sigma None: the mode records that a fused-q
-            # was attempted and failed, so the live gate rejects it with a specific failure mode.
+            # The mode records that a fused-q was attempted and failed, so the live gate rejects
+            # it with a specific failure mode.
             replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED
             settlement_sigma_floor_applied = False
             settlement_sigma_floor_c = None
@@ -4379,66 +4212,6 @@ def _compute_posterior_payload(
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                     "replacement_0_1 fused-q shape skipped (fail-closed to fused-center-only / skip): %s",
                     _exc,
-                )
-            except Exception:
-                pass
-    # FUSED-CENTER-ONLY NORMAL NON-LIVE PATH. Reached when the live fused-q shape was NOT produced — flag-off, no fused override,
-    # predictive_sigma None, or a fused-q build failure — i.e. q_shape is still the seeded
-    # placeholder, NOT "fused_normal_direct". If a multi-model fused CENTER exists (override present) with a usable
-    # spread, build q PURELY from N(mu*, sigma) over the SAME settlement bins (anchor_weight
-    # using the SAME emos.bin_probability_settlement integrator the
-    # live path uses. If even that is impossible (no override, or no finite spread), q is left at the
-    # uniform seed and the row is recorded NON-tradeable (the live gate licenses only
-    # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this path never
-    # carries). This path is experiment-only; it is intentionally not live-eligible.
-    # FAIL-SOFT: any error leaves q at the prior value and logs.
-    if q_shape not in {"fused_normal_direct", "fused_day0_conditioned_normal"} and bayes_precision_fusion_override is not None:
-        try:
-            _fc_mu = float(bayes_precision_fusion_override.anchor_value_c)
-            # Spread: ONLY the predictive settlement sigma (served realized residual width) is a
-            # valid dispersion for a settlement bin Normal. We deliberately do NOT substitute
-            # anchor_sigma_c (the fused CENTER uncertainty) when predictive_sigma_c is None — that
-            # conflates center uncertainty with predictive settlement spread (the q point and q bounds
-            # intentionally separate the two). When predictive_sigma_c is None (residual substrate too
-            # thin) we leave q at the honest uniform seed (non-tradeable) rather than fabricate a
-            # spread — "if even a fused-center Normal is impossible, do NOT serve a cold/wrong q".
-            _fc_sigma_raw = bayes_precision_fusion_override.predictive_sigma_c
-            _fc_sigma = float(_fc_sigma_raw) if _fc_sigma_raw is not None else None
-            if _fc_sigma is not None and math.isfinite(_fc_sigma) and _fc_sigma > 0.0 and math.isfinite(_fc_mu):
-                from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
-
-                _fc_half_step = float(request.settlement_step_c) / 2.0
-                _fc_rounding_rule = _family_rounding_rule(request.bins)
-                _fc_q = {
-                    b.bin_id: bin_probability_settlement(
-                        mu=_fc_mu,
-                        sigma=_fc_sigma,
-                        bin_low=(None if b.lower_c is None else float(b.lower_c)),
-                        bin_high=(None if b.upper_c is None else float(b.upper_c)),
-                        half_step=_fc_half_step,
-                        rounding_rule=_fc_rounding_rule,
-                    )
-                    for b in request.bins
-                }
-                _fc_total = sum(_fc_q.values())
-                if _fc_total > 0.0 and math.isfinite(_fc_total):
-                    q = {key: float(value) / _fc_total for key, value in _fc_q.items()}
-                    q_shape = "fused_center_only_normal"
-                    # Only the predictive settlement sigma reaches this block (the guard requires a
-                    # finite _fc_sigma sourced solely from predictive_sigma_c), so the basis is the
-                    # fused-center residual std — never the center-uncertainty sd.
-                    replacement_sigma_basis = "fused_center_residual_std"
-                    # Distinct mode: a fused CENTER materialized the q but the certified fused-q
-                    # bootstrap shape/bounds did NOT (so the live gate still rejects it). Diagnosably
-                    # different from FUSED_Q_BUILD_FAILED (no center q at all).
-                    replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
-        except Exception as _fcexc:
-            try:
-                import logging  # noqa: PLC0415
-                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "replacement_0_1 fused-center-only Normal fallback skipped "
-                    "(keeping uniform/soft seed): %s",
-                    _fcexc,
                 )
             except Exception:
                 pass
@@ -4540,18 +4313,11 @@ def _compute_posterior_payload(
     # Derived from the SAME K3 completeness verdict the fusion computed (no parallel re-derivation):
     #   FULL_CURRENT     — override present AND all 5 decorrelated providers' current values served.
     #   PARTIAL_CURRENT  — override present but the decorrelated set was INCOMPLETE (count present).
-    #   ANCHOR_ONLY_CURRENT — BPF extras are absent/transport-limited, but the current OM9 anchor
-    #                         is served through the same Normal + bootstrap-q_lcb carrier.
     #   STALE_HISTORY_ONLY — no current live carrier could be built.
     # DB_READ_ERROR is reserved for an explicit DB read failure surfaced by the capture reader; the
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
-    if (
-        bayes_precision_fusion_override is not None
-        and bayes_precision_fusion_override.method == "anchor_only_current"
-    ):
-        capture_status = REPLACEMENT_CAPTURE_STATUS_ANCHOR_ONLY_CURRENT
-    elif bayes_precision_fusion_override is None:
+    if bayes_precision_fusion_override is None:
         capture_status = REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY
     elif bayes_precision_fusion_override.decorrelated_providers_complete:
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
@@ -4665,7 +4431,7 @@ def _compute_posterior_payload(
         "capture_status": capture_status,
         # FAR-TAIL q_lcb HONESTY provenance (2026-06-22): plain fact of the live value.
         # True when >= 1 far-tail bin (q_point < FAR_TAIL_Q_POINT_THRESH) had its q_lcb
-        # capped at FAR_TAIL_LCB_FLOOR. The count is also stored for diagnostics.
+        # capped at FAR_TAIL_LCB_FLOOR. The count is also stored for telemetry.
         # Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
         "q_lcb_far_tail_honesty_applied": _far_tail_honesty_count > 0,
         "q_lcb_far_tail_honesty_bin_count": _far_tail_honesty_count,
@@ -4798,12 +4564,6 @@ def _compute_posterior_payload(
             "lead_bucket": bayes_precision_fusion_override.lead_bucket,
             "anchor_value_c": float(bayes_precision_fusion_override.anchor_value_c),
             "anchor_sigma_c": float(bayes_precision_fusion_override.anchor_sigma_c),
-            # EMOS/NGR affine center calibration (2026-07-01): μ'=a+b·μ ALREADY applied to
-            # anchor_value_c above; RAW served center = anchor_value_c − emos_center_delta_c.
-            # (a,b)=(0,1) identity for cities/metrics not gated to serve (byte-identical center).
-            "emos_center_a": float(bayes_precision_fusion_override.emos_center_a),
-            "emos_center_b": float(bayes_precision_fusion_override.emos_center_b),
-            "emos_center_delta_c": float(bayes_precision_fusion_override.emos_center_delta_c),
             "predictive_sigma_c": (
                 None if bayes_precision_fusion_override.predictive_sigma_c is None
                 else float(bayes_precision_fusion_override.predictive_sigma_c)
@@ -4869,26 +4629,6 @@ def _compute_posterior_payload(
         family_id=family_id,
         provenance_payload=provenance_payload,
     )
-
-
-def _insert_posterior(
-    conn: sqlite3.Connection,
-    request: ReplacementForecastMaterializeRequest,
-    *,
-    metric: str,
-    anchor_id: int,
-) -> int | None:
-    """Compute the posterior payload then INSERT it (the live write path).
-
-    Behavior-preserving wrapper around ``_compute_posterior_payload``: the value
-    build is identical (single source of truth shared with the read-only path),
-    and the historical ``not live_layer -> return None`` contract is preserved by
-    mapping a not-live-eligible compute result to ``None`` (no row written).
-    """
-    result = _compute_posterior_payload(conn, request, metric=metric, anchor_id=anchor_id)
-    if not result.live_eligible:
-        return None
-    return _write_posterior_row(conn, request, metric=metric, anchor_id=anchor_id, result=result)
 
 
 def _write_posterior_row(
@@ -5025,50 +4765,6 @@ def _write_posterior_row(
         posterior_id=new_posterior_id,
     )
     return new_posterior_id
-
-
-def compute_replacement_posterior_readonly(
-    conn: sqlite3.Connection,
-    request: ReplacementForecastMaterializeRequest,
-) -> _PosteriorComputeResult | None:
-    """READ-ONLY single-family replacement posterior recompute (LAYER 2).
-
-    Runs the SAME canonical multi-model Bayes-precision fusion the live write
-    path runs, against whatever single_runs are CURRENTLY persisted on ``conn``,
-    and returns the fused posterior (q point + certified q_lcb/q_ucb band + fused
-    center/spread + provider provenance) WITHOUT writing ``forecast_posteriors``.
-
-    Purpose: the monitor's held-belief read-through (2026-06-21 freeze fix). When
-    a held position's cached posterior is stale/missing, the monitor recomputes
-    the SAME-authority belief here rather than fail-closing on a frozen row or
-    substituting a cold legacy center. Fewer providers ⇒ the fusion's CI is
-    honestly wider (conservative), which is correct, not a failure.
-
-    INV-37 / connection contract: ``conn`` MUST be a forecasts-MAIN connection
-    (e.g. ``get_forecasts_connection_read_only()``) because the fusion override's
-    current-value + walk-forward readers query BARE forecast-class table names
-    (``raw_model_forecasts``, ``settlement_outcomes``, ...). This function issues
-    ZERO writes; the only DB access is the override's read paths.
-
-    Returns:
-        ``_PosteriorComputeResult`` with ``live_eligible`` set, or ``None`` when a
-        pure pre-compute guard (request well-formedness / precision guard) blocks
-        the family — an honest "cannot compute", never a fabricated belief.
-    """
-    # Pure pre-compute guards (no DB write): the same well-formedness + precision
-    # checks the write path runs FIRST. A blocked request is not an honest
-    # posterior, so report it as not-computable (None) — the caller fail-closes.
-    if _prewrite_block_reasons(request):
-        return None
-    if _precision_guard_block_reason(request):
-        return None
-    request = _request_with_materialization_clock(conn, request)
-    if _prewrite_block_reasons(request):
-        return None
-    # anchor_id is consumed ONLY by the write-path identity hash (not built here),
-    # so a sentinel is safe; the read path never persists a posterior row.
-    metric = _metric(request.temperature_metric)
-    return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
 
 
 def _build_readiness(

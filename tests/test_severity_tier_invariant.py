@@ -7,7 +7,7 @@
 Asserts:
   1. No entry has target_severity=BLOCKING with reversibility_class=WORKING.
      (The K1 invariant: BLOCKING is reserved for TRUTH_REWRITE+ reversibility.)
-  2. F5 rules (script_long_lived_bad_name, script_diagnostic_forbidden_write_target)
+  2. F5 rules (script_long_lived_bad_name, script_evidence_forbidden_write_target)
      have target_severity=ADVISORY (both are WORKING reversibility class).
   3. No WORKING-class entry silently escalates to BLOCKING via a severity_when clause
      without also carrying an explicit target_severity override.
@@ -34,7 +34,7 @@ ADMISSION_SEVERITY_YAML = REPO_ROOT / "architecture" / "admission_severity.yaml"
 # F5 rule codes that must be ADVISORY (WORKING reversibility; reversible by git mv / git rm)
 F5_RULE_CODES = {
     "script_long_lived_bad_name",
-    "script_diagnostic_forbidden_write_target",
+    "script_evidence_forbidden_write_target",
 }
 
 
@@ -133,24 +133,24 @@ def test_f5_script_long_lived_bad_name_is_advisory() -> None:
         )
 
 
-def test_f5_script_diagnostic_forbidden_write_target_is_advisory() -> None:
-    """script_diagnostic_forbidden_write_target must have target_severity=ADVISORY (F5 fix).
+def test_f5_script_evidence_forbidden_write_target_is_advisory() -> None:
+    """script_evidence_forbidden_write_target must have target_severity=ADVISORY (F5 fix).
 
     Per PLAN §1.1 F5: write-target change is reversible by git rm + reroute (WORKING class);
     therefore severity must be ADVISORY, not BLOCKING.
     Verified emitter: scripts/topology_doctor_script_checks.py:267-274.
     """
     entries = _load_issue_entries()
-    matching = [e for e in entries if e.get("code") == "script_diagnostic_forbidden_write_target"]
+    matching = [e for e in entries if e.get("code") == "script_evidence_forbidden_write_target"]
     assert matching, (
-        "No entry with code='script_diagnostic_forbidden_write_target' found in issue_severity. "
+        "No entry with code='script_evidence_forbidden_write_target' found in issue_severity. "
         "F5 fix requires this entry to exist with target_severity=ADVISORY."
     )
     for entry in matching:
         rule_id = entry.get("rule_id", "?")
         ts = entry.get("target_severity")
         assert ts == "ADVISORY", (
-            f"Entry {rule_id!r} (code=script_diagnostic_forbidden_write_target): "
+            f"Entry {rule_id!r} (code=script_evidence_forbidden_write_target): "
             f"target_severity={ts!r}, expected ADVISORY.\n"
             f"F5 fix: write-target change is reversible (WORKING class); "
             f"must be ADVISORY per K1 structural decision."

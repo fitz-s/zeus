@@ -60,8 +60,6 @@
 		<string>/Users/leofitz/zeus</string>
 		<key>ZEUS_USER_CHANNEL_WS_AUTO_DERIVE</key>
 		<string>1</string>
-		<key>ZEUS_USER_CHANNEL_WS_ENABLED</key>
-		<string>1</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>

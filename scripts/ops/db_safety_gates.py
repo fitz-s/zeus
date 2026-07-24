@@ -41,7 +41,7 @@ def _dangling_fks(state_dir: Path) -> list[tuple[str, str, str, str]]:
 
 
 def _stray_db_files(state_dir: Path) -> list[tuple[str, int]]:
-    """Decoy DB files that shadow a canonical one under the opposite dash/underscore spelling.
+    """Decoy DB files that alternate a canonical one under the opposite dash/underscore spelling.
     zeus_trades.db (canonical) vs zeus-trades.db (decoy), etc. A wrong-separator open under
     fail-open connect creates/uses one of these EMPTY files instead of erroring."""
     canonical = set(_DB_FILES)

@@ -44,12 +44,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-Role = Literal["live", "backfill", "settlement", "derived", "diagnostic"]
+Role = Literal["live", "backfill", "settlement", "derived", "health", "evidence"]
 Executor = Literal["default", "fast"]  # the CURRENT two APScheduler executors in ingest_main
 # How the daemon dispatches the job (PR #329 review B; advisor point 2). The user-WS ingestor is
 # NOT an add_job — it is a long-running thread. As of the process-topology refactor
 # (system_decomposition_plan §8 Step 3, P3, 2026-06-08) it was LIFTED out of the order daemon
-# into src/ingest/price_channel_ingest._start_user_channel_ingestor_if_enabled (started by the
+# into src/ingest/price_channel_ingest._start_user_channel_ingestor (started by the
 # P3 price-channel-ingest daemon), so frontier/singleton coverage must model it as a
 # long_running thread on the price_channel daemon, not pretend it is a scheduled src.main job.
 DispatchKind = Literal["scheduled", "long_running", "startup"]
@@ -59,7 +59,7 @@ DispatchKind = Literal["scheduled", "long_running", "startup"]
 # family onto the forecast source_run model.
 Family = Literal[
     "forecast", "observation", "solar", "market_topology", "executable_market",
-    "venue_user_ws", "settlement", "diagnostic",
+    "venue_user_ws", "settlement", "health", "evidence",
 ]
 
 
@@ -162,16 +162,16 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   source_id="polymarket_gamma", callable_ref="_harvester_truth_writer_tick", family="settlement"),
     SourceJobSpec("ingest_automation_analysis", "ingest_main", "derived", "default", True,
                   callable_ref="_automation_analysis_cycle"),
-    SourceJobSpec("ingest_oracle_snapshot", "ingest_main", "diagnostic", "fast", False,
-                  callable_ref="_oracle_snapshot_tick", file_only=True, family="diagnostic",
+    SourceJobSpec("ingest_oracle_snapshot", "ingest_main", "evidence", "fast", False,
+                  callable_ref="_oracle_snapshot_tick", file_only=True, family="evidence",
                   misfire_grace_time=600,
                   notes="daily oracle-time snapshot listener; file-only raw/oracle_time_snapshots output"),
-    SourceJobSpec("ingest_oracle_bridge", "ingest_main", "diagnostic", "fast", False,
-                  callable_ref="_bridge_oracle_tick", file_only=True, family="diagnostic",
+    SourceJobSpec("ingest_oracle_bridge", "ingest_main", "evidence", "fast", False,
+                  callable_ref="_bridge_oracle_tick", file_only=True, family="evidence",
                   misfire_grace_time=600,
                   notes="daily oracle-to-calibration artifact bridge; file-only oracle artifact outputs"),
-    SourceJobSpec("ingest_oracle_bridge_startup_catch_up", "ingest_main", "diagnostic", "fast", False,
-                  callable_ref="_bridge_oracle_startup_catch_up", file_only=True, family="diagnostic",
+    SourceJobSpec("ingest_oracle_bridge_startup_catch_up", "ingest_main", "evidence", "fast", False,
+                  callable_ref="_bridge_oracle_startup_catch_up", file_only=True, family="evidence",
                   dispatch_kind="startup",
                   notes="boot catch-up for oracle bridge when snapshot artifacts are newer"),
     SourceJobSpec("ingest_replacement_availability_poll", "ingest_main", "live", "default", True,
@@ -205,31 +205,22 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   source_id="tigge", callable_ref="_tigge_startup_catch_up"),
     SourceJobSpec("ingest_opendata_startup_catch_up", "ingest_main", "backfill", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_startup_catch_up", owner_gated=True),
-    SourceJobSpec("ingest_source_health_probe", "ingest_main", "diagnostic", "fast", False,
-                  callable_ref="_source_health_probe_tick", file_only=True, family="diagnostic",
+    SourceJobSpec("ingest_source_health_probe", "ingest_main", "health", "fast", False,
+                  callable_ref="_source_health_probe_tick", file_only=True, family="health",
                   notes="writes state/source_health.json only"),
     SourceJobSpec("ingest_station_migration_probe", "ingest_main", "backfill", "default", True,
                   callable_ref="_station_migration_probe_tick"),
     SourceJobSpec("ingest_drift_detector", "ingest_main", "derived", "default", True,
                   callable_ref="_drift_detector_tick"),
-    SourceJobSpec("ingest_status_rollup", "ingest_main", "diagnostic", "fast", False,
+    SourceJobSpec("ingest_status_rollup", "ingest_main", "health", "fast", False,
                   callable_ref="_ingest_status_rollup_tick", file_only=True),
-    SourceJobSpec("ingest_heartbeat", "ingest_main", "diagnostic", "fast", False,
+    SourceJobSpec("ingest_heartbeat", "ingest_main", "health", "fast", False,
                   callable_ref="_write_ingest_heartbeat", file_only=True,
                   notes="writes state/daemon-heartbeat-ingest.json only"),
-    SourceJobSpec("ingest_uma_resolution_listener", "ingest_main", "settlement", "fast", True,
-                  source_id="polymarket_uma_oo_v2", callable_ref="_uma_resolution_listener_tick",
-                  family="settlement",
-                  notes="AUDIT FLAG: writes DB (record_resolution) on the file-only 'fast' executor; "
-                        "historical UMA era (pre-2026-02-21). PR8 moves DB-write off fast."),
-    SourceJobSpec("ingest_etl_forecast_skill", "ingest_main", "derived", "default", True,
-                  callable_ref="_etl_forecast_skill_tick"),
     SourceJobSpec("ingest_market_scan", "ingest_main", "live", "default", True,
                   source_id="polymarket_gamma", source_ids=("polymarket_gamma", "polymarket_clob"),
                   callable_ref="_market_scan_tick", family="market_topology",
                   notes="multi-source: Gamma topology + CLOB snapshots"),
-    SourceJobSpec("ingest_calibration_auto_promote", "ingest_main", "derived", "default", True,
-                  callable_ref="_calibration_auto_promote_tick"),
     SourceJobSpec("ingest_artifact_refit", "ingest_main", "derived", "default", False,
                   callable_ref="_artifact_refit_tick", file_only=True,
                   notes="weekly Mon 06:00 UTC walk-forward refit of the four fitted serving "
@@ -252,9 +243,9 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   source_id="ecmwf_open_data", owner_gated=True),
     SourceJobSpec("forecast_live_opendata_safe_cycle_poll", "forecast_live_daemon", "live", "default", True,
                   source_id="ecmwf_open_data", owner_gated=True),
-    SourceJobSpec("forecast_live_heartbeat", "forecast_live_daemon", "diagnostic", "fast", False,
+    SourceJobSpec("forecast_live_heartbeat", "forecast_live_daemon", "health", "fast", False,
                   file_only=True, notes="writes forecast-live heartbeat JSON only"),
-    SourceJobSpec("forecast_live_source_health_probe", "forecast_live_daemon", "diagnostic", "fast", False,
+    SourceJobSpec("forecast_live_source_health_probe", "forecast_live_daemon", "health", "fast", False,
                   file_only=True),
     # Replacement-forecast production jobs (operator directive 2026-06-11: moved to this
     # daemon from src/main so downloads never share a lifecycle with trading restarts).
@@ -284,7 +275,7 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   misfire_grace_time=120, family="forecast", registry_built=False,
                   notes="periodic recovery discovery on already-downloaded manifests; isolated "
                         "on the lower-priority replacement_download lane"),
-    SourceJobSpec("anchor_meta_stamp_cross_check", "forecast_live_daemon", "diagnostic", "default", False,
+    SourceJobSpec("anchor_meta_stamp_cross_check", "forecast_live_daemon", "evidence", "default", False,
                   source_ids=("openmeteo_ecmwf_ifs_9km",),
                   callable_ref="_anchor_meta_stamp_cross_check_job",
                   misfire_grace_time=600, family="forecast", registry_built=False,
@@ -345,12 +336,12 @@ _SRC_MAIN: tuple[SourceJobSpec, ...] = (
     # user-channel WS ingestor was LIFTED out of the order daemon (`main`) into its own
     # process, the P3 price-channel-ingest daemon. owner_daemon is repointed to
     # "price_channel" so the data_collection_inventory orphan-check resolves
-    # _start_user_channel_ingestor_if_enabled against the new daemon
+    # _start_user_channel_ingestor against the new daemon
     # (src/ingest/price_channel_ingest.py via src/ingest/price_channel_daemon.py). The WS
     # thread is the ws_gap_guard latch WRITER; lifting it kills the reduce_only-forever
     # latch in the order daemon (§9).
     SourceJobSpec("user_ws_ingestor", "price_channel", "live", "default", True,
-                  source_id="polymarket_user_ws", callable_ref="_start_user_channel_ingestor_if_enabled",
+                  source_id="polymarket_user_ws", callable_ref="_start_user_channel_ingestor",
                   dispatch_kind="long_running", family="venue_user_ws",
                   notes="long-running THREAD (not add_job): user-channel WS -> market_events order/trade "
                         "facts (lifted to the P3 price-channel-ingest daemon, 2026-06-08)"),

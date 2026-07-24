@@ -113,7 +113,7 @@ Files read in full or partial audit:
 
 **What:** The `family_selection_dedup` vs. `blocked_existing_family_exposure` frontier counter split (lines 4291-4310) relies on the string `"existing family exposure"` appearing in `rejection_reason_detail`. This string comes from `dedup_mutually_exclusive_families()` in `family_exclusive_dedup.py`. If the detail string changes (even a minor refactor) the counter split silently breaks — `blocked_existing_family_exposure` would return 0 even when exposures are present, and `family_selection_dedup` would over-count. The `_current_active_blocker_hypothesis` at line 3314 reads `blocked_existing_family_exposure` directly for the "family_exposure_block" classification.
 
-**Why it matters:** If existing open positions in a family are silently dropped from the `blocked_existing_family_exposure` count, `_current_active_blocker_hypothesis()` never returns `"family_exposure_block"` and the operator's diagnostic trail misses that live positions are blocking new entries.
+**Why it matters:** If existing open positions in a family are silently dropped from the `blocked_existing_family_exposure` count, `_current_active_blocker_hypothesis()` never returns `"family_exposure_block"` and the operator's evidence trail misses that live positions are blocking new entries.
 
 **Suggested direction:** Replace the string-heuristic split with a typed field on `EdgeDecision` (e.g., `family_block_kind: Literal["preselection_dedup", "existing_exposure"] | None`) so the counter is authoritative rather than string-grep-dependent.
 

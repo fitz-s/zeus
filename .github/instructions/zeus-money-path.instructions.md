@@ -49,8 +49,7 @@ literal string constant, never derived from an index.
 
 ## Evaluator invariants
 
-`evaluator.py` produces decisions and no-trade events. Both must be
-written atomically to DB before any derived JSON export (INV-17).
-The source field distinguishes live_decision / shadow_decision /
-phase0_backfill — this must not be inferred from context; it must be
-passed explicitly so evidence queries can scope correctly.
+`evaluator.py` produces live decisions and no-trade events. Both must be
+written atomically to DB before any derived JSON export (INV-17). Offline
+replay uses an isolated DB and cannot construct or write the canonical live
+decision event type.

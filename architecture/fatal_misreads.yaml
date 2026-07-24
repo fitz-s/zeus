@@ -205,8 +205,8 @@ misreads:
       from UMA OO V2 to internal automatic resolver 0x69c47De9D4D3Dad79590d61b9e05918E03775f24
       after block 83,275,667). The "forbidden Gamma backfill" restriction is
       lifted for these two date-bounded gaps. UMA chain-only requirement is
-      preserved for HIGH 2025-01-22..2026-02-20 (already backfilled via
-      scripts/backfill_uma_resolution_2026.py). Backfill executed 2026-05-07:
+      preserved for HIGH 2025-01-22..2026-02-20 (already materialized).
+      Materialization completed 2026-05-07:
       +2562 HIGH rows (range 2026-02-21..2026-05-07), +125 LOW rows
       (range 2026-04-15..2026-05-07). reconstruction_method=gamma_backfill
       in provenance_json. Idempotent against existing UMA rows.

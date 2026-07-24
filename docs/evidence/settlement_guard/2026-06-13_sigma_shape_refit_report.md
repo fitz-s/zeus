@@ -116,7 +116,7 @@ In both held-out windows the named KL/Karachi cells where the winner landed at d
 **NEEDS FORWARD FILLS:** the exact floor MAGNITUDE (1.80 full-set; 2.02-2.26 on shorter trains) is not yet stationary on 5 days — the forecast-sharpness regime is still moving. The GATE-2 near-ring loss prevention is real at the recent split (−25%) but regime-dependent. **Do NOT promote on backtest alone** — the license is forward after-cost settlement win-rate, which requires live fills under the candidate.
 
 ## 10. Artifacts / blockers
-- Candidate artifact: `state/sigma_scale_fit.candidate.json` (local, gitignored) + committed copy `docs/evidence/settlement_guard/sigma_shape_kernel_candidate.json`. **Live `state/sigma_scale_fit.json` UNTOUCHED. No flag flips. No daemon restart.**
+- Candidate artifact: `state/sigma_scale_fit.candidate.json` (local, gitignored) + committed copy `docs/evidence/settlement_guard/sigma_shape_kernel_candidate.json.md`. **Live `state/sigma_scale_fit.json` UNTOUCHED. No flag flips. No daemon restart.**
 - Fitter: `scripts/fit_sigma_shape_kernel.py`. Holdout harness: `scripts/sigma_kernel_holdout_replay.py`. Both allowlisted in `src/state/db_writer_lock.py` (read-only ro-uri).
 - Evidence: `docs/evidence/settlement_guard/sigma_shape_holdout_split11_C.md`.
 - No blockers to the candidate deliverable. Consumer wiring for `floor_steps` + `m` fields is a separate change not done here (candidate-only scope).

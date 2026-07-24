@@ -43,36 +43,12 @@ tests:
     falsifying_proof:
       type: semantic_diff_fixture
       description: "ALTER ADD COLUMN DEFAULT VERIFIED/gamma_explicit/LIVE_ELIGIBLE fails as authority fabrication."
-  tests/money_path/test_edli_online_invariants.py:
-    category: money_path
-    protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]
+  tests/test_single_live_semantics.py:
+    category: governance
+    protects: [MP-SCH-001, MP-SCH-002]
     falsifying_proof:
       type: negative_fixture
-      description: "Config or source mutation enabling stale-book directional trading, taker FOK/FAK live, removing scheduler jobs, or adding shadow_* EDLI modules fails."
-  tests/money_path/test_edli_live_scope.py:
-    category: money_path
-    protects: [MP-SCH-001, MP-ECO-001]
-    falsifying_proof:
-      type: negative_fixture
-      description: "EDLI production has a single live scope, forecast_plus_day0. Mutating any unsupported scope back into an admissible execution scope fails before proof build or submit."
-  tests/money_path/test_edli_live_readiness.py:
-    category: money_path
-    protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]
-    falsifying_proof:
-      type: negative_fixture
-      description: "Full-live canary groundwork cannot claim runtime readiness while no-submit config remains active."
-  tests/money_path/test_mainstream_enforce_on_submit.py:
-    category: money_path
-    protects: [MP-SCH-001, MP-ECO-001]
-    falsifying_proof:
-      type: negative_fixture
-      description: "With mainstream_agreement_enforce_on_submit ON, an armed submit whose selected candidate has a failed/missing mainstream verdict must reject MAINSTREAM_AGREEMENT_REQUIRED before the executor (fail-closed); reference selector stays reference-only."
-  tests/money_path/test_mainstream_display_only_unconstructable.py:
-    category: core_law_antibody
-    protects: [MP-SCH-001, MP-ECO-001]
-    falsifying_proof:
-      type: negative_fixture
-      description: "Mainstream/forecast-bias agreement is display-only: the SAME armed submit closure run with mainstream_agreement_pass in {True, False, None} must reach the IDENTICAL downstream reason, and the enforce-on-submit branch + two-key arm boot guard must be ABSENT from source. Re-introducing any mainstream gate path (a MAINSTREAM_AGREEMENT_REQUIRED branch, or a value-dependent decision) fails — mainstream cannot alter direction/q/q_lcb/trade_score/selection/submit (DIRECTION LAW / Rule-4 antibody)."
+      description: "Executable, config, deployment, or workflow surfaces cannot restore dormant alternate-runtime semantics or route cutover deletion constants into live controls."
   tests/money_path/test_edli_order_lifecycle.py:
     category: money_path
     protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]
@@ -85,12 +61,12 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "Bankroll freshness for per-event Kelly proof must be decoupled from the slow reactor cycle; a dedicated warm job prevents cached() returning None at cycle end."
-  tests/money_path/test_edli_live_bridge_allocator_refresh.py:
+  tests/money_path/test_edli_allocator_refresh.py:
     category: money_path
     protects: [MP-SCH-001, MP-ECO-001]
     falsifying_proof:
       type: negative_fixture
-      description: "EDLI live-bridge cycle must configure the global risk-allocator singletons before submit; absence causes AllocationDenied(allocator_not_configured) on every candidate."
+      description: "EDLI live-path cycle must configure the global risk-allocator singletons before submit; absence causes AllocationDenied(allocator_not_configured) on every candidate."
   tests/money_path/test_edli_market_substrate_warm_cycle.py:
     category: money_path
     protects: [MP-SCH-001, MP-ECO-001]
@@ -109,12 +85,6 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "The durable fill->position_current bridge scan must materialise position_current for every FILL_CONFIRMED aggregate even when the transient in-memory trigger set is empty (post-restart or post-swallowed-exception), and must be idempotent across repeated scan invocations."
-  tests/money_path/test_operator_arm_gates_edli_submit.py:
-    category: money_path
-    protects: [MP-ORD-001, MP-ORD-002]
-    falsifying_proof:
-      type: negative_fixture
-      description: "OperatorArm (FIX-2b) must gate every EDLI live-submit: require_operator_arm returns None unless edli_live_operator_authorized is the literal True, and the live adapter enforces the arm token at the EDLI boundary. The mainline executor (execute_final_intent) path is unaffected."
   tests/money_path/test_finding_a_taker_depth_authority.py:
     category: money_path
     protects: [MP-ORD-001]

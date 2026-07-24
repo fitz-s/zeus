@@ -2270,7 +2270,7 @@ def _route_card_suggested_next_command(
     if "provider hot-swap" in task_l or ("canary" in task_l and "freshness" in task_l):
         return (
             "python3 scripts/topology_doctor.py --navigation "
-            "--intent \"source canary readiness hot-swap\" --write-intent edit "
+            "--intent \"source probe readiness hot-swap\" --write-intent edit "
             f"--files {' '.join(safe_next_files or ['src/control/freshness_gate.py', 'src/engine/cycle_runner.py'])}"
         )
     if "dead navigation" in task_l or "stale operations packet reference" in task_l:
@@ -2478,11 +2478,11 @@ def _route_card_dominant_driver(
         return "planning_package_split"
     if str(operation_vector.get("merge_state") or "not_merge") != "not_merge":
         return "merge_conflict_first"
-    if "source_behavior" in set(operation_vector.get("mutation_surfaces") or []) and "source canary" in profile:
-        return "source_canary_readiness_hot_swap"
+    if "source_behavior" in set(operation_vector.get("mutation_surfaces") or []) and "source probe" in profile:
+        return "source_probe_readiness_hot_swap"
     task_l = task.lower()
     if "provider hot-swap" in task_l or ("canary" in task_l and "freshness" in task_l):
-        return "source_canary_readiness_hot_swap"
+        return "source_probe_readiness_hot_swap"
     blocked_paths = set(blocked_file_reasons)
     if any(note.get("kind") == "script_manifest" and note.get("path") in blocked_paths for note in provenance_notes):
         return "script_manifest_provenance"

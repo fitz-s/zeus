@@ -59,10 +59,10 @@ invariants:
     description: "Redeem receipt classifier preserves NegRisk vs standard CTF route semantics."
     tests:
       - tests/money_path/test_003_redeem_receipt_classifier.py
-      - tests/test_polymarket_v2_adapter_negrisk_redeem.py
+      - tests/test_negrisk_redeem_payout_proof.py
   MP-RED-002:
     description: "Redeem confirmed/review/operator states have non-overloaded report eligibility."
-    tests: [tests/test_harvester_settlement_redeem.py, tests/test_redeem_cascade_liveness.py]
+    tests: [tests/test_harvester_settlement_redeem.py, tests/test_negrisk_redeem_payout_proof.py]
   MP-SCH-001:
     description: "Schema migrations cannot fabricate historical authority."
     tests:
@@ -100,27 +100,16 @@ invariants:
       - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
       - tests/money_path/test_004_schema_live_failclosed.py
 
-  MP-LEA-001:
-    description: "EvidenceReport.cohort_scope_status is FULL_SCOPE when no experiment/cohort filter applied; REGRET_ONLY_SCOPE when experiment_id or cohort_tag is supplied (n_decisions denominator is strategy+source only — decision_events has no experiment FK). n_no_trades_scope_status is always strategy_source_only. Promotion logic must block on REGRET_ONLY_SCOPE or treat n_decisions as strategy-wide."
-    tests:
-      - tests/analysis/test_evidence_report_cohort_scope.py
-      - tests/analysis/test_promotion_readiness.py
-      - tests/analysis/test_live_readiness_tribunal.py
   MP-LEA-002:
     description: "Regret decompositions joined through decision_events.decision_event_id to prevent cross-strategy contamination via shared experiment_id."
     tests:
       - tests/analysis/test_regret_decision_event_join.py
       - tests/analysis/test_regret_decomposer.py
       - tests/test_p1_findings_evidence_risk.py
-  MP-LEA-003:
-    description: "Bayesian prior is Beta(2,2); ci_lower compared against strategy breakeven_win_rate, not a hardcoded constant."
-    tests:
-      - tests/analysis/test_evidence_report_cohort_scope.py
-      - tests/analysis/test_promotion_readiness.py
   MP-OBS-001:
-    description: "B6 live-submit canary: submit→SUBMIT_REQUESTED→place_limit_order called→SUBMIT_ACKED durable→pending_entry projection→crash-then-reconcile resolves ACKED with no duplicate submit."
+    description: "B6 live-submit probe: submit→SUBMIT_REQUESTED→place_limit_order called→SUBMIT_ACKED durable→pending_entry projection→crash-then-reconcile resolves ACKED with no duplicate submit."
     tests:
-      - tests/execution/test_live_submit_canary_chain.py
+      - tests/execution/test_live_submit_probe_chain.py
   MP-OBS-002:
     description: "B6 dead-submit detection: armed_live (global_allow_submit=True AND final_intents_built>=1) with zero SUBMIT_REQUESTED/SUBMIT_ACKED receipts in last 30 min escalates infrastructure_level to RED."
     tests:
@@ -133,7 +122,7 @@ invariants:
   MP-STR-002:
     description: "Offline decision evidence remains isolated from live evidence queries."
     tests:
-      - tests/analysis/test_evidence_report_cohort_scope.py
+      - tests/test_backtest_purpose_contract.py
       - tests/test_p1_findings_evidence_risk.py
   MP-RSK-001:
     description: "Cluster exposure cap checks use all dimensions: weather_family_key, outcome_label (YES/NO), strategy_key. Collapsing dimensions allows factor-2 over-concentration."
@@ -197,8 +186,8 @@ segments:
     relationship_tests:
       - tests/money_path/test_003_redeem_receipt_classifier.py
       - tests/test_harvester_settlement_redeem.py
-      - tests/test_polymarket_v2_adapter_negrisk_redeem.py
-      - tests/test_redeem_cascade_liveness.py
+      - tests/test_negrisk_redeem_payout_proof.py
+      - tests/test_settlement_commands_ux_review_required.py
     future_object_rules:
       new_settlement_state: requires_receipt_classifier_test
       new_error_code: requires_report_eligibility_test
@@ -247,17 +236,16 @@ segments:
       - tests/events/test_reactor.py
       - tests/events/test_live_cap.py
       - tests/events/test_live_order_aggregate.py
-      - tests/events/test_live_profit_audit.py
+      - tests/test_settlement_skill_attribution.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
-      - tests/analysis/test_event_opportunity_report.py
-      - tests/money_path/test_edli_online_invariants.py
-      - tests/money_path/test_edli_live_readiness.py
+      - tests/test_decision_evidence_entry_emission.py
+      - tests/test_single_live_semantics.py
       - tests/money_path/test_edli_order_lifecycle.py
     future_object_rules:
       new_event_type: requires_idempotency_and_replay_order_test
       mutable_event_fact: forbidden_without_explicit_policy
-  edli_live_bridge_authority:
+  edli_execution_authority:
     invariant_ids: [MP-ORD-003, MP-SIDE-001, MP-SIDE-002, MP-EXT-002]
     files:
       - src/main.py
@@ -265,11 +253,9 @@ segments:
       - src/events/live_order_aggregate.py
       - src/events/live_cap.py
       - src/events/triggers/user_channel_ingestor.py
-      - tests/money_path/test_edli_live_readiness.py
       - tests/events/test_live_order_aggregate.py
       - tests/events/test_reactor.py
     relationship_tests:
-      - tests/money_path/test_edli_live_readiness.py
       - tests/events/test_live_order_aggregate.py
       - tests/events/test_reactor.py
     future_object_rules:
@@ -299,23 +285,16 @@ segments:
       - tests/test_market_scanner_provenance.py
       - tests/test_tigge_schema_contract.py
       - tests/test_source_run_schema.py
-  learning_promotion:
-    invariant_ids: [MP-LEA-001, MP-LEA-002, MP-LEA-003]
+  learning_analysis:
+    invariant_ids: [MP-LEA-002]
     files:
       - src/analysis/**
       - src/backtest/**
-      - src/state/*evidence*.py
       - src/state/*experiment*.py
     relationship_tests:
-      - tests/analysis/test_evidence_report_cohort_scope.py
       - tests/analysis/test_regret_decision_event_join.py
-      - tests/analysis/test_promotion_readiness.py
-      - tests/analysis/test_live_readiness_tribunal.py
       - tests/analysis/test_regret_decomposer.py
       - tests/test_p1_findings_evidence_risk.py
-    future_object_rules:
-      new_evidence_query: requires_cohort_scope_test
-      new_promotion_gate: requires_ci_lower_vs_strategy_breakeven_test
   strategy_authority:
     invariant_ids: [MP-STR-001, MP-STR-002]
     files:
@@ -327,10 +306,10 @@ segments:
     relationship_tests:
       - tests/test_evaluator_strategy_key_failclosed.py
       - tests/test_architecture_contracts.py
-      - tests/analysis/test_evidence_report_cohort_scope.py
+      - tests/test_backtest_purpose_contract.py
     future_object_rules:
       new_strategy_dimension: requires_registry_first_architecture_review
-      new_shadow_source: requires_live_evidence_isolation_test
+      new_observation_source: requires_live_evidence_isolation_test
   risk_dimension:
     invariant_ids: [MP-RSK-001]
     files:

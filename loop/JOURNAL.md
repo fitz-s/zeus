@@ -30,7 +30,7 @@ notes: <optional free text>
 ```
 
 An empty tick (no new evidence, nothing queued) still gets one line so a gap
-in this file is diagnostic, not ambiguous:
+in this file is telemetry, not ambiguous:
 
 ```
 ## <timestamp> L1 tick — empty (no new evidence, queue empty)

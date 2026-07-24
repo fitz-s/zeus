@@ -28,7 +28,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from src.contracts.semantic_types import ChainState, ExitState, LifecycleState
+from src.contracts.semantic_types import LifecycleState
 from src.execution.collateral import check_sell_collateral
 from src.execution.exit_lifecycle import (
     MAX_EXIT_RETRIES,
@@ -37,11 +37,6 @@ from src.execution.exit_lifecycle import (
     check_pending_retries,
     execute_exit,
     is_exit_cooldown_active,
-)
-from src.control.control_plane import (
-    clear_control_state,
-    process_commands,
-    write_commands,
 )
 from src.state.portfolio import (
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
@@ -55,7 +50,6 @@ from src.state.portfolio import (
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     Position,
     PortfolioState,
-    close_position,
 )
 from src.contracts.position_truth import ChainOnlyFact, ChainOnlyReviewState
 
@@ -280,11 +274,11 @@ def test_monitor_selection_hydrates_sibling_value_inputs_from_canonical_projecti
     )
 
     assert selected == [current, sibling]
-    assert cycle_runtime._monitor_value_inputs(current) == pytest.approx(
-        (189.77, 0.30056, 0.07, None, None)
+    assert (current.effective_shares, current.last_monitor_prob, current.last_monitor_best_bid) == pytest.approx(
+        (189.77, 0.30056, 0.07)
     )
-    assert cycle_runtime._monitor_value_inputs(sibling) == pytest.approx(
-        (40.0, 0.82404, 0.53, None, None)
+    assert (sibling.effective_shares, sibling.last_monitor_prob, sibling.last_monitor_best_bid) == pytest.approx(
+        (40.0, 0.82404, 0.53)
     )
 
 
@@ -567,7 +561,6 @@ def test_monitor_full_sweep_keeps_unique_three_cycle_deadline_reservations(monke
             summary,
             deps=_monitor_test_deps(f"test_monitor_coverage_{cycle}"),
             run_exit_preflight=False,
-            exit_order_submit_enabled=False,
             held_position_monitor_budget_seconds=10.0,
             should_preempt_for_urgent_day0=lambda: False,
         )
@@ -644,7 +637,6 @@ def test_monitor_deadline_degraded_cycles_execute_rotating_reserved_thirds(monke
             summary,
             deps=_monitor_test_deps(f"test_monitor_deadline_coverage_{cycle}"),
             run_exit_preflight=False,
-            exit_order_submit_enabled=False,
             held_position_monitor_budget_seconds=0.5,
             should_preempt_for_urgent_day0=lambda: False,
         )
@@ -718,7 +710,6 @@ def test_monitor_progress_limit_covers_mixed_canonical_and_fallback_book(monkeyp
             summary,
             deps=_monitor_test_deps(f"test_monitor_mixed_coverage_{cycle}"),
             run_exit_preflight=False,
-            exit_order_submit_enabled=False,
             held_position_monitor_budget_seconds=10.0,
             should_preempt_for_urgent_day0=lambda: False,
         )
@@ -1010,7 +1001,6 @@ def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
         summary,
         deps=deps,
         run_exit_preflight=False,
-        exit_order_submit_enabled=False,
         defer_partial_orderbook_gaps=True,
     )
 
@@ -1021,7 +1011,7 @@ def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
     assert summary.get("held_monitor_positions_deferred", 0) == 0
     assert summary["held_monitor_partial_orderbook_gaps_scheduled_after_local"] == 2
     assert summary["day0_hard_fact_direct_exit_decisions"] == 2
-    assert summary["exits_suppressed_no_submit"] == 2
+    assert summary["exits"] == 2
     dead_bin_result = next(
         result
         for result in monitor_results
@@ -1137,7 +1127,6 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
         summary,
         deps=deps,
         run_exit_preflight=False,
-        exit_order_submit_enabled=False,
         held_position_monitor_budget_seconds=0.5,
         defer_partial_orderbook_gaps=True,
     )
@@ -1273,7 +1262,6 @@ def test_monitoring_phase_caps_and_rotates_urgent_budget_bypass(monkeypatch):
             summary,
             deps=deps,
             run_exit_preflight=False,
-            exit_order_submit_enabled=False,
             held_position_monitor_budget_seconds=0.0,
             should_preempt_for_urgent_day0=lambda: False,
             defer_partial_orderbook_gaps=True,
@@ -1482,7 +1470,6 @@ def test_monitoring_phase_positive_budget_sweeps_unreserved_active_tail(monkeypa
         summary,
         deps=_monitor_test_deps("test_monitor_positive_budget_full_sweep"),
         run_exit_preflight=False,
-        exit_order_submit_enabled=False,
         held_position_monitor_budget_seconds=10.0,
         should_preempt_for_urgent_day0=lambda: False,
     )
@@ -2170,7 +2157,7 @@ def test_live_exit_never_closes_without_fill():
 
     with patch("src.execution.exit_lifecycle.place_sell_order") as mock_sell:
         mock_sell.return_value = {"orderID": "sell_123"}
-        outcome = execute_exit(
+        execute_exit(
             portfolio=portfolio,
             position=pos,
             exit_context=ExitContext(
@@ -4728,7 +4715,6 @@ def test_backoff_exhausted_holds_to_settlement():
         exit_retry_count=MAX_EXIT_RETRIES,
     )
     portfolio = _make_portfolio(pos)
-    clob = _make_clob()
 
     # execute_exit should not be called for backoff_exhausted positions,
     # but even if it were, the position should remain unchanged
@@ -4917,7 +4903,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         pos,
         phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="decision-global-auction-owned-sell",
-        source_module="tests/test_current_global_monitor_sell_is_diagnostic",
+        source_module="tests/test_current_global_monitor_sell_is_non_authoritative",
     )
     append_many_and_project(conn, events, projection)
     portfolio = _make_portfolio(pos)
@@ -5087,7 +5073,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             results[0].exit_reason
             == "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
         )
-        assert "local_statistical_sell_diagnostic_only" in pos.applied_validations
+        assert "local_statistical_sell_non_authoritative_record" in pos.applied_validations
         assert execute_calls == []
     else:
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
@@ -7660,7 +7646,6 @@ def test_replacement_forecast_authority_missing_posterior_does_not_fallback(monk
     """With replacement live, missing posterior evidence is a blocker, not a legacy fallback."""
     from src.engine import event_reactor_adapter as adapter
 
-    monkeypatch.setattr(adapter, "_replacement_authority_enabled", lambda: True)
     monkeypatch.setattr(
         adapter,
         "_forecast_authority_payload_from_posterior",
@@ -8678,7 +8663,6 @@ def test_chain_risk_hard_fact_monitor_holds_true_active_phase(tmp_path, monkeypa
         type("Tracker", (), {"record_exit": lambda self, position: None})(),
         summary,
         deps=deps,
-        exit_order_submit_enabled=False,
     )
 
     current = conn.execute(
@@ -9106,409 +9090,8 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
     conn.close()
 
 
-@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload(direction):
-    """A near-one point estimate cannot override either side's robust exit."""
-    from src.engine import cycle_runtime
-    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
-    from src.state.lifecycle_manager import LifecyclePhase
-
-    pos_a = _make_position(
-        trade_id="family-monitor-a",
-        city="Shanghai",
-        target_date="2026-06-19",
-        temperature_metric="high",
-        bin_label="29C",
-        direction=direction,
-        shares=7.0,
-        entry_price=0.79,
-        p_posterior=0.84,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    pos_b = _make_position(
-        trade_id="family-monitor-b",
-        city="Shanghai",
-        target_date="2026-06-19",
-        temperature_metric="high",
-        bin_label="31C",
-        direction=direction,
-        shares=5.55,
-        entry_price=0.80,
-        p_posterior=0.85,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    # A separately proven single-leg exit reaches the family overlay. The
-    # overlay may remain diagnostic; it cannot replace that prior decision
-    # with a point-only family summary.
-    for pos, prob, bid in (
-        (pos_a, 0.999999997246481, 0.95),
-        (pos_b, 0.9998, 0.96),
-    ):
-        pos.last_monitor_at = "2026-06-18T23:25:00+00:00"
-        pos.last_monitor_prob = prob
-        pos.last_monitor_prob_is_fresh = True
-        pos.last_monitor_market_price = bid
-        pos.last_monitor_market_price_is_fresh = True
-        pos.last_monitor_best_bid = bid
-        pos.last_monitor_best_ask = min(0.99, bid + 0.02)
-        pos.last_monitor_edge = prob - bid
-        pos.applied_validations = ["replacement_posterior", "ci_separated_reversal"]
-    pos_a._monitor_current_held_ci = (0.942952047639557, 0.999999999991716)
-    pos_b._monitor_current_held_ci = (0.91, 1.0)
-
-    portfolio = _make_portfolio(pos_a, pos_b)
-    single_leg_exit = ExitDecision(
-        True,
-        reason="CI_SEPARATED_REVERSAL",
-        trigger="CI_SEPARATED_REVERSAL",
-        selected_method="replacement_posterior",
-        applied_validations=["replacement_posterior", "ci_separated_reversal"],
-    )
-    summary = {}
-
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=portfolio,
-        pos=pos_a,
-        exit_decision=single_leg_exit,
-        should_exit=True,
-        exit_reason=single_leg_exit.reason,
-        summary=summary,
-    )
-
-    assert should_exit is True
-    assert reason == single_leg_exit.reason
-    assert summary["family_redecision_robust_exits_preserved"] == 1
-    assert "family_point_value_cannot_veto_robust_exit" in pos_a.applied_validations
-
-    events, _projection = build_monitor_refreshed_canonical_write(
-        pos_a,
-        sequence_no=4,
-        phase_after=LifecyclePhase.ACTIVE.value,
-        source_module="tests/test_family_monitor_overlay",
-        exit_decision=single_leg_exit,
-        final_should_exit=should_exit,
-        final_exit_reason=reason,
-    )
-    payload = json.loads(events[0]["payload_json"])
-    assert payload["exit_decision_should_exit"] is True
-    assert payload["exit_decision_reason"] == single_leg_exit.reason
-    family = payload["family_redecision"]
-    assert family["decision"] == "FAMILY_POINT_VALUE_DIAGNOSTIC_EXIT_PRESERVED"
-    assert family["preserved_exit_reason"] == single_leg_exit.reason
-    assert family["value_authority"] == "point_estimate_diagnostic_only"
-    assert family["can_veto_robust_exit"] is False
-    assert family["can_promote_robust_hold"] is False
-    assert family["family_hold_value_usd"] > family["family_direct_sell_value_usd"]
-    assert family["legs"][0]["held_probability_lcb"] == pytest.approx(
-        0.942952047639557
-    )
-    assert family["legs"][0]["robust_hold_value_lcb_usd"] == pytest.approx(
-        pos_a.shares * 0.942952047639557
-    )
-    assert family["legs"][0]["held_probability_ci_authority"] == (
-        "current_edge_ci_shifted_to_held_probability"
-    )
-    assert "held_probability_lcb" not in family["legs"][1]
 
 
-def test_single_leg_monitor_records_family_redecision_value_payload():
-    """A single held leg still needs continuous hold-vs-sell evidence in receipts."""
-    from src.engine import cycle_runtime
-    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
-    from src.state.lifecycle_manager import LifecyclePhase
-
-    pos = _make_position(
-        trade_id="single-family-monitor",
-        city="Paris",
-        target_date="2026-06-20",
-        temperature_metric="low",
-        bin_label="19C",
-        direction="buy_no",
-        shares=5.06,
-        entry_price=0.75,
-        p_posterior=0.80,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    pos.last_monitor_at = "2026-06-18T23:55:00+00:00"
-    pos.last_monitor_prob = 0.78
-    pos.last_monitor_prob_is_fresh = True
-    pos.last_monitor_market_price = 0.73
-    pos.last_monitor_market_price_is_fresh = True
-    pos.last_monitor_best_bid = 0.73
-    pos.last_monitor_best_ask = 0.75
-    pos.last_monitor_edge = 0.05
-    portfolio = _make_portfolio(pos)
-    hold_decision = ExitDecision(
-        False,
-        reason="CI_OVERLAP_HOLD",
-        trigger="CI_OVERLAP_HOLD",
-        selected_method="replacement_posterior",
-    )
-    summary = {}
-
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=portfolio,
-        pos=pos,
-        exit_decision=hold_decision,
-        should_exit=False,
-        exit_reason=hold_decision.reason,
-        summary=summary,
-    )
-
-    assert should_exit is False
-    assert reason == "CI_OVERLAP_HOLD"
-    assert summary["family_redecision_overlay_evaluated"] == 1
-
-    events, _projection = build_monitor_refreshed_canonical_write(
-        pos,
-        sequence_no=2,
-        phase_after=LifecyclePhase.ACTIVE.value,
-        source_module="tests/test_single_leg_monitor_redecision",
-        exit_decision=hold_decision,
-        final_should_exit=should_exit,
-        final_exit_reason=reason,
-    )
-    payload = json.loads(events[0]["payload_json"])
-    family = payload["family_redecision"]
-    assert family["position_count"] == 1
-    assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
-    assert family["family_hold_value_usd"] == pytest.approx(5.06 * 0.78)
-    assert family["family_direct_sell_value_usd"] == pytest.approx(5.06 * 0.73)
-
-
-def test_family_monitor_point_value_cannot_promote_sell_over_robust_hold():
-    """Point family value is diagnostic and cannot override a robust hold."""
-    from src.engine import cycle_runtime
-    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
-    from src.state.lifecycle_manager import LifecyclePhase
-
-    pos = _make_position(
-        trade_id="family-direct-sell-dominates",
-        city="Seoul",
-        target_date="2026-06-26",
-        temperature_metric="low",
-        bin_label="21C",
-        direction="buy_no",
-        shares=15.5,
-        entry_price=0.62,
-        p_posterior=0.67,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    pos.last_monitor_at = "2026-06-24T14:55:00+00:00"
-    pos.last_monitor_prob = 0.60
-    pos.last_monitor_prob_is_fresh = True
-    pos.last_monitor_market_price = 0.70108
-    pos.last_monitor_market_price_is_fresh = True
-    pos.last_monitor_best_bid = 0.70108
-    pos.last_monitor_best_ask = 0.72
-    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
-    pos.applied_validations = ["replacement_posterior", "ci_separated_edge_within_threshold_hold"]
-
-    portfolio = _make_portfolio(pos)
-    hold_decision = ExitDecision(
-        False,
-        reason="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
-        trigger="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
-        selected_method="replacement_posterior",
-        applied_validations=list(pos.applied_validations),
-    )
-    summary = {}
-
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=portfolio,
-        pos=pos,
-        exit_decision=hold_decision,
-        should_exit=False,
-        exit_reason=hold_decision.reason,
-        summary=summary,
-    )
-    trigger = cycle_runtime._effective_exit_trigger(hold_decision, reason)
-
-    assert should_exit is False
-    assert reason == hold_decision.reason
-    assert trigger == hold_decision.trigger
-    assert summary["family_redecision_robust_holds_preserved"] == 1
-    assert "family_point_value_cannot_promote_sell" in pos.applied_validations
-
-    events, _projection = build_monitor_refreshed_canonical_write(
-        pos,
-        sequence_no=3,
-        phase_after=LifecyclePhase.ACTIVE.value,
-        source_module="tests/test_family_direct_sell_dominates",
-        exit_decision=hold_decision,
-        final_should_exit=should_exit,
-        final_exit_reason=reason,
-        final_exit_trigger=trigger,
-    )
-    payload = json.loads(events[0]["payload_json"])
-    family = payload["family_redecision"]
-    assert payload["exit_decision_should_exit"] is False
-    assert payload["exit_decision_reason"] == hold_decision.reason
-    assert payload["exit_decision_trigger"] == hold_decision.trigger
-    assert family["decision"] == "FAMILY_POINT_VALUE_DIAGNOSTIC_HOLD_PRESERVED"
-    assert family["preserved_hold_reason"] == hold_decision.reason
-    assert family["diagnostic_suggested_action"] == "SELL"
-    assert family["value_authority"] == "point_estimate_diagnostic_only"
-    assert family["can_promote_robust_hold"] is False
-    assert family["belief_reversed_below_entry"] is True
-    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
-    assert family["family_direct_sell_advantage_usd"] > family["family_direct_sell_advantage_threshold_usd"]
-
-
-def test_family_monitor_overlay_blocks_direct_sell_on_immature_day0_authority():
-    """Pre-peak Day0 remaining-window signal is not sell authority by itself."""
-    from src.engine import cycle_runtime
-
-    pos = _make_position(
-        trade_id="family-direct-sell-day0-immature",
-        city="Munich",
-        target_date="2026-06-30",
-        temperature_metric="high",
-        bin_label="29C",
-        direction="buy_no",
-        shares=33.15,
-        entry_price=0.60,
-        p_posterior=0.83,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    pos.last_monitor_at = "2026-06-30T02:44:00+00:00"
-    pos.last_monitor_prob = 0.15
-    pos.last_monitor_prob_is_fresh = True
-    pos.last_monitor_market_price = 0.55
-    pos.last_monitor_market_price_is_fresh = True
-    pos.last_monitor_best_bid = 0.55
-    pos.last_monitor_best_ask = 0.57
-    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
-    pos.applied_validations = [
-        "day0_observation_remaining_window",
-        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
-    ]
-
-    hold_decision = ExitDecision(
-        False,
-        reason="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
-        trigger="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
-        selected_method="day0_observation_remaining_window",
-        applied_validations=list(pos.applied_validations),
-    )
-    summary = {}
-
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=_make_portfolio(pos),
-        pos=pos,
-        exit_decision=hold_decision,
-        should_exit=False,
-        exit_reason=hold_decision.reason,
-        summary=summary,
-    )
-
-    assert should_exit is False
-    assert reason == "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
-    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
-    assert "family_direct_sell_blocked_day0_immature" in pos.applied_validations
-    family = pos._monitor_family_redecision
-    assert family["decision"] == "FAMILY_DIRECT_SELL_BLOCKED_DAY0_IMMATURE"
-    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
-
-
-def test_family_monitor_overlay_replays_munich_0244_receipt_as_immature_day0_hold():
-    """Munich 02:44 receipt shape must not be promoted into a sell."""
-    from src.engine import cycle_runtime
-    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
-    from src.state.lifecycle_manager import LifecyclePhase
-
-    validations = [
-        "day0_observation_remaining_window",
-        "belief_source=day0_observation_remaining_window;kind=probabilistic_remaining_window;metric=high;posterior_mode=model_only_v1",
-        "market_quote_prior_excluded:day0_observation_remaining_window",
-        "alpha_blend_inapplicable:day0_observation_remaining_window",
-        "day0_observation",
-        "day0_hourly_vectors",
-        "forecast_source_id:day0_hourly_vectors",
-        "forecast_source_role:day0_remaining_window_live",
-        "day0_extreme_not_absorbing",
-        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
-        "mc_instrument_noise",
-        "day0_remaining_window_raw_vector_normalization",
-        "ci_threshold",
-        "ci_overlap_hold",
-    ]
-    pos = _make_position(
-        trade_id="munich-29-no-0244-receipt",
-        city="Munich",
-        target_date="2026-06-30",
-        temperature_metric="high",
-        bin_label="Will the highest temperature in Munich be 29°C on June 30?",
-        direction="buy_no",
-        shares=33.15,
-        entry_price=0.60,
-        p_posterior=0.8728257780611077,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    pos.last_monitor_at = "2026-06-30T02:44:44.908942+00:00"
-    pos.last_monitor_prob = 0.15810000000000002
-    pos.last_monitor_prob_is_fresh = True
-    pos.last_monitor_market_price = 0.57
-    pos.last_monitor_market_price_is_fresh = True
-    pos.last_monitor_best_bid = 0.57
-    pos.last_monitor_best_ask = 0.58
-    pos.last_monitor_edge = -0.41189999999999993
-    pos.applied_validations = list(validations)
-
-    hold_decision = ExitDecision(
-        False,
-        reason="CI_OVERLAP_HOLD",
-        trigger="CI_OVERLAP_HOLD",
-        selected_method="day0_observation_remaining_window",
-        applied_validations=list(validations),
-    )
-    summary = {}
-
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=_make_portfolio(pos),
-        pos=pos,
-        exit_decision=hold_decision,
-        should_exit=False,
-        exit_reason=hold_decision.reason,
-        summary=summary,
-    )
-    trigger = cycle_runtime._effective_exit_trigger(hold_decision, reason)
-
-    assert should_exit is False
-    assert reason == "CI_OVERLAP_HOLD"
-    assert trigger == "CI_OVERLAP_HOLD"
-    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
-    assert "family_direct_sell_blocked_day0_immature" in pos.applied_validations
-
-    events, _projection = build_monitor_refreshed_canonical_write(
-        pos,
-        sequence_no=27,
-        phase_after=LifecyclePhase.DAY0_WINDOW.value,
-        source_module="tests/test_munich_0244_receipt",
-        exit_decision=hold_decision,
-        final_should_exit=should_exit,
-        final_exit_reason=reason,
-        final_exit_trigger=trigger,
-    )
-    payload = json.loads(events[0]["payload_json"])
-    family = payload["family_redecision"]
-    assert payload["exit_decision_should_exit"] is False
-    assert payload["exit_decision_reason"] == "CI_OVERLAP_HOLD"
-    assert payload["exit_decision_trigger"] == "CI_OVERLAP_HOLD"
-    assert family["decision"] == "FAMILY_DIRECT_SELL_BLOCKED_DAY0_IMMATURE"
-    assert family["suppressed_exit_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
-    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
-    assert family["day0_maturity_block"].startswith("day0_high_extreme_not_mature:")
-    assert "FAMILY_DIRECT_SELL_DOMINATES_HOLD" not in {
-        payload["exit_decision_reason"],
-        payload["exit_decision_trigger"],
-    }
 
 
 def test_monitor_refreshed_persists_day0_probability_receipt():
@@ -9695,139 +9278,6 @@ def test_monitor_refreshed_omits_stale_day0_probability_receipt_on_non_day0_meth
     assert "day0_monitor_probability_receipt" not in payload
 
 
-def test_family_monitor_overlay_includes_entry_authority_quarantined_family_exposure():
-    """Chain-backed quarantine is live money risk and must enter family value math."""
-    from src.engine import cycle_runtime
-
-    active = _make_position(
-        trade_id="munich-29-no-active",
-        city="Munich",
-        target_date="2026-06-30",
-        temperature_metric="high",
-        bin_label="Will the highest temperature in Munich be 29°C on June 30?",
-        direction="buy_no",
-        shares=33.15,
-        entry_price=0.60,
-        p_posterior=0.8728257780611077,
-        state="day0_window",
-        last_monitor_prob=0.84,
-        last_monitor_prob_is_fresh=True,
-        last_monitor_market_price=0.57,
-        last_monitor_market_price_is_fresh=True,
-        last_monitor_best_bid=0.57,
-    )
-    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
-    # REPLACEMENT PHASE LAW): this leg used to be forced into
-    # state="quarantined"/chain_state="entry_authority_quarantined" to prove
-    # chain-backed exposure still reaches family value math. It now keeps its
-    # TRUE (day0_window/synced) phase — no writer mints the retired literals,
-    # and construction with them now raises. Real exposure enters family math
-    # the same way any other open-phase position does; there is no dedicated
-    # quarantine bucket to exercise separately anymore.
-    quarantined = _make_position(
-        trade_id="munich-30-no-quarantined",
-        city="Munich",
-        target_date="2026-06-30",
-        temperature_metric="high",
-        bin_label="Will the highest temperature in Munich be 30°C on June 30?",
-        direction="buy_no",
-        shares=29.14,
-        chain_shares=29.14,
-        chain_state="synced",
-        entry_price=0.73,
-        p_posterior=0.879883784472759,
-        state="day0_window",
-        last_monitor_prob=0.99,
-        last_monitor_prob_is_fresh=True,
-        last_monitor_market_price=0.74,
-        last_monitor_market_price_is_fresh=True,
-        last_monitor_best_bid=0.74,
-    )
-    hold_decision = ExitDecision(
-        False,
-        reason="CI_OVERLAP_HOLD",
-        trigger="CI_OVERLAP_HOLD",
-        selected_method="day0_observation_remaining_window",
-        applied_validations=["ci_overlap_hold"],
-    )
-    summary = {}
-
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=_make_portfolio(active, quarantined),
-        pos=active,
-        exit_decision=hold_decision,
-        should_exit=False,
-        exit_reason=hold_decision.reason,
-        summary=summary,
-    )
-
-    assert should_exit is False
-    assert reason == "CI_OVERLAP_HOLD"
-    family = active._monitor_family_redecision
-    assert family["position_count"] == 2
-    assert {leg["position_id"] for leg in family["legs"]} == {
-        "munich-29-no-active",
-        "munich-30-no-quarantined",
-    }
-    assert family["family_hold_value_usd"] == pytest.approx(
-        33.15 * 0.84 + 29.14 * 0.99
-    )
-    assert family["family_direct_sell_value_usd"] == pytest.approx(
-        33.15 * 0.57 + 29.14 * 0.74
-    )
-
-
-def test_family_monitor_overlay_holds_munich_buy_no_when_held_side_probability_high():
-    """Munich regression: buy_no monitor probability is NO-space, not same-bin YES q."""
-    from src.engine import cycle_runtime
-
-    pos = _make_position(
-        trade_id="munich-29-no-held-side-hold",
-        city="Munich",
-        target_date="2026-06-30",
-        temperature_metric="high",
-        bin_label="29C",
-        direction="buy_no",
-        shares=33.15,
-        entry_price=0.60,
-        p_posterior=0.8728257780611077,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    pos.last_monitor_at = "2026-06-30T02:44:00+00:00"
-    pos.last_monitor_prob = 0.8296
-    pos.last_monitor_prob_is_fresh = True
-    pos.last_monitor_market_price = 0.5646775174931549
-    pos.last_monitor_market_price_is_fresh = True
-    pos.last_monitor_best_bid = 0.55
-    pos.last_monitor_best_ask = 0.57
-    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
-    pos.applied_validations = ["day0_observation_remaining_window"]
-
-    hold_decision = ExitDecision(
-        False,
-        reason="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
-        trigger="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
-        selected_method="day0_observation_remaining_window",
-        applied_validations=list(pos.applied_validations),
-    )
-    summary = {}
-
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=_make_portfolio(pos),
-        pos=pos,
-        exit_decision=hold_decision,
-        should_exit=False,
-        exit_reason=hold_decision.reason,
-        summary=summary,
-    )
-
-    assert should_exit is False
-    assert reason == "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
-    family = pos._monitor_family_redecision
-    assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
-    assert family["family_hold_value_usd"] > family["family_direct_sell_value_usd"]
-    assert "family_direct_sell_dominates_hold_exit" not in pos.applied_validations
 
 
 def test_family_monitor_overlay_blocks_statistical_exit_on_immature_day0_authority():
@@ -9939,8 +9389,8 @@ def test_family_monitor_overlay_blocks_exit_decision_only_immature_day0_authorit
     )
 
 
-def test_family_monitor_overlay_blocks_immature_day0_before_missing_family_quotes():
-    """Missing sibling quote evidence cannot bypass immature Day0 exit authority."""
+def test_family_monitor_overlay_blocks_immature_day0_without_second_family_evaluator():
+    """The Day0 maturity wall does not depend on a second family evaluator."""
     from src.engine import cycle_runtime
 
     pos = _make_position(
@@ -10009,12 +9459,6 @@ def test_family_monitor_overlay_blocks_immature_day0_before_missing_family_quote
     assert summary["family_redecision_day0_immature_exits_blocked"] == 1
     family = pos._monitor_family_redecision
     assert family["decision"] == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
-    assert family["missing"] == [
-        {
-            "position_id": "family-stat-exit-day0-immature-stale-sibling",
-            "reason": "market_price_not_fresh",
-        }
-    ]
 
 
 def test_exit_evidence_gate_blocks_family_direct_sell_on_immature_day0_authority():
@@ -10065,115 +9509,6 @@ def test_exit_evidence_gate_blocks_family_direct_sell_on_immature_day0_authority
     ]
 
 
-def test_family_monitor_overlay_does_not_sell_winner_without_belief_reversal():
-    """A high bid over a conservative belief is not by itself an exit signal."""
-    from src.engine import cycle_runtime
-
-    pos = _make_position(
-        trade_id="family-direct-sell-winner-hold",
-        city="Paris",
-        target_date="2026-06-20",
-        temperature_metric="low",
-        bin_label="19C",
-        direction="buy_no",
-        shares=5.1,
-        entry_price=0.75,
-        p_posterior=0.80,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    pos.last_monitor_at = "2026-06-24T14:55:00+00:00"
-    pos.last_monitor_prob = 0.82
-    pos.last_monitor_prob_is_fresh = True
-    pos.last_monitor_market_price = 0.998
-    pos.last_monitor_market_price_is_fresh = True
-    pos.last_monitor_best_bid = 0.998
-    pos.last_monitor_best_ask = 0.999
-    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
-    pos.applied_validations = ["replacement_posterior"]
-
-    hold_decision = ExitDecision(
-        False,
-        reason="CI_OVERLAP_HOLD",
-        trigger="CI_OVERLAP_HOLD",
-        selected_method="replacement_posterior",
-        applied_validations=list(pos.applied_validations),
-    )
-    summary = {}
-
-    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
-        portfolio=_make_portfolio(pos),
-        pos=pos,
-        exit_decision=hold_decision,
-        should_exit=False,
-        exit_reason=hold_decision.reason,
-        summary=summary,
-    )
-
-    assert should_exit is False
-    assert reason == "CI_OVERLAP_HOLD"
-    assert summary["family_redecision_overlay_evaluated"] == 1
-    family = pos._monitor_family_redecision
-    assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
-    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
-    assert "family_direct_sell_dominates_hold_exit" not in pos.applied_validations
-
-
-def test_family_monitor_overlay_keeps_chain_backed_quarantine_in_family_vector():
-    """Chain-backed quarantine remains live family risk for hold-vs-sell math."""
-    from src.engine import cycle_runtime
-
-    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
-    # real chain-backed exposure now keeps its TRUE (day0_window/synced)
-    # phase — see test_family_monitor_overlay_includes_entry_authority_
-    # quarantined_family_exposure above.
-    old_leg = _make_position(
-        trade_id="munich-30-quarantine",
-        city="Munich",
-        target_date="2026-06-30",
-        temperature_metric="high",
-        bin_label="30C",
-        direction="buy_no",
-        shares=29.14,
-        chain_shares=29.14,
-        chain_state="synced",
-        state="day0_window",
-        entry_price=0.73,
-        p_posterior=0.88,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    new_leg = _make_position(
-        trade_id="munich-29-active",
-        city="Munich",
-        target_date="2026-06-30",
-        temperature_metric="high",
-        bin_label="29C",
-        direction="buy_no",
-        shares=33.15,
-        state="day0_window",
-        entry_price=0.60,
-        p_posterior=0.83,
-        strategy_key="center_bin_buy",
-        env="live",
-    )
-    for pos, prob, bid in ((old_leg, 0.92, 0.71), (new_leg, 0.84, 0.55)):
-        pos.last_monitor_prob = prob
-        pos.last_monitor_prob_is_fresh = True
-        pos.last_monitor_market_price = bid
-        pos.last_monitor_market_price_is_fresh = True
-        pos.last_monitor_best_bid = bid
-        pos.last_monitor_best_ask = min(0.99, bid + 0.02)
-
-    positions = cycle_runtime._family_monitor_positions(
-        _make_portfolio(old_leg, new_leg),
-        new_leg,
-    )
-
-    assert [pos.trade_id for pos in positions] == [
-        "munich-30-quarantine",
-        "munich-29-active",
-    ]
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
@@ -10185,7 +9520,7 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     """
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     from src.engine import cycle_runtime, monitor_refresh
-    from src.contracts import EdgeContext, EntryMethod
+    from src.contracts import EntryMethod
 
     pos = _make_position(
         state="holding",
@@ -10950,10 +10285,6 @@ def test_live_exit_collateral_blocked_goes_to_retry(monkeypatch):
         "src.riskguard.riskguard.get_current_level",
         lambda: RiskLevel.RED,
     )
-    monkeypatch.setattr(
-        "src.riskguard.riskguard.get_force_exit_review",
-        lambda: False,
-    )
 
     outcome = execute_exit(
         portfolio=portfolio,
@@ -11422,7 +10753,6 @@ def test_exit_ev_gate_uses_fill_authority_shares_for_hold_value(monkeypatch):
         captured["shares"] = kwargs["shares"]
         return 0.0
 
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
     monkeypatch.setattr("src.state.portfolio._compute_exit_correlation_crowding", capture_crowding)
 
     decision = pos.evaluate_exit(
@@ -11466,7 +10796,6 @@ def test_buy_no_exit_ev_gate_uses_fill_authority_shares_for_hold_value(monkeypat
         captured["shares"] = kwargs["shares"]
         return 0.0
 
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
     monkeypatch.setattr("src.state.portfolio._compute_exit_correlation_crowding", capture_crowding)
 
     decision = pos._buy_no_exit(
@@ -12087,7 +11416,6 @@ def test_near_one_point_holds_when_current_value_beats_bid(
         shares=shares,
         cost_basis_usd=27.0,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
     monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.02)
     monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.01)
     monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 1)
@@ -12121,7 +11449,7 @@ def test_near_one_point_holds_when_current_value_beats_bid(
         else "hold_value_probability_basis:current_q_ucb"
     )
     assert probability_basis in decision.applied_validations
-    assert "hold_value_exit_costs_enabled" in decision.applied_validations
+    assert "hold_value_exit_costs" in decision.applied_validations
     assert "hold_value_correlation_crowding_applied" in decision.applied_validations
 
 
@@ -12139,7 +11467,6 @@ def test_missing_current_ci_holds_without_reusing_legacy_edge_count(
         cost_basis_usd=27.0,
     )
     monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 2)
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
 
     unavailable_decision = pos.evaluate_exit(
         ExitContext(
@@ -12201,7 +11528,6 @@ def test_day0_overlap_uses_current_expected_value_not_optimistic_ucb(
         cost_basis_usd=3.3,
     )
     monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 2)
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
     context = ExitContext(
         fresh_prob=0.10466666666666666,
         fresh_prob_is_fresh=True,
@@ -12248,7 +11574,6 @@ def test_day0_separated_reversal_monetizes_expected_value_before_ucb_strands_leg
         shares=22.5,
         cost_basis_usd=4.32,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
     monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.05)
     monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.0001)
     monkeypatch.setattr(
@@ -12299,11 +11624,6 @@ def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
         shares=5.2,
         cost_basis_usd=1.768,
     )
-    monkeypatch.setattr(
-        "src.state.portfolio.hold_value_exit_costs_enabled",
-        lambda: False,
-    )
-
     decision = pos.evaluate_exit(
         ExitContext(
             fresh_prob=0.0,
@@ -12337,7 +11657,7 @@ def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
 
 
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
-def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, direction):
+def test_day0_low_price_high_expected_value_remains_a_hold(direction):
     """Low price alone cannot liquidate a fresh high-value held claim."""
 
     pos = _make_position(
@@ -12348,8 +11668,6 @@ def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, directio
         shares=100.0,
         cost_basis_usd=13.0,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
-
     decision = pos.evaluate_exit(
         ExitContext(
             fresh_prob=0.4939,
@@ -12371,7 +11689,7 @@ def test_day0_low_price_high_expected_value_remains_a_hold(monkeypatch, directio
     assert decision.trigger == "CI_SEPARATED_POSITIVE_EDGE_HOLD"
 
 
-def test_day0_point_q_reversal_waits_for_temporal_maturity(monkeypatch):
+def test_day0_point_q_reversal_waits_for_temporal_maturity():
     """An Ankara-shaped early reversal cannot outrun Day0 maturity authority."""
     from src.engine import cycle_runtime
 
@@ -12394,8 +11712,6 @@ def test_day0_point_q_reversal_waits_for_temporal_maturity(monkeypatch):
         state="day0_window",
         applied_validations=[maturity_reason],
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
-
     decision = pos.evaluate_exit(
         ExitContext(
             fresh_prob=0.10,
@@ -12531,7 +11847,6 @@ def test_current_global_day0_maturity_survives_refresh_to_exit_overlay(monkeypat
         ExitContext=ExitContext,
         portfolio=_make_portfolio(pos),
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
     decision = pos.evaluate_exit(context)
 
     assert decision.should_exit is False
@@ -12562,7 +11877,6 @@ def test_missing_current_ci_cannot_reuse_day0_robust_count(
         cost_basis_usd=27.0,
     )
     monkeypatch.setattr("src.state.portfolio.consecutive_confirmations", lambda: 2)
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
 
     robust_context = ExitContext(
         fresh_prob=0.94,
@@ -12635,7 +11949,6 @@ def test_exit_fee_is_charged_to_sell_not_terminal_hold(
         shares=shares,
         cost_basis_usd=90.0,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
     monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: fee_rate)
     monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.0)
     monkeypatch.setattr(
@@ -12685,7 +11998,6 @@ def test_near_settlement_obeys_robust_value_dominance(
         shares=100.0,
         cost_basis_usd=90.0,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
 
     decision = pos.evaluate_exit(
         ExitContext(
@@ -12718,7 +12030,6 @@ def test_missing_current_ci_does_not_invent_hold_value_upper_bound(monkeypatch):
         shares=30.0,
         cost_basis_usd=27.0,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: True)
     monkeypatch.setattr("src.state.portfolio.exit_fee_rate", lambda: 0.02)
     monkeypatch.setattr("src.state.portfolio.exit_daily_hurdle_rate", lambda: 0.01)
     monkeypatch.setattr(
@@ -12743,10 +12054,9 @@ def test_missing_current_ci_does_not_invent_hold_value_upper_bound(monkeypatch):
         )
     )
     assert "hold_value_probability_basis:current_q_ucb" in prior_decision.applied_validations
-    assert "hold_value_exit_costs_enabled" in prior_decision.applied_validations
+    assert "hold_value_exit_costs" in prior_decision.applied_validations
     assert "hold_value_correlation_crowding_applied" in prior_decision.applied_validations
 
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
 
     decision = pos.evaluate_exit(
         ExitContext(
@@ -12768,7 +12078,7 @@ def test_missing_current_ci_does_not_invent_hold_value_upper_bound(monkeypatch):
     assert decision.should_exit is False
     assert decision.trigger == "EVIDENCE_UNAVAILABLE"
     assert "hold_value_probability_basis:current_q_ucb" not in decision.applied_validations
-    assert "hold_value_exit_costs_enabled" not in decision.applied_validations
+    assert "hold_value_exit_costs" not in decision.applied_validations
     assert "hold_value_correlation_crowding_applied" not in decision.applied_validations
 
 
@@ -12988,7 +12298,7 @@ def test_low_probability_position_sells_when_executable_repricing_beats_hold_val
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
 @pytest.mark.parametrize(
     ("best_bid", "should_exit"),
-    [(0.55, False), (0.61, True)],
+    [(0.55, False), (0.70, True)],
 )
 def test_sell_requires_bid_to_exceed_held_side_ucb_for_each_direction(
     monkeypatch,
@@ -13006,7 +12316,6 @@ def test_sell_requires_bid_to_exceed_held_side_ucb_for_each_direction(
         shares=100.0,
         cost_basis_usd=40.0,
     )
-    monkeypatch.setattr("src.state.portfolio.hold_value_exit_costs_enabled", lambda: False)
 
     decision = pos.evaluate_exit(
         ExitContext(
@@ -13348,10 +12657,6 @@ def test_cycle_normalized_current_red_marker_bypasses_global_auction_authority(m
         lambda: RiskLevel.RED,
     )
     monkeypatch.setattr(
-        "src.riskguard.riskguard.get_force_exit_review",
-        lambda: False,
-    )
-    monkeypatch.setattr(
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
         lambda *_args, **_kwargs: {},
@@ -13447,19 +12752,17 @@ def test_incomplete_chain_response_does_not_mark_exit_pending_missing():
 
 def test_exit_retry_exponential_backoff():
     """Retry cooldown should increase exponentially."""
-    from src.execution.exit_lifecycle import _mark_exit_retry, _parse_iso, _utcnow
+    from src.execution.exit_lifecycle import _mark_exit_retry
 
     pos = _make_position()
 
     # First retry: base cooldown (300s = 5min)
     _mark_exit_retry(pos, reason="TEST", cooldown_seconds=300)
-    first_retry = _parse_iso(pos.next_exit_retry_at)
     assert pos.exit_retry_count == 1
     assert pos.exit_state == "retry_pending"
 
     # Second retry: 2x cooldown (600s = 10min)
     _mark_exit_retry(pos, reason="TEST", cooldown_seconds=300)
-    second_retry = _parse_iso(pos.next_exit_retry_at)
     assert pos.exit_retry_count == 2
 
     # Second retry should be further in the future than first was

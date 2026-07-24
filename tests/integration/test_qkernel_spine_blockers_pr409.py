@@ -424,8 +424,8 @@ def _fully_licensed_reliability_cells(guard_mod, *, hit_rate: float = 0.95) -> d
 # ===========================================================================
 # BLOCKER 1 — live==replay forecast-case (source-cycle, emos_season, 24h bucket).
 # ===========================================================================
-def test_live_bridge_forecast_case_matches_arm_replay(monkeypatch, tmp_path):
-    """The live bridge ForecastCase season / metric / lead-bucket / regime match the
+def test_allocator_forecast_case_matches_arm_replay(monkeypatch, tmp_path):
+    """The live path ForecastCase season / metric / lead-bucket / regime match the
     ARM-replay case construction, built from the FORECAST SOURCE CYCLE (not
     decision_time), and the served sigma floor is a non-None REALIZED floor.
 
@@ -1642,10 +1642,10 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "global_terminal_median_payoff_usd": "24",
         "global_terminal_wealth_after_loss_usd": "999",
         "global_terminal_wealth_after_win_usd": "1024",
-        "global_cut_time_expected_value_diagnostic_usd": 14.0,
-        "global_expected_value_diagnostic_usd": 14.0,
+        "global_cut_time_expected_value_usd": 14.0,
+        "global_expected_value_usd": 14.0,
         "global_expected_value_semantics": (
-            "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+            "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
         ),
         "global_terminal_payoff_semantics": "BINARY_0_1",
     }
@@ -2489,17 +2489,17 @@ def test_retired_near_settled_rejection_is_rescored_by_current_economics(monkeyp
         honor_admission_rejections=False,
         enforce_win_rate_floor=False,
     )
-    diagnostic = {}
+    point_evidence = {}
     global_rebind = era._selection_scoped_proofs(
         proofs=(proof,),
         honor_admission_rejections=False,
         allow_global_near_settled_rebind=True,
         enforce_win_rate_floor=False,
-        diagnostic_out=diagnostic,
+        point_evidence_out=point_evidence,
     )
 
     assert ordinary == (proof,)
-    assert global_rebind == (proof,), diagnostic
+    assert global_rebind == (proof,), point_evidence
 
     monkeypatch.setattr(
         era,
@@ -4142,42 +4142,6 @@ def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_norma
         assert decision.economics.payoff_q_lcb <= float(proof.q_lcb_5pct) + 1e-9
 
 
-def test_qkernel_threads_probability_authority_joint_samples_into_band(monkeypatch):
-    from src.config import settings
-
-    monkeypatch.setitem(settings["feature_flags"], "w3_solve_enabled", True)
-    family, _bins = _three_bin_family()
-    served_yes_q = [0.10, 0.80, 0.10, 0.00]
-    proofs = _proofs_for(
-        family,
-        yes_asks=[0.90, 0.27, 0.90, 0.90],
-        no_asks=[0.79, 0.90, 0.80, 0.95],
-        q_by_bin=served_yes_q,
-        q_lcb_by_bin=[0.02, 0.65, 0.05, 0.00],
-        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
-    )
-    payload = _payload(mu=20.0, sigma=0.05, members=[20.0] * 5)
-    yes_proofs = [proof for proof in proofs if proof.direction == "buy_yes"]
-    rows = np.asarray(
-        [
-            [0.20, 0.70, 0.10, 0.00],
-            [0.00, 0.90, 0.10, 0.00],
-        ],
-        dtype=float,
-    )
-    payload["_edli_spine_served_joint_q_samples_by_condition"] = {
-        str(proof.candidate.condition_id): rows[:, index].tolist()
-        for index, proof in enumerate(yes_proofs)
-    }
-
-    result = _drive(family, proofs, payload)
-
-    assert result.decision is not None
-    assert result.decision.band is not None
-    assert result.decision.band.samples == pytest.approx(rows)
-    assert result.decision.band.q_lcb == pytest.approx(
-        np.quantile(rows, result.decision.band.alpha, axis=0)
-    )
 
 
 def test_day0_monotone_hard_fact_overlays_stale_served_proof_q():

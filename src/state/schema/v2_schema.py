@@ -373,25 +373,6 @@ def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connec
             """
         )
         columns.add("runtime_layer")
-    if "trade_authority_status" in columns:
-        has_legacy_live_rows = conn.execute(
-            """
-            SELECT 1
-              FROM forecast_posteriors
-             WHERE runtime_layer IS NULL
-               AND trade_authority_status = 'LIVE_AUTHORITY'
-             LIMIT 1
-            """
-        ).fetchone()
-        if has_legacy_live_rows is not None:
-            conn.execute(
-                """
-                UPDATE forecast_posteriors
-                   SET runtime_layer = 'live'
-                 WHERE runtime_layer IS NULL
-                   AND trade_authority_status = 'LIVE_AUTHORITY'
-                """
-            )
     has_non_live_rows = conn.execute(
         """
         SELECT 1
@@ -407,9 +388,6 @@ def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connec
              WHERE runtime_layer IS NULL
                 OR runtime_layer != 'live'
         """)
-    if "trade_authority_status" in columns:
-        conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
-        columns.remove("trade_authority_status")
     if {"runtime_layer", "city", "target_date", "temperature_metric", "computed_at"}.issubset(columns):
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_runtime_layer_target
@@ -658,13 +636,6 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     _existing_rmf_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(raw_model_forecasts)").fetchall()
     }
-    if "trade_authority_status" in _existing_rmf_cols:
-        # raw_model_forecasts is a raw current/history input table, not a posterior authority table.
-        # Old live DBs carried a DIAGNOSTIC_ONLY-only column that made live production rows look
-        # experimental and invited downstream authority confusion. The executable authority lives
-        # on forecast_posteriors.runtime_layer/q_mode; raw rows keep training_allowed=0.
-        conn.execute("ALTER TABLE raw_model_forecasts DROP COLUMN trade_authority_status")
-        _existing_rmf_cols.remove("trade_authority_status")
     _rmf_product_identity_alters = (
         ("source_id", "TEXT"),
         ("source_family", "TEXT"),
@@ -972,7 +943,6 @@ def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
             coherence_verdict TEXT NOT NULL
                 CHECK (coherence_verdict IN ('COHERENT', 'INCOHERENT', 'INCOMPLETE')),
             incoherence_reason TEXT,
-            evidence_tier TEXT,
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(city, target_date, temperature_metric)
         )
@@ -1238,46 +1208,6 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
                 CREATE INDEX IF NOT EXISTS idx_platt_models_lookup
                     ON platt_models(temperature_metric, cluster, season, data_version, input_space, is_active)
             """)
-
-        # ----------------------------------------------------------------
-        # validated_calibration_transfers
-        # Phase X.1 (2026-05-05): OOS evidence scaffold for calibration-
-        # transfer gate. Rows written by Phase X.2 OOS evaluator; used by
-        # evaluate_calibration_transfer_policy_with_evidence when feature flag
-        # ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true (default: false).
-        # ----------------------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS validated_calibration_transfers (
-                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-                policy_id             TEXT NOT NULL,
-                source_id             TEXT NOT NULL,
-                target_source_id      TEXT NOT NULL,
-                source_cycle          TEXT NOT NULL,
-                target_cycle          TEXT NOT NULL,
-                horizon_profile       TEXT NOT NULL,
-                season                TEXT NOT NULL,
-                cluster               TEXT NOT NULL,
-                metric                TEXT NOT NULL CHECK (metric IN ('high', 'low')),
-                n_pairs               INTEGER NOT NULL,
-                brier_source          REAL NOT NULL,
-                brier_target          REAL NOT NULL,
-                brier_diff            REAL NOT NULL,
-                brier_diff_threshold  REAL NOT NULL,
-                status                TEXT NOT NULL
-                    CHECK (status IN ('LIVE_ELIGIBLE', 'TRANSFER_UNSAFE',
-                                      'INSUFFICIENT_SAMPLE', 'same_domain_no_transfer')),
-                evidence_window_start TEXT NOT NULL,
-                evidence_window_end   TEXT NOT NULL,
-                platt_model_key       TEXT NOT NULL,
-                evaluated_at          TEXT NOT NULL,
-                UNIQUE (policy_id, target_source_id, target_cycle, season, cluster, metric,
-                        horizon_profile, platt_model_key)
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_validated_transfers_route
-                ON validated_calibration_transfers(target_source_id, target_cycle, season, cluster, metric)
-        """)
 
         # ----------------------------------------------------------------
         # observation_instants  (CANONICAL — superset of the former legacy

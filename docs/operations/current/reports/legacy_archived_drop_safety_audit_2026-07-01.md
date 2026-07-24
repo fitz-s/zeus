@@ -35,7 +35,7 @@ only `platt_models` (forecasts, 0 rows) remaining. Its `--execute` is a destruct
 
 ## Recommendation
 
-1. **Shadow decoys (item 1): resolved by design, no action.** The `zero_byte_state_cleanup` organ
+1. **Retired decoys (item 1): resolved by design, no action.** The `zero_byte_state_cleanup` organ
    (`maintenance_worker/rules/zero_byte_state_cleanup.py`) deliberately excludes every `.db` file
    (`_is_sqlite_companion`, corruption-safety). The 4 zero-byte decoys (`zeus_world.db`,
    `zeus_forecasts.db`, `zeus-trades.db`, `zeus_live.db` — wrong-separator variants) are already

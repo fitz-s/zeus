@@ -48,7 +48,6 @@ import json
 import os
 import textwrap
 from dataclasses import replace
-from decimal import Decimal
 
 from src.engine import event_reactor_adapter as era
 from src.events.candidate_binding import MarketTopologyCandidate
@@ -407,11 +406,13 @@ def test_single_selection_path_always_uses_marginal_utility_ranker(monkeypatch):
             )
 
     # And the receipt the adapter emits records THAT single decision verbatim.
+    selected = _qkernel_selected(selected)
     book = era._opportunity_book_from_proofs(
         event_id="evt",
         family_id="fam",
-        proofs=(proof_a, proof_b),
+        proofs=(proof_a, selected),
         selected_proof=selected,
+        enforce_win_rate_floor=False,
     ).to_receipt_dict()
     expected_id = era._candidate_evaluation_id(proof_b)
     assert book["selected_candidate_id"] == expected_id
@@ -448,13 +449,14 @@ def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
     selected = replace(
         proof_b,
         q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
         qkernel_execution_economics=qkernel_cert,
     )
 
     book = era._opportunity_book_from_proofs(
         event_id="evt",
         family_id="fam",
-        proofs=(proof_b,),
+        proofs=(selected,),
         selected_proof=selected,
     ).to_receipt_dict()
     selected_id = era._candidate_evaluation_id(proof_b)

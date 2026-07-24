@@ -61,7 +61,7 @@ invariants:
       tests:
         - tests/test_architecture_contracts.py::test_strategy_key_manifest_is_frozen
     capability_tags: 
-      - backtest_diagnostic_write
+      - backtest_audit_write
       - canonical_position_write
       - decision_artifact_write
       - live_venue_submit
@@ -807,37 +807,40 @@ invariants:
     added: 2026-05-27
 
   - id: INV-40
-    zones: [K2_runtime, kelly_sizing]
+    zones: [K2_runtime, kelly_sizing, global_auction]
     statement: >
-      Every uncertainty source contributes to position-size reduction EXACTLY
-      ONCE — either via edge_LCB (soft σ entering the bootstrap CI lower bound)
-      OR via a hard {0, 1} veto multiplier (executable_mask, oracle_penalty=0,
-      strategy_phase=0, reliability_status hard-fail). Double-counting the
-      same uncertainty (CI width via both edge bootstrap AND dynamic_kelly_mult
-      haircut; spread/depth via both EffectiveKellyContext.haircut AND
-      σ_market in bootstrap; etc.) is forbidden.
+      On the current-q global-solver path, posterior uncertainty contributes to
+      position-size reduction exactly once through the conservative q-band and
+      terminal-wealth objective. The configured Fractional Kelly multiplier
+      remains the solver's unique stake multiplier; the subsequent event-bound
+      Kelly proof MUST NOT apply a second ci_width multiplier haircut for that
+      same band or alter the certified global stake with it. This single-count
+      rule does not waive or merge the independent q-band, hard veto,
+      correlated portfolio endowment (including bounded in-flight BUYs),
+      fee/depth, spendable-cash, capital-limit, or RiskGuard constraints.
+      Non-global callers whose uncertainty has not already entered a q-band
+      retain the existing ci_width modifier behavior.
     why: >
-      Current size chain applies 15 multiplicative haircuts across
-      dynamic_kelly_mult (7), phase_aware_kelly_multiplier (4),
-      EffectiveKellyContext.haircut (1), plus oracle / observed_fraction /
-      phase_source guards. Multiple soft uncertainties appear in BOTH
-      edge_ci_lower AND the multiplier chain. 0.8^10 ≈ 0.107 collapse of
-      valid edges with no diagnostic = death by thousand gates (Fitz §1).
+      The global solver already evaluates robust terminal wealth against
+      current lower-tail q evidence. Reapplying the same q-to-q_lcb width in
+      dynamic_kelly_mult silently shrinks the certified optimum twice and makes
+      the actuation receipt describe a different Kelly fraction from the one
+      that selected the order. SizingContext therefore retains the observed
+      width as counted_ci_width provenance while presenting ci_width=0 only on
+      the current-q global actuation path.
     enforced_by:
       tests:
-        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestFlagOffPreservesLegacyDoubleCount::test_flag_off_dynamic_mult_applies_ci_width_haircut
-        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestFlagOnSingleCountEnforced::test_flag_on_dynamic_mult_skips_ci_width_haircut
-        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestNoLegacyDoubleCountWithFlagOn::test_flag_on_ci_width_and_ekc_haircut_are_both_inactive
-        - tests/test_wave6_unified_uncertainty_budget.py::TestFlagResolution::test_off_when_prereq_eqe_flag_missing
-        - tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py::TestNoEvidencePreservesLegacy::test_no_eqe_returns_bit_identical_ci_under_fixed_seed
-        - tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py::TestSigmaMarketWidensCI::test_sigma_market_gt0_lowers_ci_lower
+        - tests/strategy/test_single_count_uncertainty.py::test_current_q_global_solver_counts_ci_width_only_in_q_band
+        - tests/strategy/test_single_count_uncertainty.py::test_non_global_kelly_keeps_ci_width_haircut
+        - tests/strategy/test_single_count_uncertainty.py::test_single_count_context_preserves_lead_and_portfolio_pressure
       negative_constraints: []
-    capability_tags: [K2_runtime, kelly_sizing, uncertainty_budget]
+    capability_tags: [K2_runtime, kelly_sizing, uncertainty_budget, global_auction]
     relationship_tests:
-      - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py
-      - tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py
-    basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D1 + Wave 5+6
+      - tests/strategy/test_single_count_uncertainty.py
+      - tests/solve/test_solver_properties.py
+    basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D1, modernized for the current-q global solver 2026-07-23
     added: 2026-05-27
+
 
   - id: INV-41
     zones: [K2_runtime, live_venue_submit, decision_kernel]
@@ -987,7 +990,11 @@ invariants:
       one command is mid-submit at any instant, and each epoch is a complete,
       unmodified single-winner epoch (fresh scope scan, fresh q/book/wealth
       cut, fresh one-shot actuator, fresh preflight, fresh reservation) —
-      never a shared or reused capability across epochs. The reactor's
+      never a shared or reused capability across epochs. Every successful BUY
+      reservation is included in the next epoch's fresh wealth witness, so
+      spendable cash strictly decreases by the committed amount; bounded
+      in-flight BUYs remain composable while missing or malformed command bounds
+      fail closed. The reactor's
       caller-level loop (src/events/reactor.py process_pending global-batch
       branch) terminates on edge/cash/cap exhaustion (an epoch that submits
       no winner), on preemption (cycle_cancelled), or on the existing
@@ -1011,15 +1018,17 @@ invariants:
         - tests/events/test_reactor.py::test_multiwinner_loop_stops_on_preemption_leaving_remainder_pending
         - tests/events/test_reactor.py::test_multiwinner_loop_stops_on_elapsed_wall_clock_budget
         - tests/test_collateral_ledger.py::test_multiwinner_loop_reservation_atomicity_under_k_winners
-        - tests/integration/test_w3_solve_seam_g3.py::test_multiwinner_wealth_witness_strictly_decreases_and_terminates_on_exhaustion
-        - tests/integration/test_w3_solve_seam_g3.py::test_multiwinner_loop_inflight_gate_accepts_bounded_prior_buy_but_not_unbounded
+        - tests/engine/test_multiwinner_wealth_composition.py::test_multiwinner_wealth_witness_strictly_decreases_until_cash_exhaustion
+        - tests/engine/test_multiwinner_wealth_composition.py::test_multiwinner_bounded_inflight_reservation_composes_and_unbounded_fails_closed
+        - tests/engine/test_multiwinner_wealth_composition.py::test_multiwinner_reactor_terminates_on_fresh_witness_cash_exhaustion
+        - tests/engine/test_multiwinner_wealth_composition.py::test_global_batch_accepts_bounded_inflight_but_rejects_unbounded_before_scope
         - tests/test_command_recovery.py::test_multiwinner_loop_recovers_k_sequential_commands_independently
       negative_constraints: []
     capability_tags: [live_venue_submit, global_auction, venue_command_write]
     relationship_tests:
       - tests/events/test_reactor.py
       - tests/test_collateral_ledger.py
-      - tests/integration/test_w3_solve_seam_g3.py
+      - tests/engine/test_multiwinner_wealth_composition.py
       - tests/test_command_recovery.py
     basis: docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md §5
     added: 2026-07-19
@@ -1042,13 +1051,13 @@ invariants:
       an alternate portfolio optimizer.
     enforced_by:
       tests:
-        - tests/integration/test_w3_solve_seam_g3.py::test_global_candidate_endowment_projects_correlated_family_holdings_exactly
-        - tests/integration/test_w3_solve_seam_g3.py::test_global_batch_candidate_block_keeps_sibling_eligible
+        - tests/solve/test_solver_properties.py::test_global_selector_consumes_ledger_bound_cumulative_buy_endowment
+        - tests/solve/test_solver_properties.py::test_family_joint_fractional_kelly_owns_one_shared_final_vector
         - tests/test_venue_command_repo.py::TestSiblingEntryPortfolioAuthority::test_command_persistence_does_not_impose_single_token_family_veto
       negative_constraints: []
     capability_tags: [global_auction, venue_command_write, live_venue_submit]
     relationship_tests:
-      - tests/integration/test_w3_solve_seam_g3.py
+      - tests/solve/test_solver_properties.py
       - tests/test_venue_command_repo.py
     basis: operator correction 2026-07-20 and current correlated-family endowment objective
     added: 2026-07-20

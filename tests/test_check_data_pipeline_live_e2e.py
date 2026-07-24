@@ -13,7 +13,9 @@ from datetime import date
 import sqlite3
 from types import SimpleNamespace
 
-from apscheduler.schedulers.base import SchedulerNotRunningError
+import pytest
+
+SchedulerNotRunningError = pytest.importorskip("apscheduler.schedulers.base").SchedulerNotRunningError
 
 from scripts import check_data_pipeline_live_e2e as checker
 

@@ -156,7 +156,6 @@ def test_t4_freshness_gate_continues_on_fresh():
 
     with patch.object(cr, "evaluate_freshness_mid_run", lambda _: fresh_verdict), \
          patch.object(cr, "get_current_level", return_value=RiskLevel.GREEN), \
-         patch.object(cr, "get_force_exit_review", return_value=False), \
          patch.object(cr, "get_connection", return_value=None), \
          patch.object(cr, "find_weather_markets", return_value=[]):
         summary = cr.run_cycle(DiscoveryMode.IMMINENT_OPEN_CAPTURE)

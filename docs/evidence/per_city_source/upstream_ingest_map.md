@@ -85,7 +85,7 @@ The `icon_seamless` model is fetched only when `icon_d2` is also in-domain (for 
 Evidence:
 - No file in `src/data/` or `scripts/` contains any INSERT into `raw_model_forecasts`, `forecasts`, `ensemble_snapshots`, or `deterministic_forecast_anchors` from NWS, HKO forecast API, CWA forecast API, MGM, AEMET, or any national met service.
 - `scripts/hko_ingest_tick.py` writes only to `hko_hourly_accumulator` (observation table), not forecast tables.
-- `docs/evidence/per_city_source/city_data_sources_overlay.csv` records NWS/HKO/CWA/MGM as expected in the `forecast_stack` column of `docs/polyweather_city_source_overlay_verified.csv` (e.g., Atlanta: "NWS forecast", Hong Kong: "HKO forecast") — but these are documentation-only; no code consumes these CSVs (see §5).
+- `docs/evidence/per_city_source/city_data_sources_overlay.csv.md` records NWS/HKO/CWA/MGM as expected in the `forecast_stack` column of `docs/polyweather_city_source_overlay_verified.csv` (e.g., Atlanta: "NWS forecast", Hong Kong: "HKO forecast") — but these are documentation-only; no code consumes these CSVs (see §5).
 - The `forecast_source_registry.py` `OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP` (`src/data/forecast_source_registry.py:154`) lists only Open-Meteo API model IDs; no national met API endpoints appear anywhere in the ingest pipeline.
 - JMA appears only as `jma_seamless` — the JMA GSM/seamless model served **through Open-Meteo**'s multi-model API, not from JMA's own dissemination.
 
@@ -133,7 +133,7 @@ grep -rn "city_data_sources_overlay\|polyweather_city_source_overlay" src/ scrip
 (no output)
 ```
 
-- `/Users/leofitz/zeus/docs/evidence/per_city_source/city_data_sources_overlay.csv` (54 rows, 21 columns including `forecast_primary_source`, `ecmwf_release_delay_min`, `forecast_shadow_source`, `forecast_backfill_source`, `observation_primary_source`, `settlement_icao_or_key`, `meteostat_wmo_id`) — documentation only.
+- `/Users/leofitz/zeus/docs/evidence/per_city_source/city_data_sources_overlay.csv.md` (54 rows, 21 columns including `forecast_primary_source`, `ecmwf_release_delay_min`, `forecast_shadow_source`, `forecast_backfill_source`, `observation_primary_source`, `settlement_icao_or_key`, `meteostat_wmo_id`) — documentation only.
 - `/Users/leofitz/zeus/docs/polyweather_city_source_overlay_verified.csv` (50 rows, 15 columns including `forecast_stack`, `settlement_source`, `observation_stack`, `settlement_stack`) — documentation only.
 
 Both files were last modified 2026-06-17 (today) and contain correct per-city source intent, but no `import`, `open()`, `read_csv()`, or path reference to either file appears in any `.py` file in `src/` or `scripts/`.
@@ -163,4 +163,4 @@ Both files were last modified 2026-06-17 (today) and contain correct per-city so
 
 4. **Coordinates used are airport coordinates** from `config/cities.json` (`_coord_note` makes this explicit). The OM API is called with `cell_selection=nearest`, meaning it snaps to the nearest model gridpoint. The actual snapped cell coordinates and distance-to-airport are **not stored** per model in `raw_model_forecasts` (columns `latitude_requested`/`longitude_requested` record what was SENT, not what the model actually used). Cell distance tracking exists only for the ECMWF IFS9 anchor via `openmeteo_ecmwf_ifs9_precision_guard.py` (in-memory only, not persisted to DB).
 
-5. **Both overlay CSVs are documentation-only**. Neither `docs/evidence/per_city_source/city_data_sources_overlay.csv` nor `docs/polyweather_city_source_overlay_verified.csv` is referenced by any code in `src/` or `scripts/`. The `forecast_primary_source` column in the operational overlay shows `ecmwf_open_data` for all 54 cities — confirming the AIFS is the declared primary, but this declaration is not enforced/consumed programmatically.
+5. **Both overlay CSV snapshots are documentation-only**. Neither `docs/evidence/per_city_source/city_data_sources_overlay.csv.md` nor `docs/polyweather_city_source_overlay_verified.csv` is referenced by any live code in `src/` or `scripts/`. The `forecast_primary_source` column in the operational overlay shows `ecmwf_open_data` for all 54 cities — confirming the AIFS is the declared primary, but this declaration is not enforced/consumed programmatically.

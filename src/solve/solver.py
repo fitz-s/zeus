@@ -5,15 +5,11 @@
 #   from qkernel_spine_bridge.py:1332-1400 + family_decision_engine.py:583-635 (FamilyDecision);
 #   CONSULT REV-2 rulings 2026-07-03 (CVaR robust objective; dominance baseline in the SAME
 #   feasible set; FamilyDecisionContract validator; max_stake_usd shim-only; single-family only).
-"""The joint SOLVE and its legacy-seam shim.
+"""Current-state probability, payoff, executable-curve, and wealth helpers.
 
-TWO-LAYER OUTPUT (packet §3): ``solve()`` → ``SolutionPlan`` is the truth (a multi-order plan
-over the full menu, κ-scaled, discretely repaired with a certificate, safe-prefix ordered,
-q_version-stamped). ``SolveEngineShim`` satisfies the frozen FamilyDecision seam and derives
-the legacy single-selection view — plus a ``LegacyDecisionProjection`` so phase-1 promotion
-evidence grades the ACTUALLY-executed primary leg, never the full plan's ΔU (consult REV-2).
-
-MATH CORE (W3 sub-slice 2) fills ``solve()``:
+The retained math supports the live global one-order selector directly. The
+retired alternate multi-order engine seam and its activation vocabulary are
+absent.
 
 * OBJECTIVE — robust expected Δlog-wealth over the joint outcome ATOMS. Wealth in atom ``a``
   under stake vector ``x`` (units per menu item) against the endowment ``W0[a]`` (cash + held
@@ -79,14 +75,8 @@ from src.contracts.venue_submission_envelope import (
     LIVE_ORDER_MIN_UNIT_PRICE,
 )
 from src.solve.exits import ZeroWealthOutcomeError
-from src.solve.kappa import KappaPolicy
-from src.solve.scenario_service import ScenarioService
 from src.solve.types import (
-    JointOutcomeScenarioSet,
     MenuItem,
-    PlannedOrder,
-    RepairCertificate,
-    SolutionPlan,
     SolveMenu,
     WealthStateByAtom,
 )
@@ -131,7 +121,7 @@ def _live_unit_price_in_band(value: Decimal) -> bool:
     )
 
 # CVaR tail stability (consult REV-2 follow-up): a robust ΔU at alpha needs enough draws in
-# the alpha-tail to be meaningful. Below this the plan is STAMPED (diagnostics) so the promotion
+# the alpha-tail to be meaningful. Below this the plan is STAMPED (metrics) so the promotion
 # evidence gate can down-weight it; a one-draw band is stamped point_belief. Not a hard reject.
 _MIN_TAIL_DRAWS = 20
 
@@ -1728,7 +1718,7 @@ class BinaryTerminalWealthCertificate:
     median_payoff_usd: Decimal
     wealth_after_loss_usd: Decimal
     wealth_after_win_usd: Decimal
-    expected_value_diagnostic_usd: float
+    expected_value_usd: float
 
     def __post_init__(self) -> None:
         if self.win_probability_lcb > 0.5:
@@ -1757,7 +1747,7 @@ class BinaryTerminalWealthCertificate:
             or not median_coherent
             or self.wealth_after_loss_usd <= 0
             or self.wealth_after_win_usd <= 0
-            or not math.isfinite(self.expected_value_diagnostic_usd)
+            or not math.isfinite(self.expected_value_usd)
         ):
             raise ValueError("terminal-wealth certificate is not branch coherent")
 
@@ -2164,7 +2154,7 @@ class GlobalSellPointCounterfactual:
             or terminal.wealth_after_win_usd
             != self.wealth_ceiling_usd + self.cash_proceeds_usd
             or not math.isclose(
-                terminal.expected_value_diagnostic_usd,
+                terminal.expected_value_usd,
                 self.expected_ev_usd,
                 rel_tol=0.0,
                 abs_tol=1e-12,
@@ -2423,7 +2413,7 @@ class GlobalSingleOrderCandidateEvaluation:
                 or terminal.loss_payoff_usd != -self.cost_usd
                 or terminal.win_payoff_usd != self.cash_proceeds_usd
                 or not math.isclose(
-                    terminal.expected_value_diagnostic_usd,
+                    terminal.expected_value_usd,
                     self.robust_ev_usd,
                     rel_tol=0.0,
                     abs_tol=1e-12,
@@ -2746,7 +2736,7 @@ class GlobalSingleOrderDecision:
                 or robust_terminal.loss_payoff_usd != -self.cost_usd
                 or robust_terminal.win_payoff_usd != self.cash_proceeds_usd
                 or not math.isclose(
-                    robust_terminal.expected_value_diagnostic_usd,
+                    robust_terminal.expected_value_usd,
                     self.robust_ev_usd,
                     rel_tol=0.0,
                     abs_tol=1e-12,
@@ -2887,7 +2877,7 @@ class GlobalSingleOrderDecision:
                 )
             )
             or not math.isclose(
-                self.terminal_wealth.expected_value_diagnostic_usd,
+                self.terminal_wealth.expected_value_usd,
                 self.robust_ev_usd,
                 rel_tol=0.0,
                 abs_tol=1e-12,
@@ -3782,7 +3772,7 @@ def _binary_terminal_wealth_certificate(
         median_payoff_usd=(win_payoff if robust_q > 0.5 else loss_payoff),
         wealth_after_loss_usd=Decimal(wealth_floor_usd) + loss_payoff,
         wealth_after_win_usd=Decimal(wealth_ceiling_usd) + win_payoff,
-        expected_value_diagnostic_usd=(
+        expected_value_usd=(
             float(robust_q) * float(shares) - float(cost_usd)
         ),
     )
@@ -3942,7 +3932,7 @@ def _buy_rejection_economics(
             probe_expected_fill_price_before_fee=expected_fill_price,
         )
     except ValueError:
-        # This certificate is diagnostic-only: the candidate is already rejected.
+        # This certificate explains an already-final rejection; it cannot authorize action.
         # A non-representable counterfactual must not abort the whole auction.
         return None
 
@@ -4715,7 +4705,7 @@ def _score_global_single_order_sell(
         ),
         wealth_after_loss_usd=loss_after,
         wealth_after_win_usd=win_after,
-        expected_value_diagnostic_usd=float(robust_ev),
+        expected_value_usd=float(robust_ev),
     )
     scored = GlobalSingleOrderDecision(
         candidate=candidate,
@@ -4898,7 +4888,7 @@ def _score_global_sell_point_counterfactual(
     sample_count: int,
     band_alpha: float,
 ) -> GlobalSellPointCounterfactual:
-    """Replay-complete point-q diagnostic; never participates in order selection."""
+    """Replay-complete point-q point_evidence; never participates in order selection."""
 
     point_q = float(point_held_payoff_q)
     if not math.isfinite(point_q) or not 0.0 <= point_q <= 1.0:
@@ -5448,7 +5438,7 @@ def select_global_single_order(
                         sample_count=q_samples.size,
                         band_alpha=band_alpha,
                     )
-                except Exception:  # noqa: BLE001 - diagnostics cannot alter live action
+                except Exception:  # noqa: BLE001 - metrics cannot alter live action
                     point_counterfactual = GlobalSellPointCounterfactual(
                         status="UNAVAILABLE",
                         point_held_payoff_q=point_q,
@@ -6415,573 +6405,3 @@ def _hash(*parts: str) -> str:
         digest.update(p.encode())
         digest.update(b"\x1f")
     return digest.hexdigest()
-
-
-def solve(
-    menu: SolveMenu,
-    *,
-    scenarios: ScenarioService,
-    wealth: WealthStateByAtom,
-    kappa_policy: KappaPolicy,
-    bands_by_family: Any,          # Mapping[str, JointQBand] — typed loosely to stay import-light
-    q_version: str,
-) -> SolutionPlan:
-    """The joint SOLVE (math core, W3 sub-slice 2) — see module docstring for the contract.
-
-    ``max_stake_usd`` is intentionally ABSENT from the core signature (consult REV-2 ruling 6):
-    the solver is budget-aware via ``WealthStateByAtom.cash_usd`` (the ledger's spendable
-    snapshot, present in every atom's wealth); any legacy cash cap is a shim-side concern
-    converted to a cash constraint before core solve, never a second authority in the math.
-    """
-    scenario_set: JointOutcomeScenarioSet = scenarios.scenarios(bands_by_family)
-    atom_ids = scenario_set.atom_ids
-    q_draws = scenario_set.q_draws
-    n_draws = q_draws.shape[0]
-    weights = (
-        scenario_set.draw_weights
-        if scenario_set.draw_weights is not None
-        else np.ones(n_draws, dtype=np.float64)
-    )
-    alpha = scenario_set.alpha
-    kappa = kappa_policy.kappa.as_float()
-
-    w0, payoff, caps, costs, items = _build_arrays(menu, wealth, atom_ids)
-    provider = scenario_set.provider
-    sample_hash = scenario_set.scenario_hash
-    cash = float(wealth.cash_usd)
-
-    # Tail-stability + point-belief stamps (consult REV-2 follow-up): the promotion evidence
-    # gate down-weights a plan whose robust ΔU rests on too few tail draws. ESS handles weights.
-    eff_draws = float(weights.sum() ** 2 / float((weights ** 2).sum())) if weights.size else 0.0
-    tail_draws = alpha * eff_draws
-    base_diag = {
-        "n_draws": float(n_draws),
-        "alpha": float(alpha),
-        "effective_tail_draws": tail_draws,
-        "tail_floor_ok": 1.0 if tail_draws >= _MIN_TAIL_DRAWS else 0.0,
-        "point_belief": 1.0 if n_draws <= 1 else 0.0,
-        "spendable_cash_usd": cash,
-    }
-
-    def _no_trade(reason: str, baseline: float, diagnostics: dict) -> SolutionPlan:
-        return SolutionPlan(
-            plan_id=_hash(menu.family_key, menu.menu_hash, sample_hash, q_version, "NO_TRADE"),
-            family_key=menu.family_key,
-            orders=(),
-            expected_delta_log_wealth=0.0,
-            delta_u_baseline_top1=baseline,
-            kappa_applied=kappa,
-            correlation_rail="caps",
-            scenario_provider=provider,
-            scenario_sample_hash=sample_hash,
-            menu_hash=menu.menu_hash,
-            q_version=q_version,
-            no_trade_reason=reason,
-            repair_certificate=None,
-            diagnostics=diagnostics,
-        )
-
-    if not items:
-        return _no_trade("NO_EXECUTABLE_MENU_ITEMS", 0.0, {**base_diag, "n_menu_items": 0.0})
-
-    x_joint, u_joint, x_top1, u_top1, sweeps = _optimize_continuous(
-        w0, payoff, caps, costs, cash, q_draws, weights, alpha
-    )
-
-    rep_joint = _repair(x_joint, items=items, w0=w0, payoff=payoff, costs=costs, cash=cash, q_draws=q_draws, weights=weights, alpha=alpha, kappa=kappa)
-    rep_top1 = _repair(x_top1, items=items, w0=w0, payoff=payoff, costs=costs, cash=cash, q_draws=q_draws, weights=weights, alpha=alpha, kappa=kappa)
-    baseline_top1 = rep_top1["u_disc"]
-
-    diagnostics = {
-        **base_diag,
-        "continuous_delta_u_joint": u_joint,
-        "continuous_delta_u_top1": u_top1,
-        "discrete_delta_u_joint": rep_joint["u_disc"],
-        "discrete_delta_u_top1": rep_top1["u_disc"],
-        "continuous_units_total": float(x_joint.sum()),
-        "n_menu_items": float(len(items)),
-        "optimizer_sweeps": float(sweeps),
-    }
-
-    # Safe-prefix ordering: most-improving order first, so every filled prefix improves (W2.1).
-    def _marginal(idx_size: tuple[int, Decimal]) -> float:
-        i, size = idx_size
-        xi = np.zeros(payoff.shape[0], dtype=np.float64)
-        xi[i] = float(size)
-        return _objective(xi, w0, payoff, q_draws, weights, alpha)
-
-    parent_vec = {"joint": kappa * x_joint, "top1": kappa * x_top1}
-
-    def _assemble(rep: dict, source: str) -> Optional[dict]:
-        sized = rep["sized"]
-        if not sized or not rep["u_disc"] > 0.0:
-            return None
-        ordered = sorted(sized, key=_marginal, reverse=True)
-        running = np.zeros(payoff.shape[0], dtype=np.float64)
-        prefix_bounds: list[float] = []
-        for i, size in ordered:
-            running[i] = float(size)
-            prefix_bounds.append(_objective(running, w0, payoff, q_draws, weights, alpha))
-        return {
-            "source": source,
-            "rep": rep,
-            "ordered": ordered,
-            "prefix_bounds": prefix_bounds,
-            "safe": all(b > 0.0 for b in prefix_bounds),          # every prefix improves
-            "affordable": rep["spend"] <= cash + 1e-9,            # net outlay within cash
-            "u_disc": rep["u_disc"],
-        }
-
-    candidates = [c for c in (_assemble(rep_joint, "joint"), _assemble(rep_top1, "top1")) if c is not None]
-    valid = [c for c in candidates if c["safe"] and c["affordable"]]
-    if not valid:
-        if any(not c["safe"] for c in candidates):
-            return _no_trade("UNSAFE_PREFIX_DECOMPOSITION", baseline_top1, diagnostics)
-        if any(not c["affordable"] for c in candidates):
-            return _no_trade("BUDGET_EXCEEDED", baseline_top1, diagnostics)
-        return _no_trade("NO_IMPROVING_DISCRETE_PLAN", baseline_top1, diagnostics)
-    chosen = max(valid, key=lambda c: c["u_disc"])
-    diagnostics["chosen_source_joint"] = 1.0 if chosen["source"] == "joint" else 0.0
-
-    orders: list[PlannedOrder] = []
-    for prefix_index, (i, size) in enumerate(chosen["ordered"]):
-        it = items[i]
-        token_id = it.token_id
-        route = it.route
-        if token_id is None and route is not None:
-            legs = getattr(route, "legs", ())
-            if legs:
-                token_id = getattr(legs[0], "token_id", None)
-        orders.append(
-            PlannedOrder(
-                order_id=_hash(menu.menu_hash, it.item_id, str(size)),
-                menu_item_id=it.item_id,
-                kind=it.kind,
-                side=_order_side(it.kind),
-                token_id=token_id,
-                price=None,  # phase-1: the executable price is assigned by the existing submit path
-                size=size,
-                q_version=q_version,
-                safe_prefix_index=prefix_index,
-                snapshot_id=None,
-                ledger_snapshot_id=wealth.ledger_snapshot_id,
-            )
-        )
-
-    order_ids = [o.order_id for o in orders]
-    batch_partition = tuple(
-        tuple(order_ids[k : k + _MAX_ORDERS]) for k in range(0, len(order_ids), _MAX_ORDERS)
-    )
-    continuous_obj = _objective(parent_vec[chosen["source"]], w0, payoff, q_draws, weights, alpha)
-    certificate = RepairCertificate(
-        continuous_objective=continuous_obj,
-        repaired_objective=chosen["u_disc"],
-        chosen_source=chosen["source"],  # type: ignore[arg-type]
-        worst_price_model=_WORST_PRICE_MODEL,
-        tick_size_deltas=chosen["rep"]["tick_deltas"],
-        min_size_promoted=chosen["rep"]["promoted"],
-        dropped_items=chosen["rep"]["dropped"],
-        batch_partition=batch_partition,
-        safe_prefix_objective_bounds=tuple(chosen["prefix_bounds"]),
-        budget_after_repair_usd=cash - chosen["rep"]["spend"],
-    )
-
-    return SolutionPlan(
-        plan_id=_hash(menu.family_key, menu.menu_hash, sample_hash, q_version, *order_ids),
-        family_key=menu.family_key,
-        orders=tuple(orders),
-        expected_delta_log_wealth=chosen["u_disc"],
-        delta_u_baseline_top1=baseline_top1,
-        kappa_applied=kappa,
-        correlation_rail="caps",
-        scenario_provider=provider,
-        scenario_sample_hash=sample_hash,
-        menu_hash=menu.menu_hash,
-        q_version=q_version,
-        no_trade_reason=None,
-        repair_certificate=certificate,
-        diagnostics=diagnostics,
-    )
-
-
-def _read_config_kelly_multiplier() -> float:
-    """The downstream kelly_multiplier config factor — the ONE reproducible piece of the submit
-    boundary haircut at decide() time (consult REV-2 follow-up judgment call).
-
-    The FULL variance-adjusted haircut (SizingContext / evaluate_kelly, event_reactor_adapter.py
-    :5657) also needs bankroll + portfolio-state provider + lead_days that are NOT in the frozen
-    :1379 kwargs, so the shim reproduces only the config base factor and the promotion evidence
-    grades the ACTUAL submitted size from the settlement receipt. Never invent a bankroll side
-    channel. Defaults to 1.0 (the W3 κ posture) if the config is unreadable.
-    """
-    try:
-        from src.config import settings
-
-        value = float(settings["sizing"]["kelly_multiplier"])
-        return value if value > 0.0 else 1.0
-    except Exception:  # noqa: BLE001 - a config read fault must not crash the decision path
-        return 1.0
-
-
-class SolveEngineShim:
-    """Drop-in replacement at the qkernel_spine_bridge.py:1332 construction seam.
-
-    Accepts the SAME constructor surface the bridge passes to FamilyDecisionEngine and the SAME
-    decide() call of :1379. It COMPOSES an inner FamilyDecisionEngine for the decision scaffolding
-    (predictive, served joint_q/band pass-through, family_book, market_coherence, market_implied_q,
-    and the enumerated candidate economics) and REPLACES the selection with the joint solver over
-    a SolveMenu built from the same route surface. The primary leg is re-scored STANDALONE at its
-    post-downstream-haircut size (``LegacyDecisionProjection``); phase-1 evidence grades that
-    projection — its ΔU/size are stamped into ``selected`` so the existing proof overlay / facts
-    writer grade the projection, NEVER the joint plan's ΔU (consult REV-2).
-
-    INJECTED INPUTS (W3.3 ruling): ``spendable_cash_provider`` (the CAS ledger's spendable amount,
-    net of reservations), ``ledger_snapshot_id_provider``, and optionally a
-    ``holdings_snapshot_provider(family_key, ledger_snapshot_id)`` returning exact native YES/NO
-    holdings from that same ledger epoch. The endowment wealth VECTOR is the legacy ``portfolio``
-    A_y (like-for-like with the picker); holdings are never inferred from it. ``engine`` may be
-    injected for tests in place of a real FamilyDecisionEngine. Wired behind the
-    w3_solve_enabled feature flag: qkernel_spine_bridge.py wraps the engine with this shim at its
-    construction seam (:1412) when w3_solve_enabled() is True.
-    """
-
-    def __init__(
-        self,
-        *,
-        engine: Any = None,
-        spendable_cash_provider: Any = None,
-        ledger_snapshot_id_provider: Any = None,
-        holdings_snapshot_provider: Any = None,
-        **engine_kwargs: Any,
-    ) -> None:
-        self._engine = engine
-        self._engine_kwargs = engine_kwargs
-        self._spendable_cash_provider = spendable_cash_provider
-        self._ledger_snapshot_id_provider = ledger_snapshot_id_provider
-        self._holdings_snapshot_provider = holdings_snapshot_provider
-        # Route-surface inputs: prefer explicit kwargs, else read them off the composed engine
-        # (the seam wraps an already-constructed FamilyDecisionEngine as `engine=` so the bridge
-        # edit stays a one-liner — no need to re-pass the builder it already holds).
-        self._route_set_builder = engine_kwargs.get("route_set_builder")
-        if self._route_set_builder is None and engine is not None:
-            self._route_set_builder = getattr(engine, "_route_set_builder", None)
-        if "enable_negrisk_routes" in engine_kwargs:
-            self._enable_negrisk_routes = bool(engine_kwargs["enable_negrisk_routes"])
-        elif engine is not None:
-            self._enable_negrisk_routes = bool(getattr(engine, "_enable_negrisk_routes", False))
-        else:
-            self._enable_negrisk_routes = False
-        # Surfaced for tests / audit; the projection VALUES also flow via ``selected`` downstream.
-        # ``last_plan`` is the joint SolutionPlan (its ΔU is DISTINCT from the projection's
-        # standalone post-haircut ΔU — the two must never be sourced from the same quantity).
-        self.last_projection: Any = None
-        self.last_plan: Any = None
-
-    def _inner_engine(self) -> Any:
-        if self._engine is None:
-            from src.decision.family_decision_engine import FamilyDecisionEngine
-
-            self._engine = FamilyDecisionEngine(**self._engine_kwargs)
-        return self._engine
-
-    def decide(
-        self,
-        case: Any,
-        omega: Any,
-        snapshots: Any,
-        *,
-        portfolio: Any,
-        matrix: Any,
-        captured_at_utc: Any,
-        sizing_candidates: Any,
-        max_stake_usd: Any,
-        shares_for_routing: Any,
-        served_joint_q: Any,
-        served_band: Any,
-        served_payoff_q_lcb_by_side: Any,
-    ) -> "FamilyDecision":
-        """EXACT seam signature (qkernel_spine_bridge.py:1379). Returns a validated FamilyDecision."""
-        from dataclasses import replace
-
-        from src.solve.exits import build_wealth_by_atom
-        from src.solve.kappa import promotion_window_policy
-        from src.solve.menu_adapter import build_solve_menu
-        from src.solve.scenario_service import TransitionalIndependentProduct
-        from src.solve.types import JointOutcomeAtom, LegacyDecisionProjection
-
-        self.last_projection = None
-        self.last_plan = None
-        legacy = self._inner_engine().decide(
-            case, omega, snapshots,
-            portfolio=portfolio, matrix=matrix, captured_at_utc=captured_at_utc,
-            sizing_candidates=sizing_candidates, max_stake_usd=max_stake_usd,
-            shares_for_routing=shares_for_routing, served_joint_q=served_joint_q,
-            served_band=served_band, served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
-            current_state_solve=True,
-        )
-
-        # Ineligible / no-q path: no belief was integrated — pass the legacy no-trade through.
-        if legacy.joint_q is None or legacy.band is None or legacy.family_book is None:
-            return validate_family_decision_contract(legacy)
-
-        family_key = str(case.family_id)
-        bin_ids = [b.bin_id for b in omega.bins]
-        atom_ids = tuple(JointOutcomeAtom.canonical_id({family_key: b}) for b in bin_ids)
-
-        # Same route surface the engine used (phase-1 direct-native).
-        route_set = self._route_set_builder(
-            legacy.family_book, shares=shares_for_routing, enable_negrisk_routes=self._enable_negrisk_routes
-        )
-
-        # Spendable cash and native holdings must come from one ledger generation.  The legacy
-        # ``portfolio`` vector is only a compatibility fallback for the pre-wiring test seam; once
-        # a holdings provider is present, terminal wealth is derived from exact held YES/NO shares
-        # instead of interpreting cost-basis exposure as a settlement payoff.
-        spendable = float(self._spendable_cash_provider()) if self._spendable_cash_provider is not None else None
-        if spendable is None:
-            # No injected ledger read (pre-seam-swap default): fall back to the endowment min so the
-            # budget never fabricates spendable cash the ledger has not confirmed.
-            spendable = float(min(float(portfolio.a(b)) for b in bin_ids))
-        ledger_snapshot_id = (
-            self._ledger_snapshot_id_provider() if self._ledger_snapshot_id_provider is not None else None
-        )
-        holdings = None
-        if self._holdings_snapshot_provider is not None:
-            holdings = self._holdings_snapshot_provider(family_key, ledger_snapshot_id)
-            if holdings is None:
-                raise ValueError("holdings_snapshot_provider returned no ledger snapshot")
-            if holdings.ledger_snapshot_id != ledger_snapshot_id:
-                raise ValueError("holdings and spendable cash use different ledger snapshots")
-            holdings_payout = {
-                JointOutcomeAtom.canonical_id({family_key: b}): sum(
-                    float(holding.shares)
-                    for holding in holdings.endowment_claims
-                    if (
-                        b == holding.bin_id
-                        if holding.side == "YES"
-                        else b != holding.bin_id
-                    )
-                )
-                for b in bin_ids
-            }
-            source_positions = tuple(holding.position_id for holding in holdings.holdings)
-        else:
-            holdings_payout = {
-                JointOutcomeAtom.canonical_id({family_key: b}): float(portfolio.a(b)) - spendable
-                for b in bin_ids
-            }
-            source_positions = ()
-        wealth = build_wealth_by_atom(
-            family_key=family_key, atom_ids=atom_ids, holdings_payout_by_atom_id=holdings_payout,
-            spendable_cash_usd=spendable, ledger_snapshot_id=ledger_snapshot_id,
-            source_positions=source_positions,
-        )
-        menu = build_solve_menu(
-            route_set,
-            family_key=family_key,
-            family_book=legacy.family_book,
-            holdings=holdings,
-            wealth=wealth,
-        )
-
-        scenarios = TransitionalIndependentProduct()
-        bands_by_family = {family_key: legacy.band}
-        q_version = str(legacy.joint_q.identity_hash)
-        plan = solve(
-            menu, scenarios=scenarios, wealth=wealth, kappa_policy=promotion_window_policy(),
-            bands_by_family=bands_by_family, q_version=q_version,
-        )
-        self.last_plan = plan
-
-        # Re-score every native leg from CURRENT state only.  The composed legacy engine is
-        # scaffolding (predictive/q/book/route construction); its settlement-fitted reliability,
-        # selection-calibrator, direction and market-coherence verdicts have no authority in W3.
-        candidate_decisions = self._current_candidate_decisions(
-            legacy=legacy,
-            matrix=matrix,
-            portfolio=portfolio,
-            sizing_candidates=sizing_candidates,
-            max_stake_usd=max_stake_usd,
-            served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
-            replace=replace,
-        )
-        econ_by_route = {d.economics.route_id: d.economics for d in candidate_decisions}
-
-        selected, no_trade_reason, projection = self._project_primary_leg(
-            plan=plan, menu=menu, wealth=wealth, scenarios=scenarios, bands_by_family=bands_by_family,
-            atom_ids=atom_ids, econ_by_route=econ_by_route, replace=replace,
-            LegacyDecisionProjection=LegacyDecisionProjection,
-        )
-        self.last_projection = projection
-
-        if selected is not None:
-            candidate_decisions = tuple(
-                replace(d, economics=selected)
-                if d.economics.route_id == selected.route_id
-                else d
-                for d in candidate_decisions
-            )
-
-        receipt_hash = _hash(
-            legacy.decision_id, plan.plan_id, q_version,
-            selected.route_id if selected is not None else f"NO_TRADE:{no_trade_reason}",
-        )
-        decision = replace(
-            legacy,
-            selected=selected,
-            no_trade_reason=no_trade_reason,
-            candidates=tuple(d.economics for d in candidate_decisions),
-            candidate_decisions=candidate_decisions,
-            receipt_hash=receipt_hash,
-        )
-        return validate_family_decision_contract(decision)
-
-    @staticmethod
-    def _current_candidate_decisions(
-        *,
-        legacy,
-        matrix,
-        portfolio,
-        sizing_candidates,
-        max_stake_usd,
-        served_payoff_q_lcb_by_side,
-        replace,
-    ):
-        """Return symmetric YES/NO economics from the served band and live cost curves.
-
-        Missing or malformed current sizing evidence removes the leg from the executable menu.
-        ``served_payoff_q_lcb_by_side`` belongs to the pre-W3 proof surface and may carry a
-        settlement-history coverage shrink.  Current-state W3 instead derives every YES/NO
-        lower bound from ``legacy.band.samples`` inside ``compute_candidate_economics`` so the
-        local certificate and the global auction consume the same decision-time simplex.
-        """
-        from src.decision.family_decision_engine import (
-            DAY0_REMAINING_DAY_GUARD_BASIS,
-        )
-        from src.decision.payoff_vector import compute_candidate_economics
-
-        sample_hash = str(getattr(legacy.band, "sample_hash", "") or "")
-        n_draws = int(getattr(getattr(legacy.band, "samples", None), "shape", (0,))[0] or 0)
-        alpha = float(getattr(legacy.band, "alpha", 0.05) or 0.05)
-        current = []
-        for decision in legacy.candidate_decisions:
-            route = decision.route
-            sizing = sizing_candidates.get((route.bin_id, route.side))
-            if sizing is None or not sizing.is_tradeable:
-                continue
-            try:
-                economics = compute_candidate_economics(
-                    route,
-                    joint_q=legacy.joint_q,
-                    band=legacy.band,
-                    sizing_candidate=sizing,
-                    matrix=matrix,
-                    exposure=portfolio,
-                    max_stake_usd=max_stake_usd,
-                    alpha=alpha,
-                    guarded_payoff_q_lcb=None,
-                )
-            except Exception:  # noqa: BLE001 - missing current economics is a fail-closed leg.
-                continue
-            hard_fact = (
-                str(getattr(decision, "q_lcb_guard_basis", "") or "")
-                == DAY0_REMAINING_DAY_GUARD_BASIS
-                and str(getattr(decision, "selection_guard_basis", "") or "")
-                == DAY0_REMAINING_DAY_GUARD_BASIS
-                and str(getattr(decision, "q_lcb_guard_cell_key", "") or "")
-                == "day0_monotone_hard_fact_q_lcb"
-                and str(getattr(decision, "selection_guard_cell_key", "") or "")
-                == "day0_monotone_hard_fact_q_lcb"
-                and getattr(decision, "q_lcb_guard_abstained", None) is False
-                and getattr(decision, "selection_guard_abstained", None) is False
-            )
-            guard_basis = (
-                DAY0_REMAINING_DAY_GUARD_BASIS
-                if hard_fact
-                else CURRENT_POSTERIOR_BAND_BASIS
-            )
-            guard_cell = (
-                "day0_monotone_hard_fact_q_lcb" if hard_fact else sample_hash
-            )
-            current.append(
-                replace(
-                    decision,
-                    economics=economics,
-                    direction_law_ok=True,
-                    coherence_allows=True,
-                    q_lcb_guard_basis=guard_basis,
-                    q_lcb_guard_abstained=False,
-                    q_lcb_guard_cell_key=guard_cell,
-                    selection_guard_basis=guard_basis,
-                    selection_guard_abstained=False,
-                    selection_guard_cell_key=guard_cell,
-                    selection_guard_n=n_draws,
-                    selection_guard_q_safe=economics.payoff_q_lcb,
-                )
-            )
-        return tuple(current)
-
-    def _project_primary_leg(
-        self, *, plan, menu, wealth, scenarios, bands_by_family, atom_ids, econ_by_route, replace,
-        LegacyDecisionProjection,
-    ):
-        """Phase-1 selection: derive the primary leg, re-score it STANDALONE at its post-haircut
-        size, and gate on ``phase1_tradeable``. Returns ``(selected, no_trade_reason, projection)``.
-        """
-        from decimal import Decimal
-
-        haircut = _read_config_kelly_multiplier()
-
-        if not plan.orders:
-            projection = LegacyDecisionProjection(
-                primary_order_id=None, projected_selected=None, standalone_primary_delta_u=0.0,
-                projection_reason=plan.no_trade_reason or "NO_TRADE", downstream_haircut_alive=True,
-                submitted_size_after_haircut=Decimal("0"),
-            )
-            return None, (plan.no_trade_reason or "NO_IMPROVING_DISCRETE_PLAN"), projection
-
-        primary = min(plan.orders, key=lambda o: o.safe_prefix_index)  # safe_prefix_index 0
-        econ = econ_by_route.get(primary.menu_item_id)
-
-        # Standalone re-score of the primary leg ALONE at the post-haircut size.
-        scenario_set = scenarios.scenarios(bands_by_family)
-        q_draws = scenario_set.q_draws
-        weights = (
-            scenario_set.draw_weights if scenario_set.draw_weights is not None
-            else np.ones(q_draws.shape[0], dtype=np.float64)
-        )
-        alpha = scenario_set.alpha
-        w0, payoff, caps, costs, items = _build_arrays(menu, wealth, atom_ids)
-        idx = next((i for i, it in enumerate(items) if it.item_id == primary.menu_item_id), None)
-        post_haircut_units = Decimal(str(float(primary.size) * haircut))
-        standalone_du = float("-inf")
-        if idx is not None:
-            x = np.zeros(payoff.shape[0], dtype=np.float64)
-            x[idx] = float(post_haircut_units)
-            standalone_du = _objective(x, w0, payoff, q_draws, weights, alpha)
-
-        direct_executable = primary.kind in ("buy_yes", "buy_no") and idx is not None
-        projection = LegacyDecisionProjection(
-            primary_order_id=primary.order_id,
-            projected_selected=primary.menu_item_id,
-            standalone_primary_delta_u=standalone_du,
-            projection_reason="PHASE1_PRIMARY_LEG",
-            downstream_haircut_alive=True,
-            submitted_size_after_haircut=post_haircut_units,
-        )
-        # Phase-1 gate: primary leg must be direct-executable AND still improving alone post-haircut.
-        if not (direct_executable and projection.phase1_tradeable):
-            return None, "PHASE1_PRIMARY_LEG_NOT_TRADEABLE", projection
-
-        # Stamp the PROJECTION (standalone post-haircut ΔU + size) into `selected` so downstream
-        # evidence grades the executed leg, never the joint plan's ΔU. Size in USD = units × cost.
-        unit_cost = float(items[idx].unit_payoff.unit_cost_usd)
-        post_haircut_stake_usd = Decimal(str(float(post_haircut_units) * unit_cost))
-        if econ is not None:
-            selected = replace(
-                econ, optimal_stake_usd=post_haircut_stake_usd, optimal_delta_u=standalone_du,
-            )
-        else:
-            selected = None
-            return None, "PHASE1_PRIMARY_LEG_ECONOMICS_MISSING", projection
-        return selected, None, projection

@@ -4,7 +4,7 @@
 #   two diagnosis rounds were burned on (a) datetime('now') vs ISO-T lexicographic
 #   mismatch silently matching all rows, (b) unguarded $(sqlite3 ...) watch loops
 #   false-firing on transient DB locks.
-"""Tiny shared helpers for read-only diagnostic probes against the live Zeus DBs.
+"""Tiny shared helpers for read-only observation probes against the live Zeus DBs.
 
 LAWS this module encodes (use it instead of re-deriving them per probe):
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-07-09; last_reviewed=2026-07-15; last_reused=2026-07-15
-# Purpose: read-only diagnostic for EDLI YES/NO selection skew from canonical order events.
+# Purpose: read-only observation for EDLI YES/NO selection skew from canonical order events.
 # Authority basis: AGENTS.md live-money proof gates; operator focus on absent high-quality YES fills.
 """Audit recent EDLI YES/NO candidate selection skew from canonical event payloads.
 
-This diagnostic reads ``edli_live_order_events`` in read-only SQLite mode. It
+This observation reads ``edli_live_order_events`` in read-only SQLite mode. It
 does not authorize live trading, mutate DB truth, or contact venues.
 """
 

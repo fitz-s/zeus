@@ -116,7 +116,6 @@ _P1_BASELINE_VIOLATIONS: frozenset[str] = frozenset({
     "src/state/venue_command_repo.py::append_trade_fact",
     "src/state/venue_command_repo.py::insert_command",
     "src/state/venue_command_repo.py::insert_submission_envelope",
-    "src/strategy/benchmark_suite.py::record_benchmark_run",
 })
 
 

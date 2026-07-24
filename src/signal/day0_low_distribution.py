@@ -14,7 +14,7 @@ Physical law (LOW), for a target local day D at decision time tau:
 The observed low is an UPPER BOUND on the day's minimum only. ``current_temp`` must NEVER enter
 the settlement-value path of an extreme statistic — a daily minimum is a path extremum, not a
 convex blend of the current temperature with the remaining forecast. ``current_temp`` may be
-diagnostic / uncertainty context elsewhere, never a daily-min sample.
+telemetry / uncertainty context elsewhere, never a daily-min sample.
 """
 from __future__ import annotations
 

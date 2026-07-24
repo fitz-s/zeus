@@ -17,7 +17,6 @@ Daily-driver commands and the scripts you reach for when something is wrong.
 | `healthcheck.py` | Operator health summary: daemon liveness, launchd contracts, source truth, entry capability, settlement freshness. Exit 0/1/2 |
 | `ops/health_probe.py` | Liveness-first health probe: daemon ps-alive, world-DB WAL size, APScheduler stalls, artifact freshness, city coverage. Run as first step on any resume |
 | `deploy_live.py` | Safe live restart: refuses `launchctl kickstart` while the live checkout is uncommitted/unpushed; requires preflight gates |
-| `preflight_restart_check.py` | Read-only flag posture check (JSON only, no DB/network): answers "which flag to flip next" |
 | `zeus_status.py` | Full money-path heartbeat: daemons → events → blocks → surface → positions in one invocation |
 | `zeus_blocks.py` | Enumerate current runtime entry blockers |
 | `antibody_scan.py` | Macro system health: pipeline health, data integrity, settlement integrity, position sanity — four immune-system questions |
@@ -60,11 +59,11 @@ dry-run protection. Do not re-run applied migrations.
 
 `health_probe.py` (see Start Here), `orderable_bias_pass_candidates.py`
 
-### `calibration/` — Calibration diagnostics (1 script)
+### `calibration/` — Calibration analysis (1 script)
 
 `q_lcb_coverage_audit.py` — q_lcb coverage audit
 
-### `fusion/` — Fusion diagnostics (1 script)
+### `fusion/` — Fusion analysis (1 script)
 
 `lead_profile_walkforward.py` — walk-forward lead profile analysis
 
@@ -78,8 +77,8 @@ dry-run protection. Do not re-run applied migrations.
 
 ### Live operations & deploy
 
-`deploy_live.py`, `preflight_restart_check.py`, `arm_live_mode.sh`,
-`check_live_restart_preflight.py`, `check_live_release_gate.py`,
+`deploy_live.py`,
+`check_live_restart_preflight.py`, `check_single_live_semantics.py`,
 `check_full_transport_ship_readiness.py`, `live_readiness_check.py`,
 `live_smoke_test.py`, `verify_fill_e2e.py`, `verify_e2e_money_path.py`,
 `restore_live_trading_launchagent.py`
@@ -94,7 +93,7 @@ heartbeat, e2e canary, work-packet, and writer-signature checks.
 `assert_invariant_coverage.py`, `assert_test_quality.py` (in `ci/`)
 `semantic_linter.py`, `source_contract_lint.py`, `doc_citation_lint.py`, `antibody_scan.py`
 
-### Diagnostics (read-only investigations)
+### Analysis (read-only investigations)
 
 `audit_*` (15 scripts): architecture alignment, city data readiness, error model,
 market price semantics, observation instants, replay fidelity, settlement provenance,
@@ -107,7 +106,7 @@ fill e2e, analytic CI coverage.
 
 `validate_*` (7 scripts): dynamic alpha, ENS refit OOS, grid representativeness fusion, assumptions, etc.
 
-`zeus_status.py`, `zeus_blocks.py`, `state_census.py`, `equity_curve.py`, `attribution_drift_weekly.py`,
+`zeus_status.py`, `zeus_blocks.py`, `state_census.py`, `equity_curve.py`,
 `edge_observation_weekly.py`, `obs_coverage_report.py`, `data_completeness_audit.py`
 
 ### ETL & backfill writers
@@ -157,8 +156,7 @@ reference but are **not repeatable tools**. Do not re-run without reading the he
 **Dated task scripts**: `task_2026-06-09_drop_dead_tables.py`,
 `task_2026-06-09_restart_zeus_daemons.sh`, `run_platt_oos_49.sh`
 
-**Single-use switches**: `apply_replacement_forecast_live_switch.py`,
-`rollback_phase3_t3.py`, `init_replacement_forecast_live_schema.py`,
+**Single-use repairs**: `rollback_phase3_t3.py`,
 `backfill_london_f_to_c_2026_05_08.py`,
 `backfill_settlement_outcomes_canonical_2026_06_02.py`,
 `backfill_settlement_unit_2026_06_03.py`

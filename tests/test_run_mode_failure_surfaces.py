@@ -1822,71 +1822,8 @@ def test_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     assert result["surfaces"]["heartbeat"]["ok"] is True
 
 
-def test_mode_specific_run_mode_failed_yields_degraded_in_legacy_cron(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """_run_mode catches exceptions, so mode-specific failure is the authority."""
-    monkeypatch.setattr(live_health, "_live_execution_mode", lambda: "legacy_cron")
-    sd = tmp_path / "state"
-    sd.mkdir()
-    cycle_time = _now_iso(-30)
-    _write(
-        sd / "daemon-heartbeat.json",
-        {"alive": True, "timestamp": cycle_time, "mode": "live"},
-    )
-    _write(
-        sd / "scheduler_jobs_health.json",
-        {
-            "run_mode": {"status": "OK", "last_run_at": cycle_time, "last_success_at": cycle_time},
-            "run_mode:opening_hunt": {
-                "status": "FAILED",
-                "last_run_at": cycle_time,
-                "last_failure_reason": "exchange reconcile stuck",
-            },
-        },
-    )
-    _write(
-        sd / "status_summary.json",
-        {
-            "timestamp": cycle_time,
-            "cycle": {
-                "mode": "opening_hunt",
-                "completed_at": cycle_time,
-                "candidates": 0,
-                "entry_orders_submitted": 0,
-            },
-        },
-    )
-
-    result = compute_composite_live_health(state_dir=sd)
-
-    assert result["status"] == "DEGRADED"
-    assert result["surfaces"]["run_mode"]["ok"] is False
-    assert result["surfaces"]["run_mode"]["issue"] == (
-        "RUN_MODE_FAILED[run_mode:opening_hunt]: exchange reconcile stuck"
-    )
 
 
-def test_legacy_run_mode_failure_ignored_in_edli_live(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """edli_live does not register legacy cron run_mode jobs; stale rows are not live evidence."""
-    monkeypatch.setattr(live_health, "_live_execution_mode", lambda: "edli_live")
-    sd = tmp_path / "state"
-    sd.mkdir()
-    _setup_healthy_state(sd)
-    scheduler = json.loads((sd / "scheduler_jobs_health.json").read_text())
-    scheduler["run_mode:day0_capture"] = {
-        "status": "FAILED",
-        "last_run_at": "2026-06-14T00:47:10+00:00",
-        "last_failure_reason": "legacy cron stale row",
-    }
-    _write(sd / "scheduler_jobs_health.json", scheduler)
-
-    result = compute_composite_live_health(state_dir=sd)
-
-    assert result["surfaces"]["run_mode"]["ok"] is True
-    assert "run_mode" not in result["failing_surfaces"]
 
 
 def test_forecast_event_bridge_not_evaluated_without_attested_main_daemon(
@@ -6124,7 +6061,7 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     )
     monkeypatch.setattr(
         main_module,
-        "_edli_refresh_global_allocator_for_live_bridge",
+        "_edli_refresh_global_allocator",
         lambda conn: refresh_calls.append(conn) or {"configured": True},
     )
     monkeypatch.setattr(
@@ -6581,110 +6518,6 @@ def test_exit_monitor_incomplete_runtime_cycle_is_not_success(monkeypatch) -> No
     assert not main_module._held_position_monitor_active.is_set()
 
 
-def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
-    import threading
-
-    import src.config as config_module
-    import src.data.polymarket_client as polymarket_module
-    import src.engine.cycle_runner as cycle_module
-    import src.execution.exit_lifecycle as exit_module
-    import src.observability.scheduler_health as health_module
-    import src.observability.status_summary as status_module
-    import src.state.canonical_write as canonical_module
-    import src.state.decision_chain as decision_chain_module
-
-    class Conn:
-        closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    class Client:
-        def __init__(
-            self,
-            *,
-            public_http_timeout=None,  # noqa: ANN001
-            public_http_limits=None,  # noqa: ANN001
-            public_request_priority=None,  # noqa: ANN001
-        ):
-            from src.data.polymarket_request_governor import RequestPriority
-
-            assert public_http_timeout is not None
-            assert public_http_limits.keepalive_expiry == 180.0
-            assert public_request_priority is RequestPriority.HELD_REDUCE_ONLY
-
-        def close(self) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            pass
-
-    def fail_monitor(*_args, **_kwargs):
-        raise RuntimeError("monitor failed")
-
-    conn = Conn()
-    active = threading.Event()
-    completed: list[bool] = []
-    health: list[tuple[bool, str | None]] = []
-    artifacts = []
-
-    monkeypatch.setattr(
-        config_module,
-        "settings",
-        {"edli": {"real_order_submit_enabled": False}},
-    )
-    monkeypatch.setattr(cycle_module, "get_connection", lambda: conn)
-    monkeypatch.setattr(cycle_module, "load_portfolio", lambda **_kwargs: object())
-    monkeypatch.setattr(cycle_module, "get_tracker", object)
-    monkeypatch.setattr(cycle_module, "_execute_monitoring_phase", fail_monitor)
-    monkeypatch.setattr(
-        exit_module,
-        "_check_monitor_cadence_watchdog",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        exit_module,
-        "_refresh_global_allocator_for_held_position_monitor",
-        lambda *_args, **_kwargs: {"configured": False},
-    )
-    monkeypatch.setattr(polymarket_module, "PolymarketClient", Client)
-    monkeypatch.setattr(
-        canonical_module,
-        "commit_then_export",
-        lambda _conn, *, db_op, json_exports: db_op(),
-    )
-    def store_artifact(_conn, artifact):
-        artifacts.append(artifact)
-        return 1
-
-    monkeypatch.setattr(decision_chain_module, "store_artifact", store_artifact)
-    monkeypatch.setattr(status_module, "write_cycle_pulse", lambda _summary: None)
-    monkeypatch.setattr(
-        health_module,
-        "_write_scheduler_health",
-        lambda _name, *, failed, reason=None, **_kwargs: health.append(
-            (failed, reason)
-        ),
-    )
-
-    succeeded = exit_module.run_exit_monitor_cycle(
-        held_position_monitor_active=active,
-        mark_held_position_monitor_complete=lambda: (
-            active.clear(),
-            completed.append(True),
-        ),
-    )
-
-    assert succeeded is False
-    assert conn.closed is True
-    assert completed == [True]
-    assert health == [(True, "monitor failed")]
-    assert len(artifacts) == 1
-    assert artifacts[0].completed_at
-    exit_module._reset_held_monitor_clob_client()
 
 
 def test_held_monitor_reuses_warm_bounded_clob_transport(monkeypatch) -> None:
@@ -6996,7 +6829,7 @@ def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> N
     )
     monkeypatch.setattr(
         main_module,
-        "_edli_refresh_global_allocator_for_live_bridge",
+        "_edli_refresh_global_allocator",
         lambda conn: refresh_calls.append(conn) or {"configured": True},
     )
     monkeypatch.setattr(
@@ -7106,7 +6939,7 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     )
     monkeypatch.setattr(
         main_module,
-        "_edli_refresh_global_allocator_for_live_bridge",
+        "_edli_refresh_global_allocator",
         lambda conn: {"configured": True},
     )
     monkeypatch.setattr(

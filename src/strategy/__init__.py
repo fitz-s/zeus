@@ -3,26 +3,4 @@
 # Authority basis: architecture/module_manifest.yaml strategy module registry
 """Strategy package exports."""
 
-from src.strategy.benchmark_suite import (
-    BenchmarkEnvironment,
-    BenchmarkObservation,
-    EvidenceGrade,
-    PromotionDecision,
-    PromotionVerdict,
-    ReplayCorpus,
-    SemanticDriftFinding,
-    StrategyBenchmarkSuite,
-    StrategyMetrics,
-)
-
-__all__ = [
-    "BenchmarkEnvironment",
-    "BenchmarkObservation",
-    "EvidenceGrade",
-    "PromotionDecision",
-    "PromotionVerdict",
-    "ReplayCorpus",
-    "SemanticDriftFinding",
-    "StrategyBenchmarkSuite",
-    "StrategyMetrics",
-]
+__all__: list[str] = []

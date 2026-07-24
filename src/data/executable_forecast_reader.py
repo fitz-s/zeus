@@ -185,11 +185,11 @@ class ExecutableForecastReadResult:
     status: str
     reason_code: str
     snapshot: ExecutableForecastSnapshot | None = None
-    # TRIBUNAL Finding 8 — inter-cycle spread diagnostics (additive, election byte-identical).
+    # TRIBUNAL Finding 8 — inter-cycle spread telemetry (additive, election byte-identical).
     # candidate_snapshot_count: number of rows matching the WHERE clause (before LIMIT 1).
     # candidate_snapshot_ids: all matching snapshot_ids in election-rank order.
     # inter_cycle_spread: stdev of source_cycle_time ordinals (seconds-since-epoch diff)
-    #   across candidates; 0.0 when single candidate; None when diagnostics not available.
+    #   across candidates; 0.0 when single candidate; None when telemetry not available.
     # election_reason: human-readable summary of why the elected snapshot won.
     candidate_snapshot_count: int | None = None
     candidate_snapshot_ids: List[int] | None = None
@@ -671,13 +671,13 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
         raise ValueError("unsupported ensemble_snapshots authority table")
 
 
-def _snapshot_diagnostic_query_sql(table: str, *, source_run_id_present: bool) -> str:
+def _snapshot_telemetry_query_sql(table: str, *, source_run_id_present: bool) -> str:
     """Return SQL that fetches snapshot_id + source_cycle_time for ALL matching rows
-    (no LIMIT) in election-rank order.  Used only for TRIBUNAL Finding 8 diagnostics —
+    (no LIMIT) in election-rank order.  Used only for TRIBUNAL Finding 8 telemetry —
     does NOT change which snapshot is elected.
 
     Created: 2026-05-29
-    Authority: TRIBUNAL Finding 8 (additive diagnostic — election byte-identical).
+    Authority: TRIBUNAL Finding 8 (additive telemetry — election byte-identical).
     """
     if table == f"{FORECASTS_SCHEMA}.ensemble_snapshots":
         extra_filter = "AND source_run_id = ?" if source_run_id_present else ""
@@ -876,8 +876,8 @@ def read_executable_forecast_snapshot(
             else None
         ),
     )
-    # TRIBUNAL Finding 8 — additive diagnostics (election byte-identical).
-    # Run a separate no-LIMIT diagnostic query to materialise the full candidate set.
+    # TRIBUNAL Finding 8 — additive telemetry (election byte-identical).
+    # Run a separate no-LIMIT telemetry query to materialise the full candidate set.
     _diag_candidate_count: int | None = None
     _diag_candidate_ids: List[int] | None = None
     _diag_spread: float | None = None
@@ -886,7 +886,7 @@ def read_executable_forecast_snapshot(
         diag_rows = [
             dict(r)
             for r in conn.execute(
-                _snapshot_diagnostic_query_sql(table, source_run_id_present=source_run_id is not None),
+                _snapshot_telemetry_query_sql(table, source_run_id_present=source_run_id is not None),
                 tuple(params),
             ).fetchall()
         ]
@@ -902,7 +902,7 @@ def read_executable_forecast_snapshot(
         else:
             _diag_election_reason = "UNKNOWN"
     except Exception:
-        # Diagnostic query failure must never block the elected result.
+        # Telemetry query failure must never block the elected result.
         pass
     return ExecutableForecastReadResult(
         "LIVE_ELIGIBLE",
@@ -1325,7 +1325,7 @@ def read_executable_forecast(
     # review5.23 P1-1: do NOT hard-gate on scope-level producer readiness before
     # enumeration.  readiness_state uses ON CONFLICT(scope_key) DO UPDATE so newer
     # cycles overwrite older ones; a blocked 12Z row must not prevent a valid 00Z
-    # coverage from being returned.  producer_reason is used as a diagnostic
+    # coverage from being returned.  producer_reason is used as a telemetry
     # fallback ONLY when enumeration yields no passing candidates.
     producer_reason = _is_live_readiness(producer, now_utc=now)
 
@@ -1380,7 +1380,7 @@ def read_executable_forecast(
         # No candidate passed every gate.
         # If the latest scope-level producer readiness was already blocked, surface
         # that reason directly — it is the authoritative explanation for why no
-        # bundle could be elected (review5.23 P1-1 diagnostic fallback).
+        # bundle could be elected (review5.23 P1-1 telemetry fallback).
         if producer_reason is not None:
             return ExecutableForecastBundleResult("BLOCKED", producer_reason)
         # Otherwise fall back to the producer's own coverage ONCE to surface its

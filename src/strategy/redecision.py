@@ -133,7 +133,7 @@ class CandidateLifecycleState(StrEnum):
     # is PROVEN through submit recapture under that mode's economics (a MAKER
     # rests at the admitted limit with zero taker fee and skips the PRICE_MOVED
     # ceiling; a TAKER pays full fee under the bounded ceiling). The final command
-    # builder may NOT re-decide the mode: if the fresh book / governor / canary /
+    # builder may NOT re-decide the mode: if the fresh book / governor / probe /
     # EV boundary would change it, the proven economics are stale and the submit
     # must ABORT and defer to a full re-rank next cycle. Fail-closed: a missing /
     # unknown mode at the final stage is treated as unproven and also aborts here
@@ -194,7 +194,7 @@ class ReversalReason(StrEnum):
                        not an edge reversal (PR#404 P0-1).
         MODE_FLIPPED — the selected proof's maker/taker execution_mode_intent was
                        PROVEN through submit recapture under that mode's economics,
-                       but the final command builder's fresh book / governor / canary
+                       but the final command builder's fresh book / governor / probe
                        / EV boundary would change the mode. The proven economics are
                        stale; the submit aborts and defers to a full re-rank. Order-TYPE
                        authority going stale, NOT an edge / rank / price reversal
@@ -353,7 +353,7 @@ class RankDecision:
 
 
 @dataclass(frozen=True)
-class FallbackPromotion:
+class FallbackDisposition:
     """Outcome of asking the engine to act on a fallback after a primary abort.
 
     Hidden #7 antibody: a fallback is WATCH-only. This object always reports
@@ -661,11 +661,11 @@ class RedecisionEngine:
     # ------------------------------------------------------------------
     # Fallback discipline — Hidden #7 antibody (spec §6 / §9 Hidden #7).
     # ------------------------------------------------------------------
-    def promote_fallback_on_primary_abort(
+    def hold_fallback_after_primary_abort(
         self,
         fallback: "NativeSideCandidate",
-    ) -> FallbackPromotion:
-        """A primary abort does NOT promote a fallback to submit (Hidden #7).
+    ) -> FallbackDisposition:
+        """A primary abort keeps a fallback away from submit authority (Hidden #7).
 
         The fallback is WATCH-only. It can become primary ONLY by passing a FULL
         re-rank (fresh book capture + probability validation + FDR validation +
@@ -674,7 +674,7 @@ class RedecisionEngine:
         =True``. There is no parameter that flips it to submit — a primary abort
         alone is never sufficient authority.
         """
-        return FallbackPromotion(
+        return FallbackDisposition(
             candidate=fallback,
             state=CandidateLifecycleState.WATCH,
             may_submit=False,
@@ -698,7 +698,7 @@ class RedecisionEngine:
         gate) ONLY when it is genuinely primary. A fallback that has NOT passed a
         full re-rank (``became_primary_via_rerank=False``) is rejected with a
         hard error — this is the Hidden #7 antibody at the state-transition
-        boundary, complementing :meth:`promote_fallback_on_primary_abort`.
+        boundary, complementing :meth:`hold_fallback_after_primary_abort`.
 
         On success the candidate is staged for recapture (no submission yet —
         the recapture gate :meth:`evaluate_submit_recapture` still runs and can

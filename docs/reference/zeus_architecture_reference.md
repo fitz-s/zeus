@@ -30,10 +30,10 @@ Edge → BH FDR → Fractional Kelly → Position Size
 - q is built and persisted in `src/data/replacement_forecast_materializer.py` `_insert_posterior` (owns q_mode); σ_pred floor in `_replacement_bayes_precision_fusion_override`.
 - The single live settlement integrator is `src/calibration/emos.py` `bin_probability_settlement` (WMO round-half preimage of N(μ*, σ)).
 
-**The Probability Chain (DIAGNOSTIC BASELINE — comparison/provenance only, NOT the live q):**
+**The Probability Chain (OFFLINE_EVIDENCE BASELINE — comparison/provenance only, NOT the live q):**
 `51 ENS members -> analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture; 10k-MC p_raw_vector_from_maxes retired) -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> market_fusion.compute_posterior (model_only_v1 — NO market-prior blend live) -> bootstrap q_lcb`
 
-This baseline is not joined to the live q. The former `min(...)` cap/floor join was deleted; baseline q may appear only as comparison/provenance unless new authority explicitly reconnects it. The legacy `α-weighted Market Fusion → P_posterior` blend is spec-only (`src/strategy/market_fusion.py` `compute_posterior` runs `model_only_v1`); the 10k Monte-Carlo P_raw is retired in favor of the closed-form `src/signal/ensemble_signal.py` `analytic_p_raw_vector_from_maxes`. ENS bias correction (`src/calibration/ens_bias_model.py`; flag `settings.bias_correction_enabled`, default `false`) and the Data Density Discount (DDD) Kelly scaling remain baseline-path features.
+This baseline is not joined to the live q. The former `min(...)` cap/floor join was deleted; baseline q may appear only as comparison/provenance unless new authority explicitly reconnects it. The legacy `α-weighted Market Fusion → P_posterior` blend is spec-only (`src/strategy/market_fusion.py` `compute_posterior` runs `model_only_v1`); the 10k Monte-Carlo P_raw is retired in favor of the closed-form `src/signal/ensemble_signal.py` `analytic_p_raw_vector_from_maxes`. Historical ENS-bias and DDD calculations remain baseline-path evidence; they have no alternate live enablement flag.
 
 ### Platform Configuration & Change Control
 

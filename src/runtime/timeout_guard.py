@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-14
 # Authority basis:
 #   - 2026-05-13: ECMWF hang antibody bundle — /tmp/zeus_module_audit.md row "rglob on stale mount"
-#   - 2026-05-14: ECMWF wedge diagnostic — latent deadlock fix. The original
+#   - 2026-05-14: ECMWF wedge telemetry — latent deadlock fix. The original
 #     `with ThreadPoolExecutor(...) as ex:` form calls `shutdown(wait=True)`
 #     on exit, which blocks forever on a wedged worker thread. The TimeoutError
 #     raised from `fut.result(timeout=...)` triggers the `with` __exit__ BEFORE

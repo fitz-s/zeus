@@ -57,11 +57,6 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'collateral_reservations': Domain.TRADE,
     'collateral_unsettled_proceeds': Domain.TRADE,
     'control_overrides_history': Domain.WORLD,
-    # W2.4 (2026-07-02) verifier finding: CTF split/merge/convert command ledger
-    # (src/execution/ctf_conversion_commands.py) — trade DB, same domain as
-    # settlement_commands/settlement_command_events (its journaling precedent).
-    'ctf_conversion_command_events': Domain.TRADE,
-    'ctf_conversion_commands': Domain.TRADE,
     # Local-ledger excision LX-T2-a (2026-07-13): durable CTF token discovery log.
     'ctf_token_registry': Domain.TRADE,
     'cycle_advance_enqueues': Domain.FORECASTS,
@@ -102,7 +97,6 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'ensemble_snapshots': Domain.FORECASTS,
     'entry_exposure_obligations': Domain.TRADE,
     'event_dead_letters': Domain.WORLD,
-    'evidence_tier_assignments': Domain.WORLD,
     'exchange_reconcile_findings': Domain.TRADE,
     'executable_market_snapshot_invalidations': Domain.TRADE,
     'executable_market_snapshot_latest': Domain.TRADE,
@@ -116,7 +110,6 @@ CANONICAL_OWNER: dict[str, Domain] = {
     # LX-T4 (3b08139f1) continuous fill synchronizer cursor state.
     'fill_sync_watermarks': Domain.TRADE,
     'forecast_posteriors': Domain.FORECASTS,
-    'forecast_skill': Domain.WORLD,
     'forecasts': Domain.WORLD,
     'fusion_upgrade_enqueues': Domain.FORECASTS,
     'historical_forecasts': Domain.WORLD,
@@ -127,8 +120,6 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'market_microstructure_snapshots': Domain.FORECASTS,
     'market_price_history': Domain.TRADE,
     'market_topology_state': Domain.WORLD,
-    'model_bias': Domain.WORLD,
-    'model_bias_ens': Domain.WORLD,
     'no_trade_events': Domain.WORLD,
     'no_trade_regret_events': Domain.WORLD,
     'observation_instants': Domain.WORLD,
@@ -174,7 +165,6 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'source_contract_audit_events': Domain.WORLD,
     'source_run': Domain.FORECASTS,
     'source_run_coverage': Domain.FORECASTS,
-    'source_time_frontier': Domain.FORECASTS,
     'strategy_health': Domain.TRADE,
     'temp_persistence': Domain.WORLD,
     'token_price_log': Domain.TRADE,
@@ -182,9 +172,7 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'token_suppression_history': Domain.TRADE,
     'trade_decisions': Domain.TRADE,
     # Trade-DB epoch marker (single-instance, unlike schema_epoch).
-    'truth_epoch': Domain.TRADE,
     'uma_resolution': Domain.WORLD,
-    'validated_calibration_transfers': Domain.WORLD,
     'venue_command_events': Domain.TRADE,
     'venue_commands': Domain.TRADE,
     'venue_order_facts': Domain.TRADE,

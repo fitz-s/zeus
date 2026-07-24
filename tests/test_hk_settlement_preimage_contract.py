@@ -26,6 +26,7 @@ is the boundary property, not a single function's output.
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -181,7 +182,18 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
     _build_fused_q_bounds,
     _family_rounding_rule,
 )
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin  # noqa: E402
+@dataclass(frozen=True)
+class _TemperatureBin:
+    bin_id: str
+    lower_c: float | None = None
+    upper_c: float | None = None
+    center_c: float | None = None
+    display_unit: str = "C"
+    settlement_unit: str = "C"
+    rounding_rule: str = "wmo_half_up"
+
+
+AifsTemperatureBin = _TemperatureBin
 
 
 def _hk_bins():

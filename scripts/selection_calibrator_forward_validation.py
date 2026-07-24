@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last audited: 2026-07-24
 # Authority basis: selection-aware settlement q_lcb calibrator
 #   (frontier consult REQ-20260622-151741; live_order_pathology 2026-06-22).
 #   Walk-forward forward-validation harness for the selection q_lcb calibrator. READ-ONLY over
 #   state/zeus-forecasts.db (forecast_posteriors ⋈ settlement_outcomes VERIFIED) + state/zeus-world.db
-#   (settlement_attribution). Writes a JSON report under docs/evidence/live_order_pathology/. The
+#   (settlement_attribution). Writes a document artifact under docs/evidence/live_order_pathology/. The
 #   orchestrator OWNS the promotion gate; this harness only MEASURES and REPORTS.
 """Forward-validation harness for the selection-aware settlement q_lcb calibrator.
 
@@ -47,7 +47,7 @@ FCST_DEFAULT = os.path.join(REPO, "state", "zeus-forecasts.db")
 WORLD_DEFAULT = os.path.join(REPO, "state", "zeus-world.db")
 OUT_DEFAULT = os.path.join(
     REPO, "docs", "evidence", "live_order_pathology",
-    "2026-06-22_qlcb_selection_forward_validation.json",
+    "2026-06-22_qlcb_selection_forward_validation.json.md",
 )
 
 
@@ -56,7 +56,7 @@ def _wilson_lo(hits: int, n: int) -> float:
 
 
 def _dist_class(i, items, mode_i, step) -> str:
-    """Fine distance class for Layer-1/decisive diagnostics: d0/d1/d2/d3p/tail."""
+    """Fine distance class for Layer-1/decisive observations: d0/d1/d2/d3p/tail."""
     _lbl, _qy, deg, opn = items[i]
     if opn or deg is None or items[mode_i][2] is None:
         return "tail"
@@ -117,7 +117,7 @@ def load_corpus_rows(fcst_path: str):
                 continue
             # COARSE bin_class so the corpus cell keys match the EXECUTED rows' {modal, nonmodal}
             # vocabulary (the executed rows cannot recover per-bin distance). The fine distance class
-            # is recomputed in Layer-1/decisive diagnostics directly where needed.
+            # is recomputed in Layer-1/decisive observations directly where needed.
             bc = _coarse_bin_class(i, mode_i)
             out.append((known_at, "YES", lead_days, bc, q, 1 if i == won_i else 0))
             out.append((known_at, "NO", lead_days, bc, 1.0 - q, 1 if i != won_i else 0))
@@ -437,7 +437,7 @@ def main() -> int:
     ap.add_argument("--out", default=OUT_DEFAULT)
     ap.add_argument("--min-n", type=int, default=fsc.MIN_N_DEFAULT)
     ap.add_argument("--tau", type=float, default=None, help="EB shrinkage strength; if omitted, learned by rolling prequential log-score.")
-    ap.add_argument("--no-walk-forward", action="store_true", help="use end-of-window corpus (diagnostic) instead of as-of-decision.")
+    ap.add_argument("--no-walk-forward", action="store_true", help="use end-of-window corpus (observation) instead of as-of-decision.")
     args = ap.parse_args()
 
     corpus_rows = load_corpus_rows(args.fcst)

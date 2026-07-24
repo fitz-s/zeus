@@ -128,7 +128,7 @@
 **Why they are cleared**:
 1. **Domain provenance**: these are settlement-bin / guard-cell identifiers used to explain which reliability cell authorized or rejected a decision.
 2. **No auth surface**: the values are not used for authentication, API access, signing, or external service calls.
-3. **Diagnostic-only semantics**: the fields travel with decision provenance and can safely appear in logs or receipts.
+3. **Telemetry-only semantics**: the fields travel with decision provenance and can safely appear in logs or receipts.
 
 **Operator ruling 2026-07-02**: guard cell keys are domain provenance identifiers, not secrets; allowlist them path-scoped to `src/decision/family_decision_engine.py`.
 

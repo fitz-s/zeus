@@ -348,7 +348,6 @@ def build_decision_provenance_envelope(
     economics: Mapping[str, Any] | None = None,
     direction: str | None = None,
     direction_law_verdict: str | None = None,
-    mainstream: Mapping[str, Any] | None = None,
     rejection: Mapping[str, Any] | None = None,
     city: str | None = None,
     target_date: Any | None = None,
@@ -436,7 +435,6 @@ def build_decision_provenance_envelope(
         "economics": _economics(economics),
         "direction": direction,
         "direction_law_verdict": direction_law_verdict,
-        "mainstream": dict(mainstream) if mainstream else None,
         "rejection": rejection_field,
     }
     return envelope

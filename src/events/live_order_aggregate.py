@@ -666,7 +666,6 @@ class LiveOrderAggregateLedger:
             if not str(payload.get("execution_receipt_hash") or "").strip():
                 raise LiveOrderAggregateError("CapTransitioned requires execution_receipt_hash")
             to_status = str(payload.get("to_status") or "")
-            reason = str(payload.get("transition_reason") or payload.get("reason_code") or "")
             command_sequence = int(command_row["event_sequence"])
             if to_status == "PENDING_RECONCILE" and self._latest_row_of_type_after(
                 aggregate_id,
@@ -680,7 +679,7 @@ class LiveOrderAggregateLedger:
                 command_sequence,
             ) is None:
                 raise LiveOrderAggregateError("CapTransitioned CONSUMED requires VenueSubmitAcknowledged")
-            if to_status == "RELEASED" and reason != "SUBMIT_DISABLED":
+            if to_status == "RELEASED":
                 if self._latest_row_of_type_after(
                     aggregate_id,
                     "SubmitRejected",

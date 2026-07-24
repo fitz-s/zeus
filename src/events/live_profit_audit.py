@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from statistics import median
 from typing import Any
@@ -21,7 +20,6 @@ from typing import Any
 from src.decision_kernel.canonicalization import stable_hash
 from src.state.schema.edli_live_profit_audit_schema import ensure_table
 
-PROMOTION_ARTIFACT_SCHEMA = "edli_live_promotion_v1"
 
 
 _AUDIT_FIELDS = (
@@ -66,146 +64,8 @@ _AUDIT_FIELDS = (
     "cost_basis_source_certificate_hash",
     "fill_source_event_hash",
     "settlement_source_event_hash",
-    "promotion_eligible",
+    "learning_eligible",
 )
-
-
-@dataclass(frozen=True)
-class LiveProfitPromotionSummary:
-    canary_count: int
-    confirmed_fill_count: int
-    terminal_no_fill_count: int
-    reconciled_no_order_count: int
-    unresolved_unknowns: int
-    realized_edge_bps: float
-    median_realized_edge_bps_from_confirmed_fills: float
-    aggregate_ids: tuple[str, ...] = ()
-    audit_ids: tuple[str, ...] = ()
-    execution_command_ids: tuple[str, ...] = ()
-    execution_receipt_hashes: tuple[str, ...] = ()
-    cap_transition_hashes: tuple[str, ...] = ()
-    user_or_reconcile_event_hashes: tuple[str, ...] = ()
-    source_summary_hash: str = ""
-    db_user_version: int = 0
-
-    def as_artifact(self) -> dict[str, Any]:
-        return {
-            "schema": PROMOTION_ARTIFACT_SCHEMA,
-            "generated_at": _utc_now_iso(),
-            "db_user_version": self.db_user_version,
-            "canary_count": self.canary_count,
-            "confirmed_fill_count": self.confirmed_fill_count,
-            "terminal_no_fill_count": self.terminal_no_fill_count,
-            "reconciled_no_order_count": self.reconciled_no_order_count,
-            "unresolved_unknowns": self.unresolved_unknowns,
-            "realized_edge_bps": self.realized_edge_bps,
-            "median_realized_edge_bps_from_confirmed_fills": self.median_realized_edge_bps_from_confirmed_fills,
-            "aggregate_ids": list(self.aggregate_ids),
-            "audit_ids": list(self.audit_ids),
-            "execution_command_ids": list(self.execution_command_ids),
-            "execution_receipt_hashes": list(self.execution_receipt_hashes),
-            "cap_transition_hashes": list(self.cap_transition_hashes),
-            "user_or_reconcile_event_hashes": list(self.user_or_reconcile_event_hashes),
-            "source_summary_hash": self.source_summary_hash,
-        }
-
-
-@dataclass(frozen=True)
-class PromotionVerification:
-    ok: bool
-    reason: str = "OK"
-
-
-# --- PR-2 (A): D2 ARM-gate artifact boot-binding (F1 Option C) ---------------
-#
-# The settlement-grounded ARM evidence artifact is PRODUCED by
-# scripts/measure_arm_gate_settlement.py (PR-1) and ENFORCED here + at boot
-# (src/main.py). Its existence + integrity is the antibody that makes
-# "flip real_order_submit_enabled=true without proven after-cost edge" a BOOT
-# FAILURE rather than a silent runtime path. Reusing the pure-verifier seam, the
-# boot path and the producer can both be tested without git or a live daemon.
-ARM_GATE_ARTIFACT_SCHEMA = "edli_arm_gate_v1"
-
-# Required keys whose mere ABSENCE fails the artifact closed. Value-level law
-# (SHA match, ev>0, coverage_licensed is True) is checked after presence.
-_ARM_GATE_REQUIRED_FIELDS = (
-    "schema",
-    "commit_sha",
-    "measurement_cmd_hash",
-    "capital_weighted_ev",
-    "production_n",
-    "per_city_n",
-    "ev_sigma",
-    "date_coverage",
-    "coverage_licensed",
-)
-
-
-@dataclass(frozen=True)
-class ArmGateVerification:
-    ok: bool
-    reason: str = "OK"
-
-
-def verify_edli_arm_gate_artifact(
-    artifact: dict[str, Any] | None,
-    *,
-    head_sha: str | None,
-) -> ArmGateVerification:
-    """Pure verifier for the ARM-gate evidence artifact.
-
-    Returns ``ok=False`` with a stable ``EDLI_LIVE_PROMOTION_ARTIFACT_*`` reason
-    when the artifact is missing, malformed, stale (SHA != HEAD), shows a
-    non-positive capital-weighted EV, or is not coverage-licensed. FAIL-CLOSED:
-    any unexpected shape denies. The reason codes share the
-    ``EDLI_LIVE_PROMOTION_ARTIFACT_`` prefix so the existing boot RuntimeError
-    family (and its grep/alerting) covers them.
-    """
-    if artifact is None:
-        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MISSING")
-    if not isinstance(artifact, dict):
-        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MALFORMED")
-
-    for field in _ARM_GATE_REQUIRED_FIELDS:
-        if field not in artifact:
-            # production_n is the current operator-facing name. gate_pass_n is
-            # accepted only as a deprecated alias for already-emitted artifacts.
-            if field == "production_n" and "gate_pass_n" in artifact:
-                continue
-            return ArmGateVerification(
-                False, f"EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_FIELD_MISSING:{field}"
-            )
-
-    if artifact.get("schema") != ARM_GATE_ARTIFACT_SCHEMA:
-        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_SCHEMA_INVALID")
-
-    expected_sha = str(head_sha or "").strip()
-    artifact_sha = str(artifact.get("commit_sha") or "").strip()
-    if not expected_sha:
-        # No HEAD SHA to compare against = cannot prove the measurement ran on
-        # the code about to arm. Fail closed.
-        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_HEAD_SHA_UNAVAILABLE")
-    if not artifact_sha:
-        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_COMMIT_SHA_MISSING")
-    if artifact_sha != expected_sha:
-        return ArmGateVerification(
-            False,
-            f"EDLI_LIVE_PROMOTION_ARM_GATE_COMMIT_SHA_MISMATCH:artifact={artifact_sha}:head={expected_sha}",
-        )
-
-    try:
-        ev = float(artifact.get("capital_weighted_ev"))
-    except (TypeError, ValueError):
-        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_EV_INVALID")
-    if not (ev > 0.0):
-        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_EV_NOT_POSITIVE")
-
-    # coverage_licensed MUST be the literal True (not a truthy 1/"true"/etc.):
-    # a settlement-coverage license is a deliberate, unambiguous boolean.
-    if artifact.get("coverage_licensed") is not True:
-        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_COVERAGE_NOT_LICENSED")
-
-    return ArmGateVerification(True)
 
 
 class LiveProfitAuditLedger:
@@ -217,7 +77,7 @@ class LiveProfitAuditLedger:
         now = _utc_now_iso()
         created_at = str(record.get("created_at") or now)
         normalized = {field: record.get(field) for field in _AUDIT_FIELDS}
-        normalized["promotion_eligible"] = 1 if normalized.get("promotion_eligible") else 0
+        normalized["learning_eligible"] = 1 if normalized.get("learning_eligible") else 0
         missing = [
             field
             for field in ("event_id", "aggregate_id", "condition_id", "token_id", "order_lifecycle_state")
@@ -265,7 +125,7 @@ class LiveProfitAuditLedger:
                 realized_edge, edge_value_usd, pnl_usd, reject_reason,
                 expected_edge_source_certificate_hash,
                 cost_basis_source_certificate_hash, fill_source_event_hash,
-                settlement_source_event_hash, promotion_eligible, created_at,
+                settlement_source_event_hash, learning_eligible, created_at,
                 schema_version
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -313,7 +173,7 @@ class LiveProfitAuditLedger:
                 cost_basis_source_certificate_hash = excluded.cost_basis_source_certificate_hash,
                 fill_source_event_hash = excluded.fill_source_event_hash,
                 settlement_source_event_hash = excluded.settlement_source_event_hash,
-                promotion_eligible = excluded.promotion_eligible,
+                learning_eligible = excluded.learning_eligible,
                 created_at = excluded.created_at,
                 schema_version = excluded.schema_version
             """,
@@ -325,94 +185,6 @@ class LiveProfitAuditLedger:
             ),
         )
         return audit_id
-
-    def promotion_summary(self) -> LiveProfitPromotionSummary:
-        return promotion_summary(self.conn)
-
-
-def promotion_summary(conn: sqlite3.Connection) -> LiveProfitPromotionSummary:
-    return _promotion_summary_from_rows(conn, _canonical_promotion_rows(conn))
-
-
-def verify_edli_live_promotion_artifact(
-    conn: sqlite3.Connection,
-    artifact: dict[str, Any],
-    *,
-    min_canary_count: int,
-    max_unresolved_unknowns: int,
-    min_realized_edge_bps: float,
-) -> PromotionVerification:
-    if artifact.get("schema") != PROMOTION_ARTIFACT_SCHEMA:
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_ARTIFACT_SCHEMA_INVALID")
-    rows = _canonical_promotion_rows(conn)
-    summary = _promotion_summary_from_rows(conn, rows)
-    aggregate_ids = tuple(row["aggregate_id"] for row in rows["audit_rows"])
-    if aggregate_ids and len(rows["projection_rows"]) != len(set(aggregate_ids)):
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_PROJECTION_MISSING")
-    if aggregate_ids and not rows["cap_transition_hashes"]:
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_CAP_TRANSITION_MISSING")
-    if aggregate_ids and not rows["user_or_reconcile_event_hashes"]:
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_USER_OR_RECONCILE_MISSING")
-    recomputed = summary.as_artifact()
-    for volatile in ("generated_at",):
-        recomputed.pop(volatile, None)
-    comparable = dict(artifact)
-    comparable.pop("generated_at", None)
-    for field in (
-        "db_user_version",
-        "canary_count",
-        "confirmed_fill_count",
-        "terminal_no_fill_count",
-        "reconciled_no_order_count",
-        "unresolved_unknowns",
-        "median_realized_edge_bps_from_confirmed_fills",
-        "aggregate_ids",
-        "audit_ids",
-        "execution_command_ids",
-        "execution_receipt_hashes",
-        "cap_transition_hashes",
-        "user_or_reconcile_event_hashes",
-        "source_summary_hash",
-    ):
-        if comparable.get(field) != recomputed.get(field):
-            return PromotionVerification(False, f"EDLI_LIVE_PROMOTION_ARTIFACT_DB_MISMATCH:{field}")
-    try:
-        artifact_edge = float(comparable.get("realized_edge_bps", 0.0))
-    except (TypeError, ValueError):
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INVALID")
-    if abs(artifact_edge - float(recomputed.get("realized_edge_bps", 0.0))) > 1e-9:
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_ARTIFACT_DB_MISMATCH:realized_edge_bps")
-    row_verification = _verify_promotion_eligible_confirmed_rows(rows["audit_rows"])
-    if row_verification is not None:
-        return PromotionVerification(False, row_verification)
-    fill_edge = float(comparable.get("median_realized_edge_bps_from_confirmed_fills", 0.0))
-    if int(comparable.get("confirmed_fill_count", 0)) < min_canary_count:
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_CANARY_COUNT_INSUFFICIENT")
-    if int(comparable.get("unresolved_unknowns", 0)) > max_unresolved_unknowns:
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN")
-    if fill_edge <= min_realized_edge_bps:
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT")
-    if _pending_projection_count(conn, tuple(comparable.get("aggregate_ids") or ())) > 0:
-        return PromotionVerification(False, "EDLI_LIVE_PROMOTION_PENDING_RECONCILE")
-    return PromotionVerification(True)
-
-
-def _verify_promotion_eligible_confirmed_rows(rows: list[dict[str, Any]]) -> str | None:
-    for row in rows:
-        if row.get("order_lifecycle_state") != "CONFIRMED":
-            continue
-        if not str(row.get("expected_edge_source_certificate_hash") or "").strip():
-            return "EDLI_LIVE_PROMOTION_EXPECTED_EDGE_PROVENANCE_MISSING"
-        if not str(row.get("cost_basis_source_certificate_hash") or "").strip():
-            return "EDLI_LIVE_PROMOTION_COST_BASIS_PROVENANCE_MISSING"
-        if not str(row.get("fill_source_event_hash") or "").strip():
-            return "EDLI_LIVE_PROMOTION_FILL_PROVENANCE_MISSING"
-        if _float_or_none(row.get("realized_edge")) is not None and float(row.get("realized_edge") or 0.0) <= 0:
-            return "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"
-        if int(row.get("promotion_eligible") or 0) != 1:
-            return "EDLI_LIVE_PROMOTION_CONFIRMED_FILL_NOT_PROMOTION_ELIGIBLE"
-    return None
-
 
 def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggregate_id: str) -> str | None:
     rows = _aggregate_event_rows(conn, aggregate_id)
@@ -469,7 +241,7 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         if isinstance(_edge_economics, dict)
         else None
     )
-    promotion_eligible = (
+    learning_eligible = (
         state == "CONFIRMED"
         and lifecycle_type == "UserTradeObserved"
         and lifecycle_payload.get("fill_authority_state") == "FILL_CONFIRMED"
@@ -518,7 +290,7 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         cost_basis_source_certificate_hash=cost_basis_source_certificate_hash,
         fill_source_event_hash=fill_source_event_hash,
         settlement_source_event_hash=settlement_source_event_hash,
-        promotion_eligible=1 if promotion_eligible else 0,
+        learning_eligible=1 if learning_eligible else 0,
     )
 
 
@@ -729,166 +501,6 @@ def _float_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
 
-
-def _promotion_summary_from_rows(
-    conn: sqlite3.Connection,
-    rows: dict[str, list[dict[str, Any]]],
-) -> LiveProfitPromotionSummary:
-    confirmed_fill_rows = [
-        row
-        for row in rows["audit_rows"]
-        if row.get("order_lifecycle_state") == "CONFIRMED" and int(row.get("promotion_eligible") or 0) == 1
-    ]
-    terminal_no_fill_count = int(
-        sum(1 for row in rows["audit_rows"] if row.get("order_lifecycle_state") == "TERMINAL_NO_FILL")
-    )
-    reconciled_no_order_count = int(
-        sum(
-            1
-            for row in rows["audit_rows"]
-            if row.get("order_lifecycle_state") == "RECONCILED" and not row.get("avg_fill_price")
-        )
-    )
-    canary_count = int(len(confirmed_fill_rows) + terminal_no_fill_count + reconciled_no_order_count)
-    unresolved_unknowns = int(
-        sum(1 for row in rows["audit_rows"] if row.get("order_lifecycle_state") in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN", "PENDING_RECONCILE"})
-        + _pending_projection_count(conn, tuple(row["aggregate_id"] for row in rows["audit_rows"]))
-    )
-    realized_edges = [
-        float(row["realized_edge"])
-        for row in rows["audit_rows"]
-        if row.get("realized_edge") is not None
-    ]
-    confirmed_fill_edges = [
-        float(row["realized_edge"])
-        for row in confirmed_fill_rows
-        if row.get("realized_edge") is not None
-    ]
-    realized_edge_bps = float(median(realized_edges) * 10_000.0) if realized_edges else 0.0
-    fill_edge_bps = float(median(confirmed_fill_edges) * 10_000.0) if confirmed_fill_edges else 0.0
-    return LiveProfitPromotionSummary(
-        canary_count=canary_count,
-        confirmed_fill_count=len(confirmed_fill_rows),
-        terminal_no_fill_count=terminal_no_fill_count,
-        reconciled_no_order_count=reconciled_no_order_count,
-        unresolved_unknowns=unresolved_unknowns,
-        realized_edge_bps=realized_edge_bps,
-        median_realized_edge_bps_from_confirmed_fills=fill_edge_bps,
-        aggregate_ids=tuple(row["aggregate_id"] for row in rows["audit_rows"]),
-        audit_ids=tuple(row["audit_id"] for row in rows["audit_rows"]),
-        execution_command_ids=tuple(
-            row["execution_command_id"] for row in rows["audit_rows"] if row.get("execution_command_id")
-        ),
-        execution_receipt_hashes=tuple(rows["execution_receipt_hashes"]),
-        cap_transition_hashes=tuple(rows["cap_transition_hashes"]),
-        user_or_reconcile_event_hashes=tuple(rows["user_or_reconcile_event_hashes"]),
-        source_summary_hash=stable_hash(rows),
-        db_user_version=int(conn.execute("PRAGMA user_version").fetchone()[0] or 0),
-    )
-
-
-def write_promotion_artifact(conn: sqlite3.Connection, path: str) -> LiveProfitPromotionSummary:
-    ensure_table(conn)
-    summary = promotion_summary(conn)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(summary.as_artifact(), fh, sort_keys=True)
-        fh.write("\n")
-    return summary
-
-
-def _canonical_promotion_rows(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
-    if not _table_exists(conn, "edli_live_profit_audit"):
-        return {
-            "audit_rows": [],
-            "event_rows": [],
-            "projection_rows": [],
-            "execution_receipt_hashes": [],
-            "cap_transition_hashes": [],
-            "user_or_reconcile_event_hashes": [],
-        }
-    audit_rows = [
-        dict(row)
-        for row in conn.execute(
-            """
-            SELECT *
-            FROM edli_live_profit_audit
-            ORDER BY aggregate_id, audit_id
-            """
-        ).fetchall()
-    ]
-    aggregate_ids = tuple(row["aggregate_id"] for row in audit_rows)
-    event_rows: list[dict[str, Any]] = []
-    if aggregate_ids and _table_exists(conn, "edli_live_order_events"):
-        event_rows = [
-            {
-                "aggregate_id": row["aggregate_id"],
-                "event_sequence": row["event_sequence"],
-                "event_type": row["event_type"],
-                "event_hash": row["event_hash"],
-                "payload": json.loads(row["payload_json"]),
-            }
-            for row in conn.execute(
-                """
-                SELECT aggregate_id, event_sequence, event_type, event_hash, payload_json
-                FROM edli_live_order_events
-                ORDER BY aggregate_id, event_sequence
-                """,
-            ).fetchall()
-            if row["aggregate_id"] in aggregate_ids
-        ]
-    return {
-        "audit_rows": audit_rows,
-        "event_rows": event_rows,
-        "projection_rows": _projection_rows(conn, aggregate_ids),
-        "execution_receipt_hashes": sorted(
-            {
-                str(row["payload"].get("execution_receipt_hash"))
-                for row in event_rows
-                if row["payload"].get("execution_receipt_hash")
-            }
-        ),
-        "cap_transition_hashes": sorted(
-            {str(row["event_hash"]) for row in event_rows if row["event_type"] == "CapTransitioned"}
-        ),
-        "user_or_reconcile_event_hashes": sorted(
-            {
-                str(row["event_hash"])
-                for row in event_rows
-                if row["event_type"] in {"UserOrderObserved", "UserTradeObserved", "Reconciled"}
-            }
-        ),
-    }
-
-
-def _projection_rows(conn: sqlite3.Connection, aggregate_ids: tuple[str, ...]) -> list[dict[str, Any]]:
-    if not aggregate_ids or not _table_exists(conn, "edli_live_order_projection"):
-        return []
-    return [
-        dict(row)
-        for row in conn.execute(
-            """
-            SELECT aggregate_id, event_id, final_intent_id, current_state, pending_reconcile, venue_order_id
-            FROM edli_live_order_projection
-            ORDER BY aggregate_id
-            """,
-        ).fetchall()
-        if row["aggregate_id"] in aggregate_ids
-    ]
-
-
-def _pending_projection_count(conn: sqlite3.Connection, aggregate_ids: tuple[str, ...]) -> int:
-    if not aggregate_ids or not _table_exists(conn, "edli_live_order_projection"):
-        return 0
-    return sum(
-        1
-        for row in conn.execute(
-            """
-            SELECT aggregate_id, pending_reconcile
-            FROM edli_live_order_projection
-            """
-        ).fetchall()
-        if row["aggregate_id"] in aggregate_ids and bool(row["pending_reconcile"])
-    )
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:

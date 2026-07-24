@@ -1,6 +1,6 @@
 # Replacement Forecast Final Form (2026-06-09, operator-ratified)
 
-**Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; `LIVE_AUTHORITY`, `trade_authority_status`, and shadow/diagnostic labels are not live execution authority.
+**Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
 **Last audited:** 2026-07-15 (source-clock live q retains absolute ENS/provider-center disagreement and its executable band combines finite-member and distribution-free moment ambiguity symmetrically for YES/NO)
@@ -98,8 +98,8 @@ seed/materialization loop replays them, and entry/monitor readers refuse an
 older shaped certificate during convergence. This is semantic identity, not a
 deployment-SHA freshness rule.
 
-The older walk-forward residual width remains diagnostic for non-source-clock
-carriers; it is not a fallback into the live source-clock probability regime.
+The older walk-forward residual width is offline historical evidence only and
+is absent from runtime probability construction.
 
 **2026-07-17 addendum — anomaly transport for a stale-but-coherent ENS shape.**
 Measured cost of the pre-addendum same-cycle-only rule: new scopes waited a mean
@@ -213,8 +213,7 @@ fallback.
 ### 1e-bis. Post-2026-06-12 q corrections (ADDENDUM — fitted artifacts + single authority)
 
 The q chain gained three fitted corrections on 2026-06-12. As of 2026-07-11 they
-remain diagnostic for the source-clock route and may still apply to explicitly
-non-source-clock carriers; they must not transform a current-evidence live q:
+are offline historical comparisons only; they must not transform a live q:
 
 1. **Fitted σ-scale + uniform mixture** (`state/sigma_scale_fit.json`, sole writer
    `scripts/fit_sigma_scale.py`, weekly refit): `q_adj = (1−w)·N(σ_impl·k) + w·(1/n_bins)`,
@@ -314,7 +313,7 @@ These make error categories **unconstructable**, not merely less likely.
 
 ## 4. Authority Status and Risk Posture
 
-**Live runtime semantics:** All required replacement policy flags true -> rows may be materialized/read as `runtime_layer='live'`. Execution and monitoring must consume the live row set only. Historical row labels such as `LIVE_AUTHORITY`, `trade_authority_status`, `SHADOW_ONLY`, `SHADOW_VETO_ONLY`, and `DIAGNOSTIC_ONLY` are not live authority and must not be joined into the execution or monitor decision path.
+**Live runtime semantics:** Materialization writes only `runtime_layer='live'` rows that satisfy the complete current-evidence contract. Execution and monitoring consume that row set only. Incomplete rows are refused rather than persisted under a second authority class.
 
 **q_lcb requirement:** The live replacement path requires fused-q certified bootstrap `q_lcb_json` / `q_ucb_json`. On the source-clock route the bootstrap consumes `σ_center`, `σ_pred`, and `member_count` from the same current-evidence shape; the coherent carrier includes the finite-member tail limit in §1f. A missing current ENS carrier or bound blocks live materialization/readiness; it must not fall back through historical residual calibration, baseline, or retired experiment provenance.
 

@@ -6,7 +6,6 @@
 #   N_SIGMA_BIAS=2.0 and the deterministic priority order; Stage 2 block 1053-1070)
 #   reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
 #   (GREENFIELD ONLY — no live-file edits; prefer the live types).
-#   Live artifact superseded: model_bias_ens.effective_bias_c (edli_per_city_v1)
 #   read+subtracted at src/engine/event_reactor_adapter.py:11526-11609 (def) /
 #   :11084 / :12594 (call sites; neutralized later at Stage 11, NOT here).
 """DebiasAuthority — the single de-bias authority for the q-kernel forecast spine.

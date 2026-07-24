@@ -1,8 +1,7 @@
 # Last reused/audited: 2026-06-12
 # Authority basis (2026-06-12): operator law 2026-06-10 ABSOLUTE — Zeus NEVER
-#   submits redeem transactions. submit_redeem / assert_redeem_submission_allowed
-#   now raise REDEEM_SUBMISSION_FORBIDDEN unconditionally (the operator-override
-#   token escape hatch was DELETED). ACCOUNTING surfaces (request_redeem intent,
+#   submits redeem transactions. The broadcast/override machinery is deleted.
+#   ACCOUNTING surfaces (request_redeem intent,
 #   reconcile_pending_redeems chain-receipt classification, EXTERNAL_REDEMPTION
 #   booking) are fully intact. External deep-review finding 2026-06-12.
 """Durable settlement/redeem command ledger for R3 R1.
@@ -105,12 +104,6 @@ _TERMINAL_STATES = {
     SettlementState.REDEEM_REVIEW_REQUIRED,
 }
 
-_SUBMITTABLE_STATES = {
-    SettlementState.REDEEM_INTENT_CREATED,
-    SettlementState.REDEEM_RETRYING,
-}
-
-
 @dataclass(frozen=True)
 class SettlementResult:
     command_id: str
@@ -156,26 +149,6 @@ class RedeemSubmissionAbandonedError(SettlementCommandError):
 # redeem transaction. The former operator-override token (a supervised manual
 # redrive escape hatch) is DELETED: there is no env, flag, or token that re-arms
 # submission. The barrier is now unconstructable, not merely double-gated.
-
-
-def redeem_submission_allowed() -> bool:
-    """Always False (operator law 2026-06-10). Retained so calm-skip callers
-    (e.g. the scheduler's redeem-submitter cycle) keep a stable boolean seam."""
-    return False
-
-
-def assert_redeem_submission_allowed(context: str) -> None:
-    """UNCONDITIONALLY refuse redeem submission (operator law 2026-06-10).
-
-    Raises ``RedeemSubmissionAbandonedError`` (a RuntimeError) BEFORE any side
-    effect, regardless of any env var or override. Pinned by
-    tests/execution/test_redeem_pivot_antibody.py: no codepath — scheduler,
-    operator override, or otherwise — can broadcast a redeem tx.
-    """
-    raise RedeemSubmissionAbandonedError(
-        f"REDEEM_SUBMISSION_FORBIDDEN: {context}: operator law 2026-06-10 — Zeus "
-        "never submits redeem; book EXTERNAL_REDEMPTION instead"
-    )
 
 
 def _enum_value(value: Any) -> str:
@@ -249,7 +222,7 @@ def ensure_settlement_schema_ready(conn: sqlite3.Connection) -> None:
     """Boot/migration path: create tables, run idempotent ALTER migrations.
 
     Must be called once at daemon startup on the shared trade connection,
-    BEFORE any hot-path calls to request_redeem / submit_redeem /
+    BEFORE any hot-path calls to request_redeem /
     reconcile_pending_redeems. Hot-path callers use assert_settlement_schema_ready
     (PRAGMA-only check, no DDL) to avoid schema-lock and transaction-boundary
     risk on every tick.
@@ -269,9 +242,8 @@ def ensure_settlement_schema_ready(conn: sqlite3.Connection) -> None:
         "ALTER TABLE settlement_commands ADD COLUMN zeus_submit_intent_time TEXT",
         "ALTER TABLE settlement_commands ADD COLUMN venue_ack_time TEXT",
         "ALTER TABLE settlement_commands ADD COLUMN clock_skew_estimate_ms_at_submit INTEGER",
-        # P1-3 live release proof: OPERATOR_REQUIRED is a manual state by
-        # default. Autonomous reseat requires an explicit row-level marker so
-        # scheduler policy no longer derives authority from the state name.
+        # Legacy schema compatibility only. No runtime path reads or writes this
+        # retired retry marker.
         "ALTER TABLE settlement_commands ADD COLUMN autoretry_eligible INTEGER NOT NULL DEFAULT 0 CHECK (autoretry_eligible IN (0, 1))",
     ]:
         try:
@@ -351,7 +323,7 @@ def assert_settlement_schema_ready(conn: sqlite3.Connection) -> None:
     lacks required columns.  Fast (single PRAGMA query); never runs executescript
     or ALTER TABLE — safe on read-only connections and inside open transactions.
 
-    Usage: call at the top of request_redeem / submit_redeem /
+    Usage: call at the top of request_redeem /
     reconcile_pending_redeems / get_command / list_commands instead of
     init_settlement_command_schema to avoid DDL in the live hot path.
     """
@@ -399,9 +371,8 @@ def request_redeem(
     V1 limitation: multi-bin (ranged market) encoding is not supported here;
     callers should pass None for non-binary markets until PR-I.5.b extends this.
 
-    This records intent only. pUSD redemption submission/accounting remains
-    Q-FX-1 gated in submit_redeem(); a missing FX classification must not erase
-    the durable command that tells the operator what work is pending. Legacy
+    This records accounting intent only; a missing FX classification must not
+    erase the durable command that tells the operator what work is pending. Legacy
     USDC.e payout is not silently promoted into pUSD accounting; it is recorded
     directly into ``REDEEM_REVIEW_REQUIRED`` for operator classification.
     """
@@ -782,7 +753,7 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
             # PayoutRedemption EVEN WHEN routing is correct through NegRiskAdapter.
             # The previous check (4th iter) required NegRiskAdapter to emit a
             # PayoutRedemption event and false-flagged the correct flow as MISROUTED
-            # → reseat → GS013 retry loop on already-redeemed position. Karachi
+            # → false retry diagnosis for an already-redeemed position. Karachi
             # 2026-05-19 was the canonical case.
             #
             # Correct test: for negRisk markets, the route is correct iff
@@ -836,8 +807,8 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                 }
                 logger.warning(
                     "[REDEEM_NEGRISK_MISROUTED] command_id=%s condition_id=%s "
-                    "tx_hash=%s wrong_adapter_in_logs=%s expected=%s — resetting to "
-                    "REDEEM_OPERATOR_REQUIRED for autonomous retry via correct adapter",
+                    "tx_hash=%s wrong_adapter_in_logs=%s expected=%s — routing to "
+                    "REDEEM_OPERATOR_REQUIRED for an external/manual replacement tx",
                     row["command_id"], row["condition_id"], tx_hash,
                     _wrong_adapters, POLYGON_NEGRISK_ADAPTER_ADDRESS.lower(),
                 )
@@ -849,8 +820,6 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                         """
                         UPDATE settlement_commands
                            SET state = ?,
-                               autoretry_eligible = 1,
-                               tx_hash = NULL,
                                terminal_at = NULL,
                                error_payload = ?
                          WHERE command_id = ?
@@ -872,7 +841,7 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                     SettlementResult(
                         str(row["command_id"]),
                         SettlementState.REDEEM_OPERATOR_REQUIRED,
-                        tx_hash=None,
+                        tx_hash=tx_hash,
                         error_payload={"errorCode": "REDEEM_NEGRISK_MISROUTED"},
                         raw_response=receipt_payload,
                     )
@@ -881,8 +850,8 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
 
             if is_negrisk_market:
                 # Compute best-effort expected amount for cross-check.
-                # Unlike submit_redeem (which has the full neg_risk_row with
-                # yes/no token IDs), reconcile only has token_amounts_json.
+                # Reconciliation has only token_amounts_json, not the full
+                # yes/no token metadata available at intent creation.
                 # Use the single-entry heuristic: if the map has exactly one
                 # key, that value is the winning-slot amount. Multi-entry maps
                 # (or None) set amount_per_slot=None to skip the cross-check.
@@ -1236,17 +1205,14 @@ def _transition(
     confirmation_count: int | None = None,
     submitted_at: str | None = None,
     error_payload: Mapping[str, Any] | None = None,
-    autoretry_eligible: bool | None = None,
     terminal: bool = False,
     recorded_at: str,
 ) -> None:
     terminal_at = recorded_at if terminal else None
-    autoretry_value = int(bool(autoretry_eligible)) if autoretry_eligible is not None else None
     conn.execute(
         """
         UPDATE settlement_commands
            SET state = ?,
-               autoretry_eligible = COALESCE(?, autoretry_eligible),
                tx_hash = COALESCE(?, tx_hash),
                block_number = COALESCE(?, block_number),
                confirmation_count = COALESCE(?, confirmation_count),
@@ -1257,7 +1223,6 @@ def _transition(
         """,
         (
             state.value,
-            autoretry_value,
             tx_hash,
             block_number,
             confirmation_count,
@@ -1280,7 +1245,6 @@ def _atomic_transition(
     submitted_at: str | None = None,
     terminal_at: str | None = None,
     error_payload: Mapping[str, Any] | None = None,
-    autoretry_eligible: bool | None = None,
     payload: Mapping[str, Any] | None = None,
     recorded_at: str | None = None,
 ) -> bool:
@@ -1292,12 +1256,10 @@ def _atomic_transition(
     audit events) — see SCAFFOLD §K.3 v5 atomicity contract.
 
     Distinct from `_transition`:
-      - `_transition` is Python-guard + SAVEPOINT semantics (caller pre-checks
-        state then transitions). Used by submit_redeem internally.
-      - `_atomic_transition` is SQL-guard via `WHERE state = ?`. Used by the
-        operator CLI (scripts/operator_record_redeem.py) which races with the
-        scheduler tick across processes — disjoint state guards (CLI on
-        OPERATOR_REQUIRED, scheduler on _SUBMITTABLE_STATES) are race-free.
+      - `_transition` is Python-guard + SAVEPOINT semantics for receipt
+        reconciliation.
+      - `_atomic_transition` is SQL-guard via `WHERE state = ?`, used by the
+        record-only operator CLI across processes.
 
     Per SCAFFOLD §K.3 v5: if rowcount == 0, alert MUST NOT fire (no
     false-alert on failed transition). The event append also depends on
@@ -1305,12 +1267,10 @@ def _atomic_transition(
     """
     from_value = from_state.value if isinstance(from_state, SettlementState) else from_state
     to_value = to_state.value if isinstance(to_state, SettlementState) else to_state
-    autoretry_value = int(bool(autoretry_eligible)) if autoretry_eligible is not None else None
     cur = conn.execute(
         """
         UPDATE settlement_commands
            SET state = ?,
-               autoretry_eligible = COALESCE(?, autoretry_eligible),
                tx_hash = COALESCE(?, tx_hash),
                submitted_at = COALESCE(?, submitted_at),
                terminal_at = COALESCE(?, terminal_at),
@@ -1320,7 +1280,6 @@ def _atomic_transition(
         """,
         (
             to_value,
-            autoretry_value,
             tx_hash,
             submitted_at,
             terminal_at,
@@ -1502,41 +1461,3 @@ def _confirmation_count(web3: Any, block_number: int | None) -> int:
         return max(0, int(current) - int(block_number) + 1)
     except (TypeError, ValueError):
         return 0
-
-
-# Error codes ALWAYS auto-retry-eligible once autonomous mode is enabled.
-# Membership criterion: the REDEEM EFFECT DID NOT OCCUR on-chain, so retrying
-# is safe and idempotent — either no tx was ever broadcast (legacy stub), or
-# the on-chain tx confirmed against the wrong contract but the redeem outcome
-# was not settled (tx_hash is cleared by the antibody, not re-queued).
-#   REDEEM_DEFERRED_TO_R1: legacy stub from the pre-PR-#183 era; no tx broadcast.
-#   REDEEM_NEGRISK_MISROUTED (PR-209): antibody (reconcile_pending_redeems) fires
-#     only when a confirmed negRisk tx hit POLYGON_CTF_ADDRESS instead of
-#     POLYGON_NEGRISK_ADAPTER_ADDRESS. Antibody clears tx_hash and parks row here.
-#     Reseat → submitter retries via NegRiskAdapter. Loop self-terminates because
-#     once the correct adapter is used the reconcile guard condition
-#     (routed_to_standard_ctf and not routed_to_neg_risk_adapter) is FALSE and
-#     the antibody never fires again. An infinite loop would require the submitter
-#     to persistently mis-route, which is a deeper routing bug orthogonal to reseat.
-_AUTONOMOUS_RETRY_ERRORCODES_ALWAYS: frozenset[str] = frozenset({
-    "REDEEM_DEFERRED_TO_R1",
-    "REDEEM_NEGRISK_MISROUTED",   # PR-209: antibody-reset cases auto-retry via NegRiskAdapter
-    # PR #212 completion: NEGRISK_FACT_MISSING is now auto-recoverable because
-    # _fetch_neg_risk_from_gamma_for_submitter() supplies the missing fact from
-    # the canonical Gamma authority when the world snapshot cache is empty
-    # (Karachi-class positions entered before the snapshot side-effect path
-    # existed). Pre-PR #212 this errorCode latched OPERATOR_REQUIRED forever;
-    # post-PR #212 the next submit attempt resolves it.
-    "REDEEM_NEGRISK_FACT_MISSING",
-})
-
-# Error codes that require DRY_RUN to be OFF before retry. REDEEM_DRY_RUN_LOGGED
-# rows ARE eligible — but only after operator review during dry-run smoke. If
-# reseat'ed while DRY_RUN is still ON, the adapter dry-run branch returns
-# DRY_RUN_LOGGED again, creating an infinite reseat→submit→DRY_RUN loop that
-# defeats the operator-review-before-broadcast gate. Anchor: Codex P2 + Copilot
-# review on PR #186 caught this; antibody covers the dry-run gating.
-_AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE: frozenset[str] = frozenset({
-    "REDEEM_DRY_RUN_LOGGED",
-})
-

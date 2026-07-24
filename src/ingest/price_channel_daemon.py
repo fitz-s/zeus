@@ -12,7 +12,7 @@ Lifts the CLOB-fact / price-channel ingest OUT of the order daemon (src.main) in
 process — §4.2. It keeps the Polymarket user/market WebSocket subscribed and durably
 bridges fills + book facts into the tables the order runtime only READS (interface I2):
 
-  - the user-channel WS ingestor THREAD (``_start_user_channel_ingestor_if_enabled``) — a
+  - the user-channel WS ingestor THREAD (``_start_user_channel_ingestor``) — a
     persistent WebSocket lifecycle, which is WHY P3 is its own service (§6 co-location:
     distinct from cron-tick daemons),
   - ``edli_market_channel_ingestor``  (market-channel online-service bootstrap, 1-min),
@@ -255,7 +255,7 @@ def main() -> None:
         _edli_held_quote_refresh_cycle,
         _edli_market_channel_ingestor_cycle,
         _edli_user_channel_reconcile_cycle,
-        _start_user_channel_ingestor_if_enabled,
+        _start_user_channel_ingestor,
     )
 
     # Pre-flight (system_decomposition_plan §8 Step 3 mitigation): assert this process can
@@ -308,7 +308,7 @@ def main() -> None:
     # (the durable bridge + feasibility rows are the persisted truth; the WS reconnects on
     # its own retry loop inside the started thread).
     try:
-        _start_user_channel_ingestor_if_enabled()
+        _start_user_channel_ingestor()
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "price-channel-ingest: user-channel WS start raised (non-fatal; the reconcile "
@@ -357,8 +357,8 @@ def main() -> None:
     # poller that closes Attack A (a fill landing after a one-time replay but
     # before a reader cutover). 90s cadence sits inside the packet's 60-120s
     # window and off-phase from PRODUCER 3's 60s tick so the two polls don't
-    # always land on the executor together. Disabled by default
-    # (edli_v1.fill_synchronizer_enabled) — see fill_synchronizer_cycle.
+    # always land on the executor together. This scheduled poll is always on;
+    # see fill_synchronizer_cycle.
     from src.ingest.fill_synchronizer import fill_synchronizer_cycle
 
     _scheduler.add_job(

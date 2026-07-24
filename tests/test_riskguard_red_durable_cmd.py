@@ -212,7 +212,6 @@ def test_run_cycle_red_risk_level_triggers_durable_sweep(monkeypatch, tmp_path):
             return 100.0
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: _file_conn(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda *args, **kwargs: None)

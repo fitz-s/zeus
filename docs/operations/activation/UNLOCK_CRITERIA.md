@@ -5,16 +5,6 @@
 
 **Created**: 2026-05-04. **Last audited**: 2026-06-28.
 
-## Retired Controls
-
-`ZEUS_ENTRY_FORECAST_ROLLOUT_GATE` is no longer live evaluator authority.
-The evaluator does not read promotion evidence and does not branch on this
-environment variable. Do not produce C1 rollout-gate evidence and do not use
-`state/entry_forecast_promotion_evidence.json` as a live-entry admission input.
-
-Promotion evidence remains a control-plane CLI artifact for
-`src/control/cli/promote_entry_forecast.py`; it is not a money-path gate.
-
 ## Active Control
 
 `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` controls whether entry-forecast
@@ -48,11 +38,8 @@ themselves to flip a flag.
 **Sufficient set**: all listed tests green, producer summary fresh within
 7 days, and `c4.healthy_when_off != c4.healthy_when_on`.
 
-**Forbidden states**:
-
-- `healthy_when_off == healthy_when_on` because the change would be a no-op.
-- Any producer output referencing `ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`, because
-  that is no longer a live evaluator control.
+**Forbidden state**: `healthy_when_off == healthy_when_on`, because the change
+would be a no-op.
 
 ## Audit Trail
 

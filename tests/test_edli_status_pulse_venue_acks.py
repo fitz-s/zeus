@@ -31,7 +31,6 @@ def _call_pulse(**overrides):
         dead_lettered=0,
         rejection_reason_counts={},
         risk_level="GREEN",
-        submit_disabled_effective_mode=False,
         live_submit_attempts=0,
         live_venue_acks=0,
     )
@@ -79,7 +78,6 @@ def test_venue_acks_default_is_zero() -> None:
         dead_lettered=0,
         rejection_reason_counts={},
         risk_level="GREEN",
-        submit_disabled_effective_mode=False,
         live_submit_attempts=1,
         # live_venue_acks intentionally omitted → must default to 0
     )
@@ -101,7 +99,6 @@ def test_live_adapter_exposes_live_ack_count_attribute() -> None:
     submit = adapter.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
-        edli_live_scope="forecast_only",
     )
 
     count_ref = getattr(submit, "_live_ack_count", None)
@@ -110,22 +107,6 @@ def test_live_adapter_exposes_live_ack_count_attribute() -> None:
         "_live_ack_count must be a 1-element list"
     )
     assert count_ref[0] == 0, "ACK counter must start at 0"
-
-
-def test_no_submit_adapter_missing_ack_attribute_gives_zero_default() -> None:
-    """The no-submit adapter does not carry _live_ack_count.
-    getattr fallback in main.py must yield [0] → live_venue_acks=0."""
-    import sqlite3
-    from src.engine import event_reactor_adapter as adapter
-    from src.riskguard.risk_level import RiskLevel
-
-    no_submit = adapter.event_bound_no_submit_adapter_from_trade_conn(
-        sqlite3.connect(":memory:"),
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
-
-    count_ref = getattr(no_submit, "_live_ack_count", [0])
-    assert count_ref[0] == 0, "No-submit adapter must report 0 via getattr fallback"
 
 
 def test_venue_acks_in_pulse_is_independent_of_proof_accepted() -> None:

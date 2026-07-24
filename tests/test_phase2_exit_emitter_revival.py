@@ -540,7 +540,7 @@ class TestDay0StaticClosedBehavioral:
         summary = {"monitors": 0, "exits": 0}
         cycle_runtime.execute_monitoring_phase(
             conn, StaticClob(), portfolio, Artifact(), Tracker(), summary,
-            deps=deps, exit_order_submit_enabled=False,
+            deps=deps,
         )
         return results, summary, pos
 
@@ -653,7 +653,6 @@ class TestDay0StaticClosedBehavioral:
             type("Tracker", (), {"record_exit": lambda self, position: None})(),
             summary,
             deps=deps,
-            exit_order_submit_enabled=False,
         )
 
         assert summary.get("monitor_skipped_closed_market_pending_settlement", 0) == 0
@@ -754,10 +753,6 @@ class TestCanonicalExitOrderPostedProvenance:
              patch(
                  "src.riskguard.riskguard.get_current_level",
                  return_value=RiskLevel.RED,
-             ), \
-             patch(
-                 "src.riskguard.riskguard.get_force_exit_review",
-                 return_value=False,
              ):
             # clob=None so the quick-fill check is skipped (stays sell_pending).
             outcome = execute_exit(

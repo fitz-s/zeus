@@ -45,7 +45,7 @@ def run_source(api: Any) -> Any:
         "canonical_position_write",
         "control_write",
         "settlement_write",
-        "backtest_diagnostic_write",
+        "offline_replay_write",
         "calibration_persistence_write",
         "calibration_decision_group_write",
         "decision_artifact_write",
@@ -72,7 +72,7 @@ def run_source(api: Any) -> Any:
         "src/state/ledger.py": "canonical_position_write",
         "src/state/projection.py": "canonical_position_write",
         "src/execution/harvester.py": "settlement_write",
-        "src/engine/replay.py": "backtest_diagnostic_write",
+        "src/engine/replay.py": "offline_replay_write",
         "src/control/control_plane.py": "control_write",
     }
     for path, route in required_file_routes.items():

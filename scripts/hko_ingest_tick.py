@@ -21,7 +21,7 @@ This closes two gaps:
    triggering any trading path.
 2. **Semantic gap**: ``rhrread`` is a rounded current temperature, not a
    running daily maximum/minimum.  The executable observation row combines
-   that diagnostic current temperature with HKO's official since-midnight
+   that observation current temperature with HKO's official since-midnight
    extrema dataset; legacy rows that equated all three are retired.
 
 Usage
@@ -323,13 +323,13 @@ def _build_hko_extrema_row(
     data_version: str,
     imported_at: str,
 ) -> ObsV2Row:
-    """Build one HKO row with source-typed official and diagnostic fields.
+    """Build one HKO row with source-typed official and observation fields.
 
     Schema semantics:
     - source='hko_hourly_accumulator' (A6 pinned for HK)
     - authority='ICAO_STATION_NATIVE' per plan v3 L95
     - data_version='v1.wu-native' to match the corpus family
-    - temp_current uses the latest rhrread diagnostic when available; it may be
+    - temp_current uses the latest rhrread observation when available; it may be
       absent because official extrema must not wait for an unrelated spot feed
     - running_max/running_min are HKO's official since-midnight 1-minute-mean
       extrema only
@@ -337,7 +337,7 @@ def _build_hko_extrema_row(
     - provenance_json makes the two source roles explicit.
 
     ``temp_current`` is a different observation statistic from HKO's official
-    since-midnight 1-minute-mean extrema. It remains diagnostic and must never
+    since-midnight 1-minute-mean extrema. It remains non-authoritative evidence and must never
     create an absorbing settlement fact. Combining the two fabricated a 30.0C
     running maximum on 2026-07-20 while the official HKO maximum remained
     29.7C, which incorrectly collapsed the 29C NO belief to q=1.

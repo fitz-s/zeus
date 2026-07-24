@@ -771,15 +771,6 @@ def apply_selection_calibrator(
 # back to the raw center-bootstrap bound.
 
 
-def selection_calibrator_live_enabled() -> bool:
-    """Whether the calibrator is the LIVE admission lower bound.
-
-    The calibrator is now direct live runtime law. The function remains only as a compatibility seam
-    for older callers/tests that ask the question explicitly.
-    """
-    return True
-
-
 def selection_calibrated_side_lcb(
     *,
     raw_side_prob: float,

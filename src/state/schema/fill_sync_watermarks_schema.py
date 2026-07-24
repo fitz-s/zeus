@@ -25,7 +25,7 @@ venue timestamp coverage has advanced through; ``cursor`` is an optional
 opaque pagination/sequence token for sources whose read surface exposes one
 (the current polymarket_v2_adapter.get_trades() does not paginate by a server
 cursor, so this is NULL there and freshness is judged by ``watermark_ts``
-alone). ``coverage_note`` is a free-text operator/diagnostic annotation (e.g.
+alone). ``coverage_note`` is a free-text operator/telemetry annotation (e.g.
 "backfilled from migration X"), never read by runtime logic.
 
 Advance-after-persist discipline (packet law, enforced by the caller, not by

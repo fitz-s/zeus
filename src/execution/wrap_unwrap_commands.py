@@ -943,11 +943,6 @@ def wrap_proceeds_now(
                 command_id, tx_kind, exc,
             )
             return "stop"
-        if result.get("errorCode") == "WRAP_DRY_RUN_LOGGED":
-            logger.info(
-                "[WRAP_PROCEEDS_DRY_RUN] command_id=%s tx_kind=%s", command_id, tx_kind,
-            )
-            return "stop"
         if not result.get("success"):
             logger.warning(
                 "[WRAP_PROCEEDS_STEP_FAILED] command_id=%s tx_kind=%s errorCode=%s msg=%s",

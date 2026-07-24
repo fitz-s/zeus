@@ -5,16 +5,10 @@
 #   (BLOCKER "cutover authority" — activation unit is ownership of the forbidden
 #   columns themselves, not the projection funnel; census §精化 #1/#2 bypass-writer set).
 
-"""Forbidden economics-column ownership contract + trade-DB truth-epoch vocabulary.
+"""Inventory of economics columns derivable from chain and venue facts.
 
-LX-0R deliverable 1 (local_ledger_excision_2026-07-12.md): a central, typed definition
-of every economics column that is CHAIN-DERIVABLE (a copy or local derivation of a
-chain/venue fact) and therefore forbidden as a durable local authority once the trade
-DB's truth epoch reaches ACTIVE_NEW. Mirrors the idiom of
-``src.contracts.canonical_lifecycle`` (A1-A6 typed vocabulary, one module owning the
-raw-vs-typed boundary) — this module is the single place a later LX-3R activation
-packet (write firewall, selector migration, manifest-drift CI gate) looks up "is this
-column forbidden" and "who may write it right now".
+This module owns only the static column set consumed by writer-census tooling. It
+does not define an activation state, writer mode, or runtime authorization path.
 
 Column set (seed, adjudicated by census §精化 #1/#2 + consult round-2 delta,
 2026-07-13; ~11 named bypass writers below the projection funnel, plus the EDLI
@@ -32,100 +26,13 @@ clobber twin):
     (LX-T3, stop writing/treating as authority), physical table retirement stays R7
     (rehome the certificate/evidence links first).
 
-This module defines the SHAPE and the EPOCH-SCOPED PERMISSION RULE ONLY. It does not
-open a connection, does not enforce anything at write time (that is LX-3R's DB-level
-BEFORE INSERT/UPDATE guard, explicitly deferred per the round-2 delta: "defense in
-depth, not the migration mechanism"), and does not change any live writer in this
-packet — see src/state/truth_epoch.py for the epoch machinery this feeds, which stays
-LEGACY until a future activation packet flips it.
+The inventory is descriptive input for static analysis; live write authority remains
+with the canonical executable paths and their current invariants.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
-
-
-# --------------------------------------------------------------------------- #
-# Truth-epoch vocabulary (LX-0R)                                              #
-# --------------------------------------------------------------------------- #
-
-class TruthEpoch(StrEnum):
-    """Trade-DB truth epoch (docs/rebuild/local_ledger_excision_2026-07-12.md
-    "修订执行序 LX-0R..5R"). Monotonic — a later stage may only move forward:
-    LEGACY -> PREPARE -> ACTIVE_NEW, never backward, never skipped.
-
-    LEGACY:     today's default. Existing writers (the projection funnel + the
-                census-named bypass UPDATEs) remain the permitted economics
-                authority. Inert state for this whole packet.
-    PREPARE:    LX-3R fenced cutover window — new entries paused, exits continue
-                from command/trade facts, dual-capable code appends facts only
-                under this branch; legacy economics writers are still the record
-                of truth until activation completes.
-    ACTIVE_NEW: the deterministic reducer / read-model is the sole economics
-                authority. Forbidden columns admit ONLY reducer writes; every
-                legacy writer named in this module's docstring must have already
-                been converted (LX-2R) before a real deployment reaches this
-                state — the DB-level guard at LX-3R is defense in depth, not the
-                cutover mechanism itself.
-    """
-
-    LEGACY = "LEGACY"
-    PREPARE = "PREPARE"
-    ACTIVE_NEW = "ACTIVE_NEW"
-
-
-# Declared forward order — the ONLY source of monotonic rank. Never re-derive
-# this from enum declaration order implicitly elsewhere; import _TRUTH_EPOCH_ORDER
-# or call truth_epoch_rank() so a reordering here cannot silently invert the guard.
-_TRUTH_EPOCH_ORDER: tuple[TruthEpoch, ...] = (
-    TruthEpoch.LEGACY,
-    TruthEpoch.PREPARE,
-    TruthEpoch.ACTIVE_NEW,
-)
-
-
-def truth_epoch_rank(epoch: TruthEpoch) -> int:
-    """Monotonic rank of ``epoch`` (0=LEGACY, 1=PREPARE, 2=ACTIVE_NEW). Raises
-    ValueError on anything not a member of ``_TRUTH_EPOCH_ORDER`` rather than
-    guessing a rank for an unknown value."""
-    try:
-        return _TRUTH_EPOCH_ORDER.index(TruthEpoch(epoch))
-    except ValueError:
-        raise ValueError(f"unknown TruthEpoch: {epoch!r}") from None
-
-
-class EconomicsWriterRole(StrEnum):
-    """Who is permitted to write a forbidden economics column, for a given
-    truth epoch. Exactly one role is permitted per epoch (see
-    ``permitted_writer_role``) — there is never a dual-writer window."""
-
-    # Today's shape: the projection funnel (src.state.projection) plus the
-    # census-named direct/dynamic UPDATE bypass sites. Permitted ONLY while the
-    # trade DB's truth epoch is LEGACY or PREPARE.
-    LEGACY_PROJECTION_WRITER = "LEGACY_PROJECTION_WRITER"
-    # The future single authority (LX-2R read-model reducer). The ONLY role
-    # permitted to write a forbidden column once the trade DB's truth epoch is
-    # ACTIVE_NEW.
-    DETERMINISTIC_REDUCER = "DETERMINISTIC_REDUCER"
-
-
-def permitted_writer_role(epoch: TruthEpoch) -> EconomicsWriterRole:
-    """The single writer role permitted to write a forbidden economics column
-    while the trade DB carries ``epoch``. ACTIVE_NEW is the only epoch that
-    hands authority to the reducer; LEGACY and PREPARE both still recognize
-    today's legacy writers (PREPARE is a fenced-entry window, not yet a writer
-    cutover — the cutover is the ACTIVE_NEW publish itself, per LX-3R)."""
-    if TruthEpoch(epoch) is TruthEpoch.ACTIVE_NEW:
-        return EconomicsWriterRole.DETERMINISTIC_REDUCER
-    return EconomicsWriterRole.LEGACY_PROJECTION_WRITER
-
-
-def is_writer_role_permitted(*, epoch: TruthEpoch, role: EconomicsWriterRole) -> bool:
-    """True iff ``role`` is the role permitted to write forbidden economics
-    columns under ``epoch``. Pure predicate — no DB access, no enforcement;
-    LX-3R's BEFORE INSERT/UPDATE guard is the actual enforcement point."""
-    return role is permitted_writer_role(epoch)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,8 +43,7 @@ def is_writer_role_permitted(*, epoch: TruthEpoch, role: EconomicsWriterRole) ->
 class ForbiddenEconomicsColumn:
     """One column that is CHAIN-DERIVABLE (disease test per
     docs/rebuild/local_ledger_excision_2026-07-12.md "Disease definition") and
-    therefore forbidden as a durable local economics authority once the trade
-    DB's truth epoch reaches ACTIVE_NEW."""
+    therefore not a durable local economics authority."""
 
     table: str
     column: str
@@ -235,11 +141,6 @@ def is_forbidden_economics_column(table: str, column: str) -> bool:
 
 
 __all__ = [
-    "TruthEpoch",
-    "truth_epoch_rank",
-    "EconomicsWriterRole",
-    "permitted_writer_role",
-    "is_writer_role_permitted",
     "ForbiddenEconomicsColumn",
     "FORBIDDEN_ECONOMICS_COLUMNS",
     "FORBIDDEN_COLUMNS_BY_TABLE",

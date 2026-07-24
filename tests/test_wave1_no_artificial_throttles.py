@@ -114,17 +114,8 @@ def test_no_src_code_references_deleted_cap_or_canary_symbols():
 # ---------------------------------------------------------------------------
 # Category 3: the redecision screen registers / runs whenever live conditions
 # hold — there is NO flag path. The job self-gates on (enabled + event_writer +
-# reactor_mode==live), never on a redecision_screen_enabled flag.
+# structural live execution, never on a redecision-screen switch.
 # ---------------------------------------------------------------------------
-def test_redecision_screen_has_no_flag_gate_only_live_armed():
-    src = (_SRC / "main.py").read_text()
-    # The screen job body must NOT read a redecision_screen_enabled flag.
-    assert 'get("redecision_screen_enabled"' not in src
-    assert 'get("redecision_continuous_enabled"' not in src
-    # It self-gates on the live-armed conditions instead.
-    assert 'reactor_mode", "live_no_submit")) != "live"' in src or 'reactor_mode") != "live"' in src
-    # The continuous re-decision block is unconditional (no flag wrapper).
-    assert 'get("redecision_max_per_cycle"' not in src
 
 
 # ---------------------------------------------------------------------------

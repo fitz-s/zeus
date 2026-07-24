@@ -168,7 +168,7 @@ def legacy_outcome_type_to_resolution_state(
     """Map a legacy settlement_outcomes row to its event lifecycle state — LIFECYCLE
     ONLY, never side/economics. A NON-NULL outcome_type is authoritative: known legacy
     values map; an UNKNOWN non-null integer (writer/schema bug or a future enum value this
-    code predates) FAILS CLOSED to UNRESOLVED rather than being promoted by the authority
+    code predates) FAILS CLOSED to UNRESOLVED rather than being accepted by authority
     fallback (consult 6a42bc3d [S2]). The authority + winning_bin fallback applies ONLY
     when outcome_type IS NULL (the safe historical backfill for un-typed rows)."""
     if outcome_type is not None:
@@ -200,10 +200,10 @@ def settlement_resolution_state_from_row(row: dict) -> SettlementResolutionState
     )
 
 
-# Calibration/promotion eligibility — the resolution-state equivalent of the legacy
-# _PROMOTION_ELIGIBLE_OUTCOMES set. Proven zero-diff vs the legacy gate across every
+# Calibration/learning eligibility — the resolution-state equivalent of the legacy
+# _LEARNING_ELIGIBLE_OUTCOMES set. Proven zero-diff vs the legacy gate across every
 # outcome_type value (tests/test_settlement_axes_a8_a9.py).
-PROMOTION_ELIGIBLE_RESOLUTION_STATES: frozenset[SettlementResolutionState] = frozenset({
+LEARNING_ELIGIBLE_RESOLUTION_STATES: frozenset[SettlementResolutionState] = frozenset({
     SettlementResolutionState.PHYSICALLY_CONFIRMED,
     SettlementResolutionState.VENUE_RESOLVED,
     SettlementResolutionState.OBSERVATION_REVISED,
@@ -211,10 +211,10 @@ PROMOTION_ELIGIBLE_RESOLUTION_STATES: frozenset[SettlementResolutionState] = fro
 })
 
 
-def is_promotion_eligible_resolution_state(state: SettlementResolutionState) -> bool:
-    """True iff this event lifecycle state is eligible to feed promotion-grade scoring
+def is_learning_eligible_resolution_state(state: SettlementResolutionState) -> bool:
+    """True iff this event lifecycle state is eligible to feed learning-grade scoring
     / calibration learning (resolved-enough), independent of who won."""
-    return state in PROMOTION_ELIGIBLE_RESOLUTION_STATES
+    return state in LEARNING_ELIGIBLE_RESOLUTION_STATES
 
 
 def market_resolution_side_for_bin(

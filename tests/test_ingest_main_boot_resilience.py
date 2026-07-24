@@ -262,7 +262,7 @@ class TestAdvisoryLockGuard:
             patch("src.data.forecasts_append.daily_tick", return_value={}) as mock_ftick,
             patch("src.data.solar_append.daily_tick", return_value={}) as mock_stick,
             patch("src.state.db.get_world_connection", return_value=conn),
-            patch("src.data.dual_run_lock.acquire_lock", new=lock_not_acquired),
+            patch("src.data.job_lock.acquire_lock", new=lock_not_acquired),
         ):
             _call_startup_catch_up(conn)
 
@@ -286,7 +286,7 @@ class TestAdvisoryLockGuard:
             patch("src.data.forecasts_append.daily_tick", return_value={}) as mock_ftick,
             patch("src.data.solar_append.daily_tick", return_value={}) as mock_stick,
             patch("src.state.db.get_world_connection", return_value=conn),
-            patch("src.data.dual_run_lock.acquire_lock", new=lock_not_acquired),
+            patch("src.data.job_lock.acquire_lock", new=lock_not_acquired),
         ):
             _call_startup_catch_up(conn)
 
@@ -328,7 +328,7 @@ class TestSolarStatusFilter:
             patch("src.data.forecasts_append.daily_tick", return_value={}) as mock_ftick,
             patch("src.data.solar_append.daily_tick", return_value=fake_solar) as mock_stick,
             patch("src.state.db.get_world_connection", return_value=conn),
-            patch("src.data.dual_run_lock.acquire_lock", new=lock_acquired),
+            patch("src.data.job_lock.acquire_lock", new=lock_acquired),
         ):
             _call_startup_catch_up(conn)
 
@@ -373,7 +373,7 @@ class TestPrePhase1Snapshot:
             patch("src.data.forecasts_append.daily_tick", return_value=fake_result) as mock_ftick,
             patch("src.data.solar_append.daily_tick", return_value={}) as mock_stick,
             patch("src.state.db.get_world_connection", return_value=conn),
-            patch("src.data.dual_run_lock.acquire_lock", new=lock_acquired),
+            patch("src.data.job_lock.acquire_lock", new=lock_acquired),
         ):
             _call_startup_catch_up(conn)
 

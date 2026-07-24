@@ -97,42 +97,6 @@ def _target_local_day_strictly_past(
     return decision_time.astimezone(UTC) >= day_after_entry
 
 
-def _intake_phase_filter_enabled() -> bool:
-    """Read edli.edli_intake_phase_filter_enabled (default OFF in code).
-
-    WAVE-1 W1-T1. FAIL-OPEN: any config-access error → False (filter OFF) so a
-    settings glitch never silently suppresses every FSR. The reactor's
-    EVENT_BOUND_MARKET_PHASE_CLOSED backstop remains the authority regardless.
-    """
-    try:
-        from src.config import settings
-
-        return bool(settings["edli"].get("edli_intake_phase_filter_enabled", False))
-    except Exception:  # noqa: BLE001 — config glitch must never zero the FSR stream
-        return False
-
-
-def _replacement_live_enabled() -> bool:
-    """True when live FSR probability source is the 0.1 replacement posterior.
-
-    Fail-closed for the replacement-specific paths: when this flag is on, an FSR
-    without a matching replacement posterior must not enter live re-decision as a
-    legacy OpenData/t3 candidate.
-    """
-
-    try:
-        from src.config import settings
-
-        return bool(
-            settings["feature_flags"].get(
-                "openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled",
-                False,
-            )
-        )
-    except Exception:  # noqa: BLE001
-        return False
-
-
 @dataclass(frozen=True)
 class CoverageFairnessRequest:
     """Contract object that owns per-cycle city-fair emit selection.
@@ -279,7 +243,6 @@ def _row_passes_emit_time_filters(
     row: dict[str, Any],
     *,
     decision_time: datetime,
-    intake_phase_filter_on: bool,
     phase_filter_exempt_families: set[tuple[str, str, str]] | None,
 ) -> bool:
     coverage = _coverage_from_join(row)
@@ -301,18 +264,17 @@ def _row_passes_emit_time_filters(
         ):
             return False
 
-    if intake_phase_filter_on:
-        family_key = (city, target_date, metric)
-        if family_key in (phase_filter_exempt_families or set()):
-            return True
-        if not market_phase_admits(
-            city=city,
-            target_date=target_date,
-            metric=metric,
-            decision_time=decision_time,
-            market_row={},
-        ):
-            return False
+    family_key = (city, target_date, metric)
+    if family_key in (phase_filter_exempt_families or set()):
+        return True
+    if not market_phase_admits(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+        market_row={},
+    ):
+        return False
     return True
 
 
@@ -837,28 +799,21 @@ class ForecastSnapshotReadyTrigger:
         the world write mutex and keep the live event writer's critical section short.
         """
 
-        # mx2t3 carrier-decouple (GATE-1 C-A2): under the replacement lane readiness rides
-        # ``forecast_posteriors`` (mx2t3-independent), so the required-table guard switches to it —
-        # otherwise this scan early-returns ``[]`` once the cold ensemble tables freeze/absent.
-        _replacement_posterior_lane = _replacement_live_enabled()
-        _posterior_lane = False
-        if _replacement_posterior_lane:
-            if not _table_exists(forecasts_conn, "forecast_posteriors"):
-                return []
-            if not _table_exists(forecasts_conn, "readiness_state"):
-                return []
-            if not _table_exists(forecasts_conn, "raw_model_forecasts"):
-                return []
-            if not _POSTERIOR_LIVE_REQUIRED_COLUMNS.issubset(
-                _table_columns(forecasts_conn, "forecast_posteriors")
-            ):
-                return []
-            if not _POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS.issubset(
-                _table_columns(forecasts_conn, "raw_model_forecasts")
-            ):
-                return []
-            _posterior_lane = True
-        elif not all(_table_exists(forecasts_conn, table) for table in _FORECAST_TABLES):
+        # Replacement readiness rides on the mx2t3-independent posterior carrier.
+        # Missing carrier tables or required columns are data-readiness failures.
+        if not _table_exists(forecasts_conn, "forecast_posteriors"):
+            return []
+        if not _table_exists(forecasts_conn, "readiness_state"):
+            return []
+        if not _table_exists(forecasts_conn, "raw_model_forecasts"):
+            return []
+        if not _POSTERIOR_LIVE_REQUIRED_COLUMNS.issubset(
+            _table_columns(forecasts_conn, "forecast_posteriors")
+        ):
+            return []
+        if not _POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS.issubset(
+            _table_columns(forecasts_conn, "raw_model_forecasts")
+        ):
             return []
         # Decision-first emission: a family with no Polymarket market (no market_events row)
         # can never trade, so it must not consume the reactor's bounded decision-proof budget
@@ -867,16 +822,9 @@ class ForecastSnapshotReadyTrigger:
         # boot / tests) emit all and let the executable-snapshot gate filter downstream; once
         # any market exists, require the family to have one. Non-permanent — re-scanned every
         # cycle, so a family emits as soon as its market is discovered.
-        market_filter = ""
         posterior_market_filter = ""
         if _table_exists(forecasts_conn, "market_events"):
             if _table_has_rows(forecasts_conn, "market_events"):
-                market_filter = (
-                    " AND EXISTS (SELECT 1 FROM market_events m"
-                    " WHERE m.city = c.city"
-                    " AND m.target_date = c.target_local_date"
-                    " AND m.temperature_metric = c.temperature_metric)"
-                )
                 posterior_market_filter = (
                     " AND EXISTS (SELECT 1 FROM market_events m"
                     " WHERE m.city = fp.city"
@@ -921,340 +869,223 @@ class ForecastSnapshotReadyTrigger:
                 restrict_to_families=restrict_to_families,
             )
         )
-        _legacy_family_filter_sql, _legacy_family_filter_params = _family_restriction_sql(
-            table_alias="c0",
-            city_col="city",
-            target_col="target_local_date",
-            metric_col="temperature_metric",
-            restrict_to_families=restrict_to_families,
+        # mx2t3 carrier-decouple (GATE-1 C-A1): readiness/selection from forecast_posteriors.
+        # Project the SAME row aliases the legacy ensemble path produced (so _source_run_from_join
+        # / _coverage_from_join / _snapshot_from_join are unchanged) but mint a NEUTRAL synthesized
+        # snapshot identity (rmf-<city>|<target>|<metric>|<cycle_date>) — no ensemble_snapshots row.
+        # completeness_status='COMPLETE' / readiness_status='LIVE_ELIGIBLE' are licensed by
+        # the exact READY dependency below. A posterior may be appended before its readiness
+        # certificate is durable, so recency alone is never carrier authority. members_json is
+        # NULL (the spine re-sources members from
+        # raw_model_forecasts; the FSR members never feed belief on this lane), but the event's
+        # member counters must still describe that same raw-model carrier instead of falling back
+        # to legacy 51-member ensemble telemetry.
+        #
+        # Live-cadence fix (2026-06-25): choose the latest live posterior
+        # families BEFORE counting raw_model_forecasts. The former CTE
+        # grouped the full raw history every reactor cycle, so a 600k-row
+        # raw table could spend minutes before emitting any candidate. This
+        # preserves the one latest posterior per family law while bounding
+        # the carrier count to the currently-emittable family/cycle set.
+        _posterior_runtime_filter = (
+            " AND fp.runtime_layer = 'live' AND fp.training_allowed = 0"
         )
-
-        if _posterior_lane:
-            # mx2t3 carrier-decouple (GATE-1 C-A1): readiness/selection from forecast_posteriors.
-            # Project the SAME row aliases the legacy ensemble path produced (so _source_run_from_join
-            # / _coverage_from_join / _snapshot_from_join are unchanged) but mint a NEUTRAL synthesized
-            # snapshot identity (rmf-<city>|<target>|<metric>|<cycle_date>) — no ensemble_snapshots row.
-            # completeness_status='COMPLETE' / readiness_status='LIVE_ELIGIBLE' are licensed by
-            # the exact READY dependency below. A posterior may be appended before its readiness
-            # certificate is durable, so recency alone is never carrier authority. members_json is
-            # NULL (the spine re-sources members from
-            # raw_model_forecasts; the FSR members never feed belief on this lane), but the event's
-            # member counters must still describe that same raw-model carrier instead of falling back
-            # to legacy 51-member ensemble telemetry.
-            #
-            # Live-cadence fix (2026-06-25): choose the latest live posterior
-            # families BEFORE counting raw_model_forecasts. The former CTE
-            # grouped the full raw history every reactor cycle, so a 600k-row
-            # raw table could spend minutes before emitting any candidate. This
-            # preserves the one latest posterior per family law while bounding
-            # the carrier count to the currently-emittable family/cycle set.
-            _posterior_columns = _table_columns(forecasts_conn, "forecast_posteriors")
-            _posterior_runtime_filter = (
-                " AND fp.runtime_layer = 'live' AND fp.training_allowed = 0"
+        _ranked_readiness_cte_sql = f"""
+            ranked_ready AS (
+                SELECT
+                    rs.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            rs.scope_type,
+                            rs.strategy_key,
+                            rs.source_id,
+                            rs.data_version,
+                            rs.city,
+                            rs.target_local_date,
+                            rs.temperature_metric
+                        ORDER BY julianday(rs.computed_at) DESC,
+                                 rs.readiness_id DESC
+                    ) AS _family_rank
+                  FROM readiness_state AS rs
+                 WHERE rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
+                   AND rs.scope_type = 'strategy'
+                   AND rs.source_id = '{REPLACEMENT_SOURCE_ID}'
+                   AND julianday(rs.computed_at) <= julianday(?)
+                   {_readiness_family_filter_sql}
+            ),
+            ready_posterior AS (
+                SELECT rs.*, dep.value AS dependency
+                  FROM ranked_ready AS rs,
+                       json_each(
+                           CASE
+                               WHEN json_valid(rs.dependency_json)
+                               THEN rs.dependency_json
+                               ELSE '{{}}'
+                           END,
+                           '$.dependencies'
+                       ) AS dep
+                 WHERE rs._family_rank = 1
+                   AND rs.status = '{REPLACEMENT_READY_STATUS}'
+                   AND rs.expires_at IS NOT NULL
+                   AND julianday(rs.expires_at) > julianday(?)
+                   AND json_extract(dep.value, '$.role') = 'soft_anchor_posterior'
+                   AND json_extract(dep.value, '$.source_id') = rs.source_id
+                   AND json_extract(dep.value, '$.status') = '{REPLACEMENT_READY_STATUS}'
+                   AND json_type(dep.value, '$.source_available_at') = 'text'
+                   AND julianday(
+                       json_extract(dep.value, '$.source_available_at')
+                   ) <= julianday(?)
+                   AND json_type(dep.value, '$.posterior_id') = 'integer'
             )
-            _ranked_readiness_cte_sql = f"""
-                ranked_ready AS (
-                    SELECT
-                        rs.*,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY
-                                rs.scope_type,
-                                rs.strategy_key,
-                                rs.source_id,
-                                rs.data_version,
-                                rs.city,
-                                rs.target_local_date,
-                                rs.temperature_metric
-                            ORDER BY julianday(rs.computed_at) DESC,
-                                     rs.readiness_id DESC
-                        ) AS _family_rank
-                      FROM readiness_state AS rs
-                     WHERE rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
-                       AND rs.scope_type = 'strategy'
-                       AND rs.source_id = '{REPLACEMENT_SOURCE_ID}'
-                       AND julianday(rs.computed_at) <= julianday(?)
-                       {_readiness_family_filter_sql}
-                ),
-                ready_posterior AS (
-                    SELECT rs.*, dep.value AS dependency
-                      FROM ranked_ready AS rs,
-                           json_each(
-                               CASE
-                                   WHEN json_valid(rs.dependency_json)
-                                   THEN rs.dependency_json
-                                   ELSE '{{}}'
-                               END,
-                               '$.dependencies'
-                           ) AS dep
-                     WHERE rs._family_rank = 1
-                       AND rs.status = '{REPLACEMENT_READY_STATUS}'
-                       AND rs.expires_at IS NOT NULL
-                       AND julianday(rs.expires_at) > julianday(?)
-                       AND json_extract(dep.value, '$.role') = 'soft_anchor_posterior'
-                       AND json_extract(dep.value, '$.source_id') = rs.source_id
-                       AND json_extract(dep.value, '$.status') = '{REPLACEMENT_READY_STATUS}'
-                       AND json_type(dep.value, '$.source_available_at') = 'text'
-                       AND julianday(
-                           json_extract(dep.value, '$.source_available_at')
-                       ) <= julianday(?)
-                       AND json_type(dep.value, '$.posterior_id') = 'integer'
+        """
+        _exact_readiness = _replacement_readiness_exact_scope_cte(
+            restrict_to_families
+        )
+        if _exact_readiness is None:
+            _readiness_cte_sql = _ranked_readiness_cte_sql
+            _readiness_params = (
+                _decision_iso,
+                *_readiness_family_filter_params,
+                _decision_iso,
+                _decision_iso,
+            )
+        else:
+            _readiness_cte_sql, _exact_readiness_params = _exact_readiness
+            _readiness_params = (
+                *_exact_readiness_params,
+                _decision_iso,
+                _decision_iso,
+                _decision_iso,
+            )
+        _select_sql_template = f"""
+            WITH __READINESS_CTE__
+            SELECT
+                fp.posterior_id AS coverage_id,
+                fp.posterior_identity_hash AS source_run_id,
+                fp.source_id AS source_id,
+                NULL AS source_transport,
+                NULL AS release_calendar_key,
+                '{REPLACEMENT_0_1_TRACK_LABEL}' AS track,
+                NULL AS city_id,
+                fp.city AS city,
+                NULL AS city_timezone,
+                fp.target_date AS target_local_date,
+                fp.temperature_metric AS temperature_metric,
+                '{POSTERIOR_BACKED_DATA_VERSION}' AS data_version,
+                NULL AS expected_members,
+                NULL AS observed_members,
+                NULL AS expected_steps_json,
+                NULL AS observed_steps_json,
+                NULL AS snapshot_ids_json,
+                NULL AS target_window_start_utc,
+                NULL AS target_window_end_utc,
+                'COMPLETE' AS completeness_status,
+                'LIVE_ELIGIBLE' AS readiness_status,
+                fp.computed_at AS computed_at,
+                fp.source_cycle_time AS sr_source_cycle_time,
+                fp.source_available_at AS sr_source_issue_time,
+                NULL AS sr_source_release_time,
+                fp.source_available_at AS sr_source_available_at,
+                NULL AS sr_fetch_started_at,
+                NULL AS sr_fetch_finished_at,
+                fp.computed_at AS sr_captured_at,
+                'COMPLETE' AS sr_status,
+                'COMPLETE' AS sr_completeness_status,
+                NULL AS sr_expected_steps_json,
+                NULL AS sr_observed_steps_json,
+                NULL AS sr_expected_members,
+                NULL AS sr_observed_members,
+                ('{_POSTERIOR_SNAPSHOT_ID_PREFIX}' || fp.city || '|' || fp.target_date || '|'
+                    || fp.temperature_metric || '|' || substr(fp.source_cycle_time, 1, 10)) AS snapshot_id,
+                fp.city AS snapshot_city,
+                fp.target_date AS snapshot_target_date,
+                fp.temperature_metric AS snapshot_temperature_metric,
+                fp.source_available_at AS snapshot_available_at,
+                fp.computed_at AS snapshot_fetch_time,
+                fp.posterior_identity_hash AS snapshot_manifest_hash,
+                json_extract(
+                    fp.provenance_json,
+                    '$.bayes_precision_fusion.raw_model_forecast_ids'
+                ) AS carrier_raw_model_forecast_ids_json,
+                json_extract(
+                    fp.provenance_json,
+                    '$.bayes_precision_fusion.decorrelated_providers_complete'
+                ) AS carrier_complete,
+                json_extract(
+                    fp.provenance_json,
+                    '$.bayes_precision_fusion.decorrelated_providers_served'
+                ) AS carrier_served,
+                json_extract(
+                    fp.provenance_json,
+                    '$.bayes_precision_fusion.decorrelated_providers_expected'
+                ) AS carrier_expected,
+                NULL AS snapshot_members_json
+              FROM ready_posterior AS rs
+              JOIN forecast_posteriors AS fp
+                ON fp.posterior_id = json_extract(
+                    rs.dependency,
+                    '$.posterior_id'
                 )
+             WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
+               {_posterior_runtime_filter}
+               {_family_filter_sql}
+               AND fp.target_date >= ?
+               AND (
+                   fp.source_available_at IS NULL
+                   OR julianday(fp.source_available_at) <= julianday(?)
+               )
+               AND (
+                   fp.computed_at IS NULL
+                   OR julianday(fp.computed_at) <= julianday(?)
+               )
+               AND rs.data_version = CASE fp.temperature_metric
+                    WHEN 'high' THEN '{REPLACEMENT_HIGH_DATA_VERSION}'
+                    WHEN 'low' THEN '{REPLACEMENT_LOW_DATA_VERSION}'
+               END
+               AND fp.source_id = rs.source_id
+               AND fp.data_version = rs.data_version
+               AND rs.city = fp.city
+               AND rs.target_local_date = fp.target_date
+               AND rs.temperature_metric = fp.temperature_metric
+               AND json_extract(rs.dependency, '$.product_id') = fp.product_id
+               AND json_extract(rs.dependency, '$.data_version') = rs.data_version
+               AND json_extract(rs.dependency, '$.posterior_id') = fp.posterior_id
+               {posterior_market_filter}
+            ORDER BY fp.source_cycle_time DESC, fp.computed_at DESC
             """
-            _exact_readiness = _replacement_readiness_exact_scope_cte(
-                restrict_to_families
-            )
-            if _exact_readiness is None:
-                _readiness_cte_sql = _ranked_readiness_cte_sql
-                _readiness_params = (
+        _select_sql_base = _select_sql_template.replace(
+            "__READINESS_CTE__",
+            _readiness_cte_sql,
+            1,
+        )
+        rows = _dict_rows(
+            forecasts_conn,
+            _select_sql_base,
+            (
+                *_readiness_params,
+                *_family_filter_params,
+                _target_date_floor,
+                _decision_iso,
+                _decision_iso,
+            ),
+        )
+        if _exact_readiness is not None and not rows:
+            rows = _dict_rows(
+                forecasts_conn,
+                _select_sql_template.replace(
+                    "__READINESS_CTE__",
+                    _ranked_readiness_cte_sql,
+                    1,
+                ),
+                (
                     _decision_iso,
                     *_readiness_family_filter_params,
                     _decision_iso,
                     _decision_iso,
-                )
-            else:
-                _readiness_cte_sql, _exact_readiness_params = _exact_readiness
-                _readiness_params = (
-                    *_exact_readiness_params,
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
-                )
-            _select_sql_template = f"""
-                WITH __READINESS_CTE__
-                SELECT
-                    fp.posterior_id AS coverage_id,
-                    fp.posterior_identity_hash AS source_run_id,
-                    fp.source_id AS source_id,
-                    NULL AS source_transport,
-                    NULL AS release_calendar_key,
-                    '{REPLACEMENT_0_1_TRACK_LABEL}' AS track,
-                    NULL AS city_id,
-                    fp.city AS city,
-                    NULL AS city_timezone,
-                    fp.target_date AS target_local_date,
-                    fp.temperature_metric AS temperature_metric,
-                    '{POSTERIOR_BACKED_DATA_VERSION}' AS data_version,
-                    NULL AS expected_members,
-                    NULL AS observed_members,
-                    NULL AS expected_steps_json,
-                    NULL AS observed_steps_json,
-                    NULL AS snapshot_ids_json,
-                    NULL AS target_window_start_utc,
-                    NULL AS target_window_end_utc,
-                    'COMPLETE' AS completeness_status,
-                    'LIVE_ELIGIBLE' AS readiness_status,
-                    fp.computed_at AS computed_at,
-                    fp.source_cycle_time AS sr_source_cycle_time,
-                    fp.source_available_at AS sr_source_issue_time,
-                    NULL AS sr_source_release_time,
-                    fp.source_available_at AS sr_source_available_at,
-                    NULL AS sr_fetch_started_at,
-                    NULL AS sr_fetch_finished_at,
-                    fp.computed_at AS sr_captured_at,
-                    'COMPLETE' AS sr_status,
-                    'COMPLETE' AS sr_completeness_status,
-                    NULL AS sr_expected_steps_json,
-                    NULL AS sr_observed_steps_json,
-                    NULL AS sr_expected_members,
-                    NULL AS sr_observed_members,
-                    ('{_POSTERIOR_SNAPSHOT_ID_PREFIX}' || fp.city || '|' || fp.target_date || '|'
-                        || fp.temperature_metric || '|' || substr(fp.source_cycle_time, 1, 10)) AS snapshot_id,
-                    fp.city AS snapshot_city,
-                    fp.target_date AS snapshot_target_date,
-                    fp.temperature_metric AS snapshot_temperature_metric,
-                    fp.source_available_at AS snapshot_available_at,
-                    fp.computed_at AS snapshot_fetch_time,
-                    fp.posterior_identity_hash AS snapshot_manifest_hash,
-                    json_extract(
-                        fp.provenance_json,
-                        '$.bayes_precision_fusion.raw_model_forecast_ids'
-                    ) AS carrier_raw_model_forecast_ids_json,
-                    json_extract(
-                        fp.provenance_json,
-                        '$.bayes_precision_fusion.decorrelated_providers_complete'
-                    ) AS carrier_complete,
-                    json_extract(
-                        fp.provenance_json,
-                        '$.bayes_precision_fusion.decorrelated_providers_served'
-                    ) AS carrier_served,
-                    json_extract(
-                        fp.provenance_json,
-                        '$.bayes_precision_fusion.decorrelated_providers_expected'
-                    ) AS carrier_expected,
-                    NULL AS snapshot_members_json
-                  FROM ready_posterior AS rs
-                  JOIN forecast_posteriors AS fp
-                    ON fp.posterior_id = json_extract(
-                        rs.dependency,
-                        '$.posterior_id'
-                    )
-                 WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
-                   {_posterior_runtime_filter}
-                   {_family_filter_sql}
-                   AND fp.target_date >= ?
-                   AND (
-                       fp.source_available_at IS NULL
-                       OR julianday(fp.source_available_at) <= julianday(?)
-                   )
-                   AND (
-                       fp.computed_at IS NULL
-                       OR julianday(fp.computed_at) <= julianday(?)
-                   )
-                   AND rs.data_version = CASE fp.temperature_metric
-                        WHEN 'high' THEN '{REPLACEMENT_HIGH_DATA_VERSION}'
-                        WHEN 'low' THEN '{REPLACEMENT_LOW_DATA_VERSION}'
-                   END
-                   AND fp.source_id = rs.source_id
-                   AND fp.data_version = rs.data_version
-                   AND rs.city = fp.city
-                   AND rs.target_local_date = fp.target_date
-                   AND rs.temperature_metric = fp.temperature_metric
-                   AND json_extract(rs.dependency, '$.product_id') = fp.product_id
-                   AND json_extract(rs.dependency, '$.data_version') = rs.data_version
-                   AND json_extract(rs.dependency, '$.posterior_id') = fp.posterior_id
-                   {posterior_market_filter}
-                ORDER BY fp.source_cycle_time DESC, fp.computed_at DESC
-                """
-            _select_sql_base = _select_sql_template.replace(
-                "__READINESS_CTE__",
-                _readiness_cte_sql,
-                1,
-            )
-            rows = _dict_rows(
-                forecasts_conn,
-                _select_sql_base,
-                (
-                    *_readiness_params,
                     *_family_filter_params,
                     _target_date_floor,
                     _decision_iso,
                     _decision_iso,
-                ),
-            )
-            if _exact_readiness is not None and not rows:
-                rows = _dict_rows(
-                    forecasts_conn,
-                    _select_sql_template.replace(
-                        "__READINESS_CTE__",
-                        _ranked_readiness_cte_sql,
-                        1,
-                    ),
-                    (
-                        _decision_iso,
-                        *_readiness_family_filter_params,
-                        _decision_iso,
-                        _decision_iso,
-                        *_family_filter_params,
-                        _target_date_floor,
-                        _decision_iso,
-                        _decision_iso,
-                    ),
-                )
-        else:
-            replacement_filter = ""
-            if _replacement_live_enabled():
-                if (
-                    not _table_exists(forecasts_conn, "forecast_posteriors")
-                    or "runtime_layer" not in _table_columns(forecasts_conn, "forecast_posteriors")
-                ):
-                    replacement_filter = " AND 0"
-                else:
-                    replacement_filter = (
-                        " AND EXISTS (SELECT 1 FROM forecast_posteriors fp"
-                        " WHERE fp.product_id = '" + REPLACEMENT_0_1_PRODUCT_ID + "'"
-                        " AND fp.runtime_layer = 'live'"
-                        " AND fp.city = c.city"
-                        " AND fp.target_date = c.target_local_date"
-                        " AND fp.temperature_metric = c.temperature_metric"
-                        " AND fp.source_available_at <= ?"
-                        " AND fp.computed_at <= ?)"
-                    )
-            _snapshot_latest_join = """
-                 AND s.snapshot_id = (
-                    SELECT MAX(s2.snapshot_id)
-                      FROM ensemble_snapshots s2
-                     WHERE s2.source_run_id = c.source_run_id
-                       AND s2.city = c.city
-                       AND s2.target_date = c.target_local_date
-                       AND s2.temperature_metric = c.temperature_metric
-                 )
-            """
-            # Wave-1 2026-06-12: the legacy (non-fairness) ORDER-BY/LIMIT select is DELETED.
-            # The coverage-fairness CTE (≤1 row per (city,target,metric), round-robined) is
-            # now the SOLE selection path — no city is monopolised/starved.
-            _select_sql_base = f"""
-                WITH ranked_coverage AS (
-                    SELECT
-                        c0.*,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY c0.city, c0.target_local_date, c0.temperature_metric
-                            ORDER BY
-                                CASE WHEN c0.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
-                                c0.computed_at DESC,
-                                c0.coverage_id DESC
-                        ) AS _family_rank
-                      FROM source_run_coverage c0
-                     WHERE (c0.computed_at IS NULL OR c0.computed_at <= ?)
-                       {_legacy_family_filter_sql}
-                )
-                SELECT
-                    c.*,
-                    sr.source_cycle_time AS sr_source_cycle_time,
-                    sr.source_issue_time AS sr_source_issue_time,
-                    sr.source_release_time AS sr_source_release_time,
-                    sr.source_available_at AS sr_source_available_at,
-                    sr.fetch_started_at AS sr_fetch_started_at,
-                    sr.fetch_finished_at AS sr_fetch_finished_at,
-                    sr.captured_at AS sr_captured_at,
-                    sr.status AS sr_status,
-                    sr.completeness_status AS sr_completeness_status,
-                    sr.expected_steps_json AS sr_expected_steps_json,
-                    sr.observed_steps_json AS sr_observed_steps_json,
-                    sr.expected_members AS sr_expected_members,
-                    sr.observed_members AS sr_observed_members,
-                    s.snapshot_id,
-                    s.city AS snapshot_city,
-                    s.target_date AS snapshot_target_date,
-                    s.temperature_metric AS snapshot_temperature_metric,
-                    s.available_at AS snapshot_available_at,
-                    s.fetch_time AS snapshot_fetch_time,
-                    s.manifest_hash AS snapshot_manifest_hash,
-                    s.members_json AS snapshot_members_json
-                FROM ranked_coverage c
-                JOIN source_run sr ON sr.source_run_id = c.source_run_id
-                JOIN ensemble_snapshots s
-                  ON s.source_run_id = c.source_run_id
-                 AND s.city = c.city
-                 AND s.target_date = c.target_local_date
-                 AND s.temperature_metric = c.temperature_metric
-                 {_snapshot_latest_join}
-                WHERE c._family_rank = 1
-                  AND COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
-                  AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
-                  AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}{replacement_filter}
-                ORDER BY
-                    CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
-                    c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
-                """
-            _replacement_params: tuple[str, ...] = (
-                (_decision_iso, _decision_iso)
-                if _replacement_live_enabled()
-                and _table_exists(forecasts_conn, "forecast_posteriors")
-                else ()
-            )
-            # Fetch all candidates (no SQL LIMIT); the fairness contract applies the per-cycle
-            # LIMIT and round-robin. The CTE's family-rank predicate needs the extra leading
-            # _decision_iso param (4 total before replacement params).
-            rows = _dict_rows(
-                forecasts_conn,
-                _select_sql_base,
-                (
-                    _decision_iso,
-                    *_legacy_family_filter_params,
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
-                    *_replacement_params,
                 ),
             )
         rows = _filter_rows_to_restricted_families(rows, restrict_to_families)
@@ -1264,16 +1095,12 @@ class ForecastSnapshotReadyTrigger:
                 row for row in rows
                 if _entity_key_from_join_row(row) not in pending_skip
             ]
-        _intake_phase_filter_on = bool(
-            source is not None or _intake_phase_filter_enabled()
-        )
         if rows:
             rows = [
                 row for row in rows
                 if _row_passes_emit_time_filters(
                     row,
                     decision_time=decision_time,
-                    intake_phase_filter_on=_intake_phase_filter_on,
                     phase_filter_exempt_families=phase_filter_exempt_families,
                 )
             ]
@@ -1286,25 +1113,18 @@ class ForecastSnapshotReadyTrigger:
                 limit=max(1, len(rows) if limit is None else int(limit)),
                 cycle_index=0 if limit is None else _cycle_index,
             ).select_rows(rows)
-        if _posterior_lane and rows:
+        if rows:
             rows = _with_posterior_raw_member_counts(
                 forecasts_conn,
                 rows,
                 decision_iso=_decision_iso,
                 min_members=3,
             )
-        # WAVE-1 W1-T1 intake phase filter. For one-shot catch-up this remains
-        # gated by edli.edli_intake_phase_filter_enabled (default OFF). For
-        # continuous re-decision (source is per-cycle) it is mandatory: same-day
-        # forecast_only families have already entered SETTLEMENT_DAY and must not
-        # be re-emitted every minute to consume the bounded decision-proof budget.
-        # The reactor's EVENT_BOUND_MARKET_PHASE_CLOSED backstop stays authoritative.
-        # market_phase_admits is the SAME predicate the reactor applies as a
-        # fail-closed backstop (they cannot diverge). The forecast-DB rows carry
-        # no market start/end timing, so the empty market_row falls back to the
-        # F1 12:00-UTC anchor — identical to the reactor's selected_market_row
-        # path. FAIL-OPEN on the flag being absent/OFF; the reactor backstop
-        # remains the authority either way.
+        # WAVE-1 W1-T1 applies market_phase_admits to every forecast_only family.
+        # It is the SAME fail-closed predicate as the reactor backstop. The
+        # forecast-DB rows carry no market timing, so the empty market_row uses
+        # the F1 12:00-UTC anchor, identical to the reactor's selected_market_row
+        # fallback.
         results: list[OpportunityEvent] = []
         for row in reversed(rows):
             source_run = _source_run_from_join(row)
@@ -1328,8 +1148,8 @@ class ForecastSnapshotReadyTrigger:
             # point-fix — the cheap source-form of the timeliness predicate, a
             # conservative lower bound of the reactor's full phase gate, so it can
             # never starve a candidate the reactor would admit. Same-day
-            # (SETTLEMENT_DAY) families are left to the flag-gated W1-T1 intake
-            # filter below / the reactor backstop.
+            # (SETTLEMENT_DAY) families are rejected by the mandatory W1-T1
+            # intake filter above.
             _src_tz = str(coverage.get("city_timezone") or "")
             _src_target = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
             if _src_tz and _src_target:
@@ -1342,22 +1162,6 @@ class ForecastSnapshotReadyTrigger:
                     target_local_date=_src_target_date,
                     decision_time=decision_time,
                 ):
-                    continue
-            if _intake_phase_filter_on:
-                city = str(snapshot.get("city") or coverage.get("city") or "")
-                target_date = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
-                metric = str(snapshot.get("temperature_metric") or coverage.get("temperature_metric") or "")
-                family_key = (city, target_date, metric)
-                if family_key in (phase_filter_exempt_families or set()):
-                    pass
-                elif not market_phase_admits(
-                    city=city,
-                    target_date=target_date,
-                    metric=metric,
-                    decision_time=decision_time,
-                    market_row={},
-                ):
-                    # Phase-closed family: emit ZERO FSR for it this cycle.
                     continue
             event = build_forecast_snapshot_ready_event(
                 source_run=source_run,
@@ -1512,13 +1316,7 @@ def _serving_track_label(*, track: str, data_version: str) -> str:
     leaking legacy t3/t6 carrier names into trading receipts/events.
     """
 
-    if _replacement_live_enabled():
-        return REPLACEMENT_0_1_TRACK_LABEL
-    if data_version == "ecmwf_opendata_mx2t3_local_calendar_day_max":
-        return "mx2t3_high_full_horizon" if track.endswith("_full_horizon") else "mx2t3_high"
-    if data_version == "ecmwf_opendata_mn2t3_local_calendar_day_min":
-        return "mn2t3_low_full_horizon" if track.endswith("_full_horizon") else "mn2t3_low"
-    return track
+    return REPLACEMENT_0_1_TRACK_LABEL
 
 
 def _parse_utc(value: Any, field_name: str) -> datetime:
@@ -1537,9 +1335,6 @@ def _int_value(value: Any) -> int:
     if value is None:
         return 0
     return int(value)
-
-
-_FORECAST_TABLES = ("source_run", "source_run_coverage", "ensemble_snapshots")
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:

@@ -13,21 +13,32 @@ independent reference computation, and the rho mixture as pure dict arithmetic."
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import pytest
 
 import src.data.replacement_forecast_materializer as mat
 from src.calibration.emos import bin_probability_settlement
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin
+
+
+@dataclass(frozen=True)
+class _TemperatureBin:
+    bin_id: str
+    lower_c: float | None = None
+    upper_c: float | None = None
+    center_c: float | None = None
+    display_unit: str = "C"
+    settlement_unit: str = "C"
+    rounding_rule: str = "wmo_half_up"
 
 
 def _bins_C():
     # A small explicit Celsius family: two interior bins + two open-ended catch-alls.
     return [
-        AifsTemperatureBin("le_20", upper_c=20.0, settlement_unit="C", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("b_21_23", lower_c=21.0, upper_c=23.0, settlement_unit="C", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("b_24_26", lower_c=24.0, upper_c=26.0, settlement_unit="C", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("ge_27", lower_c=27.0, settlement_unit="C", rounding_rule="wmo_half_up"),
+        _TemperatureBin("le_20", upper_c=20.0, settlement_unit="C", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_21_23", lower_c=21.0, upper_c=23.0, settlement_unit="C", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_24_26", lower_c=24.0, upper_c=26.0, settlement_unit="C", rounding_rule="wmo_half_up"),
+        _TemperatureBin("ge_27", lower_c=27.0, settlement_unit="C", rounding_rule="wmo_half_up"),
     ]
 
 
@@ -71,10 +82,10 @@ def _bins_interior_only():
     # An ALL-INTERIOR family (no open-ended catch-all) — the uniform mixture cannot trip the catch-all
     # coherence cap here, so q = renorm((1-w)*normal + w*uniform) is the EXACT independent reference.
     return [
-        AifsTemperatureBin("b_19_20", lower_c=19.0, upper_c=20.0, settlement_unit="C", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("b_21_22", lower_c=21.0, upper_c=22.0, settlement_unit="C", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("b_23_24", lower_c=23.0, upper_c=24.0, settlement_unit="C", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("b_25_26", lower_c=25.0, upper_c=26.0, settlement_unit="C", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_19_20", lower_c=19.0, upper_c=20.0, settlement_unit="C", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_21_22", lower_c=21.0, upper_c=22.0, settlement_unit="C", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_23_24", lower_c=23.0, upper_c=24.0, settlement_unit="C", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_25_26", lower_c=25.0, upper_c=26.0, settlement_unit="C", rounding_rule="wmo_half_up"),
     ]
 
 
@@ -177,9 +188,9 @@ def test_w0_gate_off_for_non_C_unit():
     # The uniform-w gate stays EXACTLY `if uniform_w > 0.0 and city_unit == "C"` — an F-unit family
     # gets NO uniform mixture even with w>0 (fixing F is a separate future release).
     bins = [
-        AifsTemperatureBin("le_70", upper_c=70.0, settlement_unit="F", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("b_71_73", lower_c=71.0, upper_c=73.0, settlement_unit="F", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("ge_74", lower_c=74.0, settlement_unit="F", rounding_rule="wmo_half_up"),
+        _TemperatureBin("le_70", upper_c=70.0, settlement_unit="F", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_71_73", lower_c=71.0, upper_c=73.0, settlement_unit="F", rounding_rule="wmo_half_up"),
+        _TemperatureBin("ge_74", lower_c=74.0, settlement_unit="F", rounding_rule="wmo_half_up"),
     ]
     q = mat._build_scaled_normal_uniform_q(
         mu=72.0,
@@ -217,8 +228,8 @@ def test_uniform_applied_flag_tracks_actual_mixture_fire():
     )
     assert applied_w0 is False  # w=0 => no mixture
     bins_f = [
-        AifsTemperatureBin("b_71_72", lower_c=71.0, upper_c=72.0, settlement_unit="F", rounding_rule="wmo_half_up"),
-        AifsTemperatureBin("b_73_74", lower_c=73.0, upper_c=74.0, settlement_unit="F", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_71_72", lower_c=71.0, upper_c=72.0, settlement_unit="F", rounding_rule="wmo_half_up"),
+        _TemperatureBin("b_73_74", lower_c=73.0, upper_c=74.0, settlement_unit="F", rounding_rule="wmo_half_up"),
     ]
     _, _, applied_f = mat._build_scaled_normal_uniform_q(
         mu=72.0, sigma_pred=2.0, k=1.0, uniform_w=0.3, floor_steps=0.0, bins=bins_f, half_step=0.5,

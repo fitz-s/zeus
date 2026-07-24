@@ -104,4 +104,4 @@ One BLOCKING finding (B1) that permanently loses live-money certificate records 
 ## OPEN QUESTIONS (unscored)
 
 - Does `_persist_live_command_certificates_before_executor_submit` ever run with `live_cap_conn=None` (so `build_conn` falls back to `trade_conn`)? If yes, a *small* live subset of selected command certs may also reach the trade copy — which would make the trade copy "live-but-partial ghost," not purely stale. It does not change B1 (world remains the authority superset and must be preserved), but it would mean the trade copy needs a reconciliation-extract before its 2026-08-09 drop rather than a blind drop. Worth a one-day writer probe.
-- `probability_trace_fact` (world, matrix → raw-evidence) is tagged by `fact_revocations` (world) — confirm no live decision-path reader treats a revocation as authority before epoch-deleting it. Low-confidence; likely diagnostic-only.
+- `probability_trace_fact` (world, matrix → raw-evidence) is tagged by `fact_revocations` (world) — confirm no live decision-path reader treats a revocation as authority before epoch-deleting it. Low-confidence; likely read-only evidence.

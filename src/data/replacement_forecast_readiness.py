@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Mapping, Sequence
@@ -26,6 +27,70 @@ _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 def normalize_replacement_readiness_status(status: str) -> str:
     return status
+
+
+def latest_replacement_readiness(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+) -> "ReplacementForecastReadinessDecision | None":
+    """Read the newest causal readiness certificate for one live family."""
+
+    metric = str(temperature_metric).strip().lower()
+    if metric not in {"high", "low"}:
+        return None
+    data_version = HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
+    row = conn.execute(
+        """
+        SELECT *
+        FROM readiness_state
+        WHERE scope_type = 'strategy'
+          AND strategy_key = ?
+          AND source_id = ?
+          AND data_version = ?
+          AND city = ?
+          AND target_local_date = ?
+          AND temperature_metric = ?
+          AND julianday(computed_at) <= julianday(?)
+        ORDER BY julianday(computed_at) DESC, readiness_id DESC
+        LIMIT 1
+        """,
+        (
+            STRATEGY_KEY,
+            SOURCE_ID,
+            data_version,
+            city,
+            target_date,
+            metric,
+            _to_utc(decision_time, field_name="decision_time").isoformat(),
+        ),
+    ).fetchone()
+    if row is None:
+        return None
+    payload = dict(row)
+    try:
+        status = normalize_replacement_readiness_status(str(payload.get("status") or BLOCKED_STATUS))
+        reasons = json.loads(str(payload.get("reason_codes_json") or "[]"))
+        dependencies = json.loads(str(payload.get("dependency_json") or "{}"))
+        provenance = json.loads(str(payload.get("provenance_json") or "{}"))
+        if not isinstance(reasons, list) or not isinstance(dependencies, Mapping) or not isinstance(provenance, Mapping):
+            return None
+        return ReplacementForecastReadinessDecision(
+            readiness_id=str(payload["readiness_id"]),
+            status=status if status in {READY_STATUS, BLOCKED_STATUS} else BLOCKED_STATUS,
+            reason_codes=tuple(str(reason) for reason in reasons) or ("REPLACEMENT_READINESS_STATE_LOADED",),
+            dependency_json=dependencies,
+            provenance_json=provenance,
+            expires_at=payload.get("expires_at") if status == READY_STATUS else None,
+            source_id=SOURCE_ID,
+            product_id=PRODUCT_ID,
+            strategy_key=STRATEGY_KEY,
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _to_utc(value: datetime | str, *, field_name: str) -> datetime:

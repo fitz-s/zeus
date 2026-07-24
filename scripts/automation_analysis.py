@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""automation_analysis.py — Daily diagnostic for the calibration/data automation layer.
+"""automation_analysis.py — Daily observation for the calibration/data automation layer.
 
 Checks:
 1. alpha_overrides: what's live, any pending recoms?

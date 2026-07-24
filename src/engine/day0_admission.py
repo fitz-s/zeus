@@ -66,18 +66,16 @@ def day0_live_admission_rejection_reason(ctx: Day0AdmissionContext) -> str | Non
     # pattern the Day0 first-principles audit (M-3 above) already condemned once. Two
     # findings ruled out repair-in-place:
     #   (a) No real "stage" concept exists to source a genuine per-city allowlist from.
-    #       config/settings.json's edli section has no per-city Day0 field at all; the only
-    #       scope knob, edli_live_scope, is a LANE-TYPE switch (forecast vs day0), not a city
-    #       list.
-    #   (b) The operator explicitly killed staged/canary Day0 rollout twice, BEFORE this
-    #       module was even created: edli_live_scope's own notes record 2026-06-09 ("全部打开"
-    #       — promote Day0 into forecast_plus_day0) and 2026-06-12 ("现在就解除这些限制" — day0
-    #       LIVE NOW, no shadow staging, no canary, "the 06-10 interim revert is over"). This
+    #       config/settings.json's edli section has no per-city Day0 field from
+    #       which a genuine allowlist could be derived.
+    #   (b) The operator explicitly killed staged/probe Day0 rollout twice, BEFORE this
+    #       module was even created: 2026-06-09 ("全部打开") and 2026-06-12
+    #       ("现在就解除这些限制") made Day0 live with no parallel observation stage. This
     #       module's authority-basis header dates it 2026-06-17 — five days AFTER that final
     #       word — so a per-city stage gate was never a live policy this module could have
     #       inherited; it was speculative scaffolding for a promotion design the operator had
     #       already foreclosed. Wiring a "defaults to all configured cities" allowlist instead
-    #       of deleting would resurrect exactly the canary/staging machinery the operator
+    #       of deleting would resurrect exactly the probe/staging machinery the operator
     #       twice rejected, just with an always-true default standing in for it.
     # metric_allowlist and allowed_health_states are UNCHANGED — both are real, currently-
     # exercised gates (metric/health do vary per candidate; city never could here), so gate 1

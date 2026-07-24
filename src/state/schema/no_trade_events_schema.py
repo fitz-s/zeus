@@ -34,7 +34,7 @@ schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
   - 26: evidence governance follow-up (2026-05-21) — structured strategy_key
         and event_source provenance for evidence_report.
   - 27: P1/P2 architecture review (2026-05-22) — evidence lifecycle fields
-        (revoke/expiry) in evidence_tier_assignments; day0_nowcast_entry strategy.
+        (revoke/expiry); day0_nowcast_entry strategy.
   - 28: neg_risk_basket NEGRISK_NO_PROFITABLE_BASKET reason enum member.
   - 29: settlement_capture physical-interval reasons: +4 NoTradeReason members
         (PHYSICAL_INTERVAL_DATA_GATED, PHYSICAL_INTERVAL_OVERLAP,

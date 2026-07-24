@@ -1,6 +1,6 @@
 # Created: 2026-07-02
 # Last reused/audited: 2026-07-02
-# Authority basis: docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+# Authority basis: architecture/invariants.yaml
 #   section 1 row "q_version + input HWMs (A1)".
 """Shared read-time raw-input high-water-mark (HWM) lag check.
 

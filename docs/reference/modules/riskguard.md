@@ -87,7 +87,7 @@ blocking and read-only:
   reconciliation finding count. Historical drawdown/realized-loss circuit
   breakers are retired: settled outcomes are already embedded in current cash
   and positions. `src/riskguard/riskguard.py` retains trailing settled-PnL
-  diagnostics, but they do not emit a RiskLevel or alter admission.
+  offline evidence checks, but they do not emit a RiskLevel or alter admission.
 - Maker/taker selection is behavior-changing: shallow books, near-resolution
   windows, or heartbeat states that only allow non-resting orders select `FOK`
   for executor submission; healthy/deep/far-from-close paths may rest as `GTC`.

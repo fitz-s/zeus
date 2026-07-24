@@ -58,7 +58,7 @@ _DEFAULT_FAIL_CLOSED_AFTER_SECONDS = 300.0
 #
 # Wallet balance changes SLOWLY (only on our own fills / settlements, never venue-side
 # between cycles), so serving the last good value for a generous window across a
-# transient RPC outage is SAFE and strictly better than fail-closing the whole canary.
+# transient RPC outage is SAFE and strictly better than fail-closing the whole probe.
 # The genuine fail-closed semantics are preserved: never-fetched → None, and stale
 # beyond this generous bound → None. This decouples cached()'s resilient bound from
 # current()'s tighter refresh bound. Override via env for ops tuning.
@@ -832,9 +832,9 @@ def run_warm_cycle() -> None:
     Dedicated frequent (~60s) bankroll-of-record cache warmer.
 
     STRUCTURAL FIX (2026-05-31, follow-up to #45): the per-event no-submit Kelly
-    proof and the live-bridge allocator refresh both read ``cached()`` (300s
+    proof and the live-path allocator refresh both read ``cached()`` (300s
     fail-closed window) and MUST NOT live-fetch per decision. The reactor cycle
-    previously warmed that cache ONCE at cycle start, but the canary cycle runs
+    previously warmed that cache ONCE at cycle start, but the probe cycle runs
     ~330s (heavy MC re-pricing + live /book fetches + submit path), so by the
     time those consumers ran near cycle END the cache age had exceeded 300s ->
     ``cached()`` returned None -> allocator fail-closed (bankroll_unavailable)

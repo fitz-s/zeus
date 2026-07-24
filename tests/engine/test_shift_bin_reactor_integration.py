@@ -634,6 +634,8 @@ def test_post_plan_no_submit_aborts_shift_enter_new_bin_lease():
     assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") is None
 
 
+
+
 def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(monkeypatch):
     conn = _conn()
     lease = sbw.acquire_rebalance_lease(
@@ -672,7 +674,11 @@ def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(m
         },
     )
     monkeypatch.setattr(era, "_entry_pause_blocks_live_submit", lambda _conn: None)
-    monkeypatch.setattr(era, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: receipt)
+    monkeypatch.setattr(
+        era,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: receipt,
+    )
 
     def _executor_submit(_final_intent, _command):
         raise AssertionError("executor_submit must not run after final family pending reread")
@@ -681,10 +687,7 @@ def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(m
         conn,
         live_cap_conn=conn,
         get_current_level=lambda: era.RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        durable_submit_outbox_enabled=True,
         executor_submit=_executor_submit,
-        operator_arm=object(),
     )
 
     result = submit(
@@ -700,7 +703,8 @@ def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(m
     assert result.proof_accepted is False
     assert result.reason == "SHIFT_BIN_ENTER_NEW_BIN_FAMILY_PENDING:family_pending_notional"
     row = conn.execute(
-        "SELECT status, new_entry_command_id, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        "SELECT status, new_entry_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
         (lease,),
     ).fetchone()
     assert row["status"] == "ABORTED"

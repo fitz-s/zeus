@@ -1,55 +1,13 @@
 name: money-path-release-gate
 
-# Required CI lane for the May 21 live-release proof packet.
-# Owner: live-release-proof-p0p3 packet implementer.
-# Rationale: current main integration, not PR-slice tests alone, must prove the
-# release gate and critical money-path antibodies before any live promotion.
-# Review condition: keep blocking while these tests stay deterministic and
-# isolated from live DBs; split into narrower jobs only if runtime proves noisy.
-
+# Stable required-check identity for branch protection. The check proves the
+# single live implementation and its executable safety contracts directly;
+# there is no paper path, stage ladder, or submit-disabled rehearsal.
 on:
   pull_request:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "scripts/check_live_release_gate.py"
-      - "tests/test_live_release_gate.py"
-      - "tests/test_money_path_lifecycle_replay.py"
-      - "tests/test_live_release_registry_runtime_assertions.py"
-      - "tests/test_pre_existing_failure_registry.py"
-      - "tests/test_monitor_refresh_nowcast_wiring.py"
-      - "tests/test_strategy_profile_registry.py"
-      - "tests/test_executable_market_snapshot.py"
-      - "tests/test_market_scanner_negrisk.py"
-      - "tests/test_decision_seq_cross_table_no_collision.py"
-      - "tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py"
-      - "tests/state/test_schema_current_invariant.py"
-      - "architecture/script_manifest.yaml"
-      - "architecture/test_topology.yaml"
-      - "architecture/pre_existing_failure_registry.yaml"
-      - "architecture/db_table_ownership.yaml"
-      - ".github/workflows/money-path-release-gate.yml"
+    branches: [live]
   push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "scripts/check_live_release_gate.py"
-      - "tests/test_live_release_gate.py"
-      - "tests/test_money_path_lifecycle_replay.py"
-      - "tests/test_live_release_registry_runtime_assertions.py"
-      - "tests/test_pre_existing_failure_registry.py"
-      - "tests/test_monitor_refresh_nowcast_wiring.py"
-      - "tests/test_strategy_profile_registry.py"
-      - "tests/test_executable_market_snapshot.py"
-      - "tests/test_market_scanner_negrisk.py"
-      - "tests/test_decision_seq_cross_table_no_collision.py"
-      - "tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py"
-      - "tests/state/test_schema_current_invariant.py"
-      - "architecture/script_manifest.yaml"
-      - "architecture/test_topology.yaml"
-      - "architecture/pre_existing_failure_registry.yaml"
-      - "architecture/db_table_ownership.yaml"
-      - ".github/workflows/money-path-release-gate.yml"
+    branches: [live]
   workflow_dispatch:
 
 permissions:
@@ -63,10 +21,6 @@ jobs:
   money-path-release-gate:
     name: money-path-release-gate (required)
     runs-on: ubuntu-latest
-    env:
-      GATE_OWNER: "live-release-proof-p0p3"
-      GATE_RATIONALE: "Blocks live-impact PRs unless schema, release-gate, negRisk executable semantics, and no-trade live fail-closed antibodies pass on isolated fixtures."
-      GATE_REVIEW_CONDITION: "Keep required until a broader money-path replay lane supersedes it with equal or stronger coverage."
     steps:
       - uses: actions/checkout@v4
 
@@ -79,32 +33,41 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-      - name: Prepare CI settings
-        run: test -f config/settings.json || cp config/settings.example.json config/settings.json
 
-      - name: Describe gate contract
-        run: |
-          echo "owner=${GATE_OWNER}"
-          echo "rationale=${GATE_RATIONALE}"
-          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Prepare isolated settings
+        run: test -f config/settings.json || cp config/settings.example.json config/settings.json
 
       - name: Check pinned schema contract
         run: python scripts/check_schema_fingerprint.py
 
-      - name: Run required money-path antibodies
+      - name: Prove one live implementation
+        run: python scripts/check_single_live_semantics.py
+
+      - name: Run executable money-path antibodies
         run: |
           pytest -q \
-            tests/test_live_release_gate.py \
-            tests/test_executable_market_snapshot.py \
-            tests/test_market_scanner_negrisk.py \
-            tests/test_decision_seq_cross_table_no_collision.py \
-            tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py \
-            tests/state/test_schema_current_invariant.py \
-            tests/test_money_path_lifecycle_replay.py \
-            tests/test_live_release_registry_runtime_assertions.py \
-            tests/test_pre_existing_failure_registry.py \
-            tests/test_monitor_refresh_nowcast_wiring.py \
-            tests/test_strategy_profile_registry.py
-
-      - name: Run release gate self-test fixture
-        run: python scripts/check_live_release_gate.py --self-test-fixture --json
+            tests/test_single_live_semantics.py \
+            tests/test_single_live_semantics_migration.py \
+            tests/state/test_table_registry_coherence.py \
+            tests/test_venue_command_repo.py::TestPositionDecisionAttributionAppendHook::test_later_command_inherits_position_entry_certificate \
+            tests/test_venue_command_repo.py::TestPositionDecisionAttributionAppendHook::test_live_exit_without_certificate_is_journaled_unattributable \
+            tests/test_settlement_skill_attribution.py::test_LXE_multiple_entry_certificates_are_explicitly_unattributable \
+            tests/test_settlement_skill_attribution.py::test_LXE_attribution_table_row_takes_precedence_over_legacy_bridge \
+            tests/test_settlement_skill_attribution.py::test_LXE_explicit_unattributable_row_skips_grading_without_legacy_fallback \
+            tests/engine/test_shift_bin_reactor_integration.py::test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease \
+            tests/test_replacement_fused_q_shape.py \
+            tests/strategy/test_single_count_uncertainty.py \
+            tests/engine/test_multiwinner_wealth_composition.py \
+            tests/engine/test_native_holdings.py \
+            tests/solve/test_solver_properties.py \
+            tests/integration/test_w3_solve_seam_g3.py \
+            tests/test_day0_remaining_day_pricing.py \
+            tests/test_no_aifs_module_resurrection.py \
+            tests/calibration/test_scaled_normal_uniform_q_builder.py \
+            tests/test_hk_settlement_preimage_contract.py \
+            tests/test_path_b_qlcb_modal_collapse_regression.py \
+            tests/decision/test_payoff_vector_edge.py \
+            tests/test_backtest_purpose_contract.py \
+            tests/test_backtest_skill_economics.py \
+            tests/test_replay_learning_authority.py \
+            tests/test_riskguard_daily_loss_realized_basis.py

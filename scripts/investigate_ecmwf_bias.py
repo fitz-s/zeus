@@ -1,6 +1,6 @@
 # Lifecycle: created=2026-03-30; last_reviewed=2026-04-25; last_reused=2026-04-25
-# Purpose: Diagnostic report for ECMWF bias behavior against high-track settlement evidence.
-# Reuse: Diagnostic only; do not treat output as training authority.
+# Purpose: Observation report for ECMWF bias behavior against high-track settlement evidence.
+# Reuse: Observation only; do not treat output as training authority.
 """ECMWF warm bias investigation.
 
 Questions:

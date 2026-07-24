@@ -74,7 +74,6 @@ def _ensure_auth_verified(conn) -> None:
 
 def _allow_entry_gates_for_cycle_test(monkeypatch) -> None:
     """Open only test-local runtime gates needed to exercise entry materialization."""
-    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cycle_runner, "is_strategy_enabled", lambda strategy: True)
     monkeypatch.setattr(cycle_runner.cutover_guard, "summary", lambda: {"state": "READY", "entry": {"allow_submit": True}})
     monkeypatch.setattr(

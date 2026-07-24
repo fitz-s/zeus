@@ -76,7 +76,7 @@ EMOS_JSON = os.path.join(REPO, "state", "emos_calibration.json")
 # --- constants pinned by the diagnosis / config ---------------------------
 INSTRUMENT_SIGMA_C = 0.28          # config ensemble.instrument_noise (0.5 F == 0.28 C)
 N_MC_DRAWS = 500                   # incumbent _bootstrap_p_raw_all draw count
-MC_SEED = 12345                    # deterministic seed for the diagnostic replay
+MC_SEED = 12345                    # deterministic seed for the observation replay
 MAX_DATES_PER_CITY = 60            # "most recent ~60 settled target_dates"
 MIN_N_FOR_VERDICT = 20             # below this -> INSUFFICIENT_N
 LEAD_HOURS_MAX = 24.0              # short-lead definition

@@ -1,4 +1,4 @@
-> **编辑注(Zeus 法)**:本文是外部 GPT-5.6 consult 的 verbatim 记录。其 "shadow-read / shadow mode / B shadow"(§ "Implement W0-b … in shadow/report-only mode"、"Activation order: B shadow → …")提议在 live 里常驻并行跑新旧谓词攒信心再切——**这正是 Zeus 已根除的 shadow tier**(operator 指令 2026-06-12,root AGENTS §2)。落地**不采纳此阶段,也不改名保留**:W0-b 谓词修复 live-direct 换(随 W0-a 同一 PR),信心来自离线证明(antibody recovery matrix + 一次性只读历史分析)+ tests,不留任何常驻并行旁路。权威落法见 `W0_RUNBOOK.md` 激活顺序(已删 shadow 阶段)。
+> **编辑注(Zeus 法)**:本文是外部 GPT-5.6 consult 的 verbatim 记录。其 "retired-read / retired mode / B retired"(§ "Implement W0-b … in retired/report-only mode"、"Activation order: B retired → …")提议在 live 里常驻并行跑新旧谓词攒信心再切——**这正是 Zeus 已根除的 retired tier**(operator 指令 2026-06-12,root AGENTS §2)。落地**不采纳此阶段,也不改名保留**:W0-b 谓词修复 live-direct 换(随 W0-a 同一 PR),信心来自离线证明(antibody recovery matrix + 一次性只读历史分析)+ tests,不留任何常驻并行旁路。权威落法见 `W0_RUNBOOK.md` 激活顺序(已删 retired 阶段)。
 
 Verdict — NO-GO as specified; high confidence. The generalized table rebuild is the right operation and is crash-atomic in one single-file WAL transaction, but the live procedure has five blockers: the app writer-lock is not fleet-complete, SELECT * is unsafe under known schema drift, the old AUTOINCREMENT high-water may be lost, both post-check PRAGMAs are accidentally fleet-wide, and W0-c lacks a proven per-fill idempotency key. Correct those and W0-a is GO without changing journal mode.
 
@@ -281,7 +281,7 @@ Run read-only detection over all history, but make the first mutation cohort the
 
 [HIGH] reader inventory — trade_decisions readers fleet-wide — W0-b closes the known money-path dependency, but “no historical backfill required” is valid only after every other SELECT, JOIN, and EXISTS reader of trade_decisions is classified.
 
-Verify locally: grep all runtime readers and classify each as ledger authority, projection/reporting, diagnostics, or dead code. Any second money-path reader must be re-anchored before the gap is declared harmless.
+Verify locally: grep all runtime readers and classify each as ledger authority, projection/reporting, evidence, or dead code. Any second money-path reader must be re-anchored before the gap is declared harmless.
 
 [HIGH] unfreeze backlog — trade_decisions writer paths — removing the FK causes every currently executing writer path that formerly failed to start succeeding immediately. Before releasing the fence, prove there is no durable retry/outbox backlog that will replay July 2→present writes as if they were current, and that repeated lifecycle/exit-audit writes have stable idempotency. Do not assume “fail-soft” means “discarded rather than queued.”
 
@@ -308,7 +308,7 @@ After COMMIT, do not restore the whole DB and do not casually reintroduce the da
 
 [HIGH] wave ordering — W0_SPEC.md:W0-a/W0-b/W0-c — W0-b does not need to become active before W0-a. The lowest-risk operational sequence is:
 
-Implement W0-b and run its old-versus-new predicate in shadow/report-only mode. It must not insert lots.
+Implement W0-b and run its old-versus-new predicate in retired/report-only mode. It must not insert lots.
 
 Land the exact target db.py DDL, migration script, antibodies and schema fingerprint.
 
@@ -419,6 +419,6 @@ W0-b anchor: exact canonical entry fill joined to its persisted ENTRY command.
 
 W0-c: NO-GO unless position_lots has a database-enforced per-fill or deterministic cumulative-repair identity.
 
-Activation order: B shadow → corrected A → B active → C dry-run/apply.
+Activation order: B retired → corrected A → B active → C dry-run/apply.
 
 Historical trade_decisions synthesis: reject for W0.

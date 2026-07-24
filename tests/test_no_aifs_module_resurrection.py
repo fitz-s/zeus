@@ -12,19 +12,11 @@ of antibody (e.g. tests/test_replacement_member_vote_smoothing_not_live_wired.py
 not a runtime behavior check, so it fails RED even if nothing currently imports the resurrected
 module.
 
-NOT deleted in this batch (scope note, so this antibody's boundary is legible):
-  - src/data/ecmwf_aifs_sampled_2t_localday.py (AifsSampledLocalDayExtraction/AifsInstantSample)
-    and src/strategy/ecmwf_aifs_sampled_2t_probabilities.py (AifsTemperatureBin) turned out to be
-    de facto GENERIC value types reused by ~8 test files across the whole replacement-forecast /
-    bayes-precision-fusion test suite (test_hk_settlement_preimage_contract.py,
-    test_replacement_sigma_scale_k_c.py, test_bayes_precision_fusion_history_provider_
-    materializer_wiring.py, etc.) that have nothing to do with AIFS data ingestion --
-    `replacement_forecast_materializer.py`'s own `bins` field is `Sequence[object]` (fully
-    duck-typed, zero AIFS coupling). Relocating that shared type off the AIFS module name is a
-    real rename touching 8+ files, not a mechanical deletion; left in place rather than risk
-    money-path-adjacent test collateral. src/strategy/openmeteo_ecmwf_ifs9_aifs_soft_anchor.py
-    and scripts/validate_member_vote_smoothing_3way.py are downstream of the same two types and
-    were restored alongside them for the same reason.
+Additional retired modules are included in this antibody because they encoded
+an unwired alternate calibration/fine-tune path whose names and activation
+semantics could otherwise seed a second probability authority.
+
+Still outside this antibody's module-path boundary:
   - src/data/forecast_source_registry.py's "ecmwf_aifs_ens" source spec / "A1" product spec:
     ~12 test files (test_replacement_forecast_metric_identity.py, _product_window.py,
     _cycle_phase_admission.py, _bundle_reader_staleness.py, _bundle_reader_tradeable_latest.py,
@@ -35,11 +27,6 @@ NOT deleted in this batch (scope note, so this antibody's boundary is legible):
     registry-consumer behavior. The audit itself flagged this needed a pre-check ("confirm no
     test asserts on registry completeness/count -- not confirmed safe in this audit"); the check
     came back unsafe.
-  - src/strategy/openmeteo_ecmwf_ifs9_aifs_finetune.py: not in the audit's deletion list at all,
-    and has a live production caller chain (src/events/reactor.py ->
-    src/data/replacement_forecast_refit_handoff.py ->
-    src/data/replacement_forecast_finetune_artifact.py).
-
 REPLACEMENT_SOURCE_ID / REPLACEMENT_PRODUCT_ID in src/data/replacement_forecast_calibration_
 block.py (identity "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor[_v1]") are the STILL-LIVE
 bayes-fusion replacement product family -- "aifs" survives there only as historical naming
@@ -61,11 +48,17 @@ _DELETED_MODULES = frozenset(
         "src.data.ecmwf_aifs_grib_identity",
         "src.data.ecmwf_aifs_grib_samples",
         "src.data.ecmwf_aifs_ens_request",
+        "src.data.replacement_forecast_finetune_artifact",
+        "src.strategy.openmeteo_ecmwf_ifs9_aifs_finetune",
     }
 )
 
 # Deleted standalone scripts (not import targets, but must not resurrect on disk either).
-_DELETED_SCRIPTS = ("scripts/measure_fusion_aifs_drop_performance.py",)
+_DELETED_SCRIPTS = (
+    "scripts/build_replacement_forecast_finetune_artifact.py",
+    "scripts/fit_emos_center_calibration.py",
+    "scripts/measure_fusion_aifs_drop_performance.py",
+)
 
 
 def _imported_modules(source: str) -> set[str]:

@@ -1,8 +1,6 @@
 # Created: prior
 # Last audited: 2026-06-03
-# Authority basis: D2 bias-family unify / wiring verdict 2026-06-03
-#   D2 (2026-06-03): _resolve_unified_exit_bias_native + flag-gated bias-shift +
-#   identity-Platt on the exit/monitor p_raw sites so EXIT belief matches ENTRY belief.
+# Authority basis: current replacement probability and held-position redecision law.
 """Monitor refresh: recompute fresh probability for held positions.
 
 Blueprint v2 §7 Layer 1: recompute the held-side probability.
@@ -86,7 +84,6 @@ from src.types import Bin
 from src.types.market import BinTopologyError, validate_bin_topology
 from src.types.metric_identity import MetricIdentity
 from src.types.temperature import TemperatureDelta
-from src.calibration.ens_bias_repo import read_bias_model
 
 logger = logging.getLogger(__name__)
 _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
@@ -248,7 +245,7 @@ class HeldTokenMonitorQuote:
     best_ask: float | None
     bid_size: float
     ask_size: float
-    diagnostic_market_price: float
+    mark_price: float
     source_timestamp: str
 
 
@@ -1623,7 +1620,7 @@ def _read_monitor_executable_forecast(
     A held-position monitor must not fall back to the legacy Open-Meteo
     ``fetch_ensemble`` adapter for that source, because that path cannot prove the
     executable forecast reader contract.  Non-real sqlite connections return
-    ``(None, None)`` so legacy unit tests and diagnostic callsites keep their
+    ``(None, None)`` so offline callers retain their
     existing fallback behavior.
     """
 
@@ -1715,93 +1712,6 @@ def _build_all_bins(position: Position, city) -> tuple[list, int]:
         raise ValueError(f"support topology invalid: {exc}") from exc
 
     return all_bins, held_idx
-
-
-def _resolve_unified_exit_bias_native(
-    conn: sqlite3.Connection,
-    city,
-    target_d: date,
-    metric_str: str,
-) -> "float | None":
-    """D2 bias-family unify (2026-06-03): EXIT-side analogue of the LIVE EDLI reactor's
-    entry bias correction (``event_reactor_adapter._maybe_apply_edli_bias_correction``).
-
-    Returns the native-unit per-city bias SHIFT to subtract from the member extrema BEFORE
-    p_raw on the exit/monitor path, so the exit belief matches the entry belief — or None.
-
-    The live flag ``feature_flags.exit_bias_family_unify_enabled`` reads the SAME populated VERIFIED
-    family the reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` =
-    'edli_per_city_v1', 71 rows) with the reactor's EXACT read shape:
-    ``month=target_month, target_month=target_month, authority='VERIFIED', lead_bucket=None``.
-    The legacy ft read shape (month=0, lead_bucket=computed) 0-row-missed these rows because
-    the stored rows are ``lead_bucket='LEGACY_POOLED'`` and ``month`` ∈ {target months}.
-
-    A4 lockstep (do not ship a half-fix): this is a bias-SHIFT only — NO residual widening
-    (matches the entry's ``_maybe_apply_edli_bias_correction``, which residual-widening does
-    NOT do). The caller MUST also apply identity-Platt on the corrected domain (skip
-    ``calibrate_and_normalize``), because the Platt models were fit on the UNCORRECTED p_raw
-    domain (same reasoning as ``event_reactor_adapter._snapshot_p_cal``). The legacy
-    full_transport (FT) error-model path - removed 2026-06-14 (retired 0-row experiment) -
-    residual-widened AND ran real Platt, which on a bias-shifted domain would be a
-    DIFFERENT, NEW asymmetry; this helper is deliberately a separate bias-shift-only path.
-
-    UNIT: ``effective_bias_c`` is degC; F-settled cities (members carry the city's settlement
-    unit) need ×1.8 before subtraction — same conversion the reactor entry applies.
-
-    FAIL-CLOSED: missing flag/config/row/field or any error -> None (no correction; the caller
-    uses today's plain-p_raw + real-Platt path). Never breaks the exit decision.
-    Authority: D2 bias-family unify / wiring verdict 2026-06-03.
-    """
-    try:
-        if not bool(settings["feature_flags"].get("exit_bias_family_unify_enabled", False)):
-            return None
-        # Reuse the reactor's family constant — never a second 'edli_per_city_v1' literal.
-        from src.engine.event_reactor_adapter import _EDLI_BIAS_FAMILY  # noqa: PLC0415
-        try:
-            cfg = entry_forecast_config()
-            track = track_for_metric(cfg, metric_str)
-            live_data_version = data_version_for_track(track)
-        except Exception:
-            return None
-        season = season_from_date(target_d.isoformat(), lat=city.lat)
-        _tmonth = int(target_d.isoformat()[5:7])
-        row = read_bias_model(
-            conn,
-            city=city.name,
-            season=season,
-            metric=metric_str,
-            live_data_version=live_data_version,
-            month=_tmonth,
-            target_month=_tmonth,
-            authority="VERIFIED",
-            error_model_family=_EDLI_BIAS_FAMILY,
-            lead_bucket=None,
-        )
-        if row is None:
-            logger.warning(
-                "exit_bias_family_unify: flag ON but no VERIFIED %s row for "
-                "city=%r season=%r metric=%r live_data_version=%r month=%r — plain p_raw (uncorrected exit)",
-                _EDLI_BIAS_FAMILY, city.name, season, metric_str, live_data_version, _tmonth,
-            )
-            return None
-        keys = set(row.keys())
-        eff = row["effective_bias_c"] if "effective_bias_c" in keys else None
-        wl = row["weight_live"] if "weight_live" in keys else 0.0
-        if eff is None or float(wl or 0.0) <= 0.0:
-            return None
-        unit = getattr(city, "settlement_unit", "C")
-        eff_native = float(eff) * 1.8 if unit == "F" else float(eff)
-        logger.info(
-            "exit_bias_family_unify applied city=%s season=%s metric=%s unit=%s eff_bias_c=%.3f eff_native=%.3f",
-            city.name, season, metric_str, unit, float(eff), eff_native,
-        )
-        return eff_native
-    except Exception as exc:  # fail-closed: never break the exit decision path
-        try:
-            logger.warning("exit_bias_family_unify skipped (fail-closed): %s", exc)
-        except Exception:
-            pass
-        return None
 
 
 def _hours_since_open_or_nan(position) -> float:
@@ -1918,15 +1828,6 @@ def _refresh_ens_member_counting(
     _monitor_emos_regime = _monitor_emos_regime_enabled()
     _monitor_q_source: str | None = None
     _bootstrap_probability_sampler = None
-    # D2 bias-family unify (2026-06-03): legacy EXIT-side mirror. In the
-    # EMOS sole regime this must be skipped entirely; otherwise monitor and
-    # entry would use different probability builders for the same held market.
-    _unified_exit_bias_native = None
-    if not _monitor_emos_regime:
-        _unified_exit_bias_native = _resolve_unified_exit_bias_native(
-            conn, city, target_d, _position_metric_str,
-        )
-
     if using_period_extrema:
         expected_members_unit = "degC" if city.settlement_unit == "C" else "degF"
         if ens_result.get("members_unit") != expected_members_unit:
@@ -2032,25 +1933,6 @@ def _refresh_ens_member_counting(
             pass
         if _monitor_q_source is not None:
             pass
-        elif _unified_exit_bias_native is not None:
-            # D2 unify: bias-SHIFT only (no residual widening), then plain p_raw — the
-            # exact entry treatment. Calibration step uses identity-Platt (set below).
-            member_extrema = member_extrema - float(_unified_exit_bias_native)
-            p_raw_vector = p_raw_vector_from_maxes(
-                member_extrema,
-                city,
-                semantics,
-                all_bins,
-                n_mc=ensemble_n_mc(),
-            )
-            base_applied = [
-                "fresh_ens_fetch",
-                *forecast_source_validations,
-                "entry_forecast_reader",
-                "period_extrema_members_adapter",
-                "mc_instrument_noise",
-                "exit_bias_family_unify",
-            ]
         else:
             p_raw_vector = p_raw_vector_from_maxes(
                 member_extrema,
@@ -2141,24 +2023,6 @@ def _refresh_ens_member_counting(
             pass
         if _monitor_q_source is not None:
             pass
-        elif _unified_exit_bias_native is not None:
-            # D2 unify: bias-SHIFT only (no residual widening), then plain p_raw via the
-            # shared p_raw_vector_from_maxes path (same path ens.p_raw_vector and the ft
-            # branch use). Calibration step uses identity-Platt (set below).
-            _ens_member_extrema = np.asarray(_ens_member_extrema, dtype=float) - float(_unified_exit_bias_native)
-            p_raw_vector = p_raw_vector_from_maxes(
-                _ens_member_extrema,
-                city,
-                ens.settlement_semantics,
-                all_bins,
-                n_mc=ensemble_n_mc(),
-            )
-            base_applied = [
-                "fresh_ens_fetch",
-                *forecast_source_validations,
-                "mc_instrument_noise",
-                "exit_bias_family_unify",
-            ]
         else:
             p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
             base_applied = [
@@ -2200,29 +2064,6 @@ def _refresh_ens_member_counting(
         )
     if _monitor_q_source is not None:
         pass
-    elif _unified_exit_bias_native is not None:
-        # D2 unify A4 lockstep: the member maxes were bias-SHIFTED above, so the existing
-        # Platt models (fit on the UNCORRECTED p_raw domain) would mis-calibrate the shifted
-        # domain. Use identity Platt (p_cal = normalized p_raw) — EXACT mirror of the entry
-        # path's event_reactor_adapter._snapshot_p_cal lockstep. Keeps exit belief consistent
-        # with entry belief (same bias shift AND same Platt treatment).
-        _arr = np.asarray(p_raw_vector, dtype=float)
-        _tot = float(_arr.sum())
-        if _tot <= 0.0 or not np.isfinite(_arr).all():
-            # Fail-closed: invalid corrected p_raw → keep stale probability (never trade on garbage).
-            _set_monitor_probability_fresh(position, False)
-            return position.p_posterior, [*base_applied, "exit_bias_family_unify_invalid_p_raw"]
-        p_cal_full = _arr / _tot
-        p_cal_yes = float(p_cal_full[held_idx]) if len(all_bins) > 1 else float(p_cal_full[0])
-        # NOTE: cal_level (int 1-4) from _monitor_calibrator_for_ens_result is left
-        # UNCHANGED — compute_alpha indexes BASE_ALPHA_BY_LEVEL[cal_level] and requires an
-        # int. The identity-Platt substitution affects only the p_cal vector, not the
-        # alpha calibration_level, mirroring how the entry reactor keeps its own bucket level.
-        applied = [
-            *base_applied,
-            "identity_platt_bias_unify",
-            "vector_normalization",
-        ]
     elif cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
             p_raw_vector,
@@ -2803,7 +2644,7 @@ def _day0_one_sided_monitor_quote(
             best_ask=ask_f,
             bid_size=bid_sz_f,
             ask_size=ask_sz_f,
-            diagnostic_market_price=bid_f,
+            mark_price=bid_f,
             source_timestamp=source_timestamp,
         )
     except Exception as exc:
@@ -2860,7 +2701,7 @@ def monitor_quote_refresh(
         ask_f = float(ask)
         bid_sz_f = float(bid_sz)
         ask_sz_f = float(ask_sz)
-        diagnostic_market_price = (
+        mark_price = (
             bid_f
             if pos.state == "day0_window"
             else float(vwmp(bid_f, ask_f, bid_sz_f, ask_sz_f))
@@ -2872,7 +2713,7 @@ def monitor_quote_refresh(
             best_ask=ask_f,
             bid_size=bid_sz_f,
             ask_size=ask_sz_f,
-            diagnostic_market_price=diagnostic_market_price,
+            mark_price=mark_price,
             source_timestamp=source_timestamp,
         )
     except Exception as e:
@@ -2910,7 +2751,7 @@ def _persist_monitor_quote(conn, pos: Position, quote: HeldTokenMonitorQuote | N
             city=pos.city,
             target_date=pos.target_date,
             range_label=pos.bin_label,
-            price=float(quote.diagnostic_market_price),
+            price=float(quote.mark_price),
             volume=float(quote.bid_size + quote.ask_size),
             bid=float(quote.best_bid),
             ask=(float(ask) if ask is not None else None),
@@ -5341,7 +5182,7 @@ def refresh_exact_zero_position(
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
-        current_p_market = quote.diagnostic_market_price
+        current_p_market = quote.mark_price
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
 
@@ -5427,7 +5268,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid
         pos.last_monitor_best_ask = quote.best_ask
-        current_p_market = quote.diagnostic_market_price
+        current_p_market = quote.mark_price
         market_refreshed = True
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True

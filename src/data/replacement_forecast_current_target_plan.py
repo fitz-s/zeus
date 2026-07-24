@@ -1056,7 +1056,7 @@ def _latest_authorized_day0_fact(
     # reduction logic. observation_instants + the monotone-widening branch
     # (defect-2, commit f1d135901) are now LEGACY COMPENSATION for
     # derived-state-as-truth; once the ledger has full channel coverage and a
-    # settled period of shadow-parity against the other two facts, the day0
+    # settled-history agreement against the other two facts, the day0
     # belief can read the ledger alone and the widening branch retires — not
     # yet, this only adds a third fact.
     if "observation_prints" in _table_names(conn) and city_obj is not None:
@@ -1083,7 +1083,7 @@ def _latest_authorized_day0_fact(
                 settlement_channels = {"wu_icao_history"}
                 physical_channels = {"wu_icao_history", "aviationweather_metar", "wu_api"}
             elif source_type == "hko":
-                # HKO rhrread is an instantaneous diagnostic, not the official
+                # HKO rhrread is an instantaneous telemetry, not the official
                 # since-midnight 1-minute-mean extreme used by the contract.
                 # It may trigger collection, but it cannot become payoff support.
                 settlement_channels = set()

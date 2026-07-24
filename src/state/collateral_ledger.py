@@ -177,8 +177,11 @@ def _connect_owned_collateral_db(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     busy_ms = _collateral_busy_timeout_ms()
-    conn = sqlite3.connect(
+    from src.state.db_writer_lock import connect_with_cutover_lease
+
+    conn = connect_with_cutover_lease(
         str(path),
+        canonical_db_path=path,
         timeout=busy_ms / 1000.0,
         check_same_thread=False,
     )

@@ -544,21 +544,6 @@ def _clob_signature_type_config_check(*, required: bool) -> CheckResult:
     )
 
 
-def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
-    flags = cfg.get("feature_flags") if isinstance(cfg.get("feature_flags"), dict) else {}
-    enabled = flags.get("qkernel_spine_enabled")
-    ok = enabled is True
-    return CheckResult(
-        "qkernel_spine_cutover",
-        ok,
-        "qkernel spine is enabled" if ok else "qkernel spine is not enabled for live restart",
-        {
-            "settings_path": str(SETTINGS_PATH),
-            "feature_flags.qkernel_spine_enabled": enabled,
-        },
-    )
-
-
 def _src_main_boot_guard_check() -> CheckResult:
     python_executable = _live_trading_python_executable()
     command = [
@@ -4000,35 +3985,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _harvester_live_enabled() -> tuple[bool, dict[str, Any]]:
-    """Return whether the restart target will run the settlement P&L resolver.
-
-    The preflight usually runs from an operator shell, not inside launchd. The
-    shell environment is therefore not restart-target evidence and must not
-    override the active live-trading LaunchAgent.
-    """
-    env_value = os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED")
-    evidence: dict[str, Any] = {
-        "shell_env_value_ignored": env_value,
-        "plist_path": str(LIVE_TRADING_PLIST_PATH),
-        "plist_value": None,
-        "source": "live_trading_launchagent_plist",
-    }
-
-    try:
-        with LIVE_TRADING_PLIST_PATH.open("rb") as handle:
-            payload = plistlib.load(handle)
-    except Exception as exc:
-        evidence["plist_error"] = str(exc)
-        return False, evidence
-    env_vars = payload.get("EnvironmentVariables")
-    plist_value = None
-    if isinstance(env_vars, dict):
-        plist_value = env_vars.get("ZEUS_HARVESTER_LIVE_ENABLED")
-    evidence["plist_value"] = plist_value
-    return str(plist_value or "") == "1", evidence
-
-
 def _forecast_sidecar_health() -> CheckResult:
     now = datetime.now(timezone.utc)
     current_git_head = _git_head()
@@ -6156,7 +6112,8 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     max_age = monitor_belief_max_age_hours()
     source_cycle_max_age = replacement_source_cycle_max_age_hours()
     settlement_truth = _verified_settlement_truth_for(rows)
-    harvester_enabled, harvester_evidence = _harvester_live_enabled()
+    harvester_enabled = True
+    harvester_evidence = {"source": "structural_live_harvester"}
     for row in rows:
         if row["phase"] == "pending_exit":
             continue
@@ -6744,42 +6701,38 @@ def _absolute_live_unit_price_band_check(cfg: dict[str, Any]) -> CheckResult:
 
 def evaluate() -> dict[str, Any]:
     cfg = _settings()
-    real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
     rows = _open_positions()
     projection_rows = _open_positions(positive_chain_only=False)
     quote_rows = _open_positions_requiring_executable_quote(rows)
     edli_cfg = cfg.get("edli") or {}
-    reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
-    live_execution_mode = str(edli_cfg.get("live_execution_mode") or "missing")
-    armed_live = live_execution_mode == "edli_live"
-    known_execution_mode = live_execution_mode in {"edli_live", "maker", "disabled"}
-    real_submit_effective = real_submit and reactor_mode == "live"
-    submit_ok = known_execution_mode and ((not armed_live) or real_submit_effective)
+    retired_submit_keys = sorted(
+        key
+        for key in (
+            "real_order_submit_enabled",
+            "reactor_mode",
+            "live_execution_mode",
+            "durable_submit_outbox_enabled",
+            "edli_live_operator_authorized",
+        )
+        if key in edli_cfg
+    )
+    submit_ok = not retired_submit_keys
     checks = [
         _live_trading_launchagent_installed_check(),
         _live_trading_launchagent_bootstrapable_check(),
         _live_trading_process_absent_check(),
         _absolute_live_unit_price_band_check(cfg),
         CheckResult(
-            "submit_authority_config",
+            "single_live_submit_semantics",
             submit_ok,
-            "real order submit is enabled for armed live restart"
+            "live submit authority is structural; no retired mode key is present"
             if submit_ok
-            else (
-                "live_execution_mode must be explicit (edli_live/maker/disabled), and "
-                "armed live restart requires real_order_submit_enabled with reactor_mode=live"
-            ),
+            else "retired submit-mode keys remain in active settings",
             {
-                "edli.real_order_submit_enabled": real_submit,
-                "edli.reactor_mode": reactor_mode,
-                "edli.live_execution_mode": live_execution_mode,
-                "known_execution_mode": known_execution_mode,
-                "armed_live": armed_live,
-                "real_submit_effective": real_submit_effective,
+                "retired_submit_keys": retired_submit_keys,
             },
         ),
-        _clob_signature_type_config_check(required=real_submit_effective),
-        _qkernel_spine_cutover_check(cfg),
+        _clob_signature_type_config_check(required=True),
         _src_main_boot_guard_check(),
         _family_portfolio_single_leg_check(),
         _qlcb_reliability_artifact_check(),
@@ -6813,7 +6766,7 @@ def evaluate() -> dict[str, Any]:
         "open_position_count": len(rows),
         "runtime_open_projection_count": len(projection_rows),
         "open_positions_requiring_executable_quote_count": len(quote_rows),
-        "real_order_submit_enabled": real_submit,
+        "submit_authority": "structural_live",
         "checks": [asdict(check) for check in checks],
         "blockers": blockers,
         "entry_blockers": entry_blockers,

@@ -17,9 +17,9 @@ The live halt (2026-05-31):
   Every EDLI live-canary candidate rejected at the LAST pre-venue gate with
   ``EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED``. Root cause:
   the production producer (A) emitted a QUOTE_FEASIBILITY payload WITHOUT best_bid/best_ask
-  keys, while the consumer (B) requires them. Only the test fixture
-  (no_submit_fixtures.build_test_no_submit_proof_bundle) ever set those keys, so unit tests
-  passed but production failed for EVERY candidate — a producer/consumer payload-contract gap.
+  keys, while the consumer (B) requires them. A retired fixture supplied those
+  keys, so unit tests passed but production failed for EVERY candidate — a
+  producer/consumer payload-contract gap.
 
 Cross-module property under test:
   A selected_snapshot_row carrying orderbook_top_bid / orderbook_top_ask (captured by the

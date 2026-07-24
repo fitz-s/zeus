@@ -1109,9 +1109,9 @@ def record_position_decision_attribution(
     pairs are ambiguous) is instead recorded HERE, at command creation, when the
     real decision certificate hash is known with certainty.
 
-    Append-only: UNIQUE(position_id) + ON CONFLICT DO NOTHING — a position's first
-    attribution fact is never overwritten by a later call. Idempotent no-op on a
-    retried/duplicate call for the same position. ``ensure_table`` is called here
+    Append-only: UNIQUE(command_id) + ON CONFLICT DO NOTHING. Idempotent
+    on a retried command without collapsing distinct commands for one position.
+    ``ensure_table`` is called here
     (not only at DB init) so this self-heals on any trade-shaped connection that
     predates the LX-E migration (e.g. test fixtures built via ``init_schema()``
     rather than ``init_schema_trade_only``).
@@ -1126,9 +1126,36 @@ def record_position_decision_attribution(
             resolution, resolution_reason, source, intent_kind, created_at,
             schema_version
         ) VALUES (?, ?, ?, ?, 'ATTRIBUTED', NULL, 'LIVE_DECISION', ?, ?, 1)
-        ON CONFLICT(position_id) DO NOTHING
+        ON CONFLICT DO NOTHING
         """,
         (_new_id(), position_id, command_id, decision_certificate_hash, intent_kind, created_at),
+    )
+
+
+def record_unattributable_command(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+    intent_kind: str,
+    created_at: str,
+    reason: str,
+) -> None:
+    """Preserve risk-reducing command truth when legacy attribution is absent."""
+
+    from src.state.schema.position_decision_attribution_schema import ensure_table
+
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO position_decision_attribution (
+            attribution_id, position_id, command_id, decision_certificate_hash,
+            resolution, resolution_reason, source, intent_kind, created_at,
+            schema_version
+        ) VALUES (?, ?, ?, NULL, 'UNATTRIBUTABLE', ?, 'LIVE_DECISION', ?, ?, 1)
+        ON CONFLICT DO NOTHING
+        """,
+        (_new_id(), position_id, command_id, reason, intent_kind, created_at),
     )
 
 
@@ -1176,13 +1203,9 @@ def insert_command(
     non-entry commands, offline fixtures/replay, and direct recovery/backfill
     writes that intentionally bypass this function. Never re-stamped after insert.
 
-    decision_certificate_hash (LX-E packet, 2026-07-13): when given, appends the
-    permanent position -> decision_certificate_hash fact to
-    position_decision_attribution in the SAME transaction as this command insert
-    (record_position_decision_attribution). Only ENTRY commands carry a resolvable
-    ActionableTradeCertificate hash at this repo boundary; EXIT/other commands pass
-    None (no row is written for those — attribution is a property of the
-    position's entry decision, not every command against it).
+    decision_certificate_hash anchors the command to its exact decision proof. ENTRY
+    supplies it directly. Later live commands inherit the unique ATTRIBUTED entry
+    certificate for the same position; absence or ambiguity fails closed.
     """
     # MAJOR-1: enum-grammar validation at the repo seam. Imported lazily so
     # this module stays import-light and the type module doesn't have to
@@ -1243,6 +1266,34 @@ def insert_command(
     event_id = _new_id()
 
     with _savepoint_atomic(conn):
+        resolved_certificate_hash = (
+            str(decision_certificate_hash or "").strip() or None
+        )
+        if resolved_certificate_hash is None:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT decision_certificate_hash
+                      FROM position_decision_attribution
+                     WHERE position_id = ?
+                       AND resolution = 'ATTRIBUTED'
+                       AND decision_certificate_hash IS NOT NULL
+                    """,
+                    (position_id,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            inherited = {str(row[0]).strip() for row in rows if str(row[0]).strip()}
+            if len(inherited) == 1:
+                resolved_certificate_hash = inherited.pop()
+            elif (
+                intent_kind == _IntentKind.ENTRY.value
+                and _strict_live_entry_q_version_required()
+            ):
+                raise ValueError(
+                    "live ENTRY requires one exact position decision certificate: "
+                    f"position_id={position_id!r} matches={len(inherited)}"
+                )
         conn.execute(
             """
             INSERT INTO venue_commands (
@@ -1314,14 +1365,23 @@ def insert_command(
                 "reason": reason,
             },
         )
-        if decision_certificate_hash:
+        if resolved_certificate_hash:
             record_position_decision_attribution(
                 conn,
                 position_id=position_id,
                 command_id=command_id,
-                decision_certificate_hash=decision_certificate_hash,
+                decision_certificate_hash=resolved_certificate_hash,
                 intent_kind=intent_kind,
                 created_at=created_at,
+            )
+        elif _strict_live_entry_q_version_required():
+            record_unattributable_command(
+                conn,
+                position_id=position_id,
+                command_id=command_id,
+                intent_kind=intent_kind,
+                created_at=created_at,
+                reason="legacy_position_certificate_missing_or_ambiguous",
             )
 
 

@@ -22,7 +22,6 @@ from src.decision_kernel.canonicalization import (
     stable_hash,
 )
 from src.events.candidate_evaluation import CandidateEvaluation
-from src.events.opportunity_selector import select_best_family_candidate
 
 
 def _finite_float(value: Any) -> float | None:
@@ -243,9 +242,6 @@ class OpportunityBook:
     family_id: str
     evaluations: tuple[CandidateEvaluation, ...]
     selected_candidate_id: str | None
-    family_rank: dict[str, int]
-    global_rank: dict[str, int]
-    loser_reasons: dict[str, str]
     cache_summary: dict[str, Any]
 
     def to_receipt_dict(self) -> dict[str, Any]:
@@ -333,9 +329,6 @@ class OpportunityBook:
                 if selected is not None
                 else None
             ),
-            "family_rank": self.family_rank,
-            "global_rank": self.global_rank,
-            "loser_reasons": self.loser_reasons,
             "cache_summary": self.cache_summary,
             "candidates": candidate_receipts,
         }
@@ -371,10 +364,6 @@ def build_family_opportunity_book(
     minting a second selection authority.
     """
     material = tuple(evaluations)
-    # select_best_family_candidate is retained for DISPLAY ordering + loser
-    # reasons only (provenance); it is NOT the selection authority.
-    selection = select_best_family_candidate(material)
-    ranked_ids = [evaluation.candidate_id for evaluation in selection.ranked]
     selected_candidate_id = decided_candidate_id
     book_id = "opportunity_book:" + stable_hash(
         {
@@ -384,15 +373,11 @@ def build_family_opportunity_book(
             "selected_candidate_id": selected_candidate_id,
         }
     )
-    ranks = {candidate_id: rank for rank, candidate_id in enumerate(ranked_ids, start=1)}
     return OpportunityBook(
         book_id=book_id,
         book_version=1,
         family_id=family_id,
         evaluations=material,
         selected_candidate_id=selected_candidate_id,
-        family_rank=ranks,
-        global_rank=ranks,
-        loser_reasons=selection.loser_reasons,
         cache_summary=dict(cache_summary or {}),
     )

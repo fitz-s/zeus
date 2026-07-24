@@ -60,7 +60,7 @@ def _world_write_mutex():
     """Lazily resolve the process-global zeus-world.db write mutex.
 
     Imported lazily (not at module top) to avoid an import cycle with
-    ``src.state.db``. EDLI live-canary contention fix (2026-05-31): the
+    ``src.state.db``. EDLI live-probe contention fix (2026-05-31): the
     market-channel ingestor and the EDLI reactor are two in-process WAL writers
     on zeus-world.db; serializing each write+commit unit under this mutex
     guarantees they never hold the SQLite write lock concurrently, so a contended
@@ -870,7 +870,7 @@ def active_weather_token_metadata_from_snapshots(
 ) -> dict[str, MarketTokenMetadata]:
     """Read active weather token metadata from executable snapshot truth.
 
-    Coverage contract (EDLI live canary, Blocker #52 — 2026-05-31)
+    Coverage contract (EDLI live probe, Blocker #52 — 2026-05-31)
     ---------------------------------------------------------------
     The market-channel ingestor subscribes to / REST-seeds books for EVERY
     token returned here. Those books become the ``execution_feasibility_evidence``
@@ -3006,7 +3006,7 @@ def insert_execution_feasibility_evidence_batch(
             raise
 
 
-# W0.2 blind-window metric (docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+# W0.2 blind-window metric (architecture/invariants.yaml
 # §1 "input->q latency SLA (A2, 'THE metric')"). Same schema-routing allowlist discipline as
 # execution_feasibility_evidence: never interpolate a caller string into SQL.
 _CONNECTIVITY_EVENT_ALLOWED_SCHEMAS = {"", "trades", "main"}

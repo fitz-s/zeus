@@ -11,7 +11,7 @@ Table belongs to zeus-world.db (world DB, K1 split).
 
 Two-tier model (§5.1):
   - reason: NoTradeReason (StrEnum CATEGORY, enforced by DB CHECK constraint)
-  - reason_detail: free-form diagnostic string (original f-string / interpolated content)
+  - reason_detail: free-form telemetry string (original f-string / interpolated content)
 
 INV-37 contract:
   writer requires caller-provided conn (INV-37); reader auto-opens if conn=None.
@@ -209,7 +209,7 @@ def write_no_trade_event(
         is IGNORED — a new seq is derived atomically from the UNION of
         decision_events + no_trade_events under db_writer_lock(LIVE).
     reason: NoTradeReason StrEnum — CATEGORY tier (enforced by DB CHECK).
-    reason_detail: free-form diagnostic string — DETAIL tier (no constraint).
+    reason_detail: free-form telemetry string — DETAIL tier (no constraint).
         For literal string callsites: pass the original string.
         For f-string callsites: pass the interpolated string.
         For dynamic callsites: pass str(exc) or similar.

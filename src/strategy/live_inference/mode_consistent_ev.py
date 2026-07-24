@@ -61,7 +61,7 @@ TAKER_MAX_RELATIVE_SPREAD = 0.25
 # example Milan 0.009/0.016: 7 ticks wide), but it misclassifies one-tick penny
 # books such as 0.001/0.002 as "66% wide" even though crossing pays exactly one
 # tick of spread. Keep the relative guard, but do not let it override a
-# one-tick absolute spread; the conservative all-in <= q_lcb/q_exec_lcb law below
+# one-tick absolute spread; the conservative all-in <= q_lcb law below
 # still decides whether that cross is profitable enough to submit.
 TAKER_MAX_ABSOLUTE_SPREAD_FOR_ONE_TICK_CROSS = 0.001
 
@@ -357,9 +357,6 @@ class ModeConsistentEv:
     # K4.0 REST-THEN-CROSS provenance (None on the legacy one-shot path):
     policy: str | None = None  # POLICY_* verdict that produced chosen_mode
     escalation_deadline_minutes: float | None = None  # set on REST_DEFAULT decisions
-    # P0-1 (2026-06-23) execution-conditioned bound supplied to the taker cap
-    # (None = plain q_lcb, today's behavior). Travels for settlement-loop audit.
-    q_exec_lcb: float | None = None
 
 
 def select_mode_consistent_ev(
@@ -459,7 +456,6 @@ def select_mode_consistent_ev(
 def select_rest_then_cross_mode(
     *,
     q_lcb: float,
-    q_exec_lcb: float | None = None,
     taker_all_in_cost: float | None,
     p_fill_taker: float,
     best_bid: float | None,
@@ -505,7 +501,7 @@ def select_rest_then_cross_mode(
     EV provenance: both EVs are still computed (with the MEASURED deadline-
     horizon fill probability, not the retired 0.10 guess) and travel on the
     receipt so the settlement loop recalibrates the hazard curve and lambda.
-    The taker spread guard, q/q_exec cap, fee law, maker adverse-selection
+    The taker spread guard, q_lcb cap, fee law, maker adverse-selection
     haircut, and hysteresis margin remain the live law.
     """
     mode_ev = select_mode_consistent_ev(
@@ -539,16 +535,9 @@ def select_rest_then_cross_mode(
     # (event_reactor_adapter TAKER_BUY_TOUCH_EXCEEDS_RESERVATION). The wide-spread
     # guard and the maker-vs-taker EV comparison remain in force above this.
     _q = float(q_lcb)
-    # P0-1 (2026-06-23) EXECUTION-(PRICE)-CONDITIONED TIGHTENING. q_exec_lcb is the caller's
-    # settlement-evidenced corrected bound (the selection-curse realized-NO-rate at this price —
-    # src/decision/selection_curse_bound.py, supplied by event_reactor_adapter._event_bound_q_exec_lcb)
-    # and can ONLY lower the admissibility bound, never raise it (min with _q). None => plain q_lcb
-    # (identity, today's exact behavior). Honors the same HARD LAW as FIX B: this only makes the
-    # taker lane STRICTER, never loosens it.
-    _exec_bound = _q if q_exec_lcb is None else min(_q, float(q_exec_lcb))
     _taker_cost = _finite(taker_all_in_cost)
     taker_clears_conservative_bound = (
-        _taker_cost is not None and _taker_cost <= _exec_bound + 1e-9
+        _taker_cost is not None and _taker_cost <= _q + 1e-9
     )
     taker_admissible = (
         mode_ev.ev_taker is not None
@@ -570,7 +559,6 @@ def select_rest_then_cross_mode(
             placement=PLACEMENT_MAKER,
             policy=policy,
             escalation_deadline_minutes=deadline,
-            q_exec_lcb=q_exec_lcb,
         )
 
     def _as_taker(policy: str) -> ModeConsistentEv:
@@ -581,7 +569,6 @@ def select_rest_then_cross_mode(
             placement=PLACEMENT_TAKER,
             policy=policy,
             escalation_deadline_minutes=None,
-            q_exec_lcb=q_exec_lcb,
         )
 
     # 1. ANTIBODY: an unexpired same-family rest forbids ANY new order.
