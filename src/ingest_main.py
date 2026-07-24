@@ -2435,10 +2435,8 @@ def _replacement_availability_poll_tick():
         for value in (_station_report or {}).values()
     )
     if _station_report is not None:
-        _station_changed_sources = tuple(
-            str(source)
-            for source, written in (_station_report or {}).items()
-            if int(written) > 0
+        _station_completed_sources = tuple(
+            str(source) for source in (_station_report or {})
         )
         _station_reseed_report = {
             "status": (
@@ -2451,7 +2449,7 @@ def _replacement_availability_poll_tick():
         try:
             _attach_reseed_reports(
                 _station_reseed_report,
-                changed_sources=_station_changed_sources or None,
+                changed_sources=_station_completed_sources or None,
                 include_cycle_advance=False,
             )
         except Exception as exc:  # noqa: BLE001 - source-clock poll must continue.

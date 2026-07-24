@@ -329,17 +329,23 @@ def test_availability_poll_is_wired_to_station_ingest():
 
 
 @pytest.mark.parametrize(
-    ("station_report", "expected_reseeds"),
+    ("station_report", "expected_reseeds", "expected_changed_sources"),
     [
-        ({"hko_fnd": 18}, 1),
-        ({"hko_fnd": 0}, 1),
-        (None, 0),
+        ({"hko_fnd": 18}, 1, ("hko_fnd",)),
+        ({"hko_fnd": 0}, 1, ("hko_fnd",)),
+        (
+            {"cwa_township": 6, "hko_fnd": 0},
+            1,
+            ("cwa_township", "hko_fnd"),
+        ),
+        (None, 0, None),
     ],
 )
 def test_station_writes_reseed_even_when_openmeteo_clock_is_current(
     monkeypatch,
     station_report,
     expected_reseeds,
+    expected_changed_sources,
 ):
     from src import ingest_main
     from src.data import bayes_precision_fusion_download as fusion_download
@@ -395,9 +401,7 @@ def test_station_writes_reseed_even_when_openmeteo_clock_is_current(
 
     assert reseeds["count"] == expected_reseeds
     if expected_reseeds:
-        assert changed_sources == [
-            ("hko_fnd",) if sum(station_report.values()) > 0 else None
-        ]
+        assert changed_sources == [expected_changed_sources]
         assert report["station_forecast_reseed"]["fusion_upgrade_status"] == "ENQUEUED"
     else:
         assert "station_forecast_reseed" not in report
