@@ -577,6 +577,27 @@ scripts:
     required_helpers: [src.state.ledger.append_many_and_project, src.state.projection.upsert_position_current]
     required_tests: [tests/test_repair_dust_exit_projection.py, tests/test_check_live_restart_preflight.py]
     reason: "Eliminates reload/projection risk where chain dust or snapshot-min-order dust already reached canonical backoff_exhausted but position_current no longer exposes pending_exit/backoff_exhausted."
+  repair_position_events_corruption.py:
+    # Created: 2026-07-24
+    # Last reused or audited: 2026-07-24
+    # Authority basis: AGENTS.md append-first truth law and the 2026-07-24
+    # position_events table-scoped corruption incident.
+    class: repair
+    lifecycle: long_lived
+    status: active
+    authority_scope: live_trade_event_spine_corruption_repair
+    canonical_command: "python3 scripts/repair_position_events_corruption.py --db EXPLICIT_APFS_CANDIDATE [--apply --operator-confirms-fenced --candidate-clone]"
+    read_targets: [explicit_trade_db_path]
+    write_targets: [explicit_trade_db_path, stdout]
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: "--db"
+    external_inputs: [operator_all_writer_fence, launchd_disabled_state, lsof_open_handle_state]
+    dangerous_if_run: true
+    promotion_barrier: "Apply is forbidden on canonical DB and requires an explicit disposable APFS candidate clone, the five trade-writer labels disabled, no candidate DB/WAL/SHM handles, an approved SQLite source build, pinned position_events schema, a dense readable prefix, and a bounded covering-index tail containing only MONITOR_REFRESHED evidence. Any side-effect event, identity disagreement, digest mismatch, or integrity failure aborts before commit. Candidate promotion is a separate operator-gated atomic rename after verification."
+    required_helpers: [sqlite3]
+    required_tests: [tests/test_repair_position_events_corruption.py]
+    unguarded_write_rationale: "Single-DB WAL transaction rebuilds only the corrupt position_events table, preserves every readable row byte-for-byte and its rowid, recreates append-only indexes/triggers, and refuses any unreadable tail that could contain a money side effect."
   repair_active_entry_q_versions.py:
     # Created: 2026-07-09
     # Last reused or audited: 2026-07-09
