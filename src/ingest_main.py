@@ -1238,7 +1238,7 @@ def _k2_daily_obs_tick():
             logger.info("ingest k2_daily_obs_tick skipped_lock_held")
             return
         with get_forecasts_connection_with_world(write_class="bulk") as conn:
-            result = daily_tick(conn)
+            result = daily_tick(conn, hko_accumulator_schema="world")
     logger.info("K2 daily_obs_tick: %s", result)
 
 

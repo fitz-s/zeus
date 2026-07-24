@@ -183,6 +183,67 @@ class TestDailyObsTickRouting:
         assert actual_conn is forecasts_conn, (
             f"daily_tick must receive the forecasts connection; got {actual_conn!r}"
         )
+        assert mock_daily_tick.call_args.kwargs == {
+            "hko_accumulator_schema": "world"
+        }
+
+    def test_hko_realtime_writes_attached_world_not_forecasts_ghost(
+        self, tmp_path
+    ):
+        """Same-name ghost tables must not split the HKO trajectory ledger."""
+        from src.data.daily_obs_append import _accumulate_hko_reading
+        from src.state.schema.observation_prints_schema import ensure_table
+
+        forecasts_path = tmp_path / "zeus-forecasts.db"
+        world_path = tmp_path / "zeus-world.db"
+        forecasts = sqlite3.connect(forecasts_path)
+        forecasts.execute(
+            """
+            CREATE TABLE hko_hourly_accumulator (
+                target_date TEXT NOT NULL,
+                hour_utc TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (target_date, hour_utc)
+            )
+            """
+        )
+        forecasts.commit()
+        forecasts.close()
+        world = sqlite3.connect(world_path)
+        ensure_table(world)
+        world.commit()
+        world.close()
+
+        conn = sqlite3.connect(forecasts_path)
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "updateTime": "2026-07-24T12:02:00+00:00",
+            "temperature": {
+                "data": [
+                    {"place": "Hong Kong Observatory", "value": 31.0}
+                ]
+            },
+        }
+        try:
+            with patch(
+                "src.data.daily_obs_append.httpx.get", return_value=response
+            ):
+                assert _accumulate_hko_reading(conn, schema="world") is True
+            assert conn.execute(
+                "SELECT COUNT(*) FROM main.hko_hourly_accumulator"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.hko_hourly_accumulator"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.observation_prints "
+                "WHERE source_channel='hko_rhrread_spot'"
+            ).fetchone()[0] == 1
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

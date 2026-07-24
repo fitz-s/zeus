@@ -508,27 +508,41 @@ def _fetch_hko_month_with_retry(
 # ---------------------------------------------------------------------------
 
 
-def _ensure_hko_accumulator_table(conn) -> None:
-    """Create hko_hourly_accumulator if it doesn't exist."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS hko_hourly_accumulator (
-            target_date TEXT NOT NULL,
-            hour_utc    TEXT NOT NULL,
-            temperature REAL NOT NULL,
-            fetched_at  TEXT NOT NULL,
-            PRIMARY KEY (target_date, hour_utc)
-        )
-    """)
+def _ensure_hko_accumulator_table(conn, *, schema: str = "main") -> None:
+    """Create the HKO accumulator in its explicitly selected DB schema."""
+    if schema == "main":
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS hko_hourly_accumulator (
+                target_date TEXT NOT NULL,
+                hour_utc    TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                fetched_at  TEXT NOT NULL,
+                PRIMARY KEY (target_date, hour_utc)
+            )
+        """)
+        return
+    if schema == "world":
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS world.hko_hourly_accumulator (
+                target_date TEXT NOT NULL,
+                hour_utc    TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                fetched_at  TEXT NOT NULL,
+                PRIMARY KEY (target_date, hour_utc)
+            )
+        """)
+        return
+    raise ValueError(f"unsupported HKO accumulator schema: {schema!r}")
 
 
-def _accumulate_hko_reading(conn) -> bool:
+def _accumulate_hko_reading(conn, *, schema: str = "main") -> bool:
     """Fetch current HKO rhrread temperature and store in accumulator.
 
     The rhrread endpoint returns the latest hourly reading only; we call
     this on every hourly tick to build up a full day of readings. Returns
     True if a reading was successfully stored, False otherwise.
     """
-    _ensure_hko_accumulator_table(conn)
+    _ensure_hko_accumulator_table(conn, schema=schema)
     try:
         resp = httpx.get(
             HKO_REALTIME_URL,
@@ -566,26 +580,58 @@ def _accumulate_hko_reading(conn) -> bool:
     target_date_str = hkt_now.date().isoformat()
     hour_utc_str = now_utc.strftime("%Y-%m-%dT%H:00Z")
 
-    conn.execute(
-        """
-        INSERT INTO hko_hourly_accumulator (target_date, hour_utc, temperature, fetched_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(target_date, hour_utc) DO UPDATE SET
-            temperature = excluded.temperature,
-            fetched_at = excluded.fetched_at
-        """,
-        (target_date_str, hour_utc_str, temp_c, now_utc.isoformat()),
-    )
+    params = (target_date_str, hour_utc_str, temp_c, now_utc.isoformat())
+    if schema == "main":
+        conn.execute(
+            """
+            INSERT INTO hko_hourly_accumulator
+                (target_date, hour_utc, temperature, fetched_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(target_date, hour_utc) DO UPDATE SET
+                temperature = excluded.temperature,
+                fetched_at = excluded.fetched_at
+            """,
+            params,
+        )
+    elif schema == "world":
+        conn.execute(
+            """
+            INSERT INTO world.hko_hourly_accumulator
+                (target_date, hour_utc, temperature, fetched_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(target_date, hour_utc) DO UPDATE SET
+                temperature = excluded.temperature,
+                fetched_at = excluded.fetched_at
+            """,
+            params,
+        )
+    else:
+        raise ValueError(f"unsupported HKO accumulator schema: {schema!r}")
     conn.commit()
     logger.debug(
         "HKO rhrread accumulated: date=%s hour=%s temp=%.1f°C",
         target_date_str, hour_utc_str, temp_c,
     )
-    _append_hko_rhrread_print_to_ledger(conn, data=data, temp_c=temp_c, now_utc=now_utc)
+    _append_hko_rhrread_print_to_ledger(
+        conn,
+        data=data,
+        temp_c=temp_c,
+        now_utc=now_utc,
+        schema=schema,
+    )
+    if conn.in_transaction:
+        conn.commit()
     return True
 
 
-def _append_hko_rhrread_print_to_ledger(conn, *, data: dict, temp_c: float, now_utc: datetime) -> None:
+def _append_hko_rhrread_print_to_ledger(
+    conn,
+    *,
+    data: dict,
+    temp_c: float,
+    now_utc: datetime,
+    schema: str = "main",
+) -> None:
     """Append the HKO rhrread spot reading to the observation_prints
     publication-stream ledger (day0 defect-ledger, 2026-07-16).
 
@@ -605,17 +651,41 @@ def _append_hko_rhrread_print_to_ledger(conn, *, data: dict, temp_c: float, now_
                     publish_ts = parsed.astimezone(timezone.utc)
             except (TypeError, ValueError):
                 pass  # malformed updateTime -> keep the fetch-wall-clock fallback
-        append_print(
-            conn,
-            city="Hong Kong",
-            station_id="HKO",
-            source_channel="hko_rhrread_spot",
-            publish_ts_utc=publish_ts.isoformat(),
-            value_native=float(temp_c),
-            unit="C",
-            fetched_at_utc=now_utc.isoformat(),
-            raw_report=json.dumps(data.get("temperature", {}), separators=(",", ":")),
+        params = (
+            "Hong Kong",
+            "HKO",
+            "hko_rhrread_spot",
+            publish_ts.isoformat(),
+            float(temp_c),
+            "C",
+            now_utc.isoformat(),
+            json.dumps(data.get("temperature", {}), separators=(",", ":")),
         )
+        if schema == "main":
+            append_print(
+                conn,
+                city=params[0],
+                station_id=params[1],
+                source_channel=params[2],
+                publish_ts_utc=params[3],
+                value_native=params[4],
+                unit=params[5],
+                fetched_at_utc=params[6],
+                raw_report=params[7],
+            )
+        elif schema == "world":
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO world.observation_prints (
+                    city, station_id, source_channel, publish_ts_utc,
+                    value_native, unit, fetched_at_utc, raw_report,
+                    schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                params,
+            )
+        else:
+            raise ValueError(f"unsupported HKO accumulator schema: {schema!r}")
     except Exception as exc:  # noqa: BLE001 — ledger append is best-effort, never blocks accumulation
         logger.warning(
             "OBSERVATION_PRINTS_APPEND_FAILED source=hko_rhrread_spot exc=%s: %s",
@@ -628,6 +698,7 @@ def _finalize_hko_yesterday(
     *,
     now_utc: datetime | None = None,
     rebuild_run_id: str = "",
+    accumulator_schema: str = "main",
 ) -> dict | None:
     """Check if yesterday (HKT) has enough accumulated readings to produce an observation.
 
@@ -640,17 +711,28 @@ def _finalize_hko_yesterday(
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
 
-    _ensure_hko_accumulator_table(conn)
+    _ensure_hko_accumulator_table(conn, schema=accumulator_schema)
 
     hkt = ZoneInfo("Asia/Hong_Kong")
     hkt_now = now_utc.astimezone(hkt)
     yesterday_hkt = (hkt_now - timedelta(days=1)).date()
     yesterday_str = yesterday_hkt.isoformat()
 
-    rows = conn.execute(
-        "SELECT temperature FROM hko_hourly_accumulator WHERE target_date = ?",
-        (yesterday_str,),
-    ).fetchall()
+    if accumulator_schema == "main":
+        rows = conn.execute(
+            "SELECT temperature FROM hko_hourly_accumulator WHERE target_date = ?",
+            (yesterday_str,),
+        ).fetchall()
+    elif accumulator_schema == "world":
+        rows = conn.execute(
+            "SELECT temperature FROM world.hko_hourly_accumulator "
+            "WHERE target_date = ?",
+            (yesterday_str,),
+        ).fetchall()
+    else:
+        raise ValueError(
+            f"unsupported HKO accumulator schema: {accumulator_schema!r}"
+        )
 
     if len(rows) < HKO_REALTIME_MIN_READINGS:
         logger.info(
@@ -1486,6 +1568,7 @@ def daily_tick(
     *,
     now_utc: Optional[datetime] = None,
     rebuild_run_id: Optional[str] = None,
+    hko_accumulator_schema: str = "main",
 ) -> dict:
     """Daemon per-hour entrypoint.
 
@@ -1537,7 +1620,7 @@ def daily_tick(
     # temperature and store it. This builds up hourly readings throughout
     # the day so we can compute daily max/min even when CLMMAXT/CLMMINT
     # archives aren't yet available (they lag by weeks/months).
-    _accumulate_hko_reading(conn)
+    _accumulate_hko_reading(conn, schema=hko_accumulator_schema)
 
     # HKO's current-month Daily Extract is the market-named final source. Poll
     # only while yesterday lacks a source-correct VERIFIED row; once published,
@@ -1565,7 +1648,10 @@ def daily_tick(
         # This produces an hko_realtime_api row that supplements the monthly
         # CLMMAXT/CLMMINT archive (which returns empty for the current month).
         hko_rt_stats = _finalize_hko_yesterday(
-            conn, now_utc=now_utc, rebuild_run_id=rebuild_run_id,
+            conn,
+            now_utc=now_utc,
+            rebuild_run_id=rebuild_run_id,
+            accumulator_schema=hko_accumulator_schema,
         )
 
     # Ogimet refresh: once per day at UTC hour 6. Istanbul (UTC+3) and

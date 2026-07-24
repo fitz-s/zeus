@@ -4,6 +4,26 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-07-24 HKO trajectory truth-domain correction
+
+The July 24 Hong Kong LOW loss exposed a silent same-table-name split across
+canonical DBs. The hourly daily-observation job runs with forecasts.db as MAIN
+and world.db attached. Its unqualified HKO accumulator and publication-ledger
+writes therefore updated forecasts.db, while the source-clock projector and
+Day0 current-temperature reader consumed world.db. Forecasts held 16 current
+July 24 readings through 12:00Z; world held no July 24 accumulator rows and its
+spot ledger stopped at 05:02Z even as official cumulative extrema remained
+fresh. No SQL error or source-health failure surfaced because both DBs contained
+an HKO accumulator table.
+
+The runtime writer now names the `world` schema explicitly for the accumulator,
+spot-print ledger, and next-day realtime finalization read. The forecasts/main
+path remains only for isolated legacy/test callers; production routing binds to
+the registry-owned world truth domain. An antibody creates same-name tables in
+both DBs and proves that a new HKO reading and its trajectory print land only in
+world. This repairs source truth -> Day0 trajectory evidence; it does not use
+market price as probability authority or change settlement extrema semantics.
+
 ## 2026-07-24 Day0 trajectory correction
 
 Current live Ankara 28C evidence falsified one probability assumption before
