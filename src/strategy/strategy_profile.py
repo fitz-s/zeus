@@ -164,12 +164,13 @@ class StrategyProfile:
         return topology in self.allowed_bin_topology
 
     def kelly_for_phase(self, market_phase: Optional[str]) -> float:
-        """Phase-aware Kelly multiplier (PLAN.md §A6 resolver input).
+        """HISTORICAL DECODER ONLY (ultimate_alpha_2026-07-23 group B).
 
-        Pre-A6 callers pass ``market_phase=None`` to get the legacy
-        per-strategy default. A6 layers this through a richer resolver
-        that also accounts for oracle status, observed_target_day_fraction,
-        and phase_source quality.
+        The live sizer no longer reads per-key/per-phase multipliers —
+        src.strategy.kelly.phase_aware_kelly_multiplier returns the one
+        GLOBAL_KELLY_FRACTION gated by identity/lifecycle/hard-veto. This
+        method survives for decoding historical decision_chain rows whose
+        open-time multiplier was resolved through the registry.
         """
         if market_phase is None:
             return self.kelly_default_multiplier

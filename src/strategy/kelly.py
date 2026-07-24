@@ -62,136 +62,40 @@ def kelly_size(
     return f_star * kelly_mult * bankroll
 
 
+# One global fractional-Kelly fraction (ultimate_alpha_2026-07-23 COLLISION.md
+# group B / FINAL_SPEC.md §What remains). Set to the value the dominant live
+# tier (kelly_default_multiplier: 1.0) already used, so cutover day has no
+# sizing regime jump; tuning κ later is a separate operator decision.
+GLOBAL_KELLY_FRACTION: float = 1.0
+
+# Lifecycle phases in which NO market can accept a new entry — a universal
+# market-state fact (not tradeable), not a per-strategy permission. Replaces
+# the per-key kelly_phase_overrides zeros the registry used to carry.
+_NON_TRADING_PHASES: frozenset[str] = frozenset({"pre_trading", "post_trading", "resolved"})
+
+
 def strategy_kelly_multiplier(strategy_key: str | None) -> float:
-    """Return the live sizing multiplier for a strategy key, fail-closed.
+    """Return the sizing fraction for a strategy-identity key, fail-closed.
 
-    Pre-A4: read from a hardcoded ``STRATEGY_KELLY_MULTIPLIERS`` dict
-    defined in this file. Post-A4: read through
-    ``src.strategy.strategy_profile.kelly_default_multiplier`` which
-    delegates to ``architecture/strategy_profile_registry.yaml`` (single
-    source of truth — see PLAN.md §A4 + Bug review §D). Fail-closed
-    behavior unchanged: unknown / empty key returns 0.0.
-
-    Post-A6: ``phase_aware_kelly_multiplier`` is the canonical entry-time
-    resolver (PLAN.md §A6). This function remains for back-compat with
-    callers that don't yet have phase / oracle / decision_time in scope
-    (e.g., dynamic_kelly_mult cascade-floor checks). New sites should
-    prefer ``phase_aware_kelly_multiplier``.
+    One-law form (ultimate_alpha 2026-07-23): the label no longer owns
+    economics — every LIVE key sizes at ``GLOBAL_KELLY_FRACTION``. What
+    survives of the registry lookup is identity/permission, not economics:
+    unknown/empty key → 0.0 (mis-routing bug upstream), and a non-live
+    key (blocked/refuted, e.g. shoulder_sell) → 0.0 (an operator
+    prohibition, not a multiplier).
     """
-    from src.strategy.strategy_profile import kelly_default_multiplier as _kdm
-    return _kdm(str(strategy_key or "").strip())
-
-
-def observed_target_day_fraction(
-    *,
-    decision_time_utc,
-    target_local_date,
-    city_timezone: str,
-) -> float:
-    """Fraction of the city-local target day that has elapsed at
-    ``decision_time_utc``, clamped to [0.0, 1.0].
-
-    PLAN.md §A6 layer of the phase-aware Kelly resolver. The
-    settlement_capture strategy's edge depends on how much of the
-    target day has been observed: at city-local 00:00 of target_date
-    the fraction is 0 (the day hasn't started — pure forecast play);
-    at city-local 24:00 of target_date the fraction is 1 (the day
-    is fully observed — peak alpha). The resolver scales Kelly
-    proportionally so the bot doesn't bet at full size against an
-    incomplete observation window.
-
-    East/west asymmetry (per PLAN_v3 §3 + Bug review §6.7): at a
-    fixed UTC instant, eastward-of-UTC cities (Wellington) are
-    further into their local day than westward-of-UTC cities (LA).
-    The fraction captures this asymmetry directly — it does NOT need
-    a separate east/west tag.
-
-    Implementation: compute target_local_start (city-local 00:00 of
-    target_local_date) and target_local_end (city-local 00:00 of the
-    next day). Convert decision_time_utc to the city's local clock
-    via astimezone, then compute (decision_local - target_local_start)
-    / (target_local_end - target_local_start) and clamp.
-
-    Note on DST: target_local_end - target_local_start in wall-clock
-    is 23h, 24h, or 25h depending on whether the city had a DST
-    transition during target_date. This is the CORRECT denominator
-    for computing "fraction of the local day elapsed" — the local
-    day's actual length, not a fixed 24h window. Anchoring on a fixed
-    24h would introduce a ±1h fraction skew on DST days.
-    """
-    from datetime import datetime, time, timedelta, timezone
-    from zoneinfo import ZoneInfo
-
-    if decision_time_utc.tzinfo is None:
-        raise ValueError(
-            f"decision_time_utc must be tz-aware; got naive {decision_time_utc!r}"
-        )
-
-    tz = ZoneInfo(city_timezone)
-    target_local_start = datetime.combine(target_local_date, time(0, 0, 0), tzinfo=tz)
-    target_local_end = datetime.combine(
-        target_local_date + timedelta(days=1), time(0, 0, 0), tzinfo=tz
-    )
-
-    # Convert all three endpoints to UTC before subtracting. Python's
-    # ZoneInfo-aware datetime arithmetic returns the WALL-CLOCK
-    # difference, NOT the actual elapsed UTC duration: a tz-aware
-    # 23h-DST-day from 00:00 to 24:00 yields a 24h timedelta, which
-    # would skew the fraction by ~4% on DST transition days. Going
-    # through UTC fixes this.
-    start_utc = target_local_start.astimezone(timezone.utc)
-    end_utc = target_local_end.astimezone(timezone.utc)
-    decision_utc = decision_time_utc.astimezone(timezone.utc)
-
-    elapsed = (decision_utc - start_utc).total_seconds()
-    total = (end_utc - start_utc).total_seconds()
-    if total <= 0:
+    from src.strategy.strategy_profile import try_get
+    profile = try_get(str(strategy_key or "").strip())
+    if profile is None or getattr(profile, "live_status", None) != "live":
         return 0.0
-    fraction = elapsed / total
-    if fraction < 0.0:
-        return 0.0
-    if fraction > 1.0:
-        return 1.0
-    return fraction
+    return GLOBAL_KELLY_FRACTION
 
 
-# A6 phase-aware Kelly resolver factor floors / overrides.
-#
-# Why each floor exists:
-#
-# - ``OBSERVED_FRACTION_MIN = 0.3``: prevents Wellington-style cities at
-#   12:00 UTC from getting Kelly=0 just because their local target_day
-#   has barely started. Operator-tunable; below 0.3 the day-start case
-#   becomes too punitive on early-Day0 settlement_capture entries.
-# - ``FALLBACK_F1_HAIRCUT = 0.7``: F1 anchor is verified across 13
-#   cities (INVESTIGATION_EXTERNAL Q3 = 7 + CRITIC_REVIEW_R2 spot-check
-#   = 6) but not infallible — a Polymarket schema change could move
-#   endDate. The 0.7× haircut applies until the fallback is verified
-#   for the specific market in question (i.e., explicit market_end_at
-#   parsed cleanly = phase_source==verified_gamma).
-OBSERVED_FRACTION_MIN: float = 0.3
-FALLBACK_F1_HAIRCUT: float = 0.7
-OBSERVED_FRACTION_STRATEGY_KEYS: frozenset[str] = frozenset({"settlement_capture"})
-
-
-def _observed_fraction_multiplier(
-    *,
-    strategy_key: str,
-    decision_time_utc,
-    target_local_date,
-    city_timezone: str,
-) -> float:
-    """Return target-day observation progress multiplier for strategies that use it."""
-    if strategy_key not in OBSERVED_FRACTION_STRATEGY_KEYS:
-        return 1.0
-    return max(
-        OBSERVED_FRACTION_MIN,
-        observed_target_day_fraction(
-            decision_time_utc=decision_time_utc,
-            target_local_date=target_local_date,
-            city_timezone=city_timezone,
-        ),
-    )
+# observed_target_day_fraction DELETED (ultimate_alpha_2026-07-23 group B):
+# elapsed wall-clock fraction of the target day is not the fraction of
+# information observed — the Day0-conditioned posterior already carries the
+# remaining-day distribution, so scaling Kelly by it taxed the same
+# uncertainty twice (FINAL_SPEC.md §What remains: observed-day-fraction row).
 
 
 def phase_aware_kelly_multiplier(
@@ -204,160 +108,53 @@ def phase_aware_kelly_multiplier(
     target_local_date,
     phase_source: str | None,
 ) -> float:
-    """Resolve the live Kelly multiplier from four authority sources.
+    """Resolve the entry-time Kelly fraction under the one decision law.
 
-    Resolver formula (PLAN.md §A6, written to
-    ``decision_chain.kelly_multiplier_used`` at open-time)::
+    One-law form (ultimate_alpha_2026-07-23 COLLISION.md group B): the
+    per-strategy multiplier, per-phase override, observed-day-fraction
+    scaling, phase-source haircut, and oracle soft-penalty are all retired
+    as sizing inputs — they double-counted uncertainty that the robust
+    q_lcb bound (and hard authority gates) already carry. What remains:
 
-        m_strategy_phase    = registry.get(key).kelly_for_phase(market_phase)
-        m_oracle            = oracle_penalty.get_oracle_info(city, metric).penalty_multiplier
-        m_observed_fraction = max(0.3, observed_target_day_fraction(...))
-                              for settlement_capture; 1.0 for opening-tick
-                              and model-edge strategies
-        m_phase_source      = 0.7 if phase_source == "fallback_f1" else 1.0
-        kelly_multiplier    = product of the four
+    - identity fail-closed: unknown strategy_key returns 0.0 (mis-routing
+      bug upstream, same posture as before);
+    - lifecycle validity: a market in a non-trading phase
+      (pre_trading / post_trading / resolved) can accept no entry — a
+      universal market-state fact, kept here because the registry's
+      per-key phase zeros were the only enforcement at this boundary;
+    - hard oracle veto: a 0.0 oracle penalty means settlement truth for
+      (city, metric) is UNAVAILABLE — that is an authority failure, not a
+      soft haircut, so it still zeroes the size. Soft penalties (0 < m < 1)
+      no longer scale size.
+    - otherwise ``GLOBAL_KELLY_FRACTION``.
 
-    Migration policy (PLAN_v3 §6.P5 OD7): existing positions retain
-    whatever multiplier was on ``decision_chain.kelly_multiplier_used``
-    at THEIR open-time (already persisted). This function is called
-    only at NEW open-time for new candidates. No retroactive recompute.
-
-    Failure modes:
-    - Unknown ``strategy_key``: registry returns 0.0 (fail-closed).
-    - ``market_phase`` is None: ``kelly_for_phase(None)`` returns the
-      strategy's default multiplier — preserves the pre-A5 fail-soft
-      Kelly path. Strict callers should reject phase=None at the
-      dispatch layer (see ``PhaseAuthorityViolation``) before reaching
-      this resolver.
-    - Oracle MISSING / METRIC_UNSUPPORTED: penalty_multiplier=0.5 / 0.0
-      respectively (PLAN.md §A3 multiplier table).
-
-    Strategy relationship:
-    - ``settlement_capture`` edge depends on observed target-day fact
-      accumulation, so target-day fraction is a sizing input.
-    - ``opening_inertia`` edge depends on opening-tick market age. Its phase
-      policy already supplies the pre-settlement haircut; applying target-day
-      observed fraction would suppress live opening_hunt orders before the
-      target day can begin.
+    Migration policy unchanged (PLAN_v3 §6.P5 OD7): existing positions
+    retain their persisted open-time multiplier; no retroactive recompute.
+    ``decision_time_utc`` / ``target_local_date`` / ``phase_source`` are
+    retained in the signature for call-site stability; they no longer
+    influence the fraction.
     """
     from src.strategy.oracle_penalty import get_oracle_info
-    from src.strategy.strategy_profile import try_get
 
-    profile = try_get(strategy_key)
-    if profile is None:
-        return 0.0
-    m_strategy_phase = profile.kelly_for_phase(market_phase)
-    if m_strategy_phase <= 0.0:
-        # Phase-blocked strategy — short-circuit so we don't spend time
-        # on oracle / fraction lookups when the answer is already 0.
+    del decision_time_utc, target_local_date, phase_source  # no longer sizing inputs
+
+    if strategy_kelly_multiplier(strategy_key) <= 0.0:
+        return 0.0  # unknown identity or operator-blocked key — fail closed
+    if market_phase is not None and str(market_phase) in _NON_TRADING_PHASES:
         return 0.0
 
     oracle_info = get_oracle_info(getattr(city, "name", ""), temperature_metric)
-    m_oracle = oracle_info.penalty_multiplier
-    if m_oracle <= 0.0:
+    if oracle_info.penalty_multiplier <= 0.0:
         return 0.0
 
-    m_observed_fraction = _observed_fraction_multiplier(
-        strategy_key=strategy_key,
-        decision_time_utc=decision_time_utc,
-        target_local_date=target_local_date,
-        city_timezone=getattr(city, "timezone", ""),
-    )
-
-    m_phase_source = FALLBACK_F1_HAIRCUT if phase_source == "fallback_f1" else 1.0
-
-    result = m_strategy_phase * m_oracle * m_observed_fraction * m_phase_source
-    return result
+    return GLOBAL_KELLY_FRACTION
 
 
-# Per-city Kelly multiplier (asymmetric-loss policy layer, 2026-05-03).
-# Authority: docs/reference/zeus_kelly_asymmetric_loss_handoff.md +
-# RERUN_PLAN_v2.md §5 (D-A migration: Denver/Paris asymmetric loss moved out
-# of DDD floor and into Kelly multiplier).
-#
-# Composition (live evaluator-side): final_kelly =
-#   base_kelly × strategy_kelly_multiplier × city_kelly_multiplier × (1 - DDD_discount)
-#
-# Default 1.0× for cities not listed; explicit override per-city for asymmetric-
-# loss preference. Operator can override via settings.json::sizing::city_kelly_multipliers
-# without touching code.
-DEFAULT_CITY_KELLY_MULTIPLIERS: dict[str, float] = {
-    # Continental cities with strong cold-airmass penetration risk →
-    # 3-hour outage at peak hour can mask large overnight bust.
-    # Operator Ruling A 2026-05-03: asymmetric loss principle.
-    "Denver": 0.7,
-    # Paris is excluded from DDD until workstream A LFPB resync completes;
-    # the multiplier is registered now so the wiring is ready when Paris
-    # re-enters the universe. Same continental cold-snap exposure as Denver.
-    "Paris": 0.7,
-}
-
-_CITY_KELLY_CACHE: dict[str, float] | None = None
-
-
-def _load_city_kelly_overrides() -> dict[str, float]:
-    """Read settings.json::sizing::city_kelly_multipliers (best-effort).
-
-    Operator updates this section to bless or revoke per-city overrides
-    without redeploying code. Absent / malformed → empty dict (defaults
-    apply).
-    """
-    try:
-        import json as _json
-        from pathlib import Path as _Path
-
-        cfg_path = _Path(__file__).resolve().parent.parent.parent / "config" / "settings.json"
-        if not cfg_path.exists():
-            return {}
-        cfg = _json.loads(cfg_path.read_text())
-        sizing = cfg.get("sizing") or {}
-        overrides = sizing.get("city_kelly_multipliers") or {}
-        # Sanitize: only float-like positive values
-        clean: dict[str, float] = {}
-        for city, val in overrides.items():
-            try:
-                f = float(val)
-            except (TypeError, ValueError):
-                continue
-            if f >= 0.0 and f <= 2.0:  # sane range; refuse > 2× Kelly amplification
-                clean[city] = f
-        return clean
-    except Exception as exc:  # noqa: BLE001 — fail-open to defaults
-        logger.warning(
-            "city_kelly_multiplier override load failed: %s; using DEFAULTS only", exc
-        )
-        return {}
-
-
-def city_kelly_multiplier(city: str | None) -> float:
-    """Return the per-city Kelly multiplier, fail-OPEN to 1.0× for unknown city.
-
-    Asymmetric-loss policy lives here, NOT in the DDD floor (RERUN_PLAN_v2.md
-    §5 D-A migration). Defaults from ``DEFAULT_CITY_KELLY_MULTIPLIERS``;
-    operator can override via ``config/settings.json::sizing::city_kelly_multipliers``.
-
-    Fail-open default (1.0×) is intentional: a missing entry means "no
-    asymmetric-loss adjustment for this city" — which is the correct answer
-    for the 44 of 46 cities without a documented override. Compare with the
-    strategy multiplier which fails-CLOSED to 0.0 for unknown strategies; the
-    semantics differ because strategy_key being unknown indicates a
-    mis-routing bug, whereas a city without an entry is the normal case.
-
-    Args:
-        city: City name (e.g. "Denver", "NYC"). None or empty → 1.0×.
-
-    Returns:
-        Multiplier in [0.0, 2.0] range. Typical values are 0.7–1.0.
-    """
-    global _CITY_KELLY_CACHE
-    if _CITY_KELLY_CACHE is None:
-        merged = dict(DEFAULT_CITY_KELLY_MULTIPLIERS)
-        merged.update(_load_city_kelly_overrides())
-        _CITY_KELLY_CACHE = merged
-    name = str(city or "").strip()
-    if not name:
-        return 1.0
-    return _CITY_KELLY_CACHE.get(name, 1.0)
+# Per-city Kelly multiplier machinery DELETED (ultimate_alpha_2026-07-23
+# group B): the Denver/Paris asymmetric-loss preference is model uncertainty
+# that belongs in the walk-forward robust q_lcb, not a second tax at the
+# sizer (FINAL_SPEC.md §What remains: "city and lead-time Kelly multipliers —
+# Delete once their uncertainty is represented in walk-forward q⁻").
 
 
 _ENV_UNIFIED_UNCERTAINTY_BUDGET = "ZEUS_UNIFIED_UNCERTAINTY_BUDGET"
@@ -431,87 +228,48 @@ def dynamic_kelly_mult(
     *,
     market_uncertainty_in_lcb: bool = False,
 ) -> float:
-    """Compute dynamic Kelly multiplier. Spec §5.2.
+    """Kelly fraction under the one decision law (ultimate_alpha 2026-07-23).
 
-    Reduces base multiplier based on uncertainty and risk state.
-    All adjustments are multiplicative (cumulative).
+    One-law form: the CI-width, lead-time, per-strategy, and per-city
+    multiplicative stages are DELETED — each rescaled uncertainty that the
+    robust q_lcb bound already carries into the edge (the same double-count
+    INV-40 flagged for ci_width when the unified budget is on; the one law
+    consumes q_lcb everywhere, so the collapse is now unconditional).
+    ``ci_width`` / ``lead_days`` / ``city`` / ``market_uncertainty_in_lcb``
+    remain in the signature for call-site stability; they no longer scale
+    the fraction. ``strategy_key`` survives only as the identity fail-closed
+    gate (unknown key → 0.0 upstream via strategy_kelly_multiplier).
 
-    Removed params (Wave 3, 2026-06-02): rolling_win_rate_20, drawdown_pct, max_drawdown —
-    all three were structurally 0.0 / default-only at live call sites (never computed live).
-    Baseline for portfolio-Kelly (issue #107) is deferred; see #107 for future design.
-
-    The optional ``city`` parameter applies a per-city asymmetric-loss
-    multiplier (default 1.0× for cities without an override). This is the
-    D-A migration target from RERUN_PLAN_v2.md §5 — Denver/Paris ruling-A
-    asymmetric loss preferences live here, NOT in the DDD floor. Default
-    None preserves legacy behavior for tests and unwired tooling. Live
-    callers should pass the city name from the edge/decision context.
+    NAMED PR-1 EXCEPTION — ``portfolio_heat`` STAYS: it is the only
+    portfolio-correlation pressure control until the PR-2 joint allocator
+    (structural-Σ simultaneous Kelly) replaces it. Deleting it here would
+    open a window with correlated same-day bets sized fully independently.
+    PR-2 removes this stage when joint sizing lands (COLLISION.md group B
+    named decision; FINAL_SPEC.md dissolves it "into joint sizing", which
+    does not exist yet in PR-1).
     """
     # C1/INV-13: provenance check — kelly_mult is registered in provenance_registry.yaml
     require_provenance("kelly_mult")
 
+    del ci_width, lead_days, city, market_uncertainty_in_lcb  # no longer sizing inputs
+
     m = base
 
-    # CI width: wider CI → less confident → smaller size
-    # Wave 6 (INV-40, 2026-05-27): when the unified-uncertainty-budget flag
-    # is ON, ci_width information already enters Kelly via edge_LCB (the
-    # bootstrap ci_lower of p_LCB - c_UCB). Applying a multiplicative
-    # haircut on top is the double-count INV-40 forbids. Flag OFF (default)
-    # preserves the legacy chain bit-identically until the operator promotes.
-    # K1 fix (PR #348 P0-1, 2026-05-27): the global env flag is a PRECONDITION
-    # but is NOT sufficient — the per-edge ``market_uncertainty_in_lcb`` arg
-    # must also be True (i.e. EQE actually present AND cost_uncertainty > 0
-    # AND bootstrap actually sampled σ_market for THIS edge). When the env
-    # flag is ON but THIS edge has no per-edge cost evidence in edge_LCB,
-    # the legacy ci_width haircut MUST stay applied — otherwise we'd remove
-    # the multiplier without compensating widening (operator-flagged blocker).
-    _collapse_ci_width_haircut = (
-        _unified_uncertainty_budget_enabled()
-        and bool(market_uncertainty_in_lcb)
-    )
-    if not _collapse_ci_width_haircut:
-        if ci_width > 0.10:
-            m *= 0.7
-        if ci_width > 0.15:
-            m *= 0.5  # Cumulative: 0.25 * 0.7 * 0.5 = 0.0875
-
-    # Lead time: longer lead → less reliable forecast
-    if lead_days >= 5:
-        m *= 0.6
-    elif lead_days >= 3:
-        m *= 0.8
-
-    # Portfolio concentration: positive heat → reduce marginal sizing.
-    # ``portfolio_heat`` is supplied by the money-path adapter as normalized
-    # risk-budget pressure (raw and corr budgets both considered). It is a
-    # soft multi-Kelly pressure input, not a hard cap. Use a reciprocal
-    # attenuation curve instead of a fixed floor: heat=0 leaves size unchanged,
-    # heat=1 halves the marginal multiplier, and higher heat continues to shrink
-    # smoothly toward zero without creating a discontinuous no-trade boundary.
+    # Portfolio concentration: positive heat → reduce marginal sizing (soft
+    # reciprocal attenuation, not a hard cap). PR-1 survivor — see docstring.
     if portfolio_heat > 0.0:
         m *= 1.0 / (1.0 + portfolio_heat)
 
-    # INV-05 / §P9.7: cascade floor — risk inputs must never collapse to zero or NaN.
-    # Note: This check applies to the upstream Kelly computation before per-strategy
-    # gating. The final multiplier step (below) can legitimately produce 0.0 to
-    # disable blocked, dormant, or unknown strategies via the registry's
-    # kelly_default_multiplier (was STRATEGY_KELLY_MULTIPLIERS pre-A4).
+    # INV-05 / §P9.7: risk inputs must never collapse to zero or NaN here;
+    # a legitimate 0.0 only enters via the strategy identity gate below.
     if not (m == m):  # NaN check: NaN != NaN
         raise ValueError(
-            f"dynamic_kelly_mult produced NaN (base={base}, ci_width={ci_width}, "
-            f"lead_days={lead_days}, portfolio_heat={portfolio_heat})"
+            f"dynamic_kelly_mult produced NaN (base={base}, portfolio_heat={portfolio_heat})"
         )
     if m <= 0.0:
         raise ValueError(
-            f"dynamic_kelly_mult collapsed to {m} — all sizing gates triggered, "
-            f"refusing to fabricate a floor value"
+            f"dynamic_kelly_mult collapsed to {m} — refusing to fabricate a floor value"
         )
     if strategy_key is not None:
         m *= strategy_kelly_multiplier(strategy_key)
-    # Per-city asymmetric-loss multiplier (D-A migration target). Applied AFTER
-    # strategy gate so a 0.0 strategy mult correctly zeros the result regardless
-    # of city. Default 1.0× when city is None or has no override → no behavior
-    # change for legacy callers.
-    if city is not None:
-        m *= city_kelly_multiplier(city)
     return m

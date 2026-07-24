@@ -289,7 +289,7 @@ test_trust_policy:
     tests/test_oracle_evidence_status.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_strategy_profile_registry.py: {created: "2026-05-04", last_used: "2026-07-15", note: "Strategy registry law for strategy-specific entry economics; it does not define the venue binary-contract price domain."}
     tests/test_market_phase_evidence.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_phase_aware_kelly_live.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_phase_aware_kelly_live.py: {created: "2026-05-04", last_used: "2026-07-24", note: "Rewritten 2026-07-24 (ultimate_alpha group B): pins the one-law resolver — GLOBAL_KELLY_FRACTION for every known key, fail-closed identity/lifecycle/hard-oracle veto, retired A6 multiplier stages absent."}
     tests/test_authority_rebuild_invariants.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_held_belief_readthrough_l2.py: {created: "2026-06-21", last_used: "2026-06-21", note: "LAYER 2 held-belief read-through: pins the PURE READ-ONLY fusion compute entrypoint (compute_replacement_posterior_readonly) — finite q+q_lcb+q_ucb with NO forecast_posteriors write (INV-37 no-write on read path), not-eligible on insufficient inputs, byte-identical write path after _insert_posterior extraction, and the seed->dataclass request assembler from on-disk anchor artifacts."}
     tests/engine/test_monitor_held_belief_readthrough.py: {created: "2026-06-21", last_used: "2026-06-21", note: "LAYER 2 monitor wiring antibodies: a non-day0 held position with stale/missing cached belief attempts a same-authority read-through recompute BEFORE fail-closing — fresh recompute restores probability authority (is_fresh True), insufficient inputs fail-close + durable retryable belief_debt marker + reseed, and the monitor never itself decides an exit (no false exit). RED-on-revert verified."}
@@ -642,7 +642,6 @@ test_trust_policy:
     tests/test_charter_mandatory_evidence.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_charter_sunset_required.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_check_pr_identity_collisions.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_city_kelly_multiplier.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_collateral_ledger_global_path_backed.py: {created: "2026-05-13", last_used: "2026-06-17"}
     tests/test_companion_loop_break.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_contract_source_fields_baseline.py: {created: "2026-05-01", last_used: "2026-05-01"}
@@ -1334,7 +1333,6 @@ categories:
     - tests/test_check_data_pipeline_live_e2e.py
     - tests/test_check_live_order_e2e.py
     - tests/test_check_pr_identity_collisions.py
-    - tests/test_city_kelly_multiplier.py
     - tests/test_collateral_ledger_global_path_backed.py
     - tests/test_companion_loop_break.py
     - tests/test_contract_source_fields_baseline.py

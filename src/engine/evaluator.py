@@ -6287,19 +6287,11 @@ def evaluate_candidate(
                 rejection_reason_detail=reason,
             ))
             continue
-        # A6 phase-aware Kelly resolver (PLAN.md §A6 + PLAN_v3 §6.P5).
-        # Combines the four authority sources at open-time:
-        #   - StrategyProfile.kelly_for_phase(market_phase) (registry)
-        #   - oracle_penalty.get_oracle_info(city, metric)   (A3)
-        #   - observed_target_day_fraction(...)              (city-local
-        #                                                     elapsed-day,
-        #                                                     floored at 0.3)
-        #   - phase_source quality factor (0.7× for fallback_f1)
-        # phase_source defaults to "verified_gamma" when candidate.market_phase
-        # is tagged (cycle_runtime tags via A5 builder when market dict has
-        # explicit endDate). Phase=None falls back to the strategy's default
-        # multiplier in the resolver — fail-soft path mirrors pre-A6 behavior
-        # for legacy/test fixtures that don't tag phase.
+        # One-law Kelly resolver (ultimate_alpha_2026-07-23 group B): the
+        # A6 four-source multiplier stack is retired — the resolver now
+        # returns GLOBAL_KELLY_FRACTION gated only by identity fail-closed,
+        # lifecycle validity (non-trading phases), and the hard oracle veto.
+        # The signature (and this call) is unchanged for stability.
         from datetime import date as _A6_date
         try:
             _a6_target_date = _A6_date.fromisoformat(candidate.target_date)

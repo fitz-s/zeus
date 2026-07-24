@@ -220,20 +220,21 @@ def test_is_strategy_enabled_blocks_shoulder_sell_runtime_entry():
 # ── kelly.py cutover ───────────────────────────────────────────────── #
 
 
-def test_kelly_strategy_kelly_multiplier_routes_through_registry():
-    """The pre-A4 dict literal is gone; ``strategy_kelly_multiplier``
-    delegates to the registry. Behavior is identical for known keys.
+def test_kelly_strategy_kelly_multiplier_one_law():
+    """One-law form (ultimate_alpha 2026-07-23): every LIVE key sizes at
+    GLOBAL_KELLY_FRACTION — labels carry identity/permission, not economics.
+    Blocked/refuted keys (shoulder_sell) and unknown identity stay 0.0.
     """
-    from src.strategy.kelly import strategy_kelly_multiplier
+    from src.strategy.kelly import GLOBAL_KELLY_FRACTION, strategy_kelly_multiplier
 
-    assert strategy_kelly_multiplier("settlement_capture") == 1.0
-    assert strategy_kelly_multiplier("opening_inertia") == 0.5
-    assert strategy_kelly_multiplier("shoulder_sell") == 0.0
+    assert strategy_kelly_multiplier("settlement_capture") == GLOBAL_KELLY_FRACTION
+    assert strategy_kelly_multiplier("opening_inertia") == GLOBAL_KELLY_FRACTION
+    assert strategy_kelly_multiplier("shoulder_sell") == 0.0  # live_status: blocked
     assert strategy_kelly_multiplier("nonexistent") == 0.0
     assert strategy_kelly_multiplier(None) == 0.0
     assert strategy_kelly_multiplier("") == 0.0
     # Whitespace handling preserved from pre-A4.
-    assert strategy_kelly_multiplier("  settlement_capture  ") == 1.0
+    assert strategy_kelly_multiplier("  settlement_capture  ") == GLOBAL_KELLY_FRACTION
 
 
 # ── ProfileNotFound contract ───────────────────────────────────────── #

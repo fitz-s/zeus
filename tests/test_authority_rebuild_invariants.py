@@ -303,26 +303,24 @@ def test_I5_cohort_boundary_value_pinned_to_git_fact():
 @pytest.mark.parametrize(
     "key,phase,phase_source,city_name,city_tz,decision_utc,target_date,expected",
     [
-        # settlement_capture × settlement_day × verified_gamma × NYC midday × OK oracle
+        # One-law resolver (ultimate_alpha_2026-07-23 group B): every LIVE
+        # key × tradeable phase resolves to GLOBAL_KELLY_FRACTION; the A6
+        # per-key/phase/fraction/source factors are retired as sizing inputs.
         ("settlement_capture", "settlement_day", "verified_gamma", "NYC",
          "America/New_York", datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc),
-         date(2026, 5, 8), 0.5),
-        # settlement_capture × settlement_day × fallback_f1 (0.7×) × NYC midday × OK
+         date(2026, 5, 8), 1.0),
+        # phase_source no longer haircuts (fallback_f1 retired as an input).
         ("settlement_capture", "settlement_day", "fallback_f1", "NYC",
          "America/New_York", datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc),
-         date(2026, 5, 8), 0.5 * 0.7),
-        # opening_inertia × pre_settlement_day × verified_gamma × NYC midday.
-        # opening_inertia is an opening-tick alpha: phase override 0.5 ×
-        # oracle 1.0 (OK) × observed fraction 1.0 (not applicable) ×
-        # phase_source 1.0 = 0.5.
+         date(2026, 5, 8), 1.0),
         ("opening_inertia", "pre_settlement_day", "verified_gamma", "NYC",
          "America/New_York", datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc),
-         date(2026, 5, 8), 0.5),
-        # blocked phase short-circuits to 0
+         date(2026, 5, 8), 1.0),
+        # non-trading phase short-circuits to 0 (universal lifecycle validity)
         ("settlement_capture", "post_trading", "verified_gamma", "NYC",
          "America/New_York", datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc),
          date(2026, 5, 8), 0.0),
-        # blocked strategy short-circuits to 0
+        # blocked strategy short-circuits to 0 (operator prohibition)
         ("shoulder_buy", "settlement_day", "verified_gamma", "NYC",
          "America/New_York", datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc),
          date(2026, 5, 8), 0.0),
@@ -468,12 +466,11 @@ def test_end_to_end_resolver_through_registry_and_oracle(tmp_path):
         target_local_date=date(2026, 5, 8),
         phase_source="verified_gamma",
     )
-    # m_strategy_phase = registry.kelly_phase_overrides["settlement_day"] = 1.0
-    # m_oracle: n=200, m=4 -> p95 ≈ 0.046 -> INCIDENTAL -> mult=1.0
-    # m_observed_fraction = 0.5 (NYC midday)
-    # m_phase_source = 1.0 (verified_gamma)
-    # product = 1.0 × 1.0 × 0.5 × 1.0 = 0.5
-    assert mult == pytest.approx(0.5, abs=1e-6)
+    # One-law resolver (ultimate_alpha_2026-07-23): live key, tradeable
+    # phase, healthy oracle (n=200, m=4 -> INCIDENTAL, hard veto not
+    # tripped) -> GLOBAL_KELLY_FRACTION. The A6 observed-fraction and
+    # phase-source factors are retired as sizing inputs.
+    assert mult == pytest.approx(1.0, abs=1e-6)
 
 
 def test_oracle_estimator_sanity_anchors():
@@ -608,18 +605,13 @@ def test_PR56_dispatch_flag_warning_is_one_shot_per_value(monkeypatch, caplog):
     )
 
 
-def test_PR56_fallback_f1_haircut_visible_through_full_chain(tmp_path):
-    """PR #56 review pin: end-to-end the phase_source provenance flows
-    through. fallback_f1 (gamma payload missing endDate) → resolver
-    sees fallback_f1 → 0.7× haircut applied. Without the fix the
-    multiplier would be 0.7× larger than expected.
-
-    Cross-checks: (a) the existing
-    test_resolver_parametrized_floor_matrix already pins the multiplier
-    when phase_source is passed explicitly; (b) this test pins the
-    cycle_runtime → evaluator → resolver chain end-to-end without
-    mocking the resolver.
-    """
+def test_PR56_fallback_f1_no_longer_haircuts(tmp_path):
+    """One-law update (ultimate_alpha_2026-07-23) of the PR #56 pin: the
+    ``phase_source`` provenance still FLOWS through the chain (the
+    MarketCandidate field test above pins the conduit), but it is no
+    longer a sizing input — fallback_f1 and verified_gamma resolve to the
+    same GLOBAL_KELLY_FRACTION. endDate-provenance uncertainty belongs in
+    the market-phase evidence layer, not as a Kelly tax."""
     _write_oracle(tmp_path, {"NYC": {"high": {"n": 200, "mismatches": 4}}})
 
     class _C:
@@ -646,9 +638,7 @@ def test_PR56_fallback_f1_haircut_visible_through_full_chain(tmp_path):
         target_local_date=date(2026, 5, 8),
         phase_source="fallback_f1",
     )
-    # The haircut must be observable: fallback gets 0.7× of verified
-    assert mult_fallback == pytest.approx(mult_verified * 0.7, abs=1e-6)
-    # Sanity: not just both zero
+    assert mult_fallback == pytest.approx(mult_verified, abs=1e-6)
     assert mult_verified > 0.0
 
 
