@@ -1,5 +1,8 @@
 # Created: 2026-06-29
-# Last reused/audited: 2026-07-20
+# Lifecycle: created=2026-06-29; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Purpose: Lock config-driven station forecast ingest, dual-metric HKO capture, and reseed wiring.
+# Reuse: Run for station forecast source, dispatcher, cadence, or replacement reseed changes.
+# Last reused/audited: 2026-07-24
 # Authority basis: operator directive "加数据" (add CWA/HKO station-forecast data to the
 #   live forecast cycle); src/data/station_forecast_adapter.py single_runs persist contract;
 #   config/station_forecast_sources.json adapter_kind dispatch seam.
@@ -42,7 +45,7 @@ _HKO_SPEC = {
     "enabled": True,
     "adapter_kind": "hko_fnd_json",
     "city": "Hong Kong",
-    "metric": "high",
+    "metrics": ["high", "low"],
     "endpoint": "https://example.invalid/hko",
 }
 
@@ -81,6 +84,93 @@ def test_dispatch_passes_city_and_metric_from_spec(monkeypatch, tmp_path):
     assert seen.get("metric") == "high"
 
 
+def test_dispatch_passes_both_hko_metrics_from_spec(monkeypatch, tmp_path):
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        adapter,
+        "ingest_hko_fnd_live",
+        lambda conn, **kw: (seen.update(kw), 18)[1],
+    )
+    _write_config(tmp_path, {"hko_fnd": dict(_HKO_SPEC)})
+
+    adapter.ingest_enabled_station_sources_live(_CONN, root=tmp_path)
+
+    assert seen["city"] == "Hong Kong"
+    assert seen["metrics"] == ("high", "low")
+
+
+def test_hko_multi_metric_ingest_fetches_once_and_persists_both(monkeypatch):
+    payload = {
+        "updateTime": "2026-07-23T11:30:00+08:00",
+        "weatherForecast": [
+            {
+                "forecastDate": "20260724",
+                "forecastMaxtemp": {"value": 33, "unit": "C"},
+                "forecastMintemp": {"value": 28, "unit": "C"},
+            },
+            {
+                "forecastDate": "20260725",
+                "forecastMaxtemp": {"value": 34, "unit": "C"},
+                "forecastMintemp": {"value": 27, "unit": "C"},
+            },
+        ],
+    }
+    fetches = {"count": 0}
+    captured: list[adapter.StationForecastRow] = []
+
+    def _fetch(**_kwargs):
+        fetches["count"] += 1
+        return payload
+
+    def _persist(_conn, rows, **_kwargs):
+        captured.extend(rows)
+        return len(rows)
+
+    monkeypatch.setattr(adapter, "fetch_hko_fnd_payload", _fetch)
+    monkeypatch.setattr(adapter, "persist_station_forecast_rows", _persist)
+
+    written = adapter.ingest_hko_fnd_live(
+        _CONN,
+        metrics=("high", "low"),
+    )
+
+    assert fetches["count"] == 1
+    assert written == len(captured)
+    assert {row.metric for row in captured} == {"high", "low"}
+    assert {
+        (row.target_date, row.metric) for row in captured
+    } == {
+        (row.target_date, metric)
+        for row in adapter.parse_hko_fnd_payload(payload, metric="high")
+        for metric in ("high", "low")
+    }
+    values = {
+        (row.target_date, row.metric): row.forecast_value_c
+        for row in captured
+    }
+    assert values == {
+        ("2026-07-24", "high"): 33.0,
+        ("2026-07-24", "low"): 28.0,
+        ("2026-07-25", "high"): 34.0,
+        ("2026-07-25", "low"): 27.0,
+    }
+
+
+@pytest.mark.parametrize("metrics", [(), ("high", "high"), ("high", "median"), "high"])
+def test_hko_multi_metric_ingest_rejects_invalid_metrics_before_fetch(
+    monkeypatch,
+    metrics,
+):
+    monkeypatch.setattr(
+        adapter,
+        "fetch_hko_fnd_payload",
+        lambda **_kwargs: pytest.fail("invalid metrics must fail before network I/O"),
+    )
+
+    with pytest.raises(ValueError):
+        adapter.ingest_hko_fnd_live(_CONN, metrics=metrics)
+
+
 def test_dispatch_fail_soft_one_source_error_does_not_abort_others(monkeypatch, tmp_path):
     def _boom(conn, **kw):
         raise RuntimeError("CWA network down")
@@ -93,6 +183,22 @@ def test_dispatch_fail_soft_one_source_error_does_not_abort_others(monkeypatch, 
 
     assert result.get("hko_fnd") == 9  # surviving source still ran
     assert "cwa_township" not in result  # errored source omitted, not crashing the cycle
+
+
+def test_dispatch_fail_soft_invalid_hko_metrics_do_not_abort_cwa(monkeypatch, tmp_path):
+    monkeypatch.setattr(adapter, "ingest_cwa_township_live", lambda conn, **kw: 7)
+    monkeypatch.setattr(adapter, "ingest_hko_fnd_live", lambda conn, **kw: 9)
+    _write_config(
+        tmp_path,
+        {
+            "hko_fnd": {**_HKO_SPEC, "metrics": "high,low"},
+            "cwa_township": dict(_CWA_SPEC),
+        },
+    )
+
+    result = adapter.ingest_enabled_station_sources_live(_CONN, root=tmp_path)
+
+    assert result == {"cwa_township": 7}
 
 
 def test_dispatch_unknown_adapter_kind_is_skipped(monkeypatch, tmp_path):
@@ -220,6 +326,79 @@ def test_availability_poll_is_wired_to_station_ingest():
 
     src = inspect.getsource(ingest_main._replacement_availability_poll_tick)
     assert "_ingest_station_forecasts_if_due" in src
+
+
+@pytest.mark.parametrize(
+    ("station_report", "expected_reseeds"),
+    [
+        ({"hko_fnd": 18}, 1),
+        ({"hko_fnd": 0}, 0),
+        (None, 0),
+    ],
+)
+def test_station_writes_reseed_even_when_openmeteo_clock_is_current(
+    monkeypatch,
+    station_report,
+    expected_reseeds,
+):
+    from src import ingest_main
+    from src.data import bayes_precision_fusion_download as fusion_download
+    from src.data import replacement_forecast_production as prod
+    from src.data import source_clock_update_probe as source_probe
+
+    reseeds = {"count": 0}
+    changed_sources: list[tuple[str, ...] | None] = []
+
+    class _CurrentClock:
+        updated_sources = ()
+
+        @staticmethod
+        def as_dict():
+            return {
+                "status": "CURRENT",
+                "updated_sources": [],
+                "affected_cities": [],
+                "error": None,
+            }
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        fusion_download,
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_ingest_station_forecasts_if_due",
+        lambda _cfg: station_report,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, **_kwargs: (
+            reseeds.__setitem__("count", reseeds["count"] + 1),
+            changed_sources.append(_kwargs.get("changed_sources")),
+            {"status": "ENQUEUED", "seeds_enqueued": 1},
+        )[2],
+    )
+    monkeypatch.setattr(
+        source_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _CurrentClock(),
+    )
+
+    report = ingest_main._replacement_availability_poll_tick()
+
+    assert reseeds["count"] == expected_reseeds
+    if expected_reseeds:
+        assert changed_sources == [("hko_fnd",)]
+        assert report["station_forecast_reseed"]["fusion_upgrade_status"] == "ENQUEUED"
+    else:
+        assert "station_forecast_reseed" not in report
 
 
 def test_diagnostic_download_cycle_does_not_duplicate_station_ingest():

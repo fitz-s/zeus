@@ -323,6 +323,7 @@ def ingest_hko_fnd_live(
     *,
     city: str = "Hong Kong",
     metric: str = "high",
+    metrics: Sequence[str] | None = None,
     city_timezone: str = "Asia/Hong_Kong",
     latitude: float | None = None,
     longitude: float | None = None,
@@ -330,13 +331,29 @@ def ingest_hko_fnd_live(
 ) -> int:
     """LIVE end-to-end HKO ingest: fetch → parse → persist into raw_model_forecasts.
 
-    This is the ONLY function here that touches the network. The live forecast-download lane calls
-    it for Hong Kong; siblings are added by config + a parser dispatch, not a rewrite. Returns the
-    number of raw_model_forecasts rows written.
+    This is the ONLY function here that touches the network. One HKO issue contains both maximum
+    and minimum forecasts, so a configured multi-metric ingest fetches once and persists both typed
+    rows. Siblings are added by config + a parser dispatch, not a rewrite. Returns the number of
+    raw_model_forecasts rows written.
     """
+    if isinstance(metrics, (str, bytes)):
+        raise ValueError("metrics must be a sequence of 'high'/'low' values")
+    selected = (metric,) if metrics is None else tuple(str(value).lower() for value in metrics)
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("metrics must be non-empty and unique")
+    if any(value not in {"high", "low"} for value in selected):
+        raise ValueError("metrics must contain only 'high' or 'low'")
+
     payload = fetch_hko_fnd_payload(endpoint=endpoint)
-    rows = parse_hko_fnd_payload(
-        payload, city=city, metric=metric, city_timezone=city_timezone
+    rows = tuple(
+        row
+        for value in selected
+        for row in parse_hko_fnd_payload(
+            payload,
+            city=city,
+            metric=value,
+            city_timezone=city_timezone,
+        )
     )
     return persist_station_forecast_rows(
         conn,
@@ -634,6 +651,11 @@ def _station_ingest_kwargs(
         kw["city"] = str(spec["city"])
     if spec.get("metric"):
         kw["metric"] = str(spec["metric"])
+    if adapter_kind == "hko_fnd_json" and spec.get("metrics") is not None:
+        raw_metrics = spec["metrics"]
+        if not isinstance(raw_metrics, Sequence) or isinstance(raw_metrics, (str, bytes)):
+            raise ValueError("hko_fnd metrics must be a sequence")
+        kw["metrics"] = tuple(str(value) for value in raw_metrics)
     if spec.get("endpoint"):
         kw["endpoint"] = str(spec["endpoint"])
     if adapter_kind == "cwa_township_json":
@@ -679,8 +701,8 @@ def ingest_enabled_station_sources_live(
         fn = globals().get(fn_name)
         if not callable(fn):
             continue
-        kwargs = _station_ingest_kwargs(adapter_kind, spec, environ=environ)
         try:
+            kwargs = _station_ingest_kwargs(adapter_kind, spec, environ=environ)
             out[str(source_id)] = int(fn(conn, **kwargs))
         except Exception as exc:  # noqa: BLE001 - one source must never abort the cycle
             log.warning(

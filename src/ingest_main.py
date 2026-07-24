@@ -2356,6 +2356,7 @@ def _replacement_availability_poll_tick():
     # 2026-07-20 after the 2026-06-11 download-lane migration orphaned the call (it lived only in the
     # descheduled forecast-live _replacement_forecast_download_cycle, so cwa_township/hko_fnd went dark
     # 2026-07-17). Due-gated (~3h) + fail-soft: a provider outage never touches the gridded capture.
+    _station_report = None
     try:
         _station_report = _ingest_station_forecasts_if_due(cfg)
         if _station_report:
@@ -2375,7 +2376,10 @@ def _replacement_availability_poll_tick():
         if scopes is not None:
             manifest_snapshot = prepared_manifest_snapshot or {}
         upgrade_report = (
-            _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
+            _enqueue_fusion_upgrade_reseeds_if_needed(
+                cfg,
+                changed_sources=changed_sources,
+            )
             if scopes is None
             else _enqueue_fusion_upgrade_reseeds_if_needed(
                 cfg,
@@ -2424,6 +2428,38 @@ def _replacement_availability_poll_tick():
                     )
                 }
         return report
+
+    _station_reseed_report: dict[str, object] | None = None
+    _station_rows_written = sum(
+        max(0, int(value))
+        for value in (_station_report or {}).values()
+    )
+    if _station_rows_written > 0:
+        _station_changed_sources = tuple(
+            str(source)
+            for source, written in (_station_report or {}).items()
+            if int(written) > 0
+        )
+        _station_reseed_report = {
+            "status": "STATION_FORECAST_ROWS_COMMITTED",
+            "rows_written": _station_rows_written,
+        }
+        try:
+            _attach_reseed_reports(
+                _station_reseed_report,
+                changed_sources=_station_changed_sources,
+                include_cycle_advance=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - source-clock poll must continue.
+            _station_reseed_report["fusion_upgrade_status"] = (
+                "STATION_FORECAST_RESEED_FAILED"
+            )
+            _station_reseed_report["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
+            logger.warning(
+                "station-forecast fusion reseed failed fail-soft: %s",
+                exc,
+                exc_info=True,
+            )
 
     def _download_current_targets(
         *,
@@ -2478,6 +2514,8 @@ def _replacement_availability_poll_tick():
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
+        if _station_reseed_report is not None:
+            report["station_forecast_reseed"] = _station_reseed_report
         report["maintenance_status"] = "REPLACEMENT_MAINTENANCE_DECOUPLED"
         logger.info("replacement source-clock poll current: %s", report)
         return report

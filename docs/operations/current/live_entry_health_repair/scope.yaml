@@ -12,6 +12,9 @@ in_scope:
 - src/engine/global_auction_universe.py
 - src/signal/ensemble_signal.py
 - src/data/polymarket_request_governor.py
+- src/data/station_forecast_adapter.py
+- src/ingest_main.py
+- config/station_forecast_sources.json
 - src/risk_allocator/governor.py
 - src/riskguard/riskguard.py
 - src/engine/global_single_order_auction.py
@@ -45,6 +48,7 @@ in_scope:
 - tests/test_polymarket_request_governor.py
 - tests/test_command_recovery.py
 - tests/test_fill_synchronizer.py
+- tests/test_station_forecast_live_ingest_wiring.py
 - tests/execution/test_venue_sync_contract.py
 - tests/test_db_writer_lock.py
 allow_companions:
@@ -60,7 +64,7 @@ out_of_scope:
 - scripts/**
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/kernel_manifest.yaml
-- config/**
+- config/** except config/station_forecast_sources.json
 status: in_progress
 live_side_effects_allowed: true
 live_side_effect_allowlist:
