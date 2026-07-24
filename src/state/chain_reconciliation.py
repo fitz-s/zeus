@@ -1982,11 +1982,46 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     len(_positions),
                 )
                 continue
-            _allocated, _phantoms = allocate_chain_truth(_positions, _chain_bal)
+            if len(_positions) == 1 and _chain_bal > 0.0:
+                # A positive balance smaller than one owned slice is a partial
+                # current exposure, not a phantom. The per-position pass below
+                # performs the canonical downward correction.
+                _allocated, _phantoms = list(_positions), []
+            else:
+                _allocated, _phantoms = allocate_chain_truth(_positions, _chain_bal)
             for _ph in _phantoms:
                 phantom_set.add(_ph.trade_id)
-            # Only mark aggregate-backed when there are multiple lots for this
-            # token; single-lot positions are correctly compared against chain.size.
+            _owned_total = sum(
+                float(
+                    getattr(_position, "effective_shares", None)
+                    or getattr(_position, "shares", 0.0)
+                    or 0.0
+                )
+                for _position in _positions
+            )
+            if _chain_bal > _owned_total + _ALLOCATE_DUST:
+                # `/positions` is wallet-token aggregate truth. Coverage above
+                # Zeus's command-attributed open slices is an unattributed
+                # residual, never authority to enlarge one of those slices.
+                # Keep each position on its owned quantity so the independent
+                # exchange reconciler sees exchange_size > expected_wallet and
+                # opens the existing position_drift review.
+                for _position in _positions:
+                    aggregate_backed_set.add(_position.trade_id)
+                stats["unattributed_chain_residual"] = (
+                    stats.get("unattributed_chain_residual", 0) + 1
+                )
+                logger.warning(
+                    "UNATTRIBUTED_CHAIN_RESIDUAL: token=%s wallet=%.4f "
+                    "owned_open=%.4f residual=%.4f",
+                    _tid,
+                    _chain_bal,
+                    _owned_total,
+                    _chain_bal - _owned_total,
+                )
+            # Multiple Zeus lots sharing one token are always aggregate-backed.
+            # A single lot was already marked above only when wallet inventory
+            # exceeds its owned slice.
             if len(_positions) > 1:
                 for _al in _allocated:
                     aggregate_backed_set.add(_al.trade_id)
@@ -2395,39 +2430,23 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if canonical_local_shares is not None:
                 corrected.shares = canonical_local_shares
             corrected.chain_state = "synced"
-            corrected.chain_shares = chain.size
             corrected.chain_verified_at = now
             corrected.condition_id = corrected.condition_id or chain.condition_id
-            _size_mismatch_eligible = getattr(pos, "corrected_executable_economics_eligible", False)
-            # F1 (PR1 critic in-spirit): chain economics always populate chain_*
-            # fields so VenuePositionObservedEcon is current regardless of whether
-            # the entry/fill fields are also updated.  Entry/fill mutation is
-            # controlled by the existing _size_mismatch_eligible opt-in gate.
-            if chain.avg_price > 0:
-                corrected.chain_avg_price = chain.avg_price
-            chain_observed_cost = _chain_observed_cost(chain)
-            if chain_observed_cost > 0:
-                corrected.chain_cost_basis_usd = chain_observed_cost
-            if chain.avg_price > 0:
-                if not _size_mismatch_eligible:
-                    corrected.entry_price = chain.avg_price
-                else:
-                    _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "entry_price"})
-                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=entry_price")
-            if chain.cost > 0:
-                if not _size_mismatch_eligible:
-                    corrected.cost_basis_usd = chain.cost
-                    corrected.size_usd = chain.cost
-                else:
-                    _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "cost_basis_usd"})
-                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
-                    _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "size_usd"})
-                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
-            if pos.trade_id in aggregate_backed_set:
+            if (
+                pos.trade_id in aggregate_backed_set
+                or chain.size > local_shares + _ALLOCATE_DUST
+            ):
                 # Aggregate-backed: chain.size is the token aggregate across multiple
-                # lots; comparing it against this lot's shares would produce a false
-                # SIZE MISMATCH and quarantine. Allocation confirmed chain coverage;
-                # preserve local share count (bot finding PR #141).
+                # lots or contains unattributed wallet residual. It proves
+                # coverage, not per-position quantity/economics.
+                corrected.chain_shares = local_shares
+                if (
+                    pos.trade_id not in aggregate_backed_set
+                    and chain.size > local_shares + _ALLOCATE_DUST
+                ):
+                    stats["unattributed_chain_residual"] = (
+                        stats.get("unattributed_chain_residual", 0) + 1
+                    )
                 logger.debug(
                     "AGGREGATE_BACKED: %s skipping size-mismatch check (chain agg=%.4f, lot=%.4f)",
                     pos.trade_id,
@@ -2435,31 +2454,34 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     local_shares,
                 )
             elif abs(chain.size - local_shares) > 0.01:
+                # This is a wallet reduction below the one attributed open
+                # slice. Current sellable exposure follows chain immediately,
+                # while acquisition provenance stays command/fill-owned.
+                corrected.chain_shares = chain.size
+                unit_cost = (
+                    float(getattr(pos, "cost_basis_usd", 0.0) or 0.0) / local_shares
+                    if local_shares > 0.0
+                    else 0.0
+                )
+                remaining_cost = unit_cost * float(chain.size)
+                corrected.chain_avg_price = unit_cost
+                corrected.chain_cost_basis_usd = remaining_cost
+                corrected.shares = chain.size
+                corrected.cost_basis_usd = remaining_cost
+                corrected.size_usd = remaining_cost
                 logger.warning("SIZE MISMATCH: %s local %.4f vs chain %.4f", pos.trade_id, local_shares, chain.size)
                 _guard_position_events_schema()
-                if not _size_mismatch_eligible:
-                    corrected.shares = chain.size
-                else:
-                    _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
-                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
                 if _append_canonical_size_correction_if_available(
                     corrected,
                     local_shares_before=local_shares,
                 ):
                     stats["updated"] += 1
                 else:
-                    # P0b (2026-07-04, docs/rebuild/chain_mirror_state_model_2026-07-04.md
-                    # §5 follow-up): chain size is TRUTH regardless of whether a
-                    # canonical lifecycle baseline exists yet for this position —
-                    # a size divergence is chain evidence, not a lifecycle event,
-                    # and must never mint a durable 'quarantined'/
-                    # 'size_mismatch_unresolved' dead end (the prior behavior:
-                    # this writer minted exactly the invented state the mirror
-                    # exists to drain). Apply the correction through the SAME
-                    # CHAIN_SIZE_CORRECTED event shape the chain-mirror
-                    # reconciler uses — an append-only event plus a chain_shares
-                    # projection update, keeping the position in its CURRENT
-                    # phase (no state/chain_state mutation).
+                    # A fresh wallet reduction is current owned-exposure truth
+                    # even before a canonical lifecycle baseline exists. Keep
+                    # acquisition provenance fill-owned and apply the reduction
+                    # through the mirror's CHAIN_SIZE_CORRECTED shape without
+                    # inventing a lifecycle state.
                     logger.warning(
                         "SIZE MISMATCH: %s — no canonical lifecycle baseline yet; "
                         "applying chain-truth correction via the chain-mirror "
@@ -2507,6 +2529,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                             stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
                         )
             else:
+                corrected.chain_shares = chain.size
+                if chain.avg_price > 0:
+                    corrected.chain_avg_price = chain.avg_price
+                chain_observed_cost = _chain_observed_cost(chain)
+                if chain_observed_cost > 0:
+                    corrected.chain_cost_basis_usd = chain_observed_cost
                 # Chain-shares-persist fix (2026-05-31, task #56): matched —
                 # chain.size == local_shares, single-lot (NOT aggregate-backed),
                 # no size mismatch. The pre-fix code mutated corrected.chain_*

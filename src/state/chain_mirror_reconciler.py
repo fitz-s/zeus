@@ -155,6 +155,7 @@ class LocalPositionRow:
     condition_id: str
     chain_shares: Optional[float]
     shares: Optional[float]
+    fill_authority: str
     strategy_key: str
 
     def held_token_id(self) -> str:
@@ -163,7 +164,20 @@ class LocalPositionRow:
         return self.token_id
 
     def local_reported_shares(self) -> float:
-        for value in (self.chain_shares, self.shares):
+        # `chain_shares` is a cached wallet observation, not Zeus ownership.
+        # A prior mirror pass may already have updated it while leaving the
+        # canonical open shares torn (Paris 2026-07-22: 45.0747 vs 97.8947).
+        # Fill-backed positions therefore compare fresh wallet truth against
+        # owned open shares every pass. Balance-only recovery is the one case
+        # where the chain observation itself is the exposure authority.
+        from src.state.portfolio import FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+
+        values = (
+            (self.chain_shares, self.shares)
+            if self.fill_authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+            else (self.shares, self.chain_shares)
+        )
+        for value in values:
             if value is not None:
                 return float(value)
         return 0.0
@@ -389,6 +403,23 @@ def classify_local_position(
     local_shares = row.local_reported_shares()
     delta = abs(chain_fact.size - local_shares)
     if delta > _SIZE_MISMATCH_TOLERANCE:
+        if chain_fact.size > local_shares:
+            # The Data API row is the wallet's token aggregate. It can contain
+            # operator/foreign inventory or another Zeus lot. Coverage above
+            # this position's owned slice is not authority to enlarge the
+            # position; exchange reconciliation owns the residual drift.
+            return MirrorFinding(
+                classification=CONSISTENT,
+                position_id=row.position_id,
+                asset=held_token,
+                writes=False,
+                details={
+                    "reason": "owned_position_covered_with_unattributed_wallet_residual",
+                    "chain_size": chain_fact.size,
+                    "local_shares": local_shares,
+                    "unattributed_residual": chain_fact.size - local_shares,
+                },
+            )
         return MirrorFinding(
             classification=SIZE_CORRECTED,
             position_id=row.position_id,
@@ -531,7 +562,7 @@ def load_chain_positions_by_asset(raw_positions: list[dict]) -> dict[str, ChainP
 _LOCAL_ROW_COLUMNS = (
     "position_id", "phase", "chain_state", "city", "target_date",
     "temperature_metric", "bin_label", "direction", "token_id", "no_token_id",
-    "condition_id", "chain_shares", "shares", "strategy_key",
+    "condition_id", "chain_shares", "shares", "fill_authority", "strategy_key",
 )
 
 
@@ -556,6 +587,7 @@ def load_local_position_rows(conn: sqlite3.Connection) -> list[LocalPositionRow]
                 condition_id=str(row["condition_id"] or ""),
                 chain_shares=(float(row["chain_shares"]) if row["chain_shares"] is not None else None),
                 shares=(float(row["shares"]) if row["shares"] is not None else None),
+                fill_authority=str(row["fill_authority"] or ""),
                 strategy_key=str(row["strategy_key"] or ""),
             )
         )
@@ -1041,7 +1073,35 @@ def apply_size_correction_finding(
     occurred_at = now.isoformat()
     phase_before = str(current["phase"] or "")
     chain_size = float(finding.details.get("chain_size") or 0.0)
-    projection["chain_shares"] = chain_size
+    from src.state.portfolio import (
+        FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+        FILL_GRADE_FILL_AUTHORITIES,
+    )
+
+    fill_authority = str(current["fill_authority"] or "")
+    owned_shares_before = float(current["shares"] or 0.0)
+    owned_reduction = (
+        fill_authority in FILL_GRADE_FILL_AUTHORITIES
+        and owned_shares_before > 0.0
+        and chain_size < owned_shares_before
+    )
+    attributed_chain_shares = (
+        chain_size
+        if fill_authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+        else min(chain_size, owned_shares_before)
+    )
+    projection["chain_shares"] = attributed_chain_shares
+    if owned_reduction:
+        unit_cost = float(current["cost_basis_usd"] or 0.0) / owned_shares_before
+        remaining_cost = unit_cost * chain_size
+        projection["shares"] = chain_size
+        projection["cost_basis_usd"] = remaining_cost
+        projection["chain_avg_price"] = unit_cost
+        projection["chain_cost_basis_usd"] = remaining_cost
+        if "shares_remaining" in current.keys():
+            prior_remaining = current["shares_remaining"]
+            if prior_remaining is not None:
+                projection["shares_remaining"] = min(float(prior_remaining), chain_size)
     projection["updated_at"] = occurred_at
     projection["chain_seen_at"] = occurred_at
 
@@ -1050,6 +1110,11 @@ def apply_size_correction_finding(
             "reconciler": "chain_mirror",
             "chain_mirror_classification": SIZE_CORRECTED,
             **finding.details,
+            "attributed_chain_shares": attributed_chain_shares,
+            "owned_shares_before": owned_shares_before,
+            "owned_shares_after": projection["shares"],
+            "owned_cost_basis_after": projection["cost_basis_usd"],
+            "unattributed_residual": max(0.0, chain_size - owned_shares_before),
         },
         default=str,
         sort_keys=True,

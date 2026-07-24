@@ -1305,3 +1305,44 @@ proof, the complete Day0 fast-observation/hard-fact suites, one read-only live
 WU probe with station/source identity, standard deployment, and natural monitor
 evidence that a WU-confirmed crossing dominates the prior probabilistic belief
 before the settlement-channel hourly row arrives.
+
+## 2026-07-24 chain aggregate versus owned open exposure
+
+The 72-hour loss audit found a canonical exposure split after wallet balances
+shrunk. Paris Jul 22 NO 26C retained `shares=97.8947` while fresh wallet truth
+and `chain_shares` were `45.0747`; Wuhan Jul 23 YES 32C retained the original
+fill aggregate in its chain cost after current wallet exposure fell from
+`124.8075` to `3.1125`. The chain-mirror writer updated only `chain_shares`,
+while fill-authority runtime exposure continued to read the old owned
+`shares`. Its next comparison preferred the already-updated `chain_shares`,
+making the torn projection appear permanently consistent.
+
+Truth contract: the wallet position surface owns the current token balance;
+command-linked fill facts own Zeus acquisition provenance; `position_current`
+owns Zeus's currently open attributed slice. A lower wallet balance than the
+attributed open slice reduces current sellable exposure immediately and
+pro-rates remaining open cost at the existing unit basis, without inventing an
+exit fill or lifecycle close. A higher wallet balance never expands one Zeus
+position: the positive residual remains unattributed chain inventory for
+reconciliation/risk review. The mirror must compare fresh wallet balance
+against current owned `shares`, not against its prior `chain_shares` cache.
+
+This is a K2 reconciliation/truth-ownership bugfix under INV-08, INV-18,
+INV-27, and INV-37. Allowed files are
+`src/state/chain_mirror_reconciler.py`,
+`src/state/chain_reconciliation.py`, focused reconciliation tests, and this
+plan. No schema, lifecycle grammar, probability, strategy, source, settlement,
+or control change is allowed.
+
+Acceptance requires:
+
+- a Paris-shaped antibody proving a wallet reduction updates current
+  `shares`, `chain_shares`, and proportional remaining cost in one canonical
+  event/projection transaction while preserving phase;
+- a second pass proving the mirror does not hide the remaining owned-vs-chain
+  comparison behind cached `chain_shares`;
+- an excess-wallet antibody proving wallet aggregate inventory cannot increase
+  one position's shares or chain-backed attributed slice;
+- existing known-empty/unknown-chain, multi-lot, pending-exit, canonical
+  append/projection, and live-safety reconciliation suites remain green;
+- planning-lock, source compile, and diff checks pass before hot-fix landing.

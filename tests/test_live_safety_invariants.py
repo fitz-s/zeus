@@ -4655,7 +4655,7 @@ def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():
     assert entered.chain_state == "local_only"
 
 
-def test_chain_reconciliation_updates_cost_basis_even_when_share_count_matches():
+def test_chain_reconciliation_keeps_fill_cost_when_wallet_share_count_matches():
     from src.state.chain_reconciliation import ChainPosition, reconcile
 
     pos = _make_position(
@@ -4678,9 +4678,13 @@ def test_chain_reconciliation_updates_cost_basis_even_when_share_count_matches()
 
     assert stats["synced"] == 1
     assert pos.chain_state == "synced"
-    assert pos.cost_basis_usd == pytest.approx(11.0)
-    assert pos.size_usd == pytest.approx(11.0)
-    assert pos.entry_price == pytest.approx(0.44)
+    # Wallet position economics are an aggregate observation, not authority to
+    # rewrite command/fill-owned acquisition provenance.
+    assert pos.cost_basis_usd == pytest.approx(10.0)
+    assert pos.size_usd == pytest.approx(10.0)
+    assert pos.entry_price == pytest.approx(0.40)
+    assert pos.chain_cost_basis_usd == pytest.approx(11.0)
+    assert pos.chain_avg_price == pytest.approx(0.44)
 
 
 # ---- Test 4: Retry respects cooldown ----

@@ -1260,7 +1260,7 @@ def test_aggregate_backed_multilot_not_clobbered_with_aggregate() -> None:
 
 
 def test_size_mismatch_still_uses_correction_path() -> None:
-    """A single-lot position whose chain.size differs from local shares must
+    """A single-lot position whose wallet balance fell below owned shares must
     still go through the SIZE-MISMATCH correction path (CHAIN_SIZE_CORRECTED
     with reason='chain_size_corrected'), NOT the chain-observation path."""
     trade_id = "mismatch-pos"
@@ -1274,9 +1274,9 @@ def test_size_mismatch_still_uses_correction_path() -> None:
         portfolio = PortfolioState(positions=[pos])
         chain = ChainPosition(
             token_id="tok-mismatch",
-            size=25.0,   # differs from shares=20.0 → SIZE MISMATCH branch
+            size=15.0,   # wallet reduction below owned shares
             avg_price=0.55,
-            cost=11.0,
+            cost=8.25,
             condition_id="cond-1",
         )
         stats = reconcile(portfolio, [chain], conn=conn)
@@ -1300,10 +1300,43 @@ def test_size_mismatch_still_uses_correction_path() -> None:
     assert stats.get("chain_observation_persisted", 0) == 0, (
         f"observation path must not fire for a size mismatch; stats={stats}"
     )
-    # Correction path persists chain.size too (the existing behaviour).
-    assert status == "ok" and persisted == pytest.approx(25.0), (
-        f"correction path must persist chain.size=25.0, got {persisted!r}"
+    # Correction path persists the lower current wallet exposure.
+    assert status == "ok" and persisted == pytest.approx(15.0), (
+        f"correction path must persist chain.size=15.0, got {persisted!r}"
     )
+
+
+def test_wallet_excess_does_not_expand_single_owned_lot() -> None:
+    """A wallet token aggregate may contain inventory outside this position."""
+    trade_id = "wallet-excess-pos"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+
+        pos = _make_position(trade_id=trade_id, token_id="tok-excess", shares=20.0)
+        _seed_position_current(conn, pos, chain_shares=20.0)
+
+        stats = reconcile(
+            PortfolioState(positions=[pos]),
+            [ChainPosition(
+                token_id="tok-excess",
+                size=25.0,
+                avg_price=0.55,
+                cost=13.75,
+                condition_id="cond-1",
+            )],
+            conn=conn,
+        )
+        row = conn.execute(
+            "SELECT shares, chain_shares FROM position_current WHERE position_id = ?",
+            (trade_id,),
+        ).fetchone()
+        conn.close()
+
+    assert stats.get("unattributed_chain_residual", 0) == 1
+    assert dict(row) == {"shares": 20.0, "chain_shares": 20.0}
+    assert pos.shares == pytest.approx(20.0)
+    assert pos.chain_shares == pytest.approx(20.0)
 
 
 def test_pending_exit_size_mismatch_preserves_pending_exit_phase() -> None:
@@ -1345,9 +1378,9 @@ def test_pending_exit_size_mismatch_preserves_pending_exit_phase() -> None:
         portfolio = PortfolioState(positions=[pos])
         chain = ChainPosition(
             token_id="tok-pending-exit-size",
-            size=6.25,
+            size=4.0,
             avg_price=0.64,
-            cost=4.0,
+            cost=2.56,
             condition_id="cond-pending-exit-size",
         )
         stats = reconcile(portfolio, [chain], conn=conn)
@@ -1376,7 +1409,7 @@ def test_pending_exit_size_mismatch_preserves_pending_exit_phase() -> None:
     assert stats.get("review_required_persisted", 0) == 0
     assert stats.get("skipped_size_correction_missing_canonical_baseline", 0) == 0
     assert phase == "pending_exit"
-    assert persisted_shares == pytest.approx(6.25)
+    assert persisted_shares == pytest.approx(4.0)
     assert persisted_seen_at
     assert exit_reason == "EDGE_REVERSAL"
     assert exit_retry_count == 2

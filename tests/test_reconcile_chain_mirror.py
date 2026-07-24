@@ -90,6 +90,7 @@ def _row(**overrides) -> LocalPositionRow:
         condition_id="cond-1",
         chain_shares=11.1,
         shares=11.1,
+        fill_authority="venue_confirmed_full",
         strategy_key="edli",
     )
     base.update(overrides)
@@ -158,6 +159,31 @@ def test_matching_size_unresolved_market_is_consistent():
     finding = classify_local_position(row, chain_by_asset=chain, settlement_by_key={})
     assert finding.classification == CONSISTENT
     assert finding.writes is False
+
+
+def test_wallet_excess_does_not_expand_owned_position():
+    row = _row(
+        direction="buy_yes",
+        token_id="tok-owned",
+        chain_shares=10.0,
+        shares=10.0,
+        fill_authority="venue_confirmed_full",
+    )
+    chain = {"tok-owned": ChainPositionFact(
+        token_id="tok-owned", condition_id="cond-1", size=25.0,
+        redeemable=False, current_value=5.0, side="Yes",
+    )}
+
+    finding = classify_local_position(row, chain_by_asset=chain, settlement_by_key={})
+
+    assert finding.classification == CONSISTENT
+    assert finding.writes is False
+    assert finding.details == {
+        "reason": "owned_position_covered_with_unattributed_wallet_residual",
+        "chain_size": 25.0,
+        "local_shares": 10.0,
+        "unattributed_residual": 15.0,
+    }
 
 
 def test_already_voided_duplicate_rows_on_same_token_get_no_size_correction():
@@ -324,6 +350,7 @@ def _insert_position_current(
     chain_shares: float | None = None,
     shares: float | None = None,
     cost_basis_usd: float | None = None,
+    fill_authority: str = "venue_confirmed_full",
     strategy_key: str = "edli",
     updated_at: str = "2026-07-04T00:00:00+00:00",
 ) -> None:
@@ -332,13 +359,15 @@ def _insert_position_current(
         INSERT INTO position_current (
             position_id, phase, trade_id, city, target_date, bin_label,
             direction, chain_state, token_id, no_token_id, condition_id,
-            chain_shares, shares, cost_basis_usd, strategy_key, updated_at, temperature_metric
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            chain_shares, shares, cost_basis_usd, fill_authority, strategy_key,
+            updated_at, temperature_metric
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             position_id, phase, position_id, city, target_date, bin_label,
             direction, chain_state, token_id, no_token_id, condition_id,
-            chain_shares, shares, cost_basis_usd, strategy_key, updated_at, temperature_metric,
+            chain_shares, shares, cost_basis_usd, fill_authority, strategy_key,
+            updated_at, temperature_metric,
         ),
     )
     conn.commit()
@@ -503,7 +532,7 @@ def test_apply_corrects_size_mismatch(trades_conn, forecasts_conn):
         trades_conn, position_id="pos-dallas", phase="active",
         city="dallas", target_date="2026-06-20", bin_label="100-101°F",
         direction="buy_yes", token_id="tok-dallas-yes",
-        chain_shares=1184.57, shares=1184.57,
+        chain_shares=74.55, shares=1184.57, cost_basis_usd=592.285,
     )
     chain = {"tok-dallas-yes": ChainPositionFact(
         token_id="tok-dallas-yes", condition_id="cond-1", size=74.55,
@@ -514,14 +543,25 @@ def test_apply_corrects_size_mismatch(trades_conn, forecasts_conn):
 
     assert report.applied == 1
     row = trades_conn.execute(
-        "SELECT chain_shares FROM position_current WHERE position_id='pos-dallas'"
+        "SELECT shares, cost_basis_usd, chain_shares FROM position_current "
+        "WHERE position_id='pos-dallas'"
     ).fetchone()
+    assert row["shares"] == pytest.approx(74.55)
+    assert row["cost_basis_usd"] == pytest.approx(37.275)
     assert row["chain_shares"] == 74.55
     events = trades_conn.execute(
         "SELECT event_type FROM position_events WHERE position_id='pos-dallas'"
     ).fetchall()
     assert len(events) == 1
     assert events[0]["event_type"] == "CHAIN_SIZE_CORRECTED"
+
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset=chain, apply=True)
+    assert second.applied == 0
+    assert [
+        finding.classification
+        for finding in second.findings
+        if finding.position_id == "pos-dallas"
+    ] == [CONSISTENT]
 
 
 def test_open_phase_absent_token_unresolved_market_first_run_marks_review_no_close(
