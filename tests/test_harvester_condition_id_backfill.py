@@ -102,7 +102,6 @@ def _run_settle(monkeypatch, conn, portfolio, pos):
         return {"status": "queued", "command_id": "cmd-bf", "reason": None}
 
     monkeypatch.setattr(hv, "enqueue_redeem_command", fake_enqueue)
-    monkeypatch.setattr(hv, "_get_canonical_exit_flag", lambda: True)
     monkeypatch.setattr(hv, "log_event", lambda *a, **kw: None)
     monkeypatch.setattr(hv, "log_settlement_event", lambda *a, **kw: None)
     monkeypatch.setattr(hv, "_dual_write_canonical_settlement_if_available",
@@ -189,4 +188,45 @@ def test_present_condition_id_does_not_query_token_map(monkeypatch):
     assert settled == 1
     assert called["n"] == 0, "B3 FAIL: backfill ran even though condition_id was present."
     assert enqueue_calls[0]["condition_id"] == "0x" + "ee" * 32
+    conn.close()
+
+
+def test_economically_closed_settles_despite_stale_exit_pending_missing(monkeypatch):
+    """A filled exit is already economically closed; stale chain visibility
+    cannot veto the later settlement fold."""
+    conn = _conn_with_snapshot(seed_mapping=False)
+    portfolio, pos = _make_portfolio(condition_id="0x" + "ee" * 32)
+    pos.state = "economically_closed"
+    pos.chain_state = "exit_pending_missing"
+    conn.execute(
+        "INSERT INTO position_current (trade_id, city, target_date, phase) "
+        "VALUES (?, ?, ?, 'economically_closed')",
+        (pos.trade_id, pos.city, pos.target_date),
+    )
+    conn.commit()
+
+    settled, enqueue_calls = _run_settle(monkeypatch, conn, portfolio, pos)
+
+    assert settled == 1
+    assert enqueue_calls == []
+    conn.close()
+
+
+def test_active_position_still_blocks_on_exit_pending_missing(monkeypatch):
+    """The exemption is phase-exact; an active position with unresolved exit
+    visibility remains fail-closed."""
+    conn = _conn_with_snapshot(seed_mapping=False)
+    portfolio, pos = _make_portfolio(condition_id="0x" + "ee" * 32)
+    pos.chain_state = "exit_pending_missing"
+    conn.execute(
+        "INSERT INTO position_current (trade_id, city, target_date, phase) "
+        "VALUES (?, ?, ?, 'active')",
+        (pos.trade_id, pos.city, pos.target_date),
+    )
+    conn.commit()
+
+    settled, enqueue_calls = _run_settle(monkeypatch, conn, portfolio, pos)
+
+    assert settled == 0
+    assert enqueue_calls == []
     conn.close()

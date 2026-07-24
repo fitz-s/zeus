@@ -2606,6 +2606,7 @@ def _settle_positions(
             or (
                 chain_state == "exit_pending_missing"
                 and not pending_exit_at_settlement
+                and state_name != "economically_closed"
                 and exit_state != "backoff_exhausted"
             )
             or (
@@ -2656,7 +2657,7 @@ def _settle_positions(
 
         # Winning positions are claimable inventory. Do not mark them settled
         # unless the durable redeem command is present or successfully queued.
-        if exit_price > 0:
+        if exit_price > 0 and state_name != "economically_closed":
             redeem_condition_id = str(getattr(pos, "condition_id", "") or "")
             if not redeem_condition_id:
                 # Legacy/projection-gap position: token_ids present but

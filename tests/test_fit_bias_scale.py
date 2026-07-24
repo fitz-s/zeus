@@ -306,7 +306,7 @@ def test_two_era_step_free_recovers_pooled_biased_eb_between_and_lrt_rejects():
     assert min(pooled_mean, b0_A) - 1e-6 <= eb_A <= max(pooled_mean, b0_A) + 1e-6
     assert min(pooled_mean, b0_B) - 1e-6 <= eb_B <= max(pooled_mean, b0_B) + 1e-6
 
-    # LRT REJECTS the no-era-effect null (large stat, tiny p) — but it is a DIAGNOSTIC, not a switch.
+    # LRT REJECTS the no-era-effect null (large stat, tiny p), but remains reference evidence, not a switch.
     assert em["lrt"]["stat"] is not None and em["lrt"]["stat"] > 10.0
     assert em["lrt"]["p_value"] is not None and em["lrt"]["p_value"] < 0.05
     # addendum D1: EB is ALWAYS the shipped estimator (never pretest-switched to full pooling).
@@ -465,14 +465,14 @@ def test_era_mode_artifact_schema_keys_present():
     assert em["schema_block"] == "era_mode"
     # addendum D1: EB is ALWAYS the shipped estimator (never pretest-switched).
     assert em["shipped_estimator"] == "eb_partial_pooling"
-    # LRT/bootstrap are REPORTED DIAGNOSTICS only (role tagged), never branched on.
+    # LRT/bootstrap are REPORTED REFERENCES only (role tagged), never branched on.
     for k in ("stat", "df", "p_value", "definition", "role"):
         assert k in em["lrt"]
-    assert "DIAGNOSTIC" in em["lrt"]["role"]
+    assert "REFERENCE" in em["lrt"]["role"]
     for k in ("reps", "p_value", "definition", "role"):
         assert k in em["boundary_bootstrap"]
     assert isinstance(em["boundary_bootstrap"]["reps"], int) and em["boundary_bootstrap"]["reps"] > 0
-    # Decision rule: verdict is ALWAYS EB; the pretest verdict is kept as a diagnostic only.
+    # Decision rule: verdict is ALWAYS EB; the pretest verdict is reference evidence only.
     assert em["decision_rule"]["verdict"] == "EB_PARTIAL_POOLING"
     assert em["decision_rule"]["law"] == "addendum_D1_always_eb"
     assert em["decision_rule"]["pretest_would_have_said"] in ("FULL_POOLING", "EB_PARTIAL_POOLING")

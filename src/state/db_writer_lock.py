@@ -844,6 +844,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- DB first-principles audit (2026-07-20, PR #436): operator-run
         #     migrations (daemon-fenced) + read-only audits; daemon never imports. ---
         "scripts/migrations/202607_trade_decisions_drop_dangling_fk.py",  # operator_invoked + daemon-fenced: --dry-run default; --operator-confirms-fenced rebuilds trade_decisions (single-DB WAL, crash-atomic) + a rollback-capsule sidecar FILE; daemon never imports (W0-a)
+        "scripts/repair_position_events_corruption.py",  # operator_invoked + daemon-fenced: dry-run default; --apply requires disabled trade-writer labels + no DB handles, then rebuilds only a bounded monitor-only corrupt position_events tail in one WAL transaction
+        "scripts/repair_book_hash_transitions_corruption.py",  # operator_invoked + daemon-fenced: candidate-only bounded repair of derived transition evidence whose source snapshot interval is absent
+        "scripts/repair_executable_snapshot_corruption.py",  # operator_invoked + daemon-fenced: candidate-only raw tail bridge plus full executable snapshot index rebuild; canonical DB is never edited directly
         "scripts/migrations/202607_drop_redundant_trade_indexes.py",  # operator_invoked + daemon-fenced: --dry-run default; drops 2 redundant trade indexes with --apply; daemon never imports (F15)
         "scripts/migrations/202607_regret_decompositions_drop_dead_fk.py",  # operator_invoked + daemon-fenced: --dry-run default; drops the dead regret_decompositions FK with --apply (world DB, 0 rows); daemon never imports
         "scripts/migrations/202607_single_live_semantics_cutover.py",  # operator_invoked + writer-fenced: read-only by default; --apply refuses while live writer processes exist and mutates one DB per immediate transaction

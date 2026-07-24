@@ -28,8 +28,11 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_repair_book_hash_transitions_corruption.py: {created: "2026-07-24", last_used: "2026-07-24", note: "Candidate-only book-hash transition tail repair: read-only fingerprint, surviving-snapshot blocker, readable-history preservation, and full index rebuild."}
     # DB first-principles audit (2026-07-20, PR #436) — authored + reviewed 2026-07-22.
     tests/test_trade_decisions_fk_rebuild.py: {created: "2026-07-20", last_used: "2026-07-22", note: "W0-a trade_decisions dangling-FK rebuild green-gate: crash-atomic single-DB WAL rebuild, 6-kill-point matrix, sequence preservation, rollback capsule."}
+    tests/test_repair_position_events_corruption.py: {created: "2026-07-24", last_used: "2026-07-24", note: "Incident-scoped position_events corruption repair antibody: read-only fingerprint, monitor-only loss admission, full-row preservation, append-only schema restoration, and 7-point crash rollback matrix."}
+    tests/test_repair_executable_snapshot_corruption.py: {created: "2026-07-24", last_used: "2026-07-24", note: "Incident-scoped executable snapshot tail antibody: read-only fingerprint, candidate-only table-tail bridge, full retained-history index rebuild, integrity, and append-after-repair proof."}
     tests/test_no_dangling_foreign_keys.py: {created: "2026-07-20", last_used: "2026-07-22", note: "Dangling-foreign-key class detector (the defect that froze trade_decisions since 2026-07-02)."}
     tests/test_regret_decompositions_drop_dead_fk.py: {created: "2026-07-20", last_used: "2026-07-22", note: "regret_decompositions dead-FK drop migration removes the dangling FK without data loss."}
     tests/test_drop_redundant_trade_indexes.py: {created: "2026-07-20", last_used: "2026-07-22", note: "F15 migration drops exactly the 2 redundant trade indexes, nothing else."}
