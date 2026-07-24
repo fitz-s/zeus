@@ -1220,6 +1220,27 @@ def test_resume_rejects_settings_symlink_retarget(tmp_path: Path) -> None:
         )
 
 
+def test_target_identity_with_retired_file_is_json_serializable(
+    tmp_path: Path,
+) -> None:
+    root, dbs, settings = _target_fixture(tmp_path)
+    retired = root / migration.RETIRED_FILES[0]
+    retired.write_text('{"retired": true}\n', encoding="utf-8")
+    journal = tmp_path / "cutover.progress.json"
+
+    identity = migration.target_state_identity(root, dbs, settings)
+    progress = migration._open_stage_journal(
+        journal,
+        root,
+        target_state=identity,
+    )
+
+    assert identity["retired_files_present"] == {
+        str(migration.RETIRED_FILES[0]): hashlib.sha256(retired.read_bytes()).hexdigest()
+    }
+    assert json.loads(journal.read_text(encoding="utf-8")) == progress
+
+
 def test_completed_stage_revalidates_postcondition(tmp_path: Path) -> None:
     journal = tmp_path / "cutover.progress.json"
     root = tmp_path / "root"

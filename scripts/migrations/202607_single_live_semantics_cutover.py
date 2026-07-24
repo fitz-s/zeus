@@ -704,7 +704,7 @@ def runtime_json_identity(root: Path) -> dict[str, str]:
 
 def retired_files_identity(root: Path) -> dict[str, str]:
     return {
-        rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()
+        str(rel): hashlib.sha256((root / rel).read_bytes()).hexdigest()
         for rel in sorted(RETIRED_FILES)
         if (root / rel).is_file()
     }
