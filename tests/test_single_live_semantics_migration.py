@@ -1009,6 +1009,38 @@ def test_mutation_integrity_check_is_limited_to_changed_tables(
     assert "PRAGMA INTEGRITY_CHECK" not in normalized
 
 
+@pytest.mark.parametrize(
+    ("view", "backing_table"),
+    migration.UNBACKED_LEGACY_VIEWS.items(),
+)
+def test_unbacked_legacy_view_is_dropped(
+    tmp_path: Path,
+    view: str,
+    backing_table: str,
+) -> None:
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            f'CREATE VIEW "{view}" AS SELECT 1 FROM "{backing_table}"'
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert migration.mutate_db(path) == [
+        f"dropped unbacked legacy {view} view"
+    ]
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name=?",
+            (view,),
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
 def test_retired_attribution_hash_matching_is_case_insensitive(tmp_path: Path) -> None:
     world, trades, wconn, tconn = _fixture(tmp_path)
     try:
@@ -1320,6 +1352,10 @@ def test_resume_accepts_own_transactional_generation_after_journal_gap(
             commit_then_interrupt,
             current_target_state=state,
         )
+    progress["failed_stage"] = migration.journal_active_stage(progress)
+    progress["status"] = "failed_resumable"
+    progress["error"] = "RuntimeError: killed after DB commit before journal update"
+    migration._record_stage_journal(journal, progress, "failed", complete=False)
     resumed = migration._open_stage_journal(journal, root, target_state=state())
     assert resumed["recovering_stage_commit"] == stage
     assert migration._run_journaled_stage(
@@ -1330,6 +1366,20 @@ def test_resume_accepts_own_transactional_generation_after_journal_gap(
         postcondition=lambda: None,
         current_target_state=state,
     ) == "converged"
+
+
+def test_completion_clears_stale_failure_metadata() -> None:
+    progress = {
+        "error": "stale",
+        "failed_stage": "mutated:zeus-world.db",
+        "journal_repair": {"reason": "operator recovery"},
+        "recovering_stage_commit": "mutated:zeus-world.db",
+        "keep": True,
+    }
+
+    migration.clear_failure_metadata(progress)
+
+    assert progress == {"keep": True}
 
 
 def test_resume_rejects_external_write_after_stage_marker_before_journal(

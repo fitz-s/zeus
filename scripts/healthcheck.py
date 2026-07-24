@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-03-26; last_reviewed=2026-06-17; last_reused=2026-06-17
+# Lifecycle: created=2026-03-26; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: Operator healthcheck for live daemon, launchd, source truth, entry capability, and settlement freshness.
 # Reuse: Run when live health predicates, launchd contracts, or readiness/status summary health fields change.
 # Created: 2026-03-26
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-07-24
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 """Zeus health check for Venus/OpenClaw monitoring.
 
@@ -24,16 +24,19 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import get_mode, state_path
-from src.ops.edli_queue import EDLI_REACTOR_CONSUMER, collect_edli_queue_evidence
-from src.ops.monitor_cadence import collect_monitor_cadence_evidence
-from src.state.db import (
+from src.config import get_mode, state_path  # noqa: E402
+from src.ops.edli_queue import (  # noqa: E402
+    EDLI_REACTOR_CONSUMER,
+    collect_edli_queue_evidence,
+)
+from src.ops.monitor_cadence import collect_monitor_cadence_evidence  # noqa: E402
+from src.state.db import (  # noqa: E402
     ZEUS_FORECASTS_DB_PATH,
     ZEUS_WORLD_DB_PATH,
     get_connection,
     get_forecasts_connection,
 )
-from src.state.decision_chain import query_no_trade_cases
+from src.state.decision_chain import query_no_trade_cases  # noqa: E402
 
 STATUS_STALE_SECONDS = 2 * 3600
 RISKGUARD_STALE_SECONDS = 5 * 60
@@ -595,7 +598,7 @@ def _live_db_holder_status() -> dict:
             "holders": [],
             "unknown_long_lived_holders": [],
             "unattested_holders": [],
-            "diagnostic_unavailable": True,
+            "attestation_unavailable": True,
             "issue": "LIVE_DB_HOLDER_ATTESTATION_UNAVAILABLE",
         }
     except Exception as exc:
@@ -605,7 +608,7 @@ def _live_db_holder_status() -> dict:
             "holders": [],
             "unknown_long_lived_holders": [],
             "unattested_holders": [],
-            "diagnostic_unavailable": True,
+            "attestation_unavailable": True,
             "issue": f"LIVE_DB_HOLDER_ATTESTATION_FAILED:{type(exc).__name__}",
         }
     stderr = (proc.stderr or "").strip()
@@ -616,7 +619,7 @@ def _live_db_holder_status() -> dict:
             "holders": [],
             "unknown_long_lived_holders": [],
             "unattested_holders": [],
-            "diagnostic_unavailable": True,
+            "attestation_unavailable": True,
             "issue": "LIVE_DB_HOLDER_ATTESTATION_FAILED",
             "error": stderr,
         }
@@ -1413,9 +1416,8 @@ def _forbidden_live_non_submit_env(environment: dict) -> list[str]:
     """Return env keys that contradict the live-trading launchd contract."""
     forbidden: list[str] = []
     retired_mode_marker = "SHA" + "DOW"
-    for key, value in environment.items():
+    for key in environment:
         key_text = str(key)
-        value_text = str(value)
         if retired_mode_marker in key_text.upper():
             forbidden.append(key_text)
     return sorted(forbidden)

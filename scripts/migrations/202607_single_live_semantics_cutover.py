@@ -46,6 +46,12 @@ RETIRED_CERTIFICATE_TYPES = (
     RETIRED_PRE_SUBMIT_DECISION_CERTIFICATE,
     RETIRED_PRE_SUBMIT_MODE_CERTIFICATE,
 )
+UNBACKED_LEGACY_VIEWS = {
+    "control_overrides": "control_overrides_history",
+    "token_suppression_current": "token_suppression_history",
+    "observation_hourly_extrema": "observation_instants",
+    "observation_instants_current": "observation_instants",
+}
 RETIRED_RECEIPT_COLUMNS = (
     "q_live_" + "raw",
     "q_lcb_" + "raw",
@@ -2385,6 +2391,18 @@ def mutate_db(
             raise RuntimeError(f"could not keep foreign_keys enabled for {path}")
         conn.execute("BEGIN IMMEDIATE")
         try:
+            for view, backing_table in UNBACKED_LEGACY_VIEWS.items():
+                object_type = conn.execute(
+                    "SELECT type FROM sqlite_master WHERE name=?",
+                    (view,),
+                ).fetchone()
+                if (
+                    object_type is not None
+                    and str(object_type[0]) == "view"
+                    and not table_exists(conn, backing_table)
+                ):
+                    conn.execute(f"DROP VIEW {quote_identifier(view)}")
+                    changed.append(f"dropped unbacked legacy {view} view")
             if migrate_command_attribution_schema(conn):
                 changed.append("migrated command-exact decision attribution schema")
                 check_tables.add("position_decision_attribution")
@@ -2610,7 +2628,7 @@ def recoverable_in_progress_target(
 ) -> bool:
     """Accept only stage-owned post-commit drift after an interrupted journal write."""
 
-    stage = str(progress.get("current_stage") or "")
+    stage = journal_active_stage(progress)
     if not stage or stage in set(progress.get("completed_stages") or ()):
         return False
     expected = progress.get("expected_target_state")
@@ -2699,7 +2717,7 @@ def _open_stage_journal(
                 raise RuntimeError(
                     f"stage journal target generation changed: {progress_path}"
                 )
-            progress["recovering_stage_commit"] = progress.get("current_stage")
+            progress["recovering_stage_commit"] = journal_active_stage(progress)
             progress["expected_target_state"] = target_state
         if progress.get("status") == "complete":
             return progress
@@ -2735,6 +2753,18 @@ def _record_stage_journal(
     if complete and stage not in progress["completed_stages"]:
         progress["completed_stages"].append(stage)
     _write_receipt_atomic(progress_path, progress)
+
+
+def journal_active_stage(progress: dict[str, Any]) -> str:
+    stage = str(progress.get("current_stage") or "")
+    if stage == "failed":
+        stage = str(progress.get("failed_stage") or "")
+    return stage
+
+
+def clear_failure_metadata(progress: dict[str, Any]) -> None:
+    for key in ("error", "failed_stage", "journal_repair", "recovering_stage_commit"):
+        progress.pop(key, None)
 
 
 def _run_journaled_stage(
@@ -3036,12 +3066,14 @@ def main() -> int:
             expected_recovery_state=lambda: expected_settings_identity(settings_path),
         )
         complete_postconditions()
+        clear_failure_metadata(progress)
         progress["status"] = "complete"
         _record_stage_journal(progress_path, progress, "complete", complete=True)
         print(f"rewritten json files: {len(json_paths)}")
         if removed_notes is not None:
             print(f"removed config notes: {removed_notes}")
     except BaseException as exc:
+        progress["failed_stage"] = journal_active_stage(progress)
         progress["status"] = "failed_resumable"
         progress["error"] = f"{type(exc).__name__}: {exc}"
         _record_stage_journal(progress_path, progress, "failed", complete=False)

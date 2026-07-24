@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-07-08; last_reused=2026-07-08
+# Lifecycle: created=2026-04-30; last_reviewed=2026-07-24; last_reused=2026-07-24
 # Purpose: Lock healthcheck relationship predicates for live daemon, launchd, entry capability, and settlement truth.
 # Reuse: Run when scripts/healthcheck.py health predicates or live readiness status fields change.
 # Created: 2026-04-30
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-24
 # Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 from __future__ import annotations
 import pytest
@@ -2069,7 +2069,7 @@ def test_live_db_holder_status_lsof_unavailable_blocks_ready(monkeypatch, tmp_pa
     result = _ORIGINAL_LIVE_DB_HOLDER_STATUS()
 
     assert result["ok"] is False
-    assert result["diagnostic_unavailable"] is True
+    assert result["attestation_unavailable"] is True
     assert result["issue"] == "LIVE_DB_HOLDER_ATTESTATION_UNAVAILABLE"
 
 
@@ -2088,7 +2088,7 @@ def test_live_db_holder_status_lsof_permission_error_blocks_ready(monkeypatch, t
     result = _ORIGINAL_LIVE_DB_HOLDER_STATUS()
 
     assert result["ok"] is False
-    assert result["diagnostic_unavailable"] is True
+    assert result["attestation_unavailable"] is True
     assert result["issue"] == "LIVE_DB_HOLDER_ATTESTATION_FAILED"
 
 
@@ -2107,7 +2107,7 @@ def test_live_db_holder_status_partial_lsof_with_stderr_blocks_ready(monkeypatch
     result = _ORIGINAL_LIVE_DB_HOLDER_STATUS()
 
     assert result["ok"] is False
-    assert result["diagnostic_unavailable"] is True
+    assert result["attestation_unavailable"] is True
     assert result["issue"] == "LIVE_DB_HOLDER_ATTESTATION_FAILED"
 
 
