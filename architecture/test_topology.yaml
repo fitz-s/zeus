@@ -215,7 +215,7 @@ test_trust_policy:
     tests/events/test_opportunity_event.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_candidate_binding.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_bound_decision_engine_no_runtime.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-07-16"}
+    tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-07-23"}
     tests/events/test_event_store_lock_not_schema_error.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_edli_position_bridge.py: {created: "2026-06-01", last_used: "2026-07-13"}
     tests/events/test_event_writer_single_writer.py: {created: "2026-05-24", last_used: "2026-05-24"}

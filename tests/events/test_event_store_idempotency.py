@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-07-23
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import dataclasses
 import inspect
 import json
 import sqlite3
+from datetime import datetime
 
 import pytest
 
@@ -742,6 +743,118 @@ def test_archive_superseded_forecast_snapshot_events_crosses_source_runs():
     )
     assert rows[older.event_id] == "expired"
     assert rows[newer.event_id] == "pending"
+
+
+@pytest.mark.parametrize("venue_attempted", (False, True))
+def test_forecast_supersession_preserves_and_safely_recovers_targeted_global_winner(
+    venue_attempted,
+):
+    """Generic FSR pruning must not terminalize the auction's sole claim carrier."""
+
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn = _world_conn()
+    store = EventStore(conn)
+    older = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-1",
+        "snap-targeted",
+        "2026-05-24T04:00:00+00:00",
+        "2026-05-24T04:01:00+00:00",
+    )
+    newer = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-2",
+        "snap-newer",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+    )
+    target = _next_claim_carrier(
+        older,
+        targeted_at=datetime.fromisoformat("2026-05-24T04:12:00+00:00"),
+        economic_identity="current-book-epoch",
+        payload=json.loads(older.payload_json),
+    )
+    for event in (older, newer, target):
+        store.insert_or_ignore(event)
+    store.requeue_pending(
+        target.event_id,
+        not_before="2026-05-24T04:17:00+00:00",
+        last_error="GLOBAL_WINNER_TARGETED_CLAIM",
+    )
+
+    assert store.archive_superseded_forecast_snapshot_events() == 1
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE event_id = ?",
+            (target.event_id,),
+        ).fetchone()
+    ) == (
+        "pending",
+        "2026-05-24T04:17:00+00:00",
+        "GLOBAL_WINNER_TARGETED_CLAIM",
+    )
+
+    conn.execute(
+        "UPDATE opportunity_event_processing "
+        "SET processing_status='expired', processed_at=?, updated_at=? "
+        "WHERE event_id=?",
+        (
+            "2026-05-24T04:18:00+00:00",
+            "2026-05-24T04:18:00+00:00",
+            target.event_id,
+        ),
+    )
+    if venue_attempted:
+        payload_json = json.dumps(
+            {"event_id": target.event_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        conn.execute(
+            "INSERT INTO edli_live_order_events ("
+            "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+            "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+            "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+            (
+                "attempted-targeted-maintenance-expiry",
+                "aggregate-targeted-maintenance-expiry",
+                1,
+                "VenueSubmitAttempted",
+                "event-hash",
+                payload_json,
+                "payload-hash",
+                "engine_adapter",
+                "2026-05-24T04:18:00+00:00",
+                "2026-05-24T04:18:00+00:00",
+            ),
+        )
+
+    recovered = store.prioritized_global_winner_event(target)
+
+    assert (recovered is not None) is (not venue_attempted)
+    if not venue_attempted:
+        assert recovered is not None
+        assert recovered.event_id != target.event_id
+        assert recovered.source.startswith(f"{target.source}:claim_retry:")
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE event_id = ?",
+            ((recovered or target).event_id,),
+        ).fetchone()
+    ) == (
+        (
+            "pending",
+            None,
+            "GLOBAL_WINNER_TARGETED_CLAIM",
+        )
+        if not venue_attempted
+        else (
+            "expired",
+            "2026-05-24T04:17:00+00:00",
+            "GLOBAL_WINNER_TARGETED_CLAIM",
+        )
+    )
 
 
 def test_archive_superseded_forecast_snapshot_events_capped_batch_checks_newer_tail():
