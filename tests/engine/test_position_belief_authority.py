@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-07-24
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
 #   719/719 monitor refreshes with last_monitor_prob_is_fresh=False while the
 #   entry authority forecast_posteriors was live and had re-ranked the held bin
@@ -61,6 +61,7 @@ def forecasts_db(tmp_path):
         CREATE TABLE forecast_posteriors (
             posterior_id TEXT, city TEXT, target_date TEXT,
             temperature_metric TEXT, computed_at TEXT, q_json TEXT,
+            q_lcb_json TEXT, q_ucb_json TEXT,
             source_cycle_time TEXT,
             runtime_layer TEXT,
             source_id TEXT,
@@ -103,10 +104,11 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             target_date="2026-06-12", metric="high", source_cycle_time=None,
             runtime_layer="live", source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
             posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-            semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION):
+            semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            q_lcb=None, q_ucb=None):
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             posterior_id,
             city,
@@ -114,6 +116,8 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             metric,
             computed_at,
             json.dumps(q),
+            json.dumps(q if q_lcb is None else q_lcb),
+            json.dumps(q if q_ucb is None else q_ucb),
             source_cycle_time,
             runtime_layer,
             source_id,
@@ -207,20 +211,42 @@ class TestLoadReplacementBelief:
         _insert(forecasts_db, posterior_id="p1",
                 computed_at=(NOW - timedelta(hours=2)).isoformat(),
                 q={BIN: 0.242, OTHER_BIN: 0.29},
+                q_lcb={BIN: 0.18, OTHER_BIN: 0.22},
+                q_ucb={BIN: 0.31, OTHER_BIN: 0.36},
                 source_cycle_time=(NOW - timedelta(hours=6)).isoformat())
         belief = _load(forecasts_db, direction="buy_no")
         assert belief is not None
         assert belief.fresh is True
         assert belief.q_yes_bin == pytest.approx(0.242)
+        assert belief.q_yes_lcb == pytest.approx(0.18)
+        assert belief.q_yes_ucb == pytest.approx(0.31)
         assert belief.held_side_prob == pytest.approx(1.0 - 0.242)
+        assert belief.held_side_lcb == pytest.approx(1.0 - 0.31)
+        assert belief.held_side_ucb == pytest.approx(1.0 - 0.18)
         assert belief.posterior_id == "p1"
 
     def test_buy_yes_is_q_directly(self, forecasts_db):
         _insert(forecasts_db, posterior_id="p1",
                 computed_at=(NOW - timedelta(hours=1)).isoformat(),
-                q={BIN: 0.242})
+                q={BIN: 0.242},
+                q_lcb={BIN: 0.18},
+                q_ucb={BIN: 0.31})
         belief = _load(forecasts_db, direction="buy_yes")
         assert belief.held_side_prob == pytest.approx(0.242)
+        assert belief.held_side_lcb == pytest.approx(0.18)
+        assert belief.held_side_ucb == pytest.approx(0.31)
+
+    def test_incoherent_current_evidence_bounds_fail_closed(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="bad-bounds",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.24},
+            q_lcb={BIN: 0.25},
+            q_ucb={BIN: 0.31},
+        )
+
+        assert _load(forecasts_db) is None
 
     def test_freshest_row_wins(self, forecasts_db):
         _insert(forecasts_db, posterior_id="old",
@@ -681,7 +707,8 @@ class TestMonitorPrimaryAuthority:
         import src.engine.position_belief as pb
 
         belief = ReplacementBelief(
-            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            held_side_prob=0.758, held_side_lcb=0.69, held_side_ucb=0.82,
+            q_yes_bin=0.242, q_yes_lcb=0.18, q_yes_ucb=0.31, posterior_id="p9",
             computed_at="2026-06-12T10:00:00+00:00", age_hours=2.0,
             fresh=True, bin_key=BIN, direction="buy_no",
         )
@@ -708,12 +735,74 @@ class TestMonitorPrimaryAuthority:
             for v in refresh_pos.applied_validations
         )
 
+    def test_refresh_uses_current_evidence_band_without_legacy_bootstrap(
+        self, monkeypatch
+    ):
+        import copy
+
+        import src.engine.monitor_refresh as mr
+        import src.strategy.market_analysis as market_analysis
+
+        pos = self._pos()
+        pos.target_date = "2099-06-12"
+        pos.entry_ci_width = 0.70
+        setattr(
+            pos,
+            "_bootstrap_context",
+            {
+                "bins": ["held", "other"],
+                "alpha": 0.05,
+            },
+        )
+
+        def fresh_replacement(position, **_kwargs):
+            fresh = copy.copy(position)
+            fresh.applied_validations = list(position.applied_validations)
+            fresh.selected_method = SELECTED_METHOD_REPLACEMENT_POSTERIOR
+            setattr(
+                fresh,
+                "_replacement_current_evidence_held_bounds",
+                (0.65, 0.80),
+            )
+            return 0.72, fresh, True
+
+        class ForbiddenLegacyBootstrap:
+            def __init__(self, **_kwargs):
+                raise AssertionError("legacy bootstrap must not run")
+
+        monkeypatch.setattr(mr, "monitor_probability_refresh", fresh_replacement)
+        monkeypatch.setattr(
+            mr,
+            "monitor_quote_refresh",
+            lambda *_args, **_kwargs: mr.HeldTokenMonitorQuote(
+                token_id="held-token",
+                best_bid=0.20,
+                best_ask=0.22,
+                bid_size=100.0,
+                ask_size=100.0,
+                diagnostic_market_price=0.21,
+                source_timestamp=NOW.isoformat(),
+            ),
+        )
+        monkeypatch.setattr(
+            market_analysis,
+            "MarketAnalysis",
+            ForbiddenLegacyBootstrap,
+        )
+
+        context = mr.refresh_position(None, object(), pos)
+
+        assert context.p_posterior == pytest.approx(0.72)
+        assert context.confidence_band_lower == pytest.approx(0.65 - 0.21)
+        assert context.confidence_band_upper == pytest.approx(0.80 - 0.21)
+
     def test_stale_belief_falls_through_and_never_borrows_freshness(self, monkeypatch):
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
 
         belief = ReplacementBelief(
-            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            held_side_prob=0.758, held_side_lcb=0.69, held_side_ucb=0.82,
+            q_yes_bin=0.242, q_yes_lcb=0.18, q_yes_ucb=0.31, posterior_id="p9",
             computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
             fresh=False, bin_key=BIN, direction="buy_no",
         )
@@ -738,7 +827,8 @@ class TestMonitorPrimaryAuthority:
         import src.engine.position_belief as pb
 
         belief = ReplacementBelief(
-            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            held_side_prob=0.758, held_side_lcb=0.69, held_side_ucb=0.82,
+            q_yes_bin=0.242, q_yes_lcb=0.18, q_yes_ucb=0.31, posterior_id="p9",
             computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
             fresh=False, bin_key=BIN, direction="buy_no",
         )
@@ -839,7 +929,8 @@ class TestMonitorPrimaryAuthority:
         import src.engine.position_belief as pb
 
         belief = ReplacementBelief(
-            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            held_side_prob=0.758, held_side_lcb=0.69, held_side_ucb=0.82,
+            q_yes_bin=0.242, q_yes_lcb=0.18, q_yes_ucb=0.31, posterior_id="p9",
             computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
             fresh=False, bin_key=BIN, direction="buy_no",
         )
@@ -1094,7 +1185,8 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
 
     def _stale_belief(self):
         return ReplacementBelief(
-            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            held_side_prob=0.758, held_side_lcb=0.69, held_side_ucb=0.82,
+            q_yes_bin=0.242, q_yes_lcb=0.18, q_yes_ucb=0.31, posterior_id="p9",
             computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
             fresh=False, bin_key=BIN, direction="buy_no",
         )

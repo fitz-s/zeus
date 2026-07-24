@@ -1,5 +1,5 @@
 # Created: 2026-06-21
-# Last audited: 2026-06-21
+# Last reused or audited: 2026-07-24
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
 """ANTIBODY: a non-day0 held position with a STALE/MISSING cached posterior must
@@ -32,8 +32,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.contracts import EntryMethod
-
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
 
 
@@ -60,7 +58,8 @@ def _stale_belief():
     from src.engine.position_belief import ReplacementBelief
 
     return ReplacementBelief(
-        held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+        held_side_prob=0.758, held_side_lcb=0.69, held_side_ucb=0.82,
+        q_yes_bin=0.242, q_yes_lcb=0.18, q_yes_ucb=0.31, posterior_id="p9",
         computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
         fresh=False, bin_key=BIN, direction="buy_no",
     )
@@ -81,7 +80,7 @@ def test_readthrough_fresh_recompute_restores_probability_authority(monkeypatch)
     # Read-through recompute succeeds and returns the held-side prob (e.g. NO has
     # collapsed to 0.30 — a reversal the frozen 0.758 belief could never see).
     monkeypatch.setattr(
-        mr, "_attempt_held_belief_readthrough", lambda *a, **k: 0.30
+        mr, "_attempt_held_belief_readthrough", lambda *a, **k: (0.30, 0.22, 0.41)
     )
 
     pos = _pos()
@@ -91,6 +90,10 @@ def test_readthrough_fresh_recompute_restores_probability_authority(monkeypatch)
 
     assert is_fresh is True
     assert prob == pytest.approx(0.30)
+    assert getattr(
+        refresh_pos,
+        "_replacement_current_evidence_held_bounds",
+    ) == pytest.approx((0.22, 0.41))
     # The belief is branded as a same-authority read-through, never a legacy substitution.
     assert any(
         "readthrough" in v or "read_through" in v
@@ -148,7 +151,11 @@ def test_readthrough_does_not_itself_decide_an_exit(monkeypatch):
     monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: _stale_belief())
     monkeypatch.setattr(mr, "_refresh_ens_member_counting", lambda **kw: (0.5, []))
     # A fresh belief that has NOT reversed (still favors the held NO side).
-    monkeypatch.setattr(mr, "_attempt_held_belief_readthrough", lambda *a, **k: 0.80)
+    monkeypatch.setattr(
+        mr,
+        "_attempt_held_belief_readthrough",
+        lambda *a, **k: (0.80, 0.70, 0.88),
+    )
 
     pos = _pos()
     result = mr.monitor_probability_refresh(pos, conn=None, city=object(), target_d=None)
@@ -223,6 +230,8 @@ def test_readthrough_restamps_expired_seed_ttl_to_decision_now(
         return SimpleNamespace(
             live_eligible=True,
             q={BIN: 0.25},
+            q_lcb_map={BIN: 0.18},
+            q_ucb_map={BIN: 0.33},
             decorrelated_providers_served=2,
             decorrelated_providers_expected=3,
         )
@@ -232,7 +241,7 @@ def test_readthrough_restamps_expired_seed_ttl_to_decision_now(
     monkeypatch.setattr(mat, "compute_replacement_posterior_readonly", fake_compute)
     monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: sqlite3.connect(":memory:"))
 
-    held_prob = mr._attempt_held_belief_readthrough(
+    held_prob, held_lcb, held_ucb = mr._attempt_held_belief_readthrough(
         _pos(),
         city=object(),
         target_d=None,
@@ -241,6 +250,8 @@ def test_readthrough_restamps_expired_seed_ttl_to_decision_now(
     )
 
     assert held_prob == pytest.approx(0.75)
+    assert held_lcb == pytest.approx(0.67)
+    assert held_ucb == pytest.approx(0.82)
     assert captured["payload"]["computed_at"] == monitor_now.isoformat()
 
 

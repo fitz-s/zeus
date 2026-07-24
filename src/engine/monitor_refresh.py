@@ -985,7 +985,7 @@ def _seed_payload_covers_target_local_day(*, seed_path, payload: dict) -> bool:
 def _attempt_held_belief_readthrough(
     pos: "Position", *, city, target_d, metric: str,
     decision_now: datetime | None = None,
-) -> float | None:
+) -> tuple[float, float, float] | None:
     """LAYER 2 — synchronous single-family read-through recompute (held-belief freeze fix).
 
     Recompute THIS held family's replacement posterior via the SAME canonical
@@ -993,7 +993,9 @@ def _attempt_held_belief_readthrough(
     are CURRENTLY persisted, WITHOUT writing forecast_posteriors. Returns the
     fresh HELD-SIDE probability for the position's bin, or None when the family
     cannot be honestly recomputed (no on-disk anchor seed / no current single_runs
-    / not live-eligible). Fewer providers ⇒ honestly wider fusion CI (correct).
+    / not live-eligible). Returns held-side ``(q, lcb, ucb)`` atomically; the
+    point is not authority without its current-evidence bounds. Fewer providers
+    ⇒ honestly wider fusion CI (correct).
 
     ``decision_now`` is the CURRENT monitor cycle instant (the decision time for
     this recompute).  The arrival guard inside the Bayes-precision fusion admits
@@ -1095,25 +1097,33 @@ def _attempt_held_belief_readthrough(
         # Index the held bin by its venue range-label, exactly like load_replacement_belief.
         from src.engine.position_belief import _match_bin  # noqa: PLC0415
 
+        if result.q_lcb_map is None or result.q_ucb_map is None:
+            return None
         matched = _match_bin(result.q, str(pos.bin_label))
-        if matched is None:
+        matched_lcb = _match_bin(result.q_lcb_map, str(pos.bin_label))
+        matched_ucb = _match_bin(result.q_ucb_map, str(pos.bin_label))
+        if matched is None or matched_lcb is None or matched_ucb is None:
             return None
         _bin_key, q_yes = matched
-        if not (0.0 <= float(q_yes) <= 1.0):
+        _lcb_key, q_yes_lcb = matched_lcb
+        _ucb_key, q_yes_ucb = matched_ucb
+        if not (0.0 <= q_yes_lcb <= q_yes <= q_yes_ucb <= 1.0):
             return None
-        held = _held_side_probability_from_yes_bin_probability(
-            float(q_yes), str(getattr(pos.direction, "value", pos.direction))
-        )
-        if not (0.0 <= float(held) <= 1.0):
-            return None
+        direction = str(getattr(pos.direction, "value", pos.direction))
+        held = _held_side_probability_from_yes_bin_probability(q_yes, direction)
+        if direction == "buy_yes":
+            held_lcb, held_ucb = q_yes_lcb, q_yes_ucb
+        else:
+            held_lcb, held_ucb = 1.0 - q_yes_ucb, 1.0 - q_yes_lcb
         logger.info(
             "monitor held-belief READ-THROUGH recompute OK city=%s target_date=%s metric=%s "
-            "providers=%d/%d q_held=%.4f (exit organ regains fresh same-authority belief)",
+            "providers=%d/%d q_held=%.4f band=[%.4f,%.4f] "
+            "(exit organ regains fresh same-authority belief)",
             pos.city, target_date, metric,
             result.decorrelated_providers_served, result.decorrelated_providers_expected,
-            float(held),
+            held, held_lcb, held_ucb,
         )
-        return float(held)
+        return float(held), float(held_lcb), float(held_ucb)
     except Exception as exc:  # noqa: BLE001 — read-through MUST NOT crash the monitor
         logger.warning(
             "monitor held-belief read-through FAILED (fail-soft -> fail-close) "
@@ -3946,6 +3956,10 @@ def _clone_for_probability_refresh(position: Position) -> Position:
     """Start one probability cut without inheriting prior-cut evidence."""
 
     refreshed = copy.copy(position)
+    try:
+        delattr(refreshed, "_replacement_current_evidence_held_bounds")
+    except AttributeError:
+        pass
     refreshed.applied_validations = (
         [_DAY0_ROBUST_SELL_CONFIRMATION]
         if _DAY0_ROBUST_SELL_CONFIRMATION
@@ -4944,10 +4958,10 @@ def _refresh_day0_monitor_probability(
         if unobserved_prefix is not None:
             return unobserved_prefix
 
-        readthrough_prob = _attempt_held_belief_readthrough(
+        readthrough_belief = _attempt_held_belief_readthrough(
             pos, city=city, target_d=target_d, metric=metric
         )
-        if readthrough_prob is not None:
+        if readthrough_belief is not None:
             _append_monitor_validation(
                 refresh_pos,
                 "day0_observation_unavailable:replacement_belief_readthrough_available_not_exit_authority",
@@ -5112,9 +5126,38 @@ def monitor_probability_refresh(
             exc,
         )
     if belief is not None and belief.fresh:
+        if not (
+            np.isfinite(belief.held_side_lcb)
+            and np.isfinite(belief.held_side_prob)
+            and np.isfinite(belief.held_side_ucb)
+            and 0.0
+            <= belief.held_side_lcb
+            <= belief.held_side_prob
+            <= belief.held_side_ucb
+            <= 1.0
+        ):
+            logger.warning(
+                "monitor_probability_refresh: incoherent replacement bounds for %s",
+                pos.trade_id,
+            )
+            _append_monitor_validation(
+                pos,
+                "replacement_posterior_incoherent_current_evidence_bounds",
+            )
+            belief = None
+    if belief is not None and belief.fresh:
         fresh_pos = _clone_for_probability_refresh(pos)
         setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        setattr(
+            fresh_pos,
+            "_replacement_current_evidence_held_bounds",
+            (belief.held_side_lcb, belief.held_side_ucb),
+        )
         _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(
+            fresh_pos,
+            "replacement_current_evidence_probability_bounds",
+        )
         _append_monitor_validation(fresh_pos, belief.freshness_validation())
         _set_monitor_probability_fresh(fresh_pos, True)
         return float(belief.held_side_prob), fresh_pos, True
@@ -5158,13 +5201,23 @@ def monitor_probability_refresh(
     # If it yields a fresh posterior, the exit organ regains a fresh same-authority
     # belief THIS cycle (so CI_SEPARATED_REVERSAL can arm); if not, we fail-close as
     # before AND record a durable, retryable belief_debt marker (never a silent freeze).
-    readthrough_prob = _attempt_held_belief_readthrough(
+    readthrough_belief = _attempt_held_belief_readthrough(
         pos, city=city, target_d=target_d, metric=_metric_for_family
     )
-    if readthrough_prob is not None:
+    if readthrough_belief is not None:
+        readthrough_prob, readthrough_lcb, readthrough_ucb = readthrough_belief
         fresh_pos = _clone_for_probability_refresh(pos)
         setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        setattr(
+            fresh_pos,
+            "_replacement_current_evidence_held_bounds",
+            (readthrough_lcb, readthrough_ucb),
+        )
         _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(
+            fresh_pos,
+            "replacement_current_evidence_probability_bounds",
+        )
         _append_monitor_validation(
             fresh_pos,
             "belief_source=forecast_posteriors_readthrough_recompute;basis=canonical_bayes_precision_fusion",
@@ -5212,7 +5265,11 @@ def refresh_exact_one_position(pos: Position) -> EdgeContext:
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = False
     pos.last_monitor_market_price_is_fresh = False
-    for attr in (_GLOBAL_MONITOR_SAMPLES_ATTR, _GLOBAL_MONITOR_ALPHA_ATTR):
+    for attr in (
+        _GLOBAL_MONITOR_SAMPLES_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
+        "_replacement_current_evidence_held_bounds",
+    ):
         try:
             delattr(pos, attr)
         except AttributeError:
@@ -5336,6 +5393,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         else pos.entry_price
     )
     current_p_posterior = float("nan")
+    try:
+        delattr(pos, "_replacement_current_evidence_held_bounds")
+    except AttributeError:
+        pass
     if pos.direction not in {"buy_yes", "buy_no"}:
         logger.warning("Skipping refresh for %s: unknown direction %r", pos.trade_id, pos.direction)
         raise ValueError(f"Unknown direction {pos.direction} for trade {pos.trade_id}")
@@ -5405,6 +5466,17 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 pos,
                 _GLOBAL_MONITOR_ALPHA_ATTR,
                 getattr(refresh_pos, _GLOBAL_MONITOR_ALPHA_ATTR),
+            )
+        _replacement_bounds = getattr(
+            refresh_pos,
+            "_replacement_current_evidence_held_bounds",
+            None,
+        )
+        if _replacement_bounds is not None:
+            setattr(
+                pos,
+                "_replacement_current_evidence_held_bounds",
+                _replacement_bounds,
             )
         for attr in (
             "_day0_exit_authority_status",
@@ -5528,6 +5600,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     bootstrap_ctx = getattr(pos, "_bootstrap_context", None)
     global_samples = getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None)
     global_alpha = getattr(pos, _GLOBAL_MONITOR_ALPHA_ATTR, None)
+    replacement_bounds = getattr(
+        pos,
+        "_replacement_current_evidence_held_bounds",
+        None,
+    )
     if not probability_authority_available:
         ci_lower = float("nan")
         ci_upper = float("nan")
@@ -5540,6 +5617,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         )
     if not probability_authority_available:
         pass
+    elif replacement_bounds is not None:
+        held_lcb, held_ucb = replacement_bounds
+        ci_lower = float(held_lcb) - current_p_market
+        ci_upper = float(held_ucb) - current_p_market
     elif global_samples is not None:
         ci_lower, ci_upper = _current_global_monitor_edge_band(
             global_samples,

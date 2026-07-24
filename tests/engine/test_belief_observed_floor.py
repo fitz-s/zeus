@@ -1,5 +1,5 @@
 # Created: 2026-06-28
-# Last audited: 2026-06-28
+# Last reused or audited: 2026-07-24
 # Authority basis: midstream belief-freeze incident 2026-06-28 — the served daily-HIGH
 #   belief (load_replacement_belief, the K1 single held-position belief authority) reads
 #   forecast_posteriors.q_json computed the DAY BEFORE the target day and applies NO
@@ -271,6 +271,7 @@ def forecasts_db(tmp_path):
         CREATE TABLE forecast_posteriors (
             posterior_id TEXT, city TEXT, target_date TEXT,
             temperature_metric TEXT, computed_at TEXT, q_json TEXT,
+            q_lcb_json TEXT, q_ucb_json TEXT,
             source_cycle_time TEXT, runtime_layer TEXT, source_id TEXT, posterior_method TEXT
         )
         """
@@ -280,10 +281,11 @@ def forecasts_db(tmp_path):
     # Posterior computed the DAY BEFORE the target day (the freeze) — fresh by clock,
     # stale by fact. source_cycle_time recent so the freshness gate passes.
     conn.execute(
-        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             "p_beijing", "Beijing", "2026-06-28", "high",
             "2026-06-27T14:17:17+00:00", json.dumps(BEIJING_Q),
+            json.dumps(BEIJING_Q), json.dumps(BEIJING_Q),
             "2026-06-28T06:00:00+00:00", "live",
             LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
@@ -341,7 +343,11 @@ def test_served_belief_never_below_observed_high_buy_no(forecasts_db, world_db, 
     )
     assert belief is not None
     assert belief.q_yes_bin == pytest.approx(0.0, abs=1e-9)
+    assert belief.q_yes_lcb == pytest.approx(0.0, abs=1e-9)
+    assert belief.q_yes_ucb == pytest.approx(0.0, abs=1e-9)
     assert belief.held_side_prob == pytest.approx(1.0, abs=1e-9)
+    assert belief.held_side_lcb == pytest.approx(1.0, abs=1e-9)
+    assert belief.held_side_ucb == pytest.approx(1.0, abs=1e-9)
 
 
 def test_served_belief_buy_yes_on_impossible_bin_is_dead(forecasts_db, world_db, monkeypatch):
@@ -352,7 +358,11 @@ def test_served_belief_buy_yes_on_impossible_bin_is_dead(forecasts_db, world_db,
     )
     assert belief is not None
     assert belief.q_yes_bin == pytest.approx(0.0, abs=1e-9)
+    assert belief.q_yes_lcb == pytest.approx(0.0, abs=1e-9)
+    assert belief.q_yes_ucb == pytest.approx(0.0, abs=1e-9)
     assert belief.held_side_prob == pytest.approx(0.0, abs=1e-9)
+    assert belief.held_side_lcb == pytest.approx(0.0, abs=1e-9)
+    assert belief.held_side_ucb == pytest.approx(0.0, abs=1e-9)
 
 
 def test_no_observed_surface_serves_unfloored_belief(forecasts_db, tmp_path, monkeypatch):

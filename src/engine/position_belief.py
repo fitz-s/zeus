@@ -82,7 +82,11 @@ class ReplacementBelief:
     """One held-position belief read from the replacement posterior authority."""
 
     held_side_prob: float
+    held_side_lcb: float
+    held_side_ucb: float
     q_yes_bin: float
+    q_yes_lcb: float
+    q_yes_ucb: float
     posterior_id: str
     computed_at: str
     age_hours: float
@@ -644,6 +648,11 @@ def load_replacement_belief(
             if "provenance_json" in columns
             else "NULL AS provenance_json"
         )
+        if not {"q_lcb_json", "q_ucb_json"}.issubset(columns):
+            logger.warning(
+                "position_belief: forecast_posteriors missing current-evidence bounds"
+            )
+            return None
         authority_predicates: list[str] = []
         authority_params: list[object] = [city, target_date, temperature_metric]
         if "source_id" in columns:
@@ -654,7 +663,8 @@ def load_replacement_belief(
             authority_sql = " AND " + " AND ".join(authority_predicates)
         row = conn.execute(
             f"""
-            SELECT posterior_id, computed_at, q_json, {source_cycle_expr}, runtime_layer,
+            SELECT posterior_id, computed_at, q_json, q_lcb_json, q_ucb_json,
+                   {source_cycle_expr}, runtime_layer,
                    {source_id_expr}, {posterior_method_expr}, {provenance_expr}
             FROM forecast_posteriors
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
@@ -716,9 +726,11 @@ def load_replacement_belief(
             return None
     try:
         q = json.loads(row["q_json"] or "null")
+        q_lcb = json.loads(row["q_lcb_json"] or "null")
+        q_ucb = json.loads(row["q_ucb_json"] or "null")
     except (TypeError, ValueError):
         return None
-    if not isinstance(q, dict):
+    if not all(isinstance(value, dict) for value in (q, q_lcb, q_ucb)):
         return None
     # OBSERVED-FLOOR (midstream belief-freeze fix 2026-06-28): condition the full-day-max
     # forecast posterior on today's realized running extreme BEFORE extracting the held bin,
@@ -742,16 +754,35 @@ def load_replacement_belief(
                 metric=temperature_metric,
                 rounding_rule=_belief_rounding_rule(city),
             )
+            q_lcb = apply_observed_floor_to_q_vector(
+                q_lcb,
+                observed_extreme_native=observed_extreme,
+                metric=temperature_metric,
+                rounding_rule=_belief_rounding_rule(city),
+            )
+            q_ucb = {
+                key: min(1.0, value)
+                for key, value in apply_observed_floor_to_q_vector(
+                    q_ucb,
+                    observed_extreme_native=observed_extreme,
+                    metric=temperature_metric,
+                    rounding_rule=_belief_rounding_rule(city),
+                ).items()
+            }
     except Exception as exc:  # noqa: BLE001 — the floor must never kill belief serving
         logger.warning(
             "position_belief: observed-floor skipped for %s/%s/%s: %s",
             city, target_date, temperature_metric, exc,
         )
     matched = _match_bin(q, bin_label)
-    if matched is None:
+    matched_lcb = _match_bin(q_lcb, bin_label)
+    matched_ucb = _match_bin(q_ucb, bin_label)
+    if matched is None or matched_lcb is None or matched_ucb is None:
         return None
     bin_key, q_yes = matched
-    if not (0.0 <= q_yes <= 1.0):
+    _lcb_key, q_yes_lcb = matched_lcb
+    _ucb_key, q_yes_ucb = matched_ucb
+    if not (0.0 <= q_yes_lcb <= q_yes <= q_yes_ucb <= 1.0):
         return None
     computed_at = _parse_computed_at(row["computed_at"])
     if computed_at is None:
@@ -795,9 +826,15 @@ def load_replacement_belief(
         fresh = False
         freshness_basis = _raw_input_lag_basis(raw_input_lag_reason) or "replacement_raw_input_hwm"
     held = q_yes if direction == "buy_yes" else 1.0 - q_yes
+    held_lcb = q_yes_lcb if direction == "buy_yes" else 1.0 - q_yes_ucb
+    held_ucb = q_yes_ucb if direction == "buy_yes" else 1.0 - q_yes_lcb
     return ReplacementBelief(
         held_side_prob=held,
+        held_side_lcb=held_lcb,
+        held_side_ucb=held_ucb,
         q_yes_bin=q_yes,
+        q_yes_lcb=q_yes_lcb,
+        q_yes_ucb=q_yes_ucb,
         posterior_id=str(row["posterior_id"]),
         computed_at=str(row["computed_at"]),
         age_hours=age_hours,

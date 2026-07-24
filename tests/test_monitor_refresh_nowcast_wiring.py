@@ -148,9 +148,19 @@ def _replacement_belief(
     direction: str = "buy_no",
 ) -> ReplacementBelief:
     q_yes = 0.27
+    q_yes_lcb = 0.21
+    q_yes_ucb = 0.34
     return ReplacementBelief(
         held_side_prob=q_yes if direction == "buy_yes" else 1.0 - q_yes,
+        held_side_lcb=(
+            q_yes_lcb if direction == "buy_yes" else 1.0 - q_yes_ucb
+        ),
+        held_side_ucb=(
+            q_yes_ucb if direction == "buy_yes" else 1.0 - q_yes_lcb
+        ),
         q_yes_bin=q_yes,
+        q_yes_lcb=q_yes_lcb,
+        q_yes_ucb=q_yes_ucb,
         posterior_id="posterior-pre-first-observation",
         computed_at="2026-07-11T23:05:00+00:00",
         age_hours=0.1,
@@ -225,6 +235,7 @@ def test_fresh_probability_refresh_drops_prior_cut_validations(monkeypatch) -> N
     assert refreshed.applied_validations == [
         pending,
         "replacement_posterior",
+        "replacement_current_evidence_probability_bounds",
         belief.freshness_validation(),
     ]
     assert refresh_input.applied_validations == prior.applied_validations
@@ -470,6 +481,11 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
     pos.condition_id = condition_id
     pos.token_id = "paris-yes-token"
     pos.no_token_id = "paris-no-token"
+    setattr(
+        pos,
+        "_replacement_current_evidence_held_bounds",
+        (0.05, 0.15),
+    )
 
     probability, refreshed, fresh = (
         monitor_refresh_module._refresh_current_global_day0_probability(
@@ -485,6 +501,10 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
         refreshed,
         monitor_refresh_module._GLOBAL_MONITOR_SAMPLES_ATTR,
     ) == pytest.approx([0.9, 0.8, 0.7, 0.6])
+    assert not hasattr(
+        refreshed,
+        "_replacement_current_evidence_held_bounds",
+    )
     assert refreshed._day0_monitor_probability_receipt["probability_witness_identity"] == (
         "witness-current-global"
     )
