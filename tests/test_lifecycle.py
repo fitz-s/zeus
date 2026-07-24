@@ -1618,7 +1618,7 @@ class TestExitTriggers:
         )
 
         assert not decision.should_exit
-        assert decision.trigger == "CI_SEPARATED_POSITIVE_EDGE_HOLD"
+        assert decision.trigger == "HOLD"  # one-law vocabulary 2026-07-24: CI-separation branch retired; value stop holds
 
     def test_ci_separated_shenzhen_light_negative_edge_holds(self):
         """Shenzhen 2026-06-19 regression: a lightly negative buy-NO edge is
@@ -1646,8 +1646,8 @@ class TestExitTriggers:
         )
 
         assert not decision.should_exit
-        assert decision.trigger == "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
-        assert "ci_separated_edge_within_threshold_hold" in decision.applied_validations
+        assert decision.trigger == "HOLD"  # one-law vocabulary 2026-07-24: CI-separation branch retired; value stop holds
+        assert "predicted_bin_exit_law" in decision.applied_validations  # one-law breadcrumb 2026-07-24
 
     def test_buy_yes_ev_gate_hold_when_bid_below_posterior(self):
         """When best_bid is below current posterior after exit costs, exit is blocked.

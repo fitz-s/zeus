@@ -22,23 +22,18 @@ import sqlite3
 import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Collection, Literal, Optional
 
 from src.config import (
     STATE_DIR,
-    exit_correlation_crowding_rate,
-    exit_daily_hurdle_rate,
     exit_fee_rate,
     get_mode,
-    hold_value_exit_costs_enabled,
     settings,
     state_path,
 )
 from src.contracts import (
-    HeldSideProbability, 
-    NativeSidePrice, 
-    compute_forward_edge,
     ExpiringAssumption,
 )
 from src.contracts.position_truth import (
@@ -51,7 +46,9 @@ from src.contracts.position_truth import (
 )
 from src.contracts.semantic_types import VenueVisibilityStatus, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
-from src.contracts.hold_value import HoldValue
+from src.contracts.execution_price import polymarket_fee
+from src.decision import predicted_bin_law
+from src.decision.predicted_bin_law import ExitAction, LockState
 from src.strategy.correlation import get_correlation
 from src.state.lifecycle_manager import (
     TERMINAL_STATES as _TERMINAL_POSITION_STATES,
@@ -131,6 +128,35 @@ class ExitDecision:
 
 
 _CI_SEP_EPS: float = 1e-9
+_ZERO_D: Decimal = Decimal(0)
+# Single global friction margin M_x (COLLISION.md §保号: m_e = m_x = 1 tick).
+# Polymarket price granularity is one cent; the exit stop charges one tick per
+# share to the sell branch (exit_margin = _EXIT_TICK × shares).
+_EXIT_TICK: Decimal = Decimal("0.01")
+_EXIT_BID_FEE_EPS: float = 1e-6  # keep polymarket_fee finite at extreme bids
+# Breadcrumbs the exit stop re-derives every cycle. Stripped from the carried
+# applied_validations before re-evaluation so a stale verdict cannot accrete.
+_DECISION_SCOPED_VALIDATIONS: frozenset[str] = frozenset({
+    "ev_gate",
+    "hold_value_exit_costs_enabled",
+    "hold_value_hours_unknown_time_cost_zero",
+    "hold_value_correlation_crowding_applied",
+    "hold_value_probability_basis:current_q_ucb",
+    "hold_value_probability_basis:current_point_q",
+    "exit_fee_applied_to_sell_value",
+    "hold_terminal_value_excludes_exit_fee",
+    "current_held_ci_invalid",
+    "entry_held_ci_invalid",
+    "day0_robust_sell_value_awaits_confirmation",
+    "predicted_bin_exit_law",
+    "sell_reversal",
+    "hold",
+    "evidence_unavailable_third_state",
+    "red_force_exit",
+    "dt2_red_force_exit_sweep_actuated",
+    "settlement_preimage_lock:impossible",
+    "settlement_preimage_lock:guaranteed",
+})
 _NEAR_SETTLEMENT_CONFIRMED_WIN_BID_FLOOR: float = 0.95
 _NEAR_SETTLEMENT_CONFIRMED_WIN_PROB_FLOOR: float = 0.95
 _NEAR_SETTLEMENT_TERMINAL_BID_FLOOR: float = 0.995
@@ -904,147 +930,129 @@ class Position:
         in lifecycle, risk, or monitor logic."""
         return self.city == QUARANTINE_SENTINEL
 
-    def _sell_value_exceeds_hold_value(
-        self,
-        *,
-        current_p_posterior: float,
-        best_bid: Optional[float],
-        hours_to_settlement: Optional[float],
-        applied: list[str],
-        portfolio_positions: tuple = (),
-        bankroll: Optional[float] = None,
-    ) -> Optional[bool]:
-        """Return whether immediate sale beats held EV; None means no proof."""
+    def _held_side_robust_lower(
+        self, exit_context: ExitContext
+    ) -> tuple[Decimal, bool]:
+        """Held-side robust lower bound q⁻ and whether evidence supports a stop.
 
-        if not ExitContext._is_finite(best_bid):
-            applied.append("best_bid_unavailable")
-            return None
-        shares = self.effective_shares
-        if shares <= 0:
-            applied.append("effective_shares_unavailable")
-            return None
-        applied.append("ev_gate")
-        executable_bid = float(best_bid)
-        if hold_value_exit_costs_enabled():
-            applied.append("hold_value_exit_costs_enabled")
-            if hours_to_settlement is None or hours_to_settlement < 0.0:
-                applied.append("hold_value_hours_unknown_time_cost_zero")
-            _crowding = _compute_exit_correlation_crowding(
-                this_cluster=self.cluster,
-                portfolio_positions=portfolio_positions,
-                bankroll=bankroll,
-                shares=shares,
-                best_bid=executable_bid,
-                crowding_rate=exit_correlation_crowding_rate(),
-            )
-            if _crowding > 0.0:
-                applied.append("hold_value_correlation_crowding_applied")
-            hold_value = HoldValue.compute_with_exit_costs(
-                shares=shares,
-                current_p_posterior=current_p_posterior,
-                best_bid=executable_bid,
-                hours_to_settlement=hours_to_settlement,
-                fee_rate=exit_fee_rate(),
-                daily_hurdle_rate=exit_daily_hurdle_rate(),
-                correlation_crowding=_crowding,
-            )
-        else:
-            hold_value = HoldValue.compute(
-                gross_value=shares * current_p_posterior,
-                fee_cost=0.0,
-                time_cost=0.0,
-            )
-        # The fee belongs to the executable SELL, not to hold-to-settlement.
-        # compute_with_exit_costs exposes that immediate fee as fee_cost; move
-        # it across the comparison instead of making both sides optimistic in
-        # opposite directions.
-        sell_value = shares * executable_bid - hold_value.fee_cost
-        terminal_hold_value = hold_value.net_value + hold_value.fee_cost
-        if hold_value.fee_cost > 0.0:
-            applied.append("exit_fee_applied_to_sell_value")
-            applied.append("hold_terminal_value_excludes_exit_fee")
-        return sell_value > terminal_hold_value
-
-    def _near_settlement_hold_confirmation_reason(
-        self,
-        *,
-        current_p_posterior: float,
-        best_bid: Optional[float],
-    ) -> Optional[str]:
-        """Return the hold reason for near-settle winner posture, not generic EV drift."""
-
-        if not ExitContext._is_finite(best_bid):
-            return None
-        bid = float(best_bid)
-        prob = float(current_p_posterior)
-        if (
-            bid >= _NEAR_SETTLEMENT_CONFIRMED_WIN_BID_FLOOR
-            and prob >= _NEAR_SETTLEMENT_CONFIRMED_WIN_PROB_FLOOR
+        The current-belief CI arrives already in held-side native space
+        (cycle_runtime shifts the edge band by the held-side price into the same
+        space as ``p_posterior``), so the NO-side native flip q⁻_NO = 1−q⁺_YES has
+        happened upstream — ``current_ci[0]`` is the genuine held-side q⁻ and must
+        NOT be re-derived by complementing the YES bound here. Returns
+        ``(0, False)`` whenever belief is degraded, the fresh probability is stale
+        or non-finite, or the CI is missing/malformed: evidence is then not ok and
+        the law holds EVIDENCE_UNAVAILABLE unless a settlement lock decides.
+        """
+        if not exit_context.belief_available:
+            return _ZERO_D, False
+        if not (
+            ExitContext._is_finite(exit_context.fresh_prob)
+            and exit_context.fresh_prob_is_fresh
         ):
-            return "near_settlement_confirmed_win_hold"
-        if (
-            bid >= _NEAR_SETTLEMENT_TERMINAL_BID_FLOOR
-            and prob >= _NEAR_SETTLEMENT_TERMINAL_BID_PROB_FLOOR
-        ):
-            return "near_settlement_terminal_bid_hold"
-        return None
+            return _ZERO_D, False
+        ci = exit_context.current_ci
+        if ci is None:
+            return _ZERO_D, False
+        try:
+            lo, hi = float(ci[0]), float(ci[1])
+            point = float(exit_context.fresh_prob)
+        except (TypeError, ValueError, IndexError):
+            return _ZERO_D, False
+        if not all(math.isfinite(v) for v in (lo, hi, point)):
+            return _ZERO_D, False
+        if not (0.0 <= lo <= point <= hi <= 1.0):
+            return _ZERO_D, False
+        return Decimal(str(lo)), True
+
+    def _settlement_preimage_lock(self, exit_context: ExitContext) -> LockState:
+        """Map the Day0 absorbing hard-fact authority to a settlement lock.
+
+        ``day0_zero_probability_exit_authority`` is set only when a Day0 hard-fact
+        overlay has driven the held-side belief to a deterministic terminal value
+        (monitor_refresh): fresh_prob ≈ 0 is a STRUCTURAL_LOSS (IMPOSSIBLE, folds
+        q⁻→0 so any positive bid sells) and fresh_prob ≈ 1 a STRUCTURAL_WIN
+        (GUARANTEED, folds q⁻→1 so the winner holds since bid < 1). Absent that
+        authority the reversal is physically possible and the value stop decides.
+        """
+        if not exit_context.day0_zero_probability_exit_authority:
+            return LockState.NONE
+        if not ExitContext._is_finite(exit_context.fresh_prob):
+            return LockState.NONE
+        fresh = float(exit_context.fresh_prob)
+        if fresh <= 1e-9:
+            return LockState.IMPOSSIBLE
+        if fresh >= 1.0 - 1e-9:
+            return LockState.GUARANTEED
+        return LockState.NONE
+
+    def _exit_bid_breakpoints(
+        self, exit_context: ExitContext, held_shares: Decimal
+    ) -> tuple[tuple[Decimal, Decimal], ...]:
+        """Net-of-fee sell-proceeds curve L(x) for the stop.
+
+        ExitContext exposes only the top-of-book held-side bid, so the stop is
+        evaluated at the single all-shares breakpoint (partial exits need a depth
+        ladder the monitor does not thread). Proceeds are net of the executable
+        taker fee: L = shares·(bid − polymarket_fee(bid)). No bid → empty curve →
+        the law holds (except under RED). The paid entry price is sunk and never
+        enters here.
+        """
+        if held_shares <= _ZERO_D or not ExitContext._is_finite(exit_context.best_bid):
+            return ()
+        bid = float(exit_context.best_bid)
+        clamped = min(max(bid, _EXIT_BID_FEE_EPS), 1.0 - _EXIT_BID_FEE_EPS)
+        fee_per_share = polymarket_fee(clamped, exit_fee_rate())
+        proceeds = float(held_shares) * (bid - fee_per_share)
+        return ((held_shares, Decimal(str(proceeds))),)
 
     def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
-        """Position knows how to exit ITSELF. Monitor just calls this.
+        """Position knows how to exit ITSELF via the one predicted-bin stopping law.
 
-        All probabilities remain in held/native space. Missing authority fields
-        fail closed with an explicit incomplete verdict.
+        The verdict is the unified PR-1 optimal stop (COLLISION.md C3, ΔJ≡0):
+        SELL ⟺ net liquidation proceeds L(x) beat the robust hold value h·q⁻,
+        evaluated over the bid-depth breakpoints by predicted_bin_law.exit_decision.
+        There is no per-direction branch, no repeated-cycle (neg_edge_count)
+        confirmation, no divergence / velocity / flash-crash / vig trigger, and no
+        near-settlement price floor: a near-certain winner holds because its bid
+        sits below q⁻≈1, and a reversed bin sells because the bid beats q⁻. The
+        entry price / cost basis is sunk and never enters the verdict.
 
-        Phase 9B ITERATE resolution (DT#2 R-BY): when `self.exit_reason` is
-        set to "red_force_exit" (by cycle_runner's `_execute_force_exit_sweep`
-        during a RED daily-loss cycle), short-circuit normal edge evaluation
-        and return `ExitDecision(should_exit=True, trigger="RED_FORCE_EXIT")`.
-        This wires the Phase 9B sweep marker to the existing exit actuator
-        path (monitor_refresh → evaluate_exit → execute_exit), closing the
-        critic-carol cycle-3 CRITICAL-1 "inert marker" gap. Day0 positions
-        skip this path — they have their own risk-containment via
-        nowcast/causality; DT#2 RED is orthogonal to Day0 evaluator logic.
+        Precedence is the law's: RiskGuard RED force-exits in every phase (the
+        Day0 exemption is removed — DT#2 RED is orthogonal to observation phase);
+        a degraded belief holds as EVIDENCE_UNAVAILABLE unless a Day0
+        settlement-preimage lock (IMPOSSIBLE/GUARANTEED) decides regardless.
         """
-        prior_day0_robust_confirmation = (
-            "day0_robust_sell_value_awaits_confirmation"
-            in self.applied_validations
-        )
-        prior_day0_robust_count = (
-            int(self.neg_edge_count or 0)
-            if prior_day0_robust_confirmation
-            else 0
-        )
-        if prior_day0_robust_confirmation:
-            self.neg_edge_count = 0
-        decision_scoped_value_validations = {
-            "ev_gate",
-            "hold_value_exit_costs_enabled",
-            "hold_value_hours_unknown_time_cost_zero",
-            "hold_value_correlation_crowding_applied",
-            "hold_value_probability_basis:current_q_ucb",
-            "hold_value_probability_basis:current_point_q",
-            "exit_fee_applied_to_sell_value",
-            "hold_terminal_value_excludes_exit_fee",
-            "current_held_ci_invalid",
-            "entry_held_ci_invalid",
-            "day0_robust_sell_value_awaits_confirmation",
-        }
         applied = [
             validation
             for validation in self.applied_validations
-            if validation not in decision_scoped_value_validations
+            if validation not in _DECISION_SCOPED_VALIDATIONS
         ]
 
-        # DT#2 RED force-exit sweep short-circuit (Phase 9B ITERATE, R-BY).
-        # Must run BEFORE the missing-authority fail-closed check: when the
-        # risk layer declares RED, we exit regardless of whether we have full
-        # ExitContext authority. The sell order posts at whatever the
-        # orderbook offers; RED containment takes precedence over normal
-        # price-quality gating.
-        if (
-            self.exit_reason == "red_force_exit"
-            and not exit_context.day0_active
-        ):
+        held_shares = Decimal(str(self.effective_shares))
+        q_lcb, evidence_ok = self._held_side_robust_lower(exit_context)
+        lock = self._settlement_preimage_lock(exit_context)
+        bid_breakpoints = self._exit_bid_breakpoints(exit_context, held_shares)
+
+        verdict = predicted_bin_law.exit_decision(
+            held_shares=held_shares,
+            q_lcb=q_lcb,
+            bid_breakpoints=bid_breakpoints,
+            exit_margin=_EXIT_TICK * held_shares,
+            lock=lock,
+            evidence_ok=evidence_ok,
+            riskguard_red=self.exit_reason == "red_force_exit",
+        )
+
+        applied.append("predicted_bin_exit_law")
+        if lock is LockState.IMPOSSIBLE:
+            applied.append("settlement_preimage_lock:impossible")
+        elif lock is LockState.GUARANTEED:
+            applied.append("settlement_preimage_lock:guaranteed")
+
+        method = self.selected_method or self.entry_method
+        if verdict.action is ExitAction.RED_FORCE_EXIT:
+            applied.append("red_force_exit")
             applied.append("dt2_red_force_exit_sweep_actuated")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -1052,782 +1060,36 @@ class Position:
                 "RED_FORCE_EXIT",
                 urgency="immediate",
                 trigger="RED_FORCE_EXIT",
-                selected_method=self.selected_method or self.entry_method,
+                selected_method=method,
                 applied_validations=list(self.applied_validations),
             )
-
-        # BUG#113 (守護 SD-7) — EVIDENCE_UNAVAILABLE third state. When the current belief math is
-        # degraded (day0 absorbing-mask / obs gap), belief CANNOT be computed — distinct from
-        # belief-reversed. Do NOT exit on a price move and do NOT collapse into a blind hold; return
-        # a first-class hold flagged EVIDENCE_UNAVAILABLE for the 守護 heartbeat. Runs BEFORE the
-        # missing-authority check so a NaN fresh_prob caused by degraded belief is named correctly
-        # (not the generic INCOMPLETE_EXIT_CONTEXT). RED force-exit above still preempts this.
-        if (
-            not exit_context.belief_available
-            and exit_context.entry_posterior is not None
-        ):
-            applied.append("ci_separation_gate")
+        if verdict.action is ExitAction.EVIDENCE_UNAVAILABLE:
             applied.append("evidence_unavailable_third_state")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 False,
                 "EVIDENCE_UNAVAILABLE",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
                 trigger="EVIDENCE_UNAVAILABLE",
-            )
-
-        missing = exit_context.missing_authority_fields()
-        if (
-            exit_context.day0_active
-            and any(field in missing for field in ("fresh_prob", "fresh_prob_is_fresh"))
-            and not ExitContext._is_finite(exit_context.best_bid)
-        ):
-            missing = list(missing) + ["best_bid"]
-            applied.append("best_bid_unavailable")
-        if missing:
-            applied.append("exit_context_incomplete")
-            if exit_context.day0_active and any(field in missing for field in ("fresh_prob", "fresh_prob_is_fresh")):
-                applied.append("day0_probability_authority_blocked")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                f"INCOMPLETE_EXIT_CONTEXT (missing={','.join(missing)})",
-                selected_method=self.selected_method or self.entry_method,
+                selected_method=method,
                 applied_validations=list(self.applied_validations),
             )
-
-        if exit_context.best_bid is None:
-            applied.append("best_bid_unavailable")
-        if exit_context.best_ask is None:
-            applied.append("best_ask_unavailable")
-        if exit_context.market_vig is None:
-            applied.append("market_vig_unavailable")
-        if exit_context.whale_toxicity is None:
-            applied.append("whale_toxicity_unavailable")
-        elif exit_context.whale_toxicity:
-            applied.append("whale_toxicity_available")
-        if exit_context.chain_is_fresh is None:
-            applied.append("chain_freshness_unavailable")
-        elif exit_context.chain_is_fresh is False:
-            applied.append("chain_freshness_stale")
-
-        forward_edge = compute_forward_edge(
-            HeldSideProbability(float(exit_context.fresh_prob), self.direction),
-            NativeSidePrice(float(exit_context.current_market_price), self.direction),
-        )
-        applied.append("forward_edge_compute")
-
-        if not ExitContext._is_finite(exit_context.best_bid):
-            applied.append("best_bid_unavailable")
-            applied.append("exit_context_incomplete")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-            )
-
-        if exit_context.day0_active:
-            applied.append("day0_observation_authority")
-            applied.append("day0_standard_exit_optimizer")
-
-        current_hold_q_ucb = _held_side_ci_ucb(
-            exit_context.current_ci,
-            exit_context.fresh_prob,
-        )
-        current_ci_invalid = (
-            exit_context.current_ci is not None and current_hold_q_ucb is None
-        )
-        if current_hold_q_ucb is None:
-            applied.append(
-                "current_held_ci_invalid"
-                if current_ci_invalid
-                else "current_held_ci_unavailable"
-            )
-            applied.append("evidence_unavailable_third_state")
-            if (
-                exit_context.hours_to_settlement is not None
-                and exit_context.hours_to_settlement < 1.0
-            ):
-                applied.append("near_settlement_gate")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "EVIDENCE_UNAVAILABLE",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="EVIDENCE_UNAVAILABLE",
-            )
-
-        if exit_context.day0_active:
-            if float(exit_context.fresh_prob) <= 1e-9:
-                applied.append("day0_zero_probability_exit_authority_gate")
-                if not exit_context.day0_zero_probability_exit_authority:
-                    applied.append("day0_zero_probability_exit_authority_blocked")
-                else:
-                    sell_value_dominates = self._sell_value_exceeds_hold_value(
-                        current_p_posterior=float(exit_context.fresh_prob),
-                        best_bid=exit_context.best_bid,
-                        hours_to_settlement=exit_context.hours_to_settlement,
-                        applied=applied,
-                        portfolio_positions=exit_context.portfolio_positions,
-                        bankroll=exit_context.bankroll,
-                    )
-                    if sell_value_dominates is True:
-                        self.neg_edge_count = 0
-                        entry_prob_for_reason = (
-                            float(exit_context.entry_posterior)
-                            if ExitContext._is_finite(exit_context.entry_posterior)
-                            else float(self.p_posterior or 0.0)
-                        )
-                        applied.append("day0_zero_probability_sell_value_dominates")
-                        self.applied_validations = _dedupe_validations(applied)
-                        return ExitDecision(
-                            True,
-                            (
-                                "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES "
-                                f"(entry={entry_prob_for_reason:.4f}, "
-                                "current=0.0000)"
-                            ),
-                            selected_method=self.selected_method or self.entry_method,
-                            applied_validations=list(self.applied_validations),
-                            trigger="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
-                        )
-                    if sell_value_dominates is None:
-                        applied.append("day0_zero_probability_exit_context_incomplete_hold")
-                        self.applied_validations = _dedupe_validations(applied)
-                        return ExitDecision(
-                            False,
-                            "DAY0_ZERO_PROBABILITY_EXIT_CONTEXT_INCOMPLETE_HOLD",
-                            selected_method=self.selected_method or self.entry_method,
-                            applied_validations=list(self.applied_validations),
-                            trigger="DAY0_ZERO_PROBABILITY_EXIT_CONTEXT_INCOMPLETE_HOLD",
-                        )
-                    applied.append("day0_zero_probability_hold_value_dominates")
-
-        # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
-        # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
-        # confirmed-win NO at 99.9c was force-sold). Route the decision through the SAME EV(hold)
-        # vs EV(sell) authority the rest of the exit path uses - HoldValue net of exit costs vs
-        # shares*bid. A valid current CI obeys strict net-value dominance. Missing or malformed CI
-        # cannot prove SELL, so it holds with explicit evidence-unavailable authority. A physics
-        # REVERSAL the market has not priced (fresh belief low) OR a market overpaying our fresh
-        # belief can SELL only when the UCB-based comparison is positively proven. Freshness of
-        # fresh_prob is already gated by the missing-authority check above, so a stale belief cannot
-        # drive this branch.
-        if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
-            if current_ci_invalid:
-                applied.append("current_held_ci_invalid")
-                applied.append("evidence_unavailable_third_state")
-                applied.append("near_settlement_gate")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    "NEAR_SETTLEMENT_EVIDENCE_UNAVAILABLE_HOLD",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="EVIDENCE_UNAVAILABLE",
-                )
-            if current_hold_q_ucb is None:
-                applied.append("evidence_unavailable_third_state")
-                applied.append("near_settlement_gate")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    "NEAR_SETTLEMENT_EVIDENCE_UNAVAILABLE_HOLD",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="EVIDENCE_UNAVAILABLE",
-                )
-            hold_probability = current_hold_q_ucb
-            applied.append("hold_value_probability_basis:current_q_ucb")
-            sell_beats_hold = self._sell_value_exceeds_hold_value(
-                current_p_posterior=hold_probability,
-                best_bid=exit_context.best_bid,
-                hours_to_settlement=exit_context.hours_to_settlement,
-                applied=applied,
-                portfolio_positions=exit_context.portfolio_positions,
-                bankroll=exit_context.bankroll,
-            )
-            if sell_beats_hold is True:
-                # sell-EV dominant (physics REVERSAL, or the market overpaying our fresh belief).
-                applied.append("near_settlement_gate")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    True, "SETTLEMENT_IMMINENT", "immediate",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="SETTLEMENT_IMMINENT",
-                )
-            if sell_beats_hold is None:
-                applied.append("near_settlement_exit_context_incomplete_hold")
-                applied.append("evidence_unavailable_third_state")
-                applied.append("near_settlement_gate")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    "NEAR_SETTLEMENT_EXIT_CONTEXT_INCOMPLETE_HOLD",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="EVIDENCE_UNAVAILABLE",
-                )
-            near_settlement_hold_reason = self._near_settlement_hold_confirmation_reason(
-                current_p_posterior=hold_probability,
-                best_bid=exit_context.best_bid,
-            )
-            if near_settlement_hold_reason is not None:
-                applied.append("near_settlement_confirmed_win_hold")
-                if near_settlement_hold_reason != "near_settlement_confirmed_win_hold":
-                    applied.append(near_settlement_hold_reason)
-            applied.append("near_settlement_hold_value_dominates")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES",
-            )
-
-        # Order-flow toxicity is evidence, not a liquidation objective.  It may
-        # help form a future current belief/ambiguity carrier, but it cannot
-        # bypass the fresh held-side probability and executable hold-vs-sell
-        # comparison below.
-        if exit_context.whale_toxicity:
-            applied.append("whale_toxicity_observed")
-
-        # MODEL_DIVERGENCE_PANIC removed 2026-06-24 (Shanghai 25C "wrong exit"; frontier consult
-        # REQ-20260624-105149 HIGH-confidence verdict). divergence_score = max(0, p_market - p_belief)
-        # is positive ONLY when the market values the HELD side ABOVE the model — which for a held binary
-        # is harmless overpayment or a cold model, NEVER adverse. The two panic branches turned that gap
-        # into an immediate market-order liquidation here, PREEMPTING the purpose-built CI-separation
-        # reversal gate + HoldValue economics below (the machinery that exits only on a CONFIRMED reversal,
-        # never a bare price move) — and dumped near-certain winners (Shanghai NO @0.96, belief 0.655).
-        # Removed outright (gate collapse, not a conditional gate). Real deterioration still exits via
-        # day0 absorbing hard-fact, SETTLEMENT_IMMINENT, the velocity-evidenced
-        # FLASH_CRASH_PANIC below, CI_SEPARATED_REVERSAL, and the direction-specific HoldValue economics.
-
-        # BUG#127 (守護 SEV1): FLASH_CRASH_PANIC is evidence-gated, not a bare
-        # price-delta trigger. Maintain the consecutive-cycle persistence counter
-        # first, then consult the shared gate. Probability authority is guaranteed
-        # present here (missing_authority_fields() already passed above, requiring
-        # fresh_prob + fresh_prob_is_fresh).
-        if exit_context.market_velocity_1h <= flash_crash_velocity():
-            self.flash_crash_count = int(self.flash_crash_count or 0) + 1
-        else:
-            self.flash_crash_count = 0
-        if flash_crash_should_fire(
-            market_velocity_1h=exit_context.market_velocity_1h,
-            divergence_score=exit_context.divergence_score,
-            has_probability_authority=True,
-            flash_crash_count=self.flash_crash_count,
-        ):
-            applied.append("flash_crash_trigger")
+        if verdict.action is ExitAction.SELL_REVERSAL:
+            applied.append("sell_reversal")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 True,
-                (
-                    f"FLASH_CRASH_PANIC (velocity={exit_context.market_velocity_1h:.2f}/hr, "
-                    f"divergence={exit_context.divergence_score:.2f}, cycles={self.flash_crash_count})"
-                ),
-                "immediate",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="FLASH_CRASH_PANIC",
-            )
-
-        # Micro-position marker: small fills still need the same live redecision
-        # math as every other held position. Returning here hid incident-created
-        # negative-edge dust from CI/hold-value exits; keep the breadcrumb but let
-        # the downstream economic gates decide hold vs exit.
-        if self.effective_cost_basis_usd < 1.0:
-            applied.append("micro_position_hold")
-
-        # Vig extreme
-        if (
-            exit_context.market_vig is not None
-            and ExitContext._is_finite(exit_context.market_vig)
-            and (exit_context.market_vig > 1.08 or exit_context.market_vig < 0.92)
-        ):
-            applied.append("vig_extreme_gate")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True, f"VIG_EXTREME (vig={exit_context.market_vig:.3f})",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="VIG_EXTREME",
-            )
-
-        if current_ci_invalid:
-            applied.append("ci_separation_gate")
-            applied.append("current_held_ci_invalid")
-            applied.append("evidence_unavailable_third_state")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "EVIDENCE_UNAVAILABLE",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="EVIDENCE_UNAVAILABLE",
-            )
-
-        entry_ci_invalid = (
-            exit_context.entry_ci is not None
-            and exit_context.entry_posterior is not None
-            and not _entry_ci_contains_point(
-                exit_context.entry_ci,
-                exit_context.entry_posterior,
-            )
-        )
-        if entry_ci_invalid:
-            applied.append("ci_separation_gate")
-            applied.append("entry_held_ci_invalid")
-            applied.append("evidence_unavailable_third_state")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "EVIDENCE_UNAVAILABLE",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="EVIDENCE_UNAVAILABLE",
-            )
-
-        # BUG#113 (守護 SD-7) — CI-SEPARATION belief-reversal gate (the 120-min 守護 guarantee:
-        # "exit only when the belief CI has SEPARATED below entry, NEVER on a bare/large price
-        # move whose CI still overlaps entry"). This lifts the severed screen_exit logic onto the
-        # LIVE path. It performs ZERO DB I/O — the CI bounds arrive pre-computed via ExitContext
-        # (current_ci = this cycle's fresh bootstrap CI; entry_ci = entry-time snapshot) — so the
-        # 2026-05-31 "second world connection inside the SAVEPOINT" deadlock is structurally
-        # impossible here. Missing current CI has already failed closed above.
-        separated = _ci_intervals_separated(exit_context.entry_ci, exit_context.current_ci)
-        if separated is not None and exit_context.entry_posterior is not None:
-            applied.append("ci_separation_gate")
-            assert current_hold_q_ucb is not None
-            current_held = float(exit_context.fresh_prob)
-            below = current_held < float(exit_context.entry_posterior) - _CI_SEP_EPS
-            if separated and below:
-                evidence_edge = conservative_forward_edge(
-                    forward_edge,
-                    self.entry_ci_width,
-                )
-                edge_threshold = (
-                    buy_no_edge_threshold(self.entry_ci_width)
-                    if self.direction == "buy_no"
-                    else buy_yes_edge_threshold(self.entry_ci_width)
-                )
-                applied.append("ci_threshold")
-                if exit_context.day0_active and current_held <= 1e-9:
-                    if not exit_context.day0_zero_probability_exit_authority:
-                        applied.append("day0_zero_probability_exit_authority_blocked")
-                    else:
-                        applied.append("hold_value_probability_basis:current_q_ucb")
-                        sell_value_dominates = self._sell_value_exceeds_hold_value(
-                            current_p_posterior=current_hold_q_ucb,
-                            best_bid=exit_context.best_bid,
-                            hours_to_settlement=exit_context.hours_to_settlement,
-                            applied=applied,
-                            portfolio_positions=exit_context.portfolio_positions,
-                            bankroll=exit_context.bankroll,
-                        )
-                        if sell_value_dominates is True:
-                            self.neg_edge_count = 0
-                            applied.append("day0_zero_probability_sell_value_dominates")
-                            self.applied_validations = _dedupe_validations(applied)
-                            return ExitDecision(
-                                True,
-                                (
-                                    "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES "
-                                    f"(entry={float(exit_context.entry_posterior):.4f}, "
-                                    f"current={current_held:.4f})"
-                                ),
-                                selected_method=self.selected_method or self.entry_method,
-                                applied_validations=list(self.applied_validations),
-                                trigger="DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
-                            )
-                if evidence_edge >= edge_threshold:
-                    self.neg_edge_count = 0
-                    if forward_edge > 0.0:
-                        hold_reason = "CI_SEPARATED_POSITIVE_EDGE_HOLD"
-                        applied.append("ci_separated_positive_edge_hold")
-                    else:
-                        hold_reason = "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
-                        applied.append("ci_separated_edge_within_threshold_hold")
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        hold_reason,
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                        trigger=hold_reason,
-                    )
-                applied.append("hold_value_probability_basis:current_q_ucb")
-                sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=current_hold_q_ucb,
-                    best_bid=exit_context.best_bid,
-                    hours_to_settlement=exit_context.hours_to_settlement,
-                    applied=applied,
-                    portfolio_positions=exit_context.portfolio_positions,
-                    bankroll=exit_context.bankroll,
-                )
-                if sell_value_dominates is False:
-                    self.neg_edge_count = 0
-                    applied.append("ci_separated_hold_value_dominates")
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        "CI_SEPARATED_HOLD_VALUE_DOMINATES",
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                        trigger="CI_SEPARATED_HOLD_VALUE_DOMINATES",
-                    )
-                if sell_value_dominates is None:
-                    self.neg_edge_count = 0
-                    applied.append("ci_separated_exit_context_incomplete_hold")
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        "CI_SEPARATED_EXIT_CONTEXT_INCOMPLETE_HOLD",
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                        trigger="CI_SEPARATED_EXIT_CONTEXT_INCOMPLETE_HOLD",
-                    )
-                # Disjoint AND moved against the held side → genuine evidence reversal → EXIT.
-                self.neg_edge_count = 0
-                applied.append("ci_separated_reversal")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    True,
-                    f"CI_SEPARATED_REVERSAL (entry={float(exit_context.entry_posterior):.4f}, current={current_held:.4f})",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="CI_SEPARATED_REVERSAL",
-                )
-            # The interval may overlap entry, but HOLD still competes with an
-            # executable sale on this same current cut. Day0 must retain its
-            # observation/consecutive-confirmation gate and known exit trigger
-            # so the downstream maturity lock remains authoritative.
-            if exit_context.day0_active:
-                applied.append("ci_overlap_nonterminal_day0")
-                # A confidence upper bound is an uncertainty envelope, not the
-                # expected payoff of continuing to own the token.  Day0 keeps
-                # consecutive current-cut confirmation, so point-q value does
-                # not become a mechanical price stop.
-                applied.append("hold_value_probability_basis:current_point_q")
-                sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=current_held,
-                    best_bid=exit_context.best_bid,
-                    hours_to_settlement=exit_context.hours_to_settlement,
-                    applied=applied,
-                    portfolio_positions=exit_context.portfolio_positions,
-                    bankroll=exit_context.bankroll,
-                )
-                if sell_value_dominates is True:
-                    self.neg_edge_count = (
-                        prior_day0_robust_count + 1
-                        if prior_day0_robust_confirmation
-                        else 1
-                    )
-                else:
-                    self.neg_edge_count = 0
-                applied.append("day0_observation_gate")
-                applied.append("consecutive_cycle_check")
-                if (
-                    sell_value_dominates is True
-                    and self.neg_edge_count >= consecutive_confirmations()
-                ):
-                    self.neg_edge_count = 0
-                    applied.append("ci_overlap_sell_value_dominates")
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        True,
-                        "DAY0_ROBUST_SELL_VALUE_DOMINATES",
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                        trigger="EDGE_REVERSAL",
-                    )
-                if sell_value_dominates is True:
-                    applied.append("day0_robust_sell_value_awaits_confirmation")
-                    reason = "DAY0_ROBUST_SELL_VALUE_AWAITS_CONFIRMATION"
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        reason,
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                        trigger=reason,
-                    )
-                reason = (
-                    "CI_OVERLAP_EXIT_CONTEXT_INCOMPLETE_HOLD"
-                    if sell_value_dominates is None
-                    else "CI_OVERLAP_HOLD_VALUE_DOMINATES"
-                )
-                applied.append(reason.lower())
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    reason,
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger=reason,
-                )
-            applied.append("hold_value_probability_basis:current_q_ucb")
-            sell_value_dominates = self._sell_value_exceeds_hold_value(
-                current_p_posterior=current_hold_q_ucb,
-                best_bid=exit_context.best_bid,
-                hours_to_settlement=exit_context.hours_to_settlement,
-                applied=applied,
-                portfolio_positions=exit_context.portfolio_positions,
-                bankroll=exit_context.bankroll,
-            )
-            self.neg_edge_count = 0
-            if sell_value_dominates is True:
-                applied.append("ci_overlap_sell_value_dominates")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    True,
-                    "CI_OVERLAP_SELL_VALUE_DOMINATES",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="CI_OVERLAP_SELL_VALUE_DOMINATES",
-                )
-            if sell_value_dominates is None:
-                applied.append("ci_overlap_exit_context_incomplete_hold")
-                reason = "CI_OVERLAP_EXIT_CONTEXT_INCOMPLETE_HOLD"
-            else:
-                applied.append("ci_overlap_hold_value_dominates")
-                reason = "CI_OVERLAP_HOLD_VALUE_DOMINATES"
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                reason,
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger=reason,
-            )
-
-        # Direction-specific exit logic
-        if self.direction == "buy_no":
-            return self._buy_no_exit(
-                forward_edge,
-                current_p_posterior=float(exit_context.fresh_prob),
-                current_market_price=float(exit_context.current_market_price),
-                best_bid=exit_context.best_bid,
-                hours_to_settlement=exit_context.hours_to_settlement,
-                day0_active=exit_context.day0_active,
-                applied=applied,
-                portfolio_positions=exit_context.portfolio_positions,
-                bankroll=exit_context.bankroll,
-            )
-        else:
-            best_bid = exit_context.best_bid
-            return self._buy_yes_exit(
-                forward_edge,
-                current_p_posterior=float(exit_context.fresh_prob),
-                best_bid=best_bid,
-                day0_active=exit_context.day0_active,
-                hours_to_settlement=exit_context.hours_to_settlement,
-                applied=applied,
-                portfolio_positions=exit_context.portfolio_positions,
-                bankroll=exit_context.bankroll,
-            )
-
-    def _buy_yes_exit(
-        self,
-        forward_edge: float,
-        current_p_posterior: float,
-        best_bid: Optional[float] = None,
-        day0_active: bool = False,
-        hours_to_settlement: Optional[float] = None,
-        applied: Optional[list[str]] = None,
-        portfolio_positions: tuple = (),
-        bankroll: Optional[float] = None,
-    ) -> ExitDecision:
-        """Standard 2-consecutive EDGE_REVERSAL with EV gate.
-
-        T6.4: when feature_flags.HOLD_VALUE_EXIT_COSTS is enabled, the EV
-        gate uses HoldValue.compute_with_exit_costs (fee + time opportunity
-        cost) instead of the legacy zero-cost HoldValue.compute. hours_to_
-        settlement feeds the time_cost component; when None, time_cost
-        collapses to 0.0 as a soft conservative default.
-
-        T6.4-phase2: portfolio_positions + bankroll thread the correlation-
-        crowding substrate through to HoldValue.compute_with_exit_costs.
-        Each element of portfolio_positions is
-        (cluster, effective_cost_basis_usd, trade_id) for OTHER co-held
-        positions (self-excluded at _build_exit_context
-        layer). Crowding cost defaults to 0.0 via the helper when
-        exit_correlation_crowding_rate() is 0.0 (current default).
-        """
-        applied = list(applied or [])
-        if not ExitContext._is_finite(best_bid):
-            applied.append("best_bid_unavailable")
-            applied.append("exit_context_incomplete")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
-                selected_method=self.selected_method or self.entry_method,
+                "SELL_REVERSAL",
+                trigger="SELL_REVERSAL",
+                selected_method=method,
                 applied_validations=list(self.applied_validations),
             )
-        evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
-        edge_threshold = buy_yes_edge_threshold(self.entry_ci_width)
-        applied.append("ci_threshold")
-        if day0_active and evidence_edge < edge_threshold:
-            applied.append("day0_observation_gate")
-            applied.append("day0_observation_reversal_nonterminal")
-        applied.append("consecutive_cycle_check")
-        if evidence_edge >= edge_threshold:
-            self.neg_edge_count = 0
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-            )
-
-        self.neg_edge_count += 1
-        if self.neg_edge_count < consecutive_confirmations():
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-            )
-
-        # Layer 4: EV gate
-        shares = self.effective_shares
-        if best_bid is not None and shares > 0:
-            sell_value_dominates = self._sell_value_exceeds_hold_value(
-                current_p_posterior=current_p_posterior,
-                best_bid=best_bid,
-                hours_to_settlement=hours_to_settlement,
-                applied=applied,
-                portfolio_positions=portfolio_positions,
-                bankroll=bankroll,
-            )
-            if sell_value_dominates is not True:
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                )
-
-        self.neg_edge_count = 0
-        self.applied_validations = _dedupe_validations(applied)
-        return ExitDecision(
-            True, f"EDGE_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
-            selected_method=self.selected_method or self.entry_method,
-            applied_validations=list(self.applied_validations),
-            trigger="EDGE_REVERSAL",
-        )
-
-    def _buy_no_exit(
-        self,
-        forward_edge: float,
-        current_p_posterior: float,
-        current_market_price: float,
-        best_bid: Optional[float] = None,
-        hours_to_settlement: Optional[float] = None,
-        day0_active: bool = False,
-        applied: Optional[list[str]] = None,
-        portfolio_positions: tuple = (),
-        bankroll: Optional[float] = None,
-    ) -> ExitDecision:
-        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math.
-
-        T6.4: routes the EV gate through HoldValue contract (previously
-        bypassed). When feature_flags.HOLD_VALUE_EXIT_COSTS is enabled,
-        exit decisions include fee + time opportunity cost. Buy-no sell value
-        uses held-token best_bid; current_market_price remains the probability
-        / forward-edge input and must not masquerade as executable proceeds.
-
-        T6.4-phase2: portfolio_positions + bankroll thread correlation-
-        crowding substrate; defaults preserve pre-phase2 behavior (cost 0.0)
-        until exit_correlation_crowding_rate() > 0.0.
-        """
-        applied = list(applied or [])
-        evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
-        edge_threshold = buy_no_edge_threshold(self.entry_ci_width)
-        near_threshold = buy_no_ceiling()
-        applied.append("ci_threshold")
-
-        if day0_active and evidence_edge < edge_threshold:
-            applied.append("day0_observation_gate")
-            applied.append("day0_observation_reversal_nonterminal")
-
-        # Near-settlement hold (unless deeply negative). Day0 already passed
-        # through the shared settlement-imminent gate in evaluate_exit; do not
-        # let this wider buy-NO shortcut bypass the standard Day0 optimizer.
-        if (
-            not day0_active
-            and hours_to_settlement is not None
-            and hours_to_settlement < near_settlement_hours()
-        ):
-            applied.append("near_settlement_gate")
-            if forward_edge < near_threshold:
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    True, f"BUY_NO_NEAR_EXIT (point={forward_edge:.4f})",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="BUY_NO_NEAR_EXIT",
-                )
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-            )
-
-        applied.append("consecutive_cycle_check")
-        if evidence_edge < edge_threshold:
-            self.neg_edge_count += 1
-        else:
-            self.neg_edge_count = 0
-
-        if self.neg_edge_count >= consecutive_confirmations():
-            if not ExitContext._is_finite(best_bid):
-                applied.append("best_bid_unavailable")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                )
-            shares = self.effective_shares
-            if shares > 0:
-                sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=current_p_posterior,
-                    best_bid=best_bid,
-                    hours_to_settlement=hours_to_settlement,
-                    applied=applied,
-                    portfolio_positions=portfolio_positions,
-                    bankroll=bankroll,
-                )
-                if sell_value_dominates is not True:
-                    self.applied_validations = _dedupe_validations(applied)
-                    return ExitDecision(
-                        False,
-                        selected_method=self.selected_method or self.entry_method,
-                        applied_validations=list(self.applied_validations),
-                    )
-            self.neg_edge_count = 0
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True, f"BUY_NO_EDGE_EXIT (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="BUY_NO_EDGE_EXIT",
-            )
-
+        applied.append("hold")
         self.applied_validations = _dedupe_validations(applied)
         return ExitDecision(
             False,
-            selected_method=self.selected_method or self.entry_method,
+            "HOLD",
+            trigger="HOLD",
+            selected_method=method,
             applied_validations=list(self.applied_validations),
         )
 

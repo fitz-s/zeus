@@ -1235,6 +1235,18 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     if "env" in columns:
                         insert_columns.append("env")
                         values.append(str(getattr(position, "env", "unknown_env") or "unknown_env"))
+                    # PR-1 (COLLISION.md §唯一决策律): a balance-only rescue observes a
+                    # token on the shared wallet Zeus never ordered through the law —
+                    # its origin is external_wallet, and decision_law_id stays NULL
+                    # (no Zeus decision produced it). strategy_key='chain_only_reconciliation'
+                    # continuity is written by the canonical rescue projection; here we
+                    # only add the origin axis when the migrated column is present.
+                    if "position_origin" in columns:
+                        from src.state.db import assert_law_identity
+
+                        assert_law_identity(None, "external_wallet")
+                        insert_columns.append("position_origin")
+                        values.append("external_wallet")
                     conn.execute(
                         f"""
                         INSERT INTO position_events ({", ".join(insert_columns)})

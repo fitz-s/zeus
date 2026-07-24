@@ -397,7 +397,7 @@ def test_buy_no_missing_monitor_probability_cannot_trigger_divergence_panic_exit
 
     assert decision.should_exit is False
     assert decision.trigger != "MODEL_DIVERGENCE_PANIC"
-    assert decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"  # one-law vocabulary 2026-07-24
 
 
 def test_buy_no_exit_ev_gate_uses_held_token_best_bid_not_p_market_vector():
@@ -12731,7 +12731,7 @@ def test_orange_risk_does_not_override_incomplete_exit_context(monkeypatch):
     assert summary["risk_orange_holds"] == 1
     assert summary["exits"] == 0
     assert artifact.monitor_results[0].should_exit is False
-    assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    assert artifact.monitor_results[0].exit_reason == "EVIDENCE_UNAVAILABLE"  # one-law vocabulary 2026-07-24
     assert artifact.monitor_results[0].fresh_prob is None
     assert artifact.monitor_results[0].fresh_edge is None
 
@@ -12878,7 +12878,10 @@ def test_incomplete_exit_context_missing_exit_quote_is_not_chain_missing(monkeyp
     )
     assert "monitor_chain_missing" not in summary
     assert len(artifact.monitor_results) == 1
-    assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+    # One-law vocabulary (ultimate_alpha 2026-07-24): the verdict string is
+    # EVIDENCE_UNAVAILABLE; the observability recorder still classifies it as
+    # incomplete-exit-context (the summary assertions above prove that).
+    assert artifact.monitor_results[0].exit_reason == "EVIDENCE_UNAVAILABLE"
     assert artifact.monitor_results[0].fresh_prob is None
     assert artifact.monitor_results[0].fresh_edge is None
 

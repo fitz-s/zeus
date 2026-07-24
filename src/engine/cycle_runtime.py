@@ -55,6 +55,7 @@ from src.state.portfolio import (
     FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     INACTIVE_RUNTIME_STATES,
+    ExitContext,
     get_open_positions,
 )
 
@@ -244,6 +245,14 @@ def _freeze_entries_after_shoulder_ledger_failure(error: str, *, logger) -> str 
 #   so the statistical weak-exit evidence template (sample_size=2,
 #   consecutive_confirmations=2) would misrepresent its actual burden.
 #   A future wave may introduce an observation-grade evidence variant.
+# LEGACY-ONLY (ultimate_alpha 2026-07-24): evaluate_exit now emits the unified
+# vocabulary {HOLD, SELL_REVERSAL, EVIDENCE_UNAVAILABLE, RED_FORCE_EXIT}; the
+# triggers below are no longer produced. SELL_REVERSAL is DELIBERATELY absent —
+# the consecutive-confirmation evidence template this gate enforces is the
+# repeated-cycle confirmation machinery FINAL_SPEC retires (a fresh
+# current-state value comparison is its own evidence). The set is kept only so
+# any in-flight legacy rows drain through the old burden; E-slice removes the
+# gate once the vocabulary migration completes.
 _D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
     "EDGE_REVERSAL",
     "BUY_NO_EDGE_EXIT",
@@ -2851,7 +2860,10 @@ def _orange_favorable_exit_decision(pos, exit_context, exit_decision):
 
     if exit_decision.should_exit:
         return exit_decision
-    if str(getattr(exit_decision, "reason", "") or "").startswith("INCOMPLETE_EXIT_CONTEXT"):
+    reason_text = str(getattr(exit_decision, "reason", "") or "")
+    # Evidence-incomplete verdicts (legacy INCOMPLETE_EXIT_CONTEXT string or the
+    # one-law EVIDENCE_UNAVAILABLE) never get upgraded to an ORANGE exit.
+    if reason_text.startswith("INCOMPLETE_EXIT_CONTEXT") or reason_text == "EVIDENCE_UNAVAILABLE":
         return exit_decision
     missing_authority = getattr(exit_context, "missing_authority_fields", None)
     if callable(missing_authority) and missing_authority():
@@ -3379,6 +3391,11 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
         "FLASH_CRASH_PANIC",
         "VIG_EXTREME",
         "EDGE_REVERSAL",
+        # ultimate_alpha 2026-07-24: the unified stopping-law sell. It is a
+        # statistical value comparison (robust q⁻ vs top-of-book proceeds), so
+        # it inherits this classification's Day0-immature-authority protection;
+        # the legacy triggers above are no longer emitted by evaluate_exit.
+        "SELL_REVERSAL",
     }
 )
 
@@ -3396,6 +3413,13 @@ _GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS = frozenset(
         "EDGE_REVERSAL",
         "BUY_NO_EDGE_EXIT",
         "BUY_NO_NEAR_EXIT",
+        # ultimate_alpha 2026-07-24: the unified stopping-law sell proposes and
+        # the global auction actuates — evaluate_exit's L(x) sees only the
+        # top-of-book bid, while the auction values the sell against the real
+        # depth curve, fees, and portfolio endowment (the closest existing
+        # machinery to the PR-2 allocator ΔJ). RED and absorbing Day0 hard
+        # facts remain deliberately absent (direct reduce-only authority).
+        "SELL_REVERSAL",
     }
 )
 
@@ -4963,6 +4987,28 @@ def _missing_fields_from_incomplete_exit_reason(exit_reason: str) -> set[str]:
     if not text.startswith(prefix) or not text.endswith(")"):
         return set()
     return {part.strip() for part in text[len(prefix):-1].split(",") if part.strip()}
+
+
+def _incomplete_exit_observability_reason(exit_decision, exit_context) -> str | None:
+    """The observability-recorder key for an evidence-incomplete exit verdict.
+
+    Recognizes both vocabularies: the legacy INCOMPLETE_EXIT_CONTEXT(missing=…)
+    string (in-flight rows) and the one-law EVIDENCE_UNAVAILABLE verdict, whose
+    missing fields come from exit_context.missing_authority_fields() plus the
+    quote axis (best_bid) rather than reason-string parsing.
+    """
+    reason = str(getattr(exit_decision, "reason", "") or "")
+    if reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
+        return reason
+    if reason != "EVIDENCE_UNAVAILABLE":
+        return None
+    missing = []
+    fields = getattr(exit_context, "missing_authority_fields", None)
+    if callable(fields):
+        missing = list(fields())
+    if not ExitContext._is_finite(getattr(exit_context, "best_bid", None)):
+        missing.append("best_bid")
+    return f"INCOMPLETE_EXIT_CONTEXT (missing={','.join(missing) or 'belief'})"
 
 
 def _record_incomplete_exit_context_summary(
@@ -6843,17 +6889,20 @@ def execute_monitoring_phase(
                 if not gate_allowed:
                     should_exit = False
                     exit_reason = gate_reason or "INCOMPLETE_EXIT_EVIDENCE"
-            if exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
+            _incomplete_reason = _incomplete_exit_observability_reason(
+                exit_decision, exit_context
+            )
+            if _incomplete_reason is not None and not should_exit:
                 _record_incomplete_exit_context_summary(
                     summary,
                     pos=pos,
-                    exit_reason=exit_reason,
+                    exit_reason=_incomplete_reason,
                     hours_to_settlement=hours_to_settlement,
                 )
                 deps.logger.warning(
                     "Exit authority incomplete for %s: %s",
                     pos.trade_id,
-                    exit_reason,
+                    _incomplete_reason,
                 )
 
             monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(

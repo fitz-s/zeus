@@ -1092,7 +1092,17 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
         if pnl is None:
             continue
         strategy = str(row.get("strategy") or row.get("strategy_key") or "")
-        loss_eligible = strategy != "chain_only_reconciliation"
+        # PR-1 (COLLISION.md §唯一决策律): loss-eligibility is an ORIGIN predicate,
+        # not a label predicate. A position counts against the daily-loss gates iff
+        # Zeus's own decision opened it. It is NOT loss-eligible when a non-Zeus
+        # origin opened it (operator_cotrade / external_wallet — foreign capital),
+        # OR for the legacy chain_only_reconciliation label kept for continuity.
+        # position_origin is NULL for historical rows, which stay label-scoped.
+        position_origin = row.get("position_origin")
+        loss_eligible = not (
+            (position_origin is not None and str(position_origin) != "zeus_decision")
+            or strategy == "chain_only_reconciliation"
+        )
         exits.append(
             {
                 "city": str(row.get("city") or ""),
@@ -1579,10 +1589,19 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
     unclassified_count = 0
     for row in rows:
         strategy = str(row.get("strategy") or "unclassified")
-        if strategy not in CANONICAL_STRATEGY_KEYS:
+        # PR-1 (COLLISION.md §唯一决策律): a new-law row carries strategy_key NULL/
+        # absent but a decision_law_id, so it is classified by its law identity, not
+        # the legacy registry. Bucket it under the law id; legacy rows still gate on
+        # CANONICAL_STRATEGY_KEYS exactly as before (no weakening).
+        decision_law_id = str(row.get("decision_law_id") or "").strip()
+        if strategy in CANONICAL_STRATEGY_KEYS:
+            bucket_key = strategy
+        elif decision_law_id:
+            bucket_key = f"law:{decision_law_id}"
+        else:
             unclassified_count += 1
             continue
-        bucket = buckets.setdefault(strategy, {"p": [], "o": []})
+        bucket = buckets.setdefault(bucket_key, {"p": [], "o": []})
         bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
         bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
 
