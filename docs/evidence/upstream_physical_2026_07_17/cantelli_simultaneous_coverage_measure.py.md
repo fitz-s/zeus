@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Empirical coverage of the COMPOSED finite-evidence floor  max(CP_rho, Cantelli).
 
 Read-only over state/zeus-forecasts.db. Extends cp_coverage.py: for every

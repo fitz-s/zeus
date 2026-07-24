@@ -4,7 +4,7 @@
 - Authority basis: docs/operations/current/plans/upstream_data_physical_2026-07-17.md
   §Consult v2 (f) — "CP+Cantelli max() composition needs simultaneous-coverage accounting."
 - Composes with commit `eaf016ead` (CP effective-n member-dependence ρ) — does NOT undo it.
-- Measurement script: `cantelli_simultaneous_coverage_measure.py` (this dir; read-only over
+- Historical measurement document: `cantelli_simultaneous_coverage_measure.py.md` (this dir; read-only over
   `state/zeus-forecasts.db`, mirrors `cp_coverage.py` cell construction + target-clustered
   bootstrap + walk-forward split).
 

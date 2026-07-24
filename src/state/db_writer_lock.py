@@ -1,5 +1,5 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-12
+# Last reused or audited: 2026-07-24
 # Authority basis: .omc/plans/sqlite_contention_structural_design_v4_2026_05_07.md
 #                  §3.1 (mechanism), §3.1.2 (per-DB flock topology),
 #                  §3.1.5 (BulkChunker dual-channel watchdog),
@@ -755,7 +755,6 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_wu_blind_window.py",  # operator_invoked + guarded: comparison connection is mode=ro (read-only); --apply writes observation_instants + observation_prints via scripts.obs_live_tick._write_rows under db_writer_lock(BULK); WU-sourced blind-window recovery re-fetch (2026-07-16)
         "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
         "scripts/sigma_scale_before_after.py",  # read_only_ro_uri: sigma-scale before/after evidence table, opens forecasts/trades DBs mode=ro, SELECT-only (docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md)
-        "scripts/prune_terminal_opportunity_events.py",  # standalone one-time/maintenance retention sweep: own short-lived zeus-world.db connection with busy_timeout + batched-delete-with-backoff; runs OUTSIDE the daemon (cooperates via SQLite file lock), NOT a daemon-path writer (docs/evidence/settlement_guard/world_db_bloat_prune_and_forecast_lane_diagnosis_2026-06-16.md)
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
         # the original single-script design. Each handles RO inspect/verify;

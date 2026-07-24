@@ -1,5 +1,5 @@
 # Created: 2026-07-22
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-24
 # Authority basis: operator-directed single-live-semantics extinction pass.
 """Relapse antibodies for dormant alternate-runtime concepts."""
 
@@ -78,6 +78,110 @@ def test_gate_scans_dynamically_importable_python_under_exclusion(tmp_path: Path
     assert any(
         item.startswith("docs/rebuild/alternate.py:") for item in violations(tmp_path)
     )
+
+
+def test_gate_rejects_executable_shell_under_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "docs" / "archive" / "bad.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\necho historical\n", encoding="utf-8")
+    script.chmod(0o755)
+    found = violations(tmp_path)
+    assert any(
+        item.startswith("docs/archive/bad.sh:")
+        and "non-document artifact" in item
+        for item in found
+    )
+    assert any("executable permission" in item for item in found)
+    assert any("has a shebang" in item for item in found)
+
+
+def test_gate_rejects_subprocess_target_under_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "src" / "runtime_launcher.py"
+    target = tmp_path / "docs" / "archive" / "historical.md"
+    launcher.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    launcher.write_text(
+        "import subprocess\n"
+        "subprocess.run(['bash', 'docs/archive/historical.md'], check=True)\n",
+        encoding="utf-8",
+    )
+    target.write_text("historical evidence\n", encoding="utf-8")
+    assert any(
+        item.startswith("src/runtime_launcher.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_shell_source_from_excluded_subtree(tmp_path: Path) -> None:
+    launcher = tmp_path / "scripts" / "runtime.sh"
+    target = tmp_path / "docs" / "evidence" / "historical.md"
+    launcher.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    launcher.write_text(
+        ". docs/evidence/historical.md\n",
+        encoding="utf-8",
+    )
+    target.write_text("historical evidence\n", encoding="utf-8")
+    assert any(
+        item.startswith("scripts/runtime.sh:")
+        and "executes or sources an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_plist_program_argument_under_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    plist = tmp_path / "deploy" / "runtime.plist"
+    target = tmp_path / "docs" / "rebuild" / "historical.md"
+    plist.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    plist.write_text(
+        "<plist><dict><key>ProgramArguments</key><array>"
+        "<string>bash</string><string>docs/rebuild/historical.md</string>"
+        "</array></dict></plist>\n",
+        encoding="utf-8",
+    )
+    target.write_text("historical evidence\n", encoding="utf-8")
+    assert any(
+        item.startswith("deploy/runtime.plist:")
+        and "ProgramArguments" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_rejects_live_config_load_from_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    loader = tmp_path / "src" / "config_loader.py"
+    target = tmp_path / "docs" / "evidence" / "historical.md"
+    loader.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    loader.write_text(
+        "from pathlib import Path\n"
+        "config = Path('docs/evidence/historical.md').read_text()\n",
+        encoding="utf-8",
+    )
+    target.write_text("historical evidence\n", encoding="utf-8")
+    assert any(
+        item.startswith("src/config_loader.py:")
+        and "consumes an excluded subtree" in item
+        for item in violations(tmp_path)
+    )
+
+
+def test_gate_allows_plain_historical_markdown_under_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    history = tmp_path / "docs" / "archive" / "historical.md"
+    history.parent.mkdir(parents=True)
+    history.write_text("historical evidence only\n", encoding="utf-8")
+    assert violations(tmp_path) == []
 
 
 def test_gate_scans_new_config_deploy_and_workflow_surfaces(tmp_path: Path) -> None:

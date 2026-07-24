@@ -978,6 +978,27 @@ scripts:
   promote_platt.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-world.db, read_targets: [explicit_isolated_staging_db, state/zeus-world.db], write_targets: [state/zeus-world.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of platt_models_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from refit_platt.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_platt.py::_rw_connect", "scripts/promote_platt.py::_backup_prod_tables"], required_tests: [tests/test_promote_platt.py]}
   promote_calibration.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-forecasts.db, read_targets: [explicit_isolated_staging_db, state/zeus-forecasts.db], write_targets: [state/zeus-forecasts.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of calibration_pairs_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from rebuild_calibration_pairs.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_calibration.py::_rw_connect", "scripts/promote_calibration.py::_backup_prod_tables"], required_tests: [tests/test_promote_calibration.py]}
 
+  prune_terminal_opportunity_events.py:
+    class: repair
+    dangerous_if_run: true
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: state/zeus-world.db
+    read_targets: [opportunity_events, opportunity_event_processing]
+    write_targets: [opportunity_event_processing]
+    authority_scope: canonical_world_retention
+    lifecycle: long_lived
+    status: active
+    delete_policy: retain_until_superseded
+    reuse_when: "Prune terminal opportunity_event_processing rows after the keep-set contract and live retention need are confirmed."
+    do_not_use_when: "The canonical cutover lease cannot be acquired, retained rows are uncertain, or a live-money cutover is in progress."
+    canonical_command: "python3 scripts/prune_terminal_opportunity_events.py [--db PATH] [--keep-hours HOURS] [--vacuum]"
+    external_inputs: []
+    promotion_barrier: "The shared cutover lease covers the connection lifetime; BULK db_writer_lock covers every mutation; opportunity_events remains append-only."
+    required_helpers: [src.state.db_writer_lock.connect_with_cutover_lease, src.state.db_writer_lock.db_writer_lock]
+    required_tests: [tests/test_single_live_semantics_migration.py]
+    unguarded_write_rationale: "This established operator maintenance script has no dry-run mode; it writes only terminal processing rows after persisting the keep set and now obeys both whole-cutover and BULK writer exclusion."
+
   regenerate_registries.py:
     class: utility
     reason: "Read-only harness-debate audit utility for manifest completeness/header drift; deliberately audits instead of regenerating authority manifests."

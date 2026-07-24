@@ -1,11 +1,12 @@
 # Created: 2026-07-23
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-07-24
 # Authority basis: operator-directed WORLD single-live decision-graph cutover.
 # Invariants: INV-03, INV-08, INV-17, INV-29, INV-30, INV-37
 """Fixture-only antibodies for the single-live WORLD decision-graph migration."""
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sqlite3
@@ -13,6 +14,9 @@ import threading
 from pathlib import Path
 
 import pytest
+
+from scripts import prune_terminal_opportunity_events as prune
+from src.state.db_writer_lock import SQLITE_CONNECT_ALLOWLIST
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1194,6 +1198,119 @@ def test_open_canonical_connection_blocks_exclusive_cutover(tmp_path: Path) -> N
                 pytest.fail("exclusive cutover entered while canonical connection lived")
     finally:
         conn.close()
+
+
+def test_prune_cannot_open_canonical_world_while_cutover_lease_is_exclusive(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    db = root / "state" / "zeus-world.db"
+    db.parent.mkdir(parents=True)
+    sqlite3.connect(db).close()
+    started = threading.Event()
+    opened = threading.Event()
+    errors: list[BaseException] = []
+
+    def open_prune() -> None:
+        started.set()
+        try:
+            with prune._prune_connection(db, busy_timeout_ms=100):
+                opened.set()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    with migration.cutover_lease(root, (db,)):
+        thread = threading.Thread(target=open_prune)
+        thread.start()
+        assert started.wait(1.0)
+        assert not opened.wait(0.1)
+
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert errors == []
+    assert opened.is_set()
+
+
+def test_cutover_cannot_acquire_exclusive_lease_while_prune_is_running(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    db = root / "state" / "zeus-world.db"
+    db.parent.mkdir(parents=True)
+    sqlite3.connect(db).close()
+
+    with prune._prune_connection(db, busy_timeout_ms=100):
+        with pytest.raises(RuntimeError, match="canonical writer lease is held"):
+            with migration.cutover_lease(root, (db,)):
+                pytest.fail("cutover entered while prune held its shared lease")
+
+
+def test_prune_started_after_process_fence_before_first_mutation_cannot_commit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    db = root / "state" / "zeus-world.db"
+    db.parent.mkdir(parents=True)
+    seed = sqlite3.connect(db)
+    seed.execute("CREATE TABLE retained (id INTEGER PRIMARY KEY)")
+    seed.execute("INSERT INTO retained VALUES (1)")
+    seed.commit()
+    seed.close()
+    started = threading.Event()
+    opened = threading.Event()
+    committed = threading.Event()
+    errors: list[BaseException] = []
+
+    def mutate() -> None:
+        started.set()
+        try:
+            with prune._prune_connection(db, busy_timeout_ms=100) as conn:
+                opened.set()
+                conn.execute("DELETE FROM retained")
+                conn.commit()
+                committed.set()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    with migration.cutover_lease(root, (db,)):
+        thread = threading.Thread(target=mutate)
+        thread.start()
+        assert started.wait(1.0)
+        assert not opened.wait(0.1)
+        assert not committed.is_set()
+        check = sqlite3.connect(db)
+        try:
+            assert check.execute("SELECT COUNT(*) FROM retained").fetchone()[0] == 1
+        finally:
+            check.close()
+
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert errors == []
+    assert opened.is_set()
+    assert committed.is_set()
+    check = sqlite3.connect(db)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM retained").fetchone()[0] == 0
+    finally:
+        check.close()
+
+
+def test_prune_has_no_raw_connect_allowlist_exception() -> None:
+    rel = "scripts/prune_terminal_opportunity_events.py"
+    assert rel not in SQLITE_CONNECT_ALLOWLIST
+
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    raw_connects = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "sqlite3"
+        and node.func.attr == "connect"
+    ]
+    assert raw_connects == []
 
 
 def test_legacy_risk_and_collateral_factories_obey_cutover(tmp_path: Path) -> None:

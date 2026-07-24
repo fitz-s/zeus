@@ -253,7 +253,7 @@ Landed (this wave):
 - 845be2a49 fix(day0): M-2/H-3 GAP_SUSPECT coverage detector (metric-aware extreme-window overlap, entry fail-closed, monitor bound-only + exit-authority revoke) + M-1 stale-bound margin on monitor belief.
 - 6b4f99cc5 fix(state): chain-mirror settlement clobber guard (was_economically_closed) — realized_pnl_usd writer fixed.
 - 8b74e79b5 + 46d56436c feat(reactor): multi-winner sequential re-auction loop (plan docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md, INV-44, 6 antibodies; K-winner recovery antibody re-based onto 094e7e91e projection-proof gate).
-- Historical repair applied: scripts/repair_settled_clobbered_pnl.py --apply → 58 repairs; rollback snapshot docs/evidence/capital_efficiency_2026_07_19/pnl_repair_rollback_2026-07-19.sql; 10 SKIP (no exit-fill event, by design) + 49 NULL (foreign rows, no Zeus economics).
+- Historical repair applied: scripts/repair_settled_clobbered_pnl.py --apply → 58 repairs; rollback snapshot docs/evidence/capital_efficiency_2026_07_19/pnl_repair_rollback_2026-07-19.sql.md; 10 SKIP (no exit-fill event, by design) + 49 NULL (foreign rows, no Zeus economics).
 
 Event bridge first fire confirmed live: DAY0_METAR_MATERIALIZATION_BRIDGE 118 log hits since 05:40 restart (mesh restart by coworker session at 2ffbd2d84).
 

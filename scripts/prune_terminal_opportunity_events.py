@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-06-16
-# Last audited: 2026-06-16
+# Last audited: 2026-07-24
 # Authority basis: GOAL #83 (continuous settlement-graded alpha) + RULE 1 (a "no fresh
 #   candidates / EXECUTABLE_SNAPSHOT_BLOCKED" symptom is OUR defect). Twin gap to the
 #   trades_wal_checkpoint backstop (2026-06-16): the EDLI prune organ
@@ -33,6 +33,15 @@ import os
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
+from src.state.db_writer_lock import (
+    WriteClass,
+    connect_with_cutover_lease,
+    db_writer_lock,
+)
 
 DEFAULT_DB = "/Users/leofitz/zeus/state/zeus-world.db"
 LIVE_STATUSES = ("pending", "processing", "claimed")
@@ -42,26 +51,29 @@ def _count(conn: sqlite3.Connection, sql: str, params=()) -> int:
     return int(conn.execute(sql, params).fetchone()[0])
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=DEFAULT_DB)
-    ap.add_argument("--keep-hours", type=float, default=3.0,
-                    help="also keep opportunity_events created within this many hours")
-    ap.add_argument("--proc-batch", type=int, default=20000)
-    ap.add_argument("--event-batch", type=int, default=5000)
-    ap.add_argument("--busy-timeout-ms", type=int, default=60000)
-    ap.add_argument("--sleep", type=float, default=0.05, help="seconds between batches")
-    ap.add_argument("--max-seconds", type=float, default=3600.0)
-    ap.add_argument("--keep-out", default="/tmp/prune_keep_event_ids_2026-06-16.txt")
-    ap.add_argument("--vacuum", action="store_true")
-    args = ap.parse_args()
+@contextmanager
+def _prune_connection(
+    db_path: Path,
+    *,
+    busy_timeout_ms: int,
+) -> Iterator[sqlite3.Connection]:
+    """Hold the shared cutover lease and BULK writer lock until close."""
 
-    if not os.path.exists(args.db):
-        print(f"DB not found: {args.db}", file=sys.stderr)
-        return 2
+    conn = connect_with_cutover_lease(
+        db_path,
+        canonical_db_path=db_path,
+        timeout=busy_timeout_ms / 1000.0,
+    )
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+    try:
+        with db_writer_lock(db_path, WriteClass.BULK):
+            yield conn
+    finally:
+        conn.close()
 
-    conn = sqlite3.connect(args.db, timeout=args.busy_timeout_ms / 1000.0)
-    conn.execute(f"PRAGMA busy_timeout={args.busy_timeout_ms}")
+
+def _prune(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
+    """Run the retention sweep inside the caller-held writer critical section."""
 
     fk = _count(conn, "PRAGMA foreign_keys")
     print(f"foreign_keys={fk} (expect 0)", flush=True)
@@ -168,8 +180,33 @@ def main() -> int:
         print("VACUUM done", flush=True)
 
     print(f"DONE in {time.monotonic()-start:.0f}s. proc_deleted={p} events_deleted={e} keep={keep_n}", flush=True)
-    conn.close()
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--db", default=DEFAULT_DB)
+    ap.add_argument("--keep-hours", type=float, default=3.0,
+                    help="also keep opportunity_events created within this many hours")
+    ap.add_argument("--proc-batch", type=int, default=20000)
+    ap.add_argument("--event-batch", type=int, default=5000)
+    ap.add_argument("--busy-timeout-ms", type=int, default=60000)
+    ap.add_argument("--sleep", type=float, default=0.05, help="seconds between batches")
+    ap.add_argument("--max-seconds", type=float, default=3600.0)
+    ap.add_argument("--keep-out", default="/tmp/prune_keep_event_ids_2026-06-16.txt")
+    ap.add_argument("--vacuum", action="store_true")
+    args = ap.parse_args()
+
+    if not os.path.exists(args.db):
+        print(f"DB not found: {args.db}", file=sys.stderr)
+        return 2
+
+    db_path = Path(args.db).resolve()
+    with _prune_connection(
+        db_path,
+        busy_timeout_ms=args.busy_timeout_ms,
+    ) as conn:
+        return _prune(args, conn)
 
 
 if __name__ == "__main__":

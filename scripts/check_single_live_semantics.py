@@ -1,5 +1,5 @@
 # Created: 2026-07-22
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-07-24
 # Authority basis: operator-directed single-live-semantics extinction pass.
 """Reject resurrection of dormant alternate-runtime concepts."""
 
@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import plistlib
 import re
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +33,7 @@ SCAN_FILES = (
     "docs/operations/current/plans/single_live_semantics_2026-07-22.md",
 )
 TEXT_SUFFIXES = {".json", ".md", ".plist", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
+EXCLUDED_DOCUMENT_SUFFIXES = {".md", ".txt"}
 EXCLUDED = {Path("scripts/check_single_live_semantics.py")}
 CUTOVER_SCRIPT = Path("scripts/migrations/202607_single_live_semantics_cutover.py")
 CUTOVER_RETIRED_ASSIGNMENTS = frozenset(
@@ -64,6 +67,8 @@ EXCLUDED_SUBTREES = (
     Path("docs/rebuild"),
     Path("docs/operations/current/plans/migration_preview"),
 )
+_EXCLUDED_PREFIXES = tuple(f"{path.as_posix()}/" for path in EXCLUDED_SUBTREES)
+_LIVE_REFERENCE_ROOTS = frozenset({"src", "scripts", "config", "deploy", ".github"})
 
 _PARALLEL_INACTIVE = "shadow_" + "veto_only"
 _RETIRED_MEAN_SHIFT = "edli_" + "bias_correction"
@@ -120,7 +125,7 @@ def violations(
     paths = _scan_paths(root)
     paths.update(_live_reachable_excluded_python_paths(root, paths))
     for path in paths:
-        if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
+        if not path.is_file():
             continue
         if path.is_symlink() and not include_external_symlinks:
             try:
@@ -134,8 +139,19 @@ def violations(
         rel_lower = rel.as_posix().lower()
         if rel in EXCLUDED:
             continue
+        if _is_excluded_subtree(rel):
+            out.extend(
+                f"{rel}: {item}" for item in _excluded_artifact_violations(path)
+            )
+        if path.suffix.lower() not in TEXT_SUFFIXES:
+            continue
         source = path.read_text(encoding="utf-8", errors="replace")
         scan_value = source.lower()
+        if rel.parts and rel.parts[0] in _LIVE_REFERENCE_ROOTS:
+            out.extend(
+                f"{rel}: {item}"
+                for item in _excluded_reference_violations(rel, source)
+            )
         if path.suffix.lower() == ".py":
             out.extend(
                 f"{rel}: {item}"
@@ -219,13 +235,134 @@ def _scan_paths(root: Path) -> set[Path]:
     for subtree in EXCLUDED_SUBTREES:
         base = root / subtree
         if base.exists():
-            paths.update(base.rglob("*.py"))
+            for path in base.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    executable_document = bool(path.stat().st_mode & 0o111)
+                    shebang_document = path.read_bytes()[:2] == b"#!"
+                except OSError:
+                    executable_document = True
+                    shebang_document = True
+                if (
+                    path.suffix.lower() not in EXCLUDED_DOCUMENT_SUFFIXES
+                    or executable_document
+                    or shebang_document
+                ):
+                    paths.add(path)
     paths.update(root / name for name in SCAN_FILES)
     return paths
 
 
 def _is_excluded_subtree(rel: Path) -> bool:
     return any(rel == subtree or subtree in rel.parents for subtree in EXCLUDED_SUBTREES)
+
+
+def _excluded_artifact_violations(path: Path) -> list[str]:
+    out: list[str] = []
+    if path.suffix.lower() not in EXCLUDED_DOCUMENT_SUFFIXES:
+        out.append("excluded subtree contains a non-document artifact")
+    try:
+        if path.stat().st_mode & 0o111:
+            out.append("excluded subtree document has executable permission")
+        if path.read_bytes()[:2] == b"#!":
+            out.append("excluded subtree document has a shebang")
+    except OSError as exc:
+        out.append(f"excluded subtree artifact cannot be verified: {exc}")
+    return out
+
+
+def _excluded_reference_violations(path: Path, source: str) -> list[str]:
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        return _python_excluded_reference_violations(source)
+    lower = source.lower()
+    if suffix == ".sh":
+        patterns = (
+            r"(?m)^\s*(?:source|\.)\s+[^\n]*(?:"
+            + "|".join(re.escape(prefix) for prefix in _EXCLUDED_PREFIXES)
+            + ")",
+            r"(?m)^\s*(?:exec\s+)?(?:ba|z|k)?sh\s+[^\n]*(?:"
+            + "|".join(re.escape(prefix) for prefix in _EXCLUDED_PREFIXES)
+            + ")",
+        )
+        return (
+            ["live shell executes or sources an excluded subtree"]
+            if any(re.search(pattern, lower) for pattern in patterns)
+            else []
+        )
+    if suffix == ".plist":
+        try:
+            payload = plistlib.loads(source.encode("utf-8"))
+        except (ExpatError, ValueError, plistlib.InvalidFileException):
+            match = re.search(
+                r"<key>\s*ProgramArguments\s*</key>\s*<array>(.*?)</array>",
+                source,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            arguments = [match.group(1)] if match else []
+        else:
+            arguments = payload.get("ProgramArguments", []) if isinstance(payload, dict) else []
+        if any(
+            prefix in str(argument).lower()
+            for argument in arguments
+            for prefix in _EXCLUDED_PREFIXES
+        ):
+            return ["live plist ProgramArguments references an excluded subtree"]
+        return []
+    if path.parts and path.parts[0] in {"config", "deploy", ".github"}:
+        key = r"(?:path|file|config|program|source|exec|command)"
+        prefix = "|".join(re.escape(item) for item in _EXCLUDED_PREFIXES)
+        if re.search(rf"{key}[^\n]{{0,120}}(?:{prefix})", lower):
+            return ["live config references an excluded subtree"]
+    return []
+
+
+def _python_excluded_reference_violations(source: str) -> list[str]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    bindings = _literal_bindings(tree, excluded=frozenset())
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _is_path_consuming_call(node.func):
+            continue
+        values = {
+            value.lower()
+            for child in ast.walk(node)
+            if (value := _literal_string(child, bindings)) is not None
+        }
+        if any(
+            prefix in value
+            for value in values
+            for prefix in _EXCLUDED_PREFIXES
+        ):
+            out.append("live Python call consumes an excluded subtree")
+    return sorted(set(out))
+
+
+def _is_path_consuming_call(function: ast.AST) -> bool:
+    name = _call_name(function)
+    return name in {
+        "open",
+        "io.open",
+        "os.system",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.Popen",
+        "subprocess.run",
+    } or name.rsplit(".", 1)[-1] in {"open", "read_bytes", "read_text"}
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _call_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
 
 
 def _live_reachable_excluded_python_paths(root: Path, paths: set[Path]) -> set[Path]:

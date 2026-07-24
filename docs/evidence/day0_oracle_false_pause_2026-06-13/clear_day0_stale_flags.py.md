@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Created: 2026-06-13
 # Last reused or audited: 2026-06-13
 # Authority basis: docs/evidence/day0_oracle_false_pause_2026-06-13/diagnosis.md
