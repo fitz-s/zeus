@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-21
+# Last reused/audited: 2026-07-24
 # Lifecycle: created=2026-06-06; last_reviewed=2026-07-20; last_reused=2026-07-20
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
@@ -215,6 +215,79 @@ def test_day0_observation_without_import_clock_is_not_live_visible() -> None:
         target_date="2026-07-10",
         temperature_metric="high",
         decision_time=datetime(2026, 7, 10, 12, tzinfo=timezone.utc),
+    ) is None
+    conn.close()
+
+
+def test_day0_global_fact_uses_provider_report_time_and_rejects_lookahead() -> None:
+    """RELATIONSHIP: canonical WU row -> global Day0 monitor fact clock."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, imported_at TEXT, local_timestamp TEXT,
+            utc_timestamp TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT, provenance_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Miami",
+            "2026-07-23",
+            "wu_icao_history",
+            "KMIA",
+            "F",
+            "2026-07-24T02:15:00+00:00",
+            "2026-07-23T21:00:00-04:00",
+            "2026-07-24T01:00:00+00:00",
+            92.0,
+            81.0,
+            "VERIFIED",
+            1,
+            "OK",
+            "historical_hourly",
+            json.dumps(
+                {
+                    "latest_raw_ts": "2026-07-24T01:53:00+00:00",
+                    "hour_max_raw_ts": "2026-07-24T01:53:00+00:00",
+                    "hour_min_raw_ts": "2026-07-24T01:10:00+00:00",
+                }
+            ),
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Miami",
+        target_date="2026-07-23",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 24, 2, 37, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 92.0
+    assert fact["observation_time"] == "2026-07-24T01:53:00+00:00"
+
+    # Defense in depth: even a corrupt row whose possession clock predates its
+    # source report cannot leak that future report into an earlier decision.
+    conn.execute(
+        "UPDATE observation_instants SET imported_at = ?",
+        ("2026-07-24T01:10:00+00:00",),
+    )
+    assert _latest_authorized_day0_fact(
+        conn,
+        city="Miami",
+        target_date="2026-07-23",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 24, 1, 30, tzinfo=timezone.utc),
+        require_settlement_channel=True,
     ) is None
     conn.close()
 

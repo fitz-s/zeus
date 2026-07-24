@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from src.data.day0_observation_reader import _OBSERVATION_FACT_TIME_SQL
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_input_hwm import (
     prime_frozen_replacement_artifact_hwm,
@@ -703,15 +704,23 @@ def _latest_authorized_day0_fact(
     if "observation_instants" in _table_names(conn):
         extreme_col = "running_min" if metric == "low" else "running_max"
         extreme_order = "ASC" if metric == "low" else "DESC"
-        instant_order = (
-            "utc_timestamp DESC"
-            if source_type == "hko"
-            else f"observed_extreme_native {extreme_order}, utc_timestamp DESC"
-        )
         instant_columns = {
             str(column[1])
             for column in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
         }
+        observation_fact_time_sql = (
+            _OBSERVATION_FACT_TIME_SQL
+            if "provenance_json" in instant_columns
+            else "utc_timestamp"
+        )
+        instant_order = (
+            "observation_fact_time DESC"
+            if source_type == "hko"
+            else (
+                f"observed_extreme_native {extreme_order}, "
+                "observation_fact_time DESC"
+            )
+        )
 
         def optional_column(name: str) -> str:
             return name if name in instant_columns else f"NULL AS {name}"
@@ -738,6 +747,7 @@ def _latest_authorized_day0_fact(
         query_params: tuple[object, ...] = (
             city,
             target_date,
+            decision_utc.isoformat(),
             decision_utc.isoformat(),
         )
         if "imported_at" in instant_columns:
@@ -790,6 +800,7 @@ def _latest_authorized_day0_fact(
             WITH authorized AS (
                 SELECT CAST({extreme_col} AS REAL) AS observed_extreme_native,
                        utc_timestamp,
+                       {observation_fact_time_sql} AS observation_fact_time,
                        source,
                        {optional_column('station_id')},
                        {optional_column('temp_unit')},
@@ -799,6 +810,7 @@ def _latest_authorized_day0_fact(
                    AND target_date = ?
                    AND substr(local_timestamp, 1, 10) = target_date
                    AND utc_timestamp <= ?
+                   AND datetime({observation_fact_time_sql}) <= datetime(?)
                    {availability_clause}
                    {time_geometry_clause}
                    {station_identity_clause}
@@ -827,7 +839,10 @@ def _latest_authorized_day0_fact(
                    AND {extreme_col} IS NOT NULL
             )
             SELECT observed_extreme_native,
-                   (SELECT MAX(utc_timestamp) FROM authorized) AS observation_time,
+                   (
+                       SELECT MAX(observation_fact_time)
+                         FROM authorized
+                   ) AS observation_time,
                    (SELECT COUNT(*) FROM authorized) AS sample_count,
                    source AS observation_source,
                    station_id,
