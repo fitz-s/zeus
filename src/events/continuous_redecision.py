@@ -176,6 +176,17 @@ class CachedBelief:
     # pipe-separated id) so the P2 job can build the (city, target_date, metric) family key for the
     # FSR re-emit restriction without re-deriving topology. Empty when unparseable.
     metric: str = ""
+    # Certificate validity across forecast issues (FINAL_SPEC §certificate validity). Both ISO-8601
+    # UTC, defaulted None so every existing constructor / cached-before-this-change row is preserved.
+    #   valid_until: the instant past which this belief is no longer a valid decision basis —
+    #     min(τ_next − Δ_cancel, market close, probability freshness). Enqueue/screen treat a belief
+    #     past valid_until exactly like a stale-freshness reject (CERT_EXPIRED); a resting maker order
+    #     is pulled once now is within Δ_cancel of it (CERT_EXPIRY_PULL).
+    #   next_authoritative_issue_at: the raw τ_next (next authoritative forecast-issue availability).
+    #     None means the next-issue schedule is unverified/missing → a NEW forecast-conditioned entry
+    #     fails closed (no enqueue); exit/monitor of existing positions is never blocked by this.
+    valid_until: str | None = None
+    next_authoritative_issue_at: str | None = None
 
 
 @dataclass(frozen=True)
