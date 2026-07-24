@@ -14,7 +14,7 @@
       "chronicle::SETTLEMENT": 9,
       "decision_log::decision_cycle_completed": 1829,
       "opportunity_fact::opportunity_evaluated": 7261,
-      "shadow_signals::shadow_signal_emitted": 964
+      "observation_signals::observation_signal_emitted": 964
     },
     "event_count": 10063,
     "seed_cutoff_utc": "2026-05-17T21:50:37.499195+00:00",

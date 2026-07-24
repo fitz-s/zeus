@@ -25,14 +25,6 @@ from src.state.db import init_schema
 UTC = timezone.utc
 
 
-@pytest.fixture(autouse=True)
-def _replacement_authority_disabled_by_default(monkeypatch):
-    monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
-        lambda: False,
-    )
-
-
 def _source_run(status: str = "SUCCESS", completeness: str = "COMPLETE") -> dict:
     return {
         "source_run_id": "run-1",
@@ -573,6 +565,31 @@ def test_build_committed_snapshot_events_does_not_write_world_rows():
     assert len(written) == 1
     assert written[0].inserted is True
     assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+
+
+def test_build_committed_snapshot_events_honors_monitor_preemption():
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    _seed_committed_chicago_2026_05_24(forecasts_conn)
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=executable_forecast_live_eligible_reader(
+            forecasts_conn
+        ),
+    )
+
+    with pytest.raises(InterruptedError, match="FORECAST_SNAPSHOT_SCAN_CANCELLED"):
+        trigger.build_committed_snapshot_events(
+            forecasts_conn=forecasts_conn,
+            decision_time=_decision_time(),
+            received_at="2026-05-24T04:17:00+00:00",
+            cancelled=lambda: True,
+        )
+
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
 
 
 def test_build_committed_snapshot_events_filters_pending_before_fairness_window():

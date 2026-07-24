@@ -19,8 +19,8 @@ must split those surfaces deliberately.
 ## Required Outcome
 
 `/Users/leofitz/zeus` becomes the normal Zeus checkout for source work and,
-after gated cutover, the runtime checkout for shadow/no-submit daemons. The old
-checkout remains intact as a hot rollback point until all runtime-ready shadow
+after gated cutover, the runtime checkout for retired/no-submit daemons. The old
+checkout remains intact as a hot rollback point until all runtime-ready retired
 gates pass.
 
 ## Non-Goals
@@ -87,7 +87,7 @@ Completed pre-cutover actions:
   runtime config file; it remains outside the planned commit scope unless the
   operator explicitly stages it.
 - Left canonical runtime DBs uncopied. Destination `state/` currently contains
-  only tracked placeholders / shadow placeholders, not production DB authority.
+  only tracked placeholders / retired placeholders, not production DB authority.
 - Replaced old-checkout defaults in the following admitted scripts with
   destination-relative repo discovery and/or environment overrides:
   - `scripts/live_health_probe.py`
@@ -126,8 +126,8 @@ Residual old-checkout path blockers found by repo scan:
 | Path | Current classification | Required next route |
 |---|---|---|
 | `src/state/db_paths.py` | state authority default; already supports `ZEUS_PRIMARY_ROOT` override but still defaults to old root | state/DB authority planning route before changing default |
-| `scripts/arm_live_mode.sh` | live operation script | cutover/live-shadow route only; out of scope while live is ignored |
-| `scripts/expire_auto_pause.sh` | live operation script | cutover/live-shadow route only; out of scope while live is ignored |
+| `scripts/arm_live_mode.sh` | live operation script | cutover/live-retired route only; out of scope while live is ignored |
+| `scripts/expire_auto_pause.sh` | live operation script | cutover/live-retired route only; out of scope while live is ignored |
 | `scripts/purge_partial_fsr_events.py` | registered dangerous repair script | dedicated repair-script route; do not edit as generic hygiene |
 | `scripts/score_raw_vs_sd3_bins.py` | unregistered historical/scoring script | script-manifest/provenance decision before edit |
 | `scripts/install_hooks.sh` | unregistered installer helper | script-manifest/provenance decision before edit |
@@ -217,7 +217,7 @@ Chosen option:
 5. Copy local-only config and runtime state intentionally.
 6. Stop writers before DB copy.
 7. Retarget launchd/cron only after code-ready and DB integrity gates pass.
-8. Start with shadow/no-submit runtime readiness.
+8. Start with retired/no-submit runtime readiness.
 
 Rejected options:
 
@@ -596,7 +596,7 @@ chmod 600 "$NEW/config/settings.json"
 
 Policy:
 
-- Preserve shadow/no-submit posture during migration.
+- Preserve retired/no-submit posture during migration.
 - Do not infer live-ready from settings.
 - Do not commit `config/settings.json`.
 
@@ -687,7 +687,7 @@ crontab -l | nl -ba | rg 'zeus|workspace-venus'
 No active Zeus cron should point to old repo unless intentionally paused or
 part of rollback.
 
-### Phase 7: Retarget LaunchAgents Shadow-Only
+### Phase 7: Retarget LaunchAgents Retired-Only
 
 Objective: move host services to new repo without arming real fills.
 
@@ -700,7 +700,7 @@ cp ~/Library/LaunchAgents/com.zeus.*.plist ~/Library/LaunchAgents/zeus-migration
 ```
 
 Edit active plists listed above. Replace old root with new root. Keep
-shadow/no-submit config unchanged.
+retired/no-submit config unchanged.
 
 Validate:
 
@@ -748,7 +748,7 @@ pgrep -af '/Users/leofitz/.openclaw/workspace-venus/zeus|/Users/leofitz/zeus'
 
 There must not be simultaneous old and new writer processes.
 
-### Phase 9: Runtime-Ready Shadow Verification
+### Phase 9: Runtime-Ready Retired Verification
 
 Required checks:
 
@@ -756,7 +756,7 @@ Required checks:
 cd /Users/leofitz/zeus
 python3 scripts/healthcheck.py --mode live --json
 python3 scripts/check_forecast_live_ready.py --claim-mode post-launch --json
-python3 scripts/topology_doctor.py --navigation --task "post-migration runtime shadow verification" --intent audit --write-intent read_only
+python3 scripts/topology_doctor.py --navigation --task "post-migration runtime retired verification" --intent audit --write-intent read_only
 ```
 
 Manual evidence to inspect:
@@ -802,7 +802,7 @@ AI/session records:
 | DB-ready | destination DBs are readable and coherent | `PRAGMA quick_check`, checksum/size comparison |
 | Cron-ready | active Zeus cron points to new repo | `crontab -l` scan |
 | Launchd-ready | active plists point to new repo and lint | `plutil -lint`, `rg` scan |
-| Runtime shadow | daemons run from new repo in no-submit mode | launchctl, logs, heartbeats, loaded SHA |
+| Runtime retired | daemons run from new repo in no-submit mode | launchctl, logs, heartbeats, loaded SHA |
 | No split brain | only one writer set exists | process/lsof checks |
 | Rollback-ready | old repo and plist backups remain usable | old checkout intact, backups present |
 
@@ -888,7 +888,7 @@ Post-rollback evidence:
 | local settings copied into git | preserve `.gitignore`, do not stage `config/settings.json` |
 | transcript/session loss | leave global Codex/OpenClaw state in place; archive repo-local scratch only |
 | stale worktrees confuse source authority | recreate active worktrees from new repo only |
-| live-ready overclaim | keep code-ready, runtime-ready shadow, and live-arm separate |
+| live-ready overclaim | keep code-ready, runtime-ready retired, and live-arm separate |
 | launchd typo | `plutil -lint`, staged service start, log check per service |
 
 ## Implementation Slices
@@ -900,8 +900,8 @@ Post-rollback evidence:
 5. New repo clone and venv build.
 6. DB copy rehearsal with writers stopped.
 7. Cron retarget.
-8. Launchd retarget shadow-only.
-9. Runtime shadow verification.
+8. Launchd retarget non-authoritative.
+9. Runtime retired verification.
 10. Old checkout retirement decision after sustained stability.
 
 Each slice must run its own topology/admission command and verification before

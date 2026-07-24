@@ -511,6 +511,55 @@ def test_live_input_lag_enqueues_single_family_cycle_advance():
     assert _status(conn, event.event_id) == "pending"
 
 
+def test_day0_raw_input_hwm_exclusion_enqueues_single_family_cycle_advance():
+    """A Day0 family-local raw-input HWM exclusion refreshes that family only."""
+
+    event = _forecast_event(target_date="2026-05-25")
+    payload = json.loads(event.payload_json)
+    enqueues: list[tuple] = []
+
+    def _submit(current, _dt):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=current.event_id,
+            causal_snapshot_id=current.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=False,
+            side_effect_status="NO_SUBMIT",
+            reason=(
+                "GLOBAL_FAMILY_INELIGIBLE:"
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
+                "REPLACEMENT_RAW_INPUT_HWM:"
+                "basis=used_raw_model_forecasts_late_input"
+            ),
+        )
+
+    def _enqueuer(*, city, target_date, metric):
+        enqueues.append((city, target_date, metric))
+        return True
+
+    conn, store = _store()
+    store.insert_or_ignore(event)
+    reactor = _reactor(
+        store,
+        snapshot_present={"v": True},
+        cycle_advance_enqueuer=_enqueuer,
+        submit=_submit,
+    )
+    result = reactor.process_pending(decision_time=_DT)
+
+    assert enqueues == [("Chicago", "2026-05-25", "high")]
+    assert result.cycle_advance_enqueues == 1
+    assert result.retried == 1
+    assert result.rejected == 0
+    assert _status(conn, event.event_id) == "pending"
+
+
 def test_pre_cutover_posterior_staleness_reason_alias_enqueues_cycle_advance():
     payload = json.loads(_forecast_event().payload_json)
     enqueues: list[tuple] = []

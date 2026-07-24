@@ -47,7 +47,7 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 def _settled_positions(conn: sqlite3.Connection) -> list[dict]:
     """Every terminally-settled position with a realized settlement price.
 
-    settlement_authority is diagnostic only — it is NOT a position_current column
+    settlement_authority is observation only — it is NOT a position_current column
     (verified 2026-07-21 against both the CREATE TABLE in src/state/db.py:5482 and the
     live DB schema; the atomicity_outbox_contract.md §3.5 query's column list assumed it
     was). The real value lives inside the latest SETTLED position_events row's

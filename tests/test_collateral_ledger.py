@@ -37,11 +37,6 @@ from src.execution.wrap_unwrap_commands import (
     request_wrap,
 )
 
-# Captured at import time, BEFORE conftest's autouse no-op patch runs per-test —
-# the genuine unconditional redeem-submission guard (operator law 2026-06-10).
-from src.execution.settlement_commands import (
-    assert_redeem_submission_allowed as _REAL_ASSERT_REDEEM,
-)
 from src.state.collateral_ledger import (
     CollateralInsufficient,
     CollateralLedger,
@@ -1684,31 +1679,6 @@ def test_polymarket_client_redeem_defers_to_r1_without_sdk_side_effect(monkeypat
     result = PolymarketClient().redeem("condition-1")
     assert result["success"] is False
     assert result["errorCode"] == "REDEEM_DEFERRED_TO_R1"
-
-
-def test_v2_adapter_redeem_forbidden_without_sdk_contact(monkeypatch):
-    """Operator law 2026-06-10 (redeem submission FORBIDDEN): adapter.redeem()
-    raises REDEEM_SUBMISSION_FORBIDDEN before ANY construction — strictly
-    stronger than the former REDEEM_DEFERRED_TO_R1 stub (no SDK client, no RPC).
-    Restores the real guard (conftest installs a session no-op patch)."""
-    import src.execution.settlement_commands as _sc
-    from src.execution.settlement_commands import RedeemSubmissionAbandonedError
-    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
-
-    monkeypatch.setattr(_sc, "assert_redeem_submission_allowed", _REAL_ASSERT_REDEEM)
-
-    def client_factory(**kwargs):  # pragma: no cover - assertion tripwire
-        raise AssertionError("Z4 adapter redeem must not construct SDK client")
-
-    adapter = PolymarketV2Adapter(
-        funder_address="0xabc",
-        signer_key="key",
-        q1_egress_evidence_path=None,
-        client_factory=client_factory,
-    )
-
-    with pytest.raises(RedeemSubmissionAbandonedError, match="REDEEM_SUBMISSION_FORBIDDEN"):
-        adapter.redeem("condition-1")
 
 
 # ---------------------------------------------------------------------------

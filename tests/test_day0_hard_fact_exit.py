@@ -1843,7 +1843,7 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         summary = {"monitors": 0, "exits": 0}
         cycle_runtime.execute_monitoring_phase(
             None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
-            deps=deps, exit_order_submit_enabled=False,
+            deps=deps,
         )
         return results, summary
 
@@ -1987,7 +1987,7 @@ class TestStructuralWinTerminalHold:
         summary = {"monitors": 0, "exits": 0}
         cycle_runtime.execute_monitoring_phase(
             None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
-            deps=deps, exit_order_submit_enabled=False,
+            deps=deps,
         )
         return results, summary
 
@@ -2105,7 +2105,7 @@ class TestStructuralWinTerminalHold:
         summary = {"monitors": 0, "exits": 0}
         cycle_runtime.execute_monitoring_phase(
             None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
-            deps=deps, exit_order_submit_enabled=True,
+            deps=deps,
         )
         assert summary.get("day0_hard_fact_direct_exit_decisions") == 1
         assert summary.get("day0_hard_fact_probability_refresh_bypassed") == 1
@@ -2235,7 +2235,6 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(mo
         Tracker(),
         summary,
         deps=deps,
-        exit_order_submit_enabled=True,
     )
 
     assert calls["refresh"] == 1

@@ -104,7 +104,7 @@ def fetch_ensemble(
         data_version: str | None — populated when temperature_metric is given
             and the source resolves to a known source_family; sentinel
             'unknown_forecast_source_family' when source is unrecognized.
-            None for diagnostic/crosscheck callers that pass no metric.
+            None for telemetry/crosscheck callers that pass no metric.
         n_members: int
 
     Returns None if all retries fail.
@@ -138,14 +138,14 @@ def fetch_ensemble(
     # via the snapshot row, so it inherently can't trigger this guard.
     # Copilot review #3 (2026-05-04): the original guard fired only when
     # role == "entry_primary", but the same Open-Meteo-broker mis-provenance
-    # affects any non-entry role too — crosscheck, diagnostic, and monitor
+    # affects any non-entry role too — crosscheck, telemetry, and monitor
     # callers that asked for ecmwf_open_data ended up with Open-Meteo
     # payloads labeled as `source_id="ecmwf_open_data"` (with the registry's
     # authority_tier / degradation_level), which then propagated downstream
     # into calibration buckets and decision logs.  Drop the role gate.  Any
     # caller asking for ecmwf_open_data with no ingest_class now fails
     # closed regardless of role.  Future role-specific exceptions (e.g., a
-    # diagnostic that *wants* the Open-Meteo broker) should plumb a
+    # telemetry that *wants* the Open-Meteo broker) should plumb a
     # different source_id, not widen this guard.
     if (
         source_id == "ecmwf_open_data"
@@ -415,7 +415,7 @@ def _parse_response(
     correct stratified Platt bucket. When source_family is unrecognized
     we set a sentinel so the gate REJECTS (rather than silently
     fallthrough through the legacy hardcoded TIGGE constant). When
-    temperature_metric is None (e.g., diagnostic/crosscheck callers),
+    temperature_metric is None (e.g., telemetry/crosscheck callers),
     data_version stays None and the gate falls through.
     """
     hourly = data["hourly"]

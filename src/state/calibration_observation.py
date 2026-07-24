@@ -5,10 +5,10 @@ Last reused/audited: 2026-04-29
 Authority basis: round3_verdict.md §1 #2 (FOURTH edge packet) + ULTIMATE_PLAN.md
 §4 #2 ("Extended Platt (A·logit + B·lead_days + C) parameter monitoring; Monte
 Carlo noise calibration vs realized; α-fusion weight tuning; double-bootstrap CI
-tightness on small-sample bins"). EDGE_OBSERVATION + ATTRIBUTION_DRIFT + WS_OR_POLL
-measurement-substrate-first pattern repeated.
+tightness on small-sample bins"). EDGE_OBSERVATION + WS_OR_POLL measurement-
+substrate-first pattern repeated.
 
-K1 contract (mirrors src/state/edge_observation.py + attribution_drift.py + ws_poll_reaction.py):
+K1 contract (mirrors src/state/edge_observation.py + ws_poll_reaction.py):
   - Read-only projection. NO write path. NO JSON persistence. NO caches.
   - Reads canonical surfaces directly via src.calibration.store.list_active_platt_models
     (BATCH 1 read-side addition to store.py; pure SELECT, mirrors

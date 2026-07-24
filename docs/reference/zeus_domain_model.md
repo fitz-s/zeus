@@ -15,7 +15,7 @@ q_lcb floor → Edge → BH FDR → Fractional Kelly → Position size
 
 Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof`; q built in `replacement_forecast_materializer._insert_posterior`.
 
-**Diagnostic baseline (comparison/provenance only; not joined to live q):**
+**Offline evidence baseline (comparison/provenance only; not joined to live q):**
 
 ```
 51 ENS → analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture; 10k-MC retired) →
@@ -315,7 +315,7 @@ Zeus classifies all persistent data into three layers with distinct isolation se
 | **Decision data** | Records of Zeus's choices and their outcomes | Shared + `env` column discriminator | `trade_decisions`, `chronicle`, `position_events` |
 | **Process state** | Mutable runtime state of a running instance | Physically isolated via `state_path()` | `positions-{mode}.json`, `strategy_tracker-{mode}.json`, `risk_state` |
 
-**Why this matters**: World data can be safely shared across execution contexts because it is objective. Decision data must be tagged so diagnostic/backtest decisions never contaminate live analytics. Process state must be physically separate because two concurrent instances writing the same file corrupt both.
+**Why this matters**: World data can be safely shared across execution contexts because it is objective. Decision data must be tagged so offline evidence/backtest decisions never contaminate live analytics. Process state must be physically separate because two concurrent instances writing the same file corrupt both.
 
 ## 15. Code-data mismatch: the DST case study
 

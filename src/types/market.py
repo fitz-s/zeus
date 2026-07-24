@@ -6,12 +6,9 @@ import math
 
 import numpy as np
 
-from typing import Literal, TYPE_CHECKING
+from typing import Literal
 
 from src.contracts.execution_price import ExecutionPrice
-
-if TYPE_CHECKING:
-    from src.contracts.entry_quote_evidence import EntryQuoteEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -337,37 +334,6 @@ class BinEdge:
     forward_edge: float = 0.0
     support_index: int | None = None
     ev_per_dollar: float = 0.0
-    # Wave 5 (2026-05-27, INV-40): optional executable-cost evidence carrying
-    # the depth-walked fill price + cost_uncertainty for the σ_market input
-    # to the bootstrap (sampled per iteration in MarketAnalysis._bootstrap_bin
-    # when present). Legacy fixtures and callers without EntryQuoteEvidence
-    # leave this None — the bootstrap then subtracts the fixed self.p_market
-    # value, preserving pre-Wave-5 behaviour.
-    entry_quote_evidence: "EntryQuoteEvidence | None" = None
-    # K1 fix (PR #348 operator review): per-edge cost-evidence fields drive
-    # BOTH the bootstrap CI AND the multiplier-suppression decision AND the
-    # stored edge magnitude. Pre-fix the unified-uncertainty-budget was a
-    # GLOBAL env flag — that meant haircuts were skipped even when this
-    # particular edge had NO EntryQuoteEvidence in its bootstrap (P0-1).
-    # And ``edge`` / ``forward_edge`` were always computed off legacy
-    # ``p_market``, so family selection + economic floors used optimistic
-    # numbers even when EQE was present (P0-2). These three fields close
-    # both holes:
-    #
-    #   entry_cost_mean — the value Kelly should use as cost-of-entry
-    #                     (= eqe.all_in_entry_price when EQE present,
-    #                      else legacy p_market). ``edge`` / ``forward_edge``
-    #                     must be computed off this, NOT off p_market.
-    #   entry_cost_uncertainty — σ_market (0.0 when no EQE present).
-    #   market_cost_uncertainty_applied — True iff the bootstrap actually
-    #                     consumed σ_market for this edge. Caller-side
-    #                     unified-budget consumers (dynamic_kelly_mult,
-    #                     _size_at_execution_price_boundary) gate their
-    #                     haircut suppression on this PER EDGE, not on
-    #                     the global env flag alone.
-    entry_cost_mean: float = 0.0
-    entry_cost_uncertainty: float = 0.0
-    market_cost_uncertainty_applied: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.entry_price, ExecutionPrice):

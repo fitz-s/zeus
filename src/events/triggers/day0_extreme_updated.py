@@ -15,7 +15,7 @@ from src.events.day0_authority import (
     day0_evidence_finality,
     normalize_day0_live_authority_status,
 )
-from src.events.event_priority import day0_emit_priority
+from src.events.event_priority import PRIORITY_DAY0
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, OpportunityEvent, make_day0_extreme_updated_event
 
@@ -54,7 +54,6 @@ def build_day0_extreme_updated_event(
     settlement_semantics: Any,
     decision_time: datetime,
     received_at: str,
-    day0_is_tradeable: bool = True,
 ) -> OpportunityEvent:
     available_at = _parse_utc(observation["observation_available_at"], "observation_available_at")
     if available_at > decision_time.astimezone(UTC):
@@ -95,10 +94,9 @@ def build_day0_extreme_updated_event(
         received_at=received_at,
         payload=payload,
         causal_snapshot_id=str(observation.get("observation_context_id") or ""),
-        # Emission-priority half of the 2026-06-11 anti-starvation fix. This is a
-        # WITHIN-TIER sub-sort; fetch_pending owns the cross-tier authority.
-        # Single source of truth: src.events.event_priority.day0_emit_priority.
-        priority=day0_emit_priority(day0_is_tradeable=day0_is_tradeable),
+        # Emission priority is a within-tier sub-sort; fetch_pending owns the
+        # cross-tier authority.
+        priority=PRIORITY_DAY0,
     )
 
 
@@ -127,15 +125,11 @@ class Day0ExtremeUpdatedTrigger:
         self,
         writer: EventWriter,
         *,
-        day0_is_tradeable: bool = True,
         suppress_recent_no_value_refutations: bool = False,
         family_admission: Day0FamilyAdmission | None = None,
         scan_cities: Iterable[str] | None = None,
     ) -> None:
         self._writer = writer
-        # Stamp the scope-aware emission priority (2026-06-11 anti-starvation).
-        # Production live uses the default True; False is for tests/replay.
-        self._day0_is_tradeable = day0_is_tradeable
         self._suppress_recent_no_value_refutations = suppress_recent_no_value_refutations
         self._family_admission = family_admission
         self._scan_cities = (
@@ -176,7 +170,6 @@ class Day0ExtremeUpdatedTrigger:
             settlement_semantics=settlement_semantics,
             decision_time=decision_time,
             received_at=received_at,
-            day0_is_tradeable=self._day0_is_tradeable,
         )
         if self._suppress_recent_no_value_refutations:
             from src.events.continuous_redecision import recent_no_value_event_refutation

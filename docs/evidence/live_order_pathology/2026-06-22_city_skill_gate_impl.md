@@ -35,7 +35,7 @@ This gate consumes that track record.
 | `scripts/city_skill_gate_forward_validation.py` | Walk-forward harness: as-of-T gate (learn hyperparams on prior-resolved only), admitted/blocked cities, after-cost EV forward, early/late stability, look-ahead contrast. |
 | `tests/decision/test_city_skill_gate.py` (10) + `tests/test_fit_city_skill_gate.py` (4) | Runtime + fitter no-leak/sign/learned-hyperparam/schema contracts. |
 | `src/state/db_writer_lock.py` | +2 read-only `?mode=ro` allowlist lines. |
-| `docs/evidence/live_order_pathology/2026-06-22_city_skill_gate_forward_validation.json` | Walk-forward report (real data). |
+| `docs/evidence/live_order_pathology/2026-06-22_city_skill_gate_forward_validation.json.md` | Walk-forward report (real data). |
 
 The gate PAIRS with the selection-calibrator: skill-gate = WHICH cities; calibrator = block the toxic
 tail WITHIN them. Both apply at the admission seam before edge/FDR/Kelly, both flag-gated default OFF.

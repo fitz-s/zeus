@@ -5,7 +5,7 @@
 **Authority status:** Dense system reference for top-level scripts as tools, not hidden authority surfaces.
 
 ## 1. Module purpose
-Explain the lifecycle, classes, and risk boundaries of the top-level scripts layer, which now spans topology enforcement, diagnostics, repairs, migrations, ETL writers, audits, and operator support.
+Explain the lifecycle, classes, and risk boundaries of the top-level scripts layer, which now spans topology enforcement, offline evidence checks, repairs, migrations, ETL writers, audits, and operator support.
 
 ## 2. What this module is not
 - Not a second codebase with its own unstated law.
@@ -14,7 +14,7 @@ Explain the lifecycle, classes, and risk boundaries of the top-level scripts lay
 
 ## 3. Domain model
 - Enforcement scripts (topology doctor and related checks).
-- Diagnostic and diagnostic-report writers.
+- Offline evidence and offline evidence-report writers.
 - Runtime support wrappers.
 - ETL/backfill writers.
 - Repair/config/deprecated-fail-closed tools.
@@ -33,7 +33,7 @@ Scripts may enforce or manipulate truth, but they are never themselves a constit
 
 ### Non-authority surfaces
 - Unknown historical scripts retained only because they were never classified
-- Outputs of diagnostic_report_writer scripts
+- Outputs of offline evidence_report_writer scripts
 - Packet-local scratch scripts after packet close
 
 ## 7. Public interfaces
@@ -42,7 +42,7 @@ Scripts may enforce or manipulate truth, but they are never themselves a constit
 
 ## 8. Internal seams
 - Long-lived vs packet-ephemeral scripts
-- Diagnostic stdout-only tools vs writers
+- Offline evidence stdout-only tools vs writers
 - Repair/apply tools vs topology enforcement
 
 ## 9. Source files and their roles
@@ -65,16 +65,16 @@ Scripts may enforce or manipulate truth, but they are never themselves a constit
 
 ## 12. Negative constraints
 - Do not leave packet-ephemeral scripts unclassified after packet close.
-- Do not let diagnostic scripts write canonical DB truth.
+- Do not let offline evidence scripts write canonical DB truth.
 - Do not let stale scripts linger in active runbooks/manifests.
 
 ## 13. Known failure modes
-- One-off scripts become shadow production tools.
+- One-off scripts become undeclared production tools.
 - Repair scripts outlive their packet and silently mutate truth later.
 - Manifest too thin to prevent unsafe script discovery/execution.
 
 ## 14. Historical failures and lessons
-- [Archive evidence] The archive contains many one-off packets, migrations, and scratch tools; without lifecycle discipline, the scripts layer becomes a shadow architecture.
+- [Archive evidence] The archive contains many one-off packets, migrations, and scratch tools; without lifecycle discipline, the scripts layer becomes a parallel architecture.
 
 ## 15. Code graph high-impact nodes
 - `scripts/topology_doctor.py` and companions are current script hubs.
@@ -91,7 +91,7 @@ Scripts may enforce or manipulate truth, but they are never themselves a constit
 ## 18. Common false assumptions
 - A script is harmless because it is not imported by runtime modules.
 - Old scripts are safe evidence because they once worked.
-- Diagnostic output can stand in for canonical truth.
+- Offline evidence output can stand in for canonical truth.
 
 ## 19. Do-not-change-without-checking list
 - topology_doctor behavior without matching tests

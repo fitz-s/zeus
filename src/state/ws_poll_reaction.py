@@ -5,9 +5,9 @@ Last reused/audited: 2026-04-28
 Authority basis: round3_verdict.md §1 #2 (R3 §3 weeks 5-12 third edge leg) +
 ULTIMATE_PLAN.md L312-314 ("reactive WS lets Zeus respond faster than
 competitors during opening-inertia and shoulder-bin entry windows").
-ATTRIBUTION_DRIFT packet's measurement-substrate-first pattern repeated.
+EDGE_OBSERVATION packet's measurement-substrate-first pattern repeated.
 
-K1 contract (mirrors src/state/edge_observation.py + src/state/attribution_drift.py):
+K1 contract (mirrors src/state/edge_observation.py):
   - Read-only projection. NO write path. NO JSON persistence. NO caches.
   - Reads canonical surfaces directly: token_price_log (price ticks with
     source_timestamp + Zeus persist timestamp; latency = delta) JOIN

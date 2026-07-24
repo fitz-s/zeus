@@ -170,7 +170,7 @@ class TestDailyObsTickRouting:
         with (
             patch("src.state.db.get_forecasts_connection_with_world", return_value=fw_ctx) as mock_fc,
             patch("src.data.daily_obs_append.daily_tick") as mock_daily_tick,
-            patch("src.data.dual_run_lock.acquire_lock", return_value=lock_ctx),
+            patch("src.data.job_lock.acquire_lock", return_value=lock_ctx),
         ):
             mock_daily_tick.return_value = {"rows_written": 0}
             ingest_main._k2_daily_obs_tick()

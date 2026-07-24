@@ -8,7 +8,6 @@ any K2 ingest module, source-health / calibration-producer module, or the
 legacy get_trade_connection_with_world seam.
 
 Allowed (trading-only):
-- src.data.dual_run_lock (lock infrastructure — retained for future daemons)
 - src.execution.harvester_pnl_resolver (trading-side P&L resolver)
 - src.contracts.* (read API; typed ConnectionTriple accessors post-K1)
 - src.data.proxy_health (startup gate)
@@ -87,20 +86,6 @@ def test_main_does_not_contain_forbidden_strings():
         f"src/main.py contains forbidden strings (Phase 3 violation):\n"
         + "\n".join(f"  - {s!r}" for s in violations)
     )
-
-
-def test_dual_run_lock_allowed():
-    """src.data.dual_run_lock is explicitly allowed — lock infrastructure stays."""
-    src_main = REPO_ROOT / "src" / "main.py"
-    source = src_main.read_text()
-    tree = ast.parse(source, filename=str(src_main))
-    imported = _collect_imports(tree)
-    # dual_run_lock is allowed; this test documents the intent explicitly.
-    # If it appears, that is expected. If not, also fine — just not forbidden.
-    forbidden_present = any(
-        imp.startswith("src.data.dual_run_lock") for imp in imported
-    ) and False  # always passes — this is documentation only
-    assert True, "src.data.dual_run_lock is an allowed import in src.main"
 
 
 def test_harvester_pnl_resolver_allowed():

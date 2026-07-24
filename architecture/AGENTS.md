@@ -41,7 +41,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `zones.yaml` | Zone definitions with import rules (K0-K4) |
 | `negative_constraints.yaml` | 10 negative constraint definitions |
 | `maturity_model.yaml` | Maturity model definitions |
-| `topology.yaml` | Initial compiled topology graph for root/src/tests/scripts/docs/config/CI/state/runtime/shadow surfaces |
+| `topology.yaml` | Initial compiled topology graph for root/src/tests/scripts/docs/config/CI/state/runtime/observation surfaces |
 | `source_rationale.yaml` | Per-file rationale map for tracked `src/**` files, hazards, and write-route cards |
 | `test_topology.yaml` | Test-suite topology manifest: law gate, categories, high-sensitivity skips, reverse-antibody status |
 | `script_manifest.yaml` | Script manifest with authority class, write targets, dry-run/apply metadata, and safety gates |
@@ -85,7 +85,6 @@ Changes here are architecture or governance changes, never “just docs.”
 | `admission_severity.yaml` | topology_doctor admission severity overrides; maps issue codes and file patterns to severity levels (created 2026-05-07) |
 | `antibody_specs.yaml` | Machine-readable antibody specs from zeus_agent_runtime_compounding plan W1.2 (created 2026-05-16) |
 | `artifact_authority_status.yaml` | Closed-artifact authority distinction registry per UNIVERSAL_TOPOLOGY_DESIGN §13 (created 2026-05-16) |
-| `calibration_transfer_oos_design_2026-05-05.md` | Design doc for calibration transfer OOS evidence; legacy `evaluate_calibration_transfer_policy` wiring analysis (created 2026-05-05) |
 | `capabilities.yaml` | Capability registry with sunset dates; agent capability declarations per ULTIMATE_DESIGN §2.2 (created 2026-05-06) |
 | `cascade_liveness_contract.yaml` | Registry of state-machine tables and their cascade liveness obligations per SCAFFOLD_F14_F16 §G.2 (created 2026-05-16) |
 | `db_table_ownership.yaml` | Canonical table→DB mapping authority post K1 DB split (eba80d2b9d); cross-reference for all DB routing decisions (created 2026-05-14) |

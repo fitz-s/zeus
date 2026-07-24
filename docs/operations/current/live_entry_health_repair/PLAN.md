@@ -256,7 +256,70 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Verification: five exact positive/negative variants pass together; the
   combined token-dedup/live-safety suite passes `333 passed, 1 xpassed`;
   compilation and `git diff --check` pass.
+## Slice B71 -- Reconstruct mixed-token ENTRY facts into token-typed positions
 
+- Approval: operator-approved K0/K2 recovery slice, based at live
+  `74158bc02`. This is an architecture change: it repairs an invalid
+  condition-level projection through canonical append-first evidence, not a
+  stop-loss rule and not a venue action.
+- Proven defect: one legacy `position_id` can contain authenticated `FILLED`
+  `ENTRY BUY` commands for different native held tokens. A single projection
+  cannot truthfully represent both tokens, so its shares, direction, and
+  executable inventory are corrupted.
+- First-principles invariant: a position is one held native token. The only
+  reconstruction authority is the joined command, canonical trade-fact,
+  exact executable-envelope/snapshot topology, and exact certificate evidence.
+  `position_current`, a model payoff, or a chain absence is never evidence
+  from which a token split may be inferred. Chain facts remain chain facts;
+  this repair creates none.
+- Minimal repair: run before filled-entry projection recovery in the registered
+  command-recovery transaction. Partition authenticated positive-fill ENTRY
+  BUY commands by the token selected by their certified binary topology. Keep
+  the original position for its original token group; derive a stable child id
+  for every other group from the root id, held token, and sorted command ids.
+  Append one typed repair fact for the root and each child, fold both
+  projections atomically, CAS-rebind only still-root-bound commands, rehome
+  their execution facts, and write command-exact attribution. A repeated run
+  is a no-op.
+- Fail closed: any missing/mismatched certificate, envelope or snapshot,
+  malformed/non-binary topology, unauthenticated/nonpositive/unsettled trade,
+  existing exit/terminal lifecycle, non-root CAS conflict, or inconsistent
+  amount opens/refreshes a typed ReviewWorkItem and writes no token split.
+  The repair never sends/cancels an order, alters chain data, fabricates a fill,
+  or uses `POSITION_IDENTITY_SUPERSEDED` (which describes duplicate-identity
+  consolidation, not token ownership reconstruction).
+- Event grammar: add the minimal `POSITION_TOKEN_SPLIT_RECONSTRUCTED` canonical
+  repair event plus DDL and registered migration because no existing lifecycle
+  event truthfully expresses a token partition and root/child evidence relation.
+  It preserves the pre-existing lifecycle phase and carries exact command,
+  trade-fact, topology, certificate, and allocation evidence.
+- Review-block remediation: every command resolves exactly one non-revoked,
+  verifier-backed `ActionableTradeCertificate`; B71 carries that row's hash
+  with the verified payload and never falls back to event context. Because
+  `position_decision_attribution` is unique by `position_id`, a held-token
+  group with multiple commands is review-only rather than choosing one
+  certificate. The migration is non-dry-run: its only apply acknowledgement
+  is `--operator-confirms-fenced`, retaining the base writer fence,
+  checkpoint, backup, and atomic rebuild.
+- Files authorized: `src/execution/command_recovery.py`,
+  `src/state/ledger.py`, `src/state/projection.py`, `src/state/venue_command_repo.py`,
+  `src/state/db.py`, `src/state/schema/v2_schema.py`, `src/contracts/position_truth.py`,
+  `architecture/2026_04_02_architecture_kernel.sql`,
+  `scripts/migrations/2026_07_position_token_split_reconstructed.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`,
+  `tests/test_command_recovery.py`, `tests/test_cross_module_invariants.py`,
+  and this packet/scope sidecar.
+- Required antibodies: Guangzhou `5.2 @ 0.34 NO` plus `6.5 @ 0.88 YES`
+  reconstructs two token-typed rows with costs `1.768` and `5.72`; rerun adds
+  nothing; a fault between any event/projection/rebind/attribution step rolls
+  back the whole transaction; ambiguous topology/certificate, unsettled or
+  exit/settled state writes review only; chain reconciliation resolves each
+  reconstructed row by its selected held token.
+- Acceptance: focused recovery/contract/invariant tests, schema/migration
+  checks, compile, planning lock, registry/freshness checks, and
+  `git diff --check` pass. Independent review must find no path to a manual
+  SQL repair, synthetic chain fact, direct venue action, partial commit, or
+  false token-owned SELL inventory.
 ## Slice B4 -- Bounded live working-set reads
 
 - Current runtime proof: the reactor run started at `18:46:50Z`, completed `pending_prune` at `18:46:57Z`, and then emitted no `forecast_snapshot_build` completion for more than ten minutes. That stage spans `_edli_pending_entity_keys` plus the forecast builder, so the log anchors alone do not isolate one call. The pending-key query had no SQLite progress deadline and its plan allowed an unbounded status scan, per-row event PK lookup, and temporary DISTINCT tree. `sqlite_stat1` was stale (2,520,044 estimated rows); a later exact read found 10,801,165 processing rows but only 1,018 pending and 12 processing. Hot read-only timing was 179ms for the old query and 94ms for the bounded query; this is a structural I/O amplifier, not proven as the sole ten-minute root. The separately budgeted forecast builder was 52ms hot after recovery.
@@ -307,11 +370,11 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 - Current proof: after B7 deployment, two fresh live cycles independently returned `GLOBAL_ACTUATION_PREPARE_FAILED:prepared_family_missing` for the claim-owned Moscow winner. B7 removed `DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`; the JIT refresh itself reports fresh cached topology, but `_selection_scoped_proofs` returns an empty tuple before the qkernel can construct `global_family`. The generic fallback erases which fail-closed filter removed the proofs.
 - First-principles invariant: no executable order may be created without a current family, but a rejection must preserve the exact epistemic boundary that made the family non-executable. Observability may name a gate; it may not alter that gate or convert absence into eligibility.
-- Minimal repair: collect typed, count-bounded rejection classes while the existing selection scope is evaluated, and use that diagnostic as `global_prepare_reason` only when the scope is empty. Preserve proof order, filter order, return values, qkernel inputs, global probability/book/wealth revalidation, and all venue behavior.
+- Minimal repair: collect typed, count-bounded rejection classes while the existing selection scope is evaluated, and use that evidence as `global_prepare_reason` only when the scope is empty. Preserve proof order, filter order, return values, qkernel inputs, global probability/book/wealth revalidation, and all venue behavior.
 - Files authorized: `src/engine/event_reactor_adapter.py`, `tests/integration/test_w3_solve_seam_g3.py`, and this packet.
-- Forbidden: admit a proof rejected by execution-price, semantic admission, lock, held-position, strategy-policy, or final-floor gates; reuse a previously prepared family; submit from diagnostic state; alter YES/NO probability or scoring; add a DB write or network call.
-- Acceptance: an empty scope reports its exact stage and bounded rejection-class counts instead of `prepared_family_missing`; a non-empty scope is byte-for-byte identical and emits no diagnostic; affected tests pass; independent live-money review finds no P0/P1; live deploy exposes the next exact blocker or advances to an independently evidenced order.
-- Pre-deploy verification: the complete trusted global-auction seam file passes 32/32; module compilation and `git diff --check` pass. The new antibody proves a non-empty scope returns the identical ordered proof tuple with no diagnostic and an all-blocked scope returns the same empty tuple plus bounded stage/class counts.
+- Forbidden: admit a proof rejected by execution-price, semantic admission, lock, held-position, strategy-policy, or final-floor gates; reuse a previously prepared family; submit from evidence state; alter YES/NO probability or scoring; add a DB write or network call.
+- Acceptance: an empty scope reports its exact stage and bounded rejection-class counts instead of `prepared_family_missing`; a non-empty scope is byte-for-byte identical and emits no evidence; affected tests pass; independent live-money review finds no P0/P1; live deploy exposes the next exact blocker or advances to an independently evidenced order.
+- Pre-deploy verification: the complete trusted global-auction seam file passes 32/32; module compilation and `git diff --check` pass. The new antibody proves a non-empty scope returns the identical ordered proof tuple with no evidence and an all-blocked scope returns the same empty tuple plus bounded stage/class counts.
 - Live correction: after the restart's existing 300-second processing lease reclaimed the interrupted claim, the next clean cycle again returned bare `prepared_family_missing` and emitted no `SELECTION_SCOPE_EMPTY`. Therefore the scope was non-empty. The remaining shape is an early typed spine no-trade before `_prepare_global_family`: `SpineDecisionResult.no_trade_reason` is populated, while its optional `global_prepare_reason` remains unset because the bridge returned before global materialization.
 
 ## Slice B8.1 -- Preserve early spine no-trade at the global seam
@@ -435,7 +498,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 ## Slice B18 -- Split global actuation supersession evidence
 
 - B17 live proof: loaded SHA `d54ad4aa1`; callback TypeError is gone. Two consecutive epochs select the same Wellington family, refresh its substrate as fresh, then fail closed on the composite `GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED`; order proof deltas remain zero.
-- First-principles diagnostic: identity drift and executable-curve drift have different causes and remedies. A single reason erases the distinction and makes any attempted fix guesswork.
+- First-principles evidence: identity drift and executable-curve drift have different causes and remedies. A single reason erases the distinction and makes any attempted fix guesswork.
 - Minimal change: preserve both rejection branches and expose only the mismatched identity field names or the two execution-curve identity hashes in the typed reason. Do not change comparison inputs, equality, requeue behavior, q, book refresh, sizing, or submission.
 - Files authorized: `src/engine/event_reactor_adapter.py` and this packet.
 - Acceptance: affected suite remains green; official deploy identifies which exact fail-closed branch is active without creating a command/order.
@@ -529,7 +592,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 - First-principles correction: a binary claim has exactly two settlement payoffs: lose `-cost` or win `shares-cost`. For a 13% claim bought at 1 cent, `+$0.12` per share is an expectation, not realized capital gain; the conservative terminal loss probability is 87% and the median payoff is `-$0.01`. Zero-sum fixes the payoff vector but does not erase uncertainty before settlement.
 - Objective contract: retain robust expected log growth for multiplicative sizing only after a lexically prior terminal-outcome constraint. A candidate is entry-eligible only when lower-tail-CVaR win probability is strictly above one half, equivalently conservative loss probability is strictly below one half. This is a positive-median-payoff requirement, not a configurable hit-rate heuristic. YES and NO consume the same rule over native payoff-side q; labels receive no waiver.
-- Minimal repair: add a typed `ROBUST_MAJORITY_LOSS` rejection, reject before sizing, and bind win/loss probabilities plus the exact 0/1 payoff branches into selection, actuation identity, and the current-state execution receipt. Keep EV only as explicitly diagnostic evidence; never name it realized gain.
+- Minimal repair: add a typed `ROBUST_MAJORITY_LOSS` rejection, reject before sizing, and bind win/loss probabilities plus the exact 0/1 payoff branches into selection, actuation identity, and the current-state execution receipt. Keep EV only as explicitly evidence evidence; never name it realized gain.
 - Files authorized: `src/solve/solver.py`, `src/engine/global_single_order_auction.py`, `src/engine/event_reactor_adapter.py`, `src/decision_kernel/canonicalization.py`, narrow solver/integration tests, the two W3 design authorities, this packet, and its scope sidecar.
 - Forbidden: delete probability from a pre-settlement decision; treat positive EV as a realized profit; special-case YES or NO; infer a 0.5+ YES probability when current evidence does not provide it; weaken current q/book/wealth/JIT/RiskGuard/venue gates; submit, cancel, or mutate a live DB from this isolated branch.
 - Acceptance: an otherwise current 13%-at-1-cent order is rejected specifically for majority loss; a mirrored YES/NO pair at identical payoff q and book receives identical certificates; a qualifying order exposes win/loss probabilities summing to one, exact lose/win payoffs, positive median payoff, and no wording that calls EV capital gain; receipt validation rejects forged or missing certificate fields; affected and declared evaluator suites pass.
@@ -538,11 +601,11 @@ Restore truthful live entry admission after the global auction reached a real wi
 ## Slice B26 -- Prevent point-estimate family value from vetoing a robust exit
 
 - Current live proof: non-Day0 held positions exposed monitor point probabilities of `0.995586--0.999999997`, while the same current posterior rows carried side-correct lower bounds of only `0.872727--0.942952`. Individual exit evaluation consumes fresh CI and fee/time/crowding-aware hold value, but the later family overlay recomputes `shares * q_point` without those costs and may turn a statistical exit back into a hold.
-- First-principles invariant: a lower-authority point expectation is diagnostic evidence only. It cannot veto an already-approved higher-authority CI/cost-aware exit or promote a sale over a robust hold. Either override requires a coherent current family distribution and the same fee/time/crowding objective; this surface has neither.
-- Minimal repair: preserve statistical exits after the Day0 maturity gate, preserve robust holds, and stamp any conflicting family point-value comparison as a diagnostic counterfactual with no actuation authority.
+- First-principles invariant: a lower-authority point expectation is evidence evidence only. It cannot veto an already-approved higher-authority CI/cost-aware exit or promote a sale over a robust hold. Either override requires a coherent current family distribution and the same fee/time/crowding objective; this surface has neither.
+- Minimal repair: preserve statistical exits after the Day0 maturity gate, preserve robust holds, and stamp any conflicting family point-value comparison as a evidence counterfactual with no actuation authority.
 - Files authorized: `src/engine/cycle_runtime.py`, `tests/test_live_safety_invariants.py`, this packet, and its existing scope sidecar.
 - Forbidden: weaken Day0 maturity, quote freshness, exit evidence, or RED/ORANGE behavior; invent q bounds from entry width; change entry selection or venue actuation; treat point probability as certainty.
-- Acceptance: family point value cannot suppress a statistical exit or promote a sale over a robust hold; receipts name diagnostic-only authority, preserve the robust reason, and expose the conflicting point suggestion; Day0 maturity behavior remains unchanged; affected tests, the capital evaluator, compilation, planning-lock, and `git diff --check` pass. No deployment until the main worktree's independent T5+T6 hard gate is complete.
+- Acceptance: family point value cannot suppress a statistical exit or promote a sale over a robust hold; receipts name read-only evidence authority, preserve the robust reason, and expose the conflicting point suggestion; Day0 maturity behavior remains unchanged; affected tests, the capital evaluator, compilation, planning-lock, and `git diff --check` pass. No deployment until the main worktree's independent T5+T6 hard gate is complete.
 - Verification: the existing robust HOLD/EXIT decision remains the sole actuator; family point value is receipt-only in both directions. The receipt carries the evaluated leg's side-correct current `q_lcb/q_ucb` and `shares * q_lcb`, refuses a sibling's transient bound, clears a missing next-cycle CI instead of reusing it, and proves the same rule for `buy_yes` and `buy_no` at a live-shaped `q_point=0.999999997`. Focused tests pass `15/15`, live-safety passes `188/188`, and the declared capital evaluator passes `235/235`; compilation and `git diff --check` pass. Full-file Ruff reports 17 pre-existing findings and none on B26 added lines. No deploy, DB mutation, or venue action was performed; mainline T5+T6 remains a separate deployment blocker.
 
 ## Slice B27 -- Value robust HOLD at the current held-side lower bound
@@ -579,7 +642,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 - Current proof: exact-HEAD daemon `cb17d70ec` has healthy runtime, venue, risk, collateral, forecast, and execution-capability surfaces. New entry is nevertheless globally blocked because `pending_exit_release_loop` reports a Guangzhou exit rejection emitted under an already-superseded deployment mismatch.
 - First-principles invariant: an exit incident is evidence about that position's exit lifecycle. It may block or escalate that exit, reserve its exposure, and remain visible to operators; it is not authority to veto an independently executable new entry. Global entry denial belongs only to facts that invalidate every candidate's source, probability, capital, runtime, venue, risk, or submit authority. A true global deployment failure is already covered by `runtime_code` and `process_code`, so coupling the exit telemetry adds no safety invariant.
-- Minimal repair: keep `pending_exit_release_loop` in composite live health and operator diagnostics, but remove it from `_ENTRY_LIVE_HEALTH_REQUIRED_SURFACES`. No event is deleted, aged out, rewritten, or relabeled. Recent exit failures remain DEGRADED telemetry while independent entry evaluation proceeds through all real global gates.
+- Minimal repair: keep `pending_exit_release_loop` in composite live health and operator evidence, but remove it from `_ENTRY_LIVE_HEALTH_REQUIRED_SURFACES`. No event is deleted, aged out, rewritten, or relabeled. Recent exit failures remain DEGRADED telemetry while independent entry evaluation proceeds through all real global gates.
 - Acceptance: a composite failing only on pending-exit telemetry does not block ENTRY; runtime/venue/risk/probability/execution failures still fail closed; exit monitoring and projection tests remain unchanged; no live state or venue action is performed by the code change.
 - Verification: exit-only degradation passes entry authority while `runtime_code` degradation still returns `failing_surfaces=runtime_code`; focused authority/global-batch tests pass `9/9`. The broader money-path, run-mode, global-auction, and qkernel batch passes `384` with one baseline-reproduced Day0 fixture failure (`DAY0_ONE_BIN_EDGE_FRAGILE`) on untouched code. The declared capital evaluator passes `254/254` with 42 existing NumPy warnings; compile, planning-lock, and `git diff --check` pass. Aggregate diff from loaded `cb17d70ec` is one runtime-line removal plus tests/docs; B31 cutoff code is fully absent.
 
@@ -605,7 +668,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 ## Slice B34 -- Vectorize exact Day0 settlement Monte Carlo
 
 - Current proof: the latest 120 live cycles have `prepare_families` p50 `4.615s`, p95 `5.876s`. A production-shaped read-only profile over 117 current families prepared 92 and spent `7.365s/7.951s` in 40 Day0 probability rebuilds; `p_raw_vector_from_maxes -> bin_counts_from_array` executed 400,000 times and consumed about `4.0s`. With the production read transaction active, SQLite execution was only `0.429s`, so DB HWM reads are not the remaining prepare bottleneck.
-- First-principles invariant: preserve the exact seeded Monte Carlo experiment: identical normal draw sequence, per-market instrument/residual sigma, `SettlementSemantics.round_values`, inclusive integer-bin membership, count normalization, and output ordering. Do not substitute the analytic diagnostic model, reduce `n_mc`, weaken topology completeness, or change Day0 probability authority.
+- First-principles invariant: preserve the exact seeded Monte Carlo experiment: identical normal draw sequence, per-market instrument/residual sigma, `SettlementSemantics.round_values`, inclusive integer-bin membership, count normalization, and output ordering. Do not substitute the analytic evidence model, reduce `n_mc`, weaken topology completeness, or change Day0 probability authority.
 - Minimal repair: draw the same `n_mc * n_members` normal sequence once into a two-dimensional NumPy array, apply settlement rounding once, flatten the measured outcomes, and count every bin once. The Day0 bootstrap sampler likewise replaces its per-bin scalar count loop with the existing all-bin counter without reordering draws. This removes 10,000 Python loop iterations per family plus repeated per-bin masks while retaining the same simulated sample multiset, RNG order, and integer counts.
 - Files authorized: `src/signal/ensemble_signal.py`, `tests/test_ensemble_signal.py`, this packet, and its scope sidecar. Existing B33 files remain authorized for the preceding slice.
 - Acceptance: an explicit scalar oracle with independently seeded identical generators is bit-identical to the vectorized function for WMO and non-WMO rounding, residual sigma, incomplete bin masks, and multiple `n_mc` sizes; existing signal/Day0/global-auction suites pass; a fixed-input microbenchmark materially reduces median latency; planning-lock, compilation, Ruff on changed files, and `git diff --check` pass. Deployment remains operator-only.
@@ -1062,3 +1125,124 @@ Restore truthful live entry admission after the global auction reached a real wi
   reproduced unchanged on `ad655f5f1`. Compilation, planning-lock, and
   `git diff --check` pass; no canonical DB, control override, or venue state
   changed during worktree verification.
+
+## Slice B71.1 -- Make F109 duplicate protection held-token exact
+
+- Restart proof: B71 reconstructed the Guangzhou root as its authenticated
+  `buy_no` fill, then failed before creating the YES child with F109 claiming
+  the child's YES token was already held by the NO root. The root carries that
+  YES `token_id` only as binary market topology; its owned asset is
+  `no_token_id`.
+- First-principles invariant: duplicate-open protection is per owned native
+  token, not per sibling token named by the market. `buy_yes` owns `token_id`;
+  `buy_no` owns `no_token_id`. The writer checks both fields for an unknown
+  direction; destructive consolidation leaves such untyped rows untouched.
+- Minimal repair: derive the candidate held token from direction and compare it
+  only with direction-selected held tokens on existing typed rows. Preserve the
+  hard failure for a true same-held-token duplicate and all append/projection
+  transaction boundaries.
+- Files authorized: `src/state/projection.py`,
+  `src/state/position_duplicate_consolidator.py`,
+  `tests/test_command_recovery.py`, `architecture/source_rationale.yaml`, and
+  this packet plus its scope sidecar.
+- Acceptance: a NO root and YES child sharing one exact binary topology both
+  project; another YES position on the same YES token still raises F109. The
+  live B71 reconstruction then writes one root and one deterministic child
+  atomically, restart recovery is green, and no venue action is introduced.
+- Post-deploy blocker: monitor projections carry `Direction` enum values, not
+  only DB strings. Treating those enums as unknown made each sibling check both
+  topology tokens and blocked every post-split `MONITOR_REFRESHED`. The legacy
+  duplicate consolidator independently grouped on `token_id OR no_token_id`,
+  which could misclassify legitimate opposite-token siblings as overbook.
+- Corrective acceptance: string and enum directions select the same single
+  owned token; both Guangzhou rows persist monitor projections; the
+  consolidator excludes opposite-token siblings and untyped legacy rows while
+  retaining typed same-token duplicate repair; both positions receive fresh
+  canonical monitor receipts.
+
+## Slice B72.1 -- Keep a Day0 raw-input HWM local to its family
+
+- Live proof: at `2026-07-24T09:44:15Z`, Seattle Jul24 HIGH received a newer
+  `06Z` raw input while its latest complete source-clock posterior remained
+  bound to `00Z`. The bundle reader correctly rejected that stale posterior
+  with `REPLACEMENT_RAW_INPUT_HWM`, but the Day0 source-clock wrapper surfaced
+  it as an untyped `ValueError`. One temporarily ineligible Seattle family
+  therefore produced `GLOBAL_PREPARED_FAMILY_INCOMPLETE` and stopped the whole
+  102-family auction; one event accumulated 76 retries while the reactor
+  repeatedly occupied the decision lane.
+- First-principles invariant: a family without a current q cannot enter the
+  feasible set, but it cannot erase current executable actions from unrelated
+  families. The full universe receipt must retain the excluded family and its
+  exact reason while the auction compares every other current-q family against
+  CASH/HOLD. A refreshable raw-input HWM must trigger the existing targeted
+  same-family materialization lane.
+- Minimal repair: classify
+  `GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:*` through the existing typed
+  `FamilyAuthorityUnavailable` path, and recognize the nested
+  `REPLACEMENT_RAW_INPUT_HWM` segment as posterior staleness for the existing
+  single-family cycle-advance drain. Do not accept the stale posterior and do
+  not remove the family from the full-scope identity.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `src/events/reactor.py`, `tests/integration/test_w3_solve_seam_g3.py`,
+  `tests/events/test_always_decidable_invariant.py`, and this packet.
+- Forbidden: stale-as-fresh probability, partial family q, whole-auction
+  fallback, history-derived q, market-price probability, forced orders,
+  operator pause changes, Wellington changes, canonical DB mutation/copy, or
+  interference with another runtime.
+- Acceptance: the production-shaped Day0 HWM error becomes one typed
+  family-local exclusion; the full scope and exclusion reason remain persisted;
+  another current family can still win and actuate; the excluded family causes
+  exactly one targeted cycle-advance enqueue and stays pending; unexpected
+  probability exceptions still fail the entire cut. Focused relationship,
+  integration, compilation, planning-lock, and diff checks pass before exact-SHA
+  deployment.
+- Pre-deploy verification: the production-shaped relationship checks pass
+  `9/9`; reactor/qkernel/raw-HWM coverage passes `330/330`; complete
+  W3 plus always-decidable coverage passes `288` tests and retains three fixture
+  failures reproduced identically on unmodified live `8c4aa329f` (two fake
+  `object()` connections and one incomplete in-memory executable-snapshot
+  schema). Compilation, planning lock, and `git diff --check` pass. Ruff is not
+  installed in the live virtualenv.
+
+## Slice B72.2 -- Let held-position monitoring preempt a slow scope scan
+
+- Live proof: after full held-book coverage recovered, an active EDLI reactor
+  still made `exit_monitor` defer after its 30-second handoff budget. The same
+  current run spent 78.336 seconds in the global scope scan; 72-hour logs
+  contain scans up to 610.927 seconds. The 41 held positions were fresh at the
+  sample, but correctness still depended on the entry reactor finishing before
+  the next material belief/book reversal.
+- First-principles invariant: the reactor may finish an atomic venue side
+  effect, but a read-only scope construction cannot outrank capital already at
+  risk. Once monitor priority is claimed, scope SQL and event construction must
+  cooperatively cancel, return no partial scope, release the reactor boundary,
+  and let the next reactor cycle re-decide from current truth.
+- Minimal repair: pass the existing held-monitor cancellation signal through
+  global scope construction; use a scope-owned watcher and SQLite
+  `Connection.interrupt()` to stop long world/forecast reads without replacing
+  a caller-owned progress handler, plus explicit checks between Python
+  row-build phases. Convert only an observed monitor cancellation into the
+  existing `GLOBAL_SELECTION_CANCELLED` requeue receipt. Do not run monitor and
+  reactor venue work concurrently.
+- Files authorized: `src/engine/global_batch_runtime.py`,
+  `src/engine/global_auction_universe.py`,
+  `src/events/triggers/forecast_snapshot_ready.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`,
+  `tests/events/test_forecast_snapshot_ready.py`, and this packet plus its
+  scope sidecar.
+- Acceptance: a monitor handoff interrupts a deliberately long scope SQL,
+  forecast-event construction returns no partial carrier, the batch persists
+  the existing cancellation/requeue reason with zero candidate preparation and
+  zero venue actuation, existing global-auction behavior remains green, and a
+  live exact-SHA restart shows no monitor defer under another slow scope scan.
+- Verification: real `threading.Event` antibodies interrupt forecast SQL and
+  Day0 Python filtering within one second, preserve a caller-owned SQLite
+  progress handler, join the watcher, and keep a failed cancellation probe
+  fail-soft. Forecast-trigger coverage passes `31/31`, global-batch coverage
+  `50/50`, handoff coverage `4/4`, and combined dedup/live-safety coverage
+  `333 passed, 1 xpassed`; schema fingerprint, compilation, and
+  `git diff --check` pass. A read-only scan of the canonical live world and
+  forecast DBs cancelled in `0.069822s`. Two wider scope-fixture tests fail
+  identically on live because they pass `object()` into `EventWriter`; neither
+  reaches this cancellation path. Independent review found no P0/P1/P2 and
+  returned LAND.

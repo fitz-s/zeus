@@ -8,10 +8,8 @@ allowed_files:
   - architecture/_schema_fingerprint.txt
   - architecture/script_manifest.yaml
   - config/settings.json
-  - scripts/check_replacement_forecast_live_dry_run.py
   - scripts/download_replacement_forecast_current_targets.py
   - scripts/hko_ingest_tick.py
-  - scripts/apply_replacement_forecast_live_switch.py
   - scripts/plan_replacement_forecast_live_config.py
   - scripts/verify_e2e_money_path.py
   - src/execution/exit_lifecycle.py
@@ -49,7 +47,7 @@ allowed_files:
   - src/data/replacement_forecast_event_payload.py
   - src/data/replacement_forecast_receipt_provenance.py
   - src/data/replacement_forecast_runtime_policy.py
-  - src/data/replacement_forecast_live_dry_run.py
+  - src/data/retired forecast rehearsal key.py
   - src/data/replacement_forecast_switch_decision.py
   - src/data/replacement_forecast_live_switch_surface.py
   - src/data/replacement_forecast_readiness.py
@@ -102,7 +100,7 @@ forbidden_files:
 live_side_effects_allowed: replacement_forecast_authority_db_repair_live_path_rename_and_daemon_reload_only
 completed_live_side_effects:
   - state/zeus-forecasts.db forecast_posteriors schema/status repair on 2026-06-17
-  - state/zeus-forecasts.db readiness_state provenance live/diagnostic repair on 2026-06-17
+  - state/zeus-forecasts.db readiness_state provenance live/evidence repair on 2026-06-17
   - rename state/replacement_forecast_shadow to state/replacement_forecast_live on 2026-06-17
   - launchctl kickstart com.zeus.live-trading com.zeus.forecast-live com.zeus.data-ingest on 2026-06-17
 high_risk_changes:

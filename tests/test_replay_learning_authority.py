@@ -1,8 +1,8 @@
 # Created: 2026-05-29
 # Last reused or audited: 2026-05-29
 # Authority basis: TRIBUNAL replay redesign PR H — promotion/learning authority gates.
-#   A SKILL/DIAGNOSTIC result can never promote; promotion requires a ForecastObject
-#   identity + a promotion_eligible SettlementResolution; trade_decisions (legacy_archived)
+#   A SKILL/AUDIT_REPLAY result can never enter learning; learning requires a ForecastObject
+#   identity + a learning_eligible SettlementResolution; trade_decisions (legacy_archived)
 #   can never be an authority source.
 """Tests for the replay promotion/learning authority gates."""
 
@@ -12,14 +12,14 @@ import pytest
 
 from src.backtest.purpose import (
     BacktestPurpose,
-    DIAGNOSTIC_CONTRACT,
+    AUDIT_REPLAY_CONTRACT,
     ECONOMICS_CONTRACT,
-    PromotionAuthorityViolation,
+    LearningAuthorityViolation,
     PurposeContract,
     SKILL_CONTRACT,
     SKILL_PARITY,
     assert_not_legacy_authority,
-    assert_promotion_grade,
+    assert_learning_grade,
 )
 from src.contracts.calibration_bins import F_CANONICAL_GRID
 from src.contracts.settlement_outcome import SettlementOutcome
@@ -49,40 +49,40 @@ def _settlement(*, promotion_eligible: bool):
     )
 
 
-# ── structural antibody: SKILL/DIAGNOSTIC cannot hold promotion_authority=True ──
+# ── structural antibody: SKILL/AUDIT_REPLAY cannot hold learning_authority=True ──
 
 
-def test_skill_contract_cannot_be_promotion_authority():
-    with pytest.raises(PromotionAuthorityViolation):
+def test_skill_contract_cannot_be_learning_authority():
+    with pytest.raises(LearningAuthorityViolation):
         PurposeContract(
             purpose=BacktestPurpose.SKILL,
             permitted_outputs=frozenset(),
             parity=SKILL_PARITY,
-            promotion_authority=True,
+            learning_authority=True,
         )
 
 
-def test_diagnostic_contract_cannot_be_promotion_authority():
-    with pytest.raises(PromotionAuthorityViolation):
+def test_audit_replay_contract_cannot_be_learning_authority():
+    with pytest.raises(LearningAuthorityViolation):
         PurposeContract(
-            purpose=BacktestPurpose.DIAGNOSTIC,
+            purpose=BacktestPurpose.AUDIT_REPLAY,
             permitted_outputs=frozenset(),
             parity=SKILL_PARITY,
-            promotion_authority=True,
+            learning_authority=True,
         )
 
 
 def test_canonical_contracts_still_construct():
-    assert SKILL_CONTRACT.promotion_authority is False
-    assert DIAGNOSTIC_CONTRACT.promotion_authority is False
-    assert ECONOMICS_CONTRACT.promotion_authority is True
+    assert SKILL_CONTRACT.learning_authority is False
+    assert AUDIT_REPLAY_CONTRACT.learning_authority is False
+    assert ECONOMICS_CONTRACT.learning_authority is True
 
 
 # ── trade_decisions can never be an authority source ──
 
 
 def test_trade_decisions_refused_as_authority():
-    with pytest.raises(PromotionAuthorityViolation, match="legacy_archived"):
+    with pytest.raises(LearningAuthorityViolation, match="legacy_archived"):
         assert_not_legacy_authority("trade_decisions")
 
 
@@ -92,43 +92,43 @@ def test_canonical_authority_table_allowed():
     assert_not_legacy_authority("settlement_outcomes")
 
 
-# ── assert_promotion_grade ──
+# ── assert_learning_grade ──
 
 
-def test_promotion_grade_passes_with_full_identity():
+def test_learning_grade_passes_with_full_identity():
     res = _settlement(promotion_eligible=True)
-    assert_promotion_grade(
+    assert_learning_grade(
         ECONOMICS_CONTRACT, forecast_object=object(), settlement_resolution=res
     )  # no raise
 
 
 def test_skill_result_cannot_promote():
     res = _settlement(promotion_eligible=True)
-    with pytest.raises(PromotionAuthorityViolation, match="ECONOMICS"):
-        assert_promotion_grade(
+    with pytest.raises(LearningAuthorityViolation, match="ECONOMICS"):
+        assert_learning_grade(
             SKILL_CONTRACT, forecast_object=object(), settlement_resolution=res
         )
 
 
 def test_promotion_requires_forecast_object():
     res = _settlement(promotion_eligible=True)
-    with pytest.raises(PromotionAuthorityViolation, match="ForecastObject"):
-        assert_promotion_grade(
+    with pytest.raises(LearningAuthorityViolation, match="ForecastObject"):
+        assert_learning_grade(
             ECONOMICS_CONTRACT, forecast_object=None, settlement_resolution=res
         )
 
 
 def test_promotion_requires_settlement_resolution():
-    with pytest.raises(PromotionAuthorityViolation, match="SettlementResolution"):
-        assert_promotion_grade(
+    with pytest.raises(LearningAuthorityViolation, match="SettlementResolution"):
+        assert_learning_grade(
             ECONOMICS_CONTRACT, forecast_object=object(), settlement_resolution=None
         )
 
 
 def test_exceptional_settlement_cannot_promote():
     res = _settlement(promotion_eligible=False)  # UMA_UNKNOWN_50_50
-    assert res.promotion_eligible is False
-    with pytest.raises(PromotionAuthorityViolation, match="not promotion_eligible"):
-        assert_promotion_grade(
+    assert res.learning_eligible is False
+    with pytest.raises(LearningAuthorityViolation, match="not learning_eligible"):
+        assert_learning_grade(
             ECONOMICS_CONTRACT, forecast_object=object(), settlement_resolution=res
         )

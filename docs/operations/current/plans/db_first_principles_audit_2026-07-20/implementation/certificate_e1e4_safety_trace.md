@@ -21,11 +21,11 @@ design-C lane 的 receipt_hash / opportunity_book 溯源。**这是 E1 落地的
 
 **非阻塞机械改动**(非安全相关):需存储路径重接的是 live_health.py 的 3 个 decode/reference 函数 + event_reactor_adapter.py:1281-1317 对 book_native_side_states_zlib_b64 的原生 SQL json_extract。
 
-## TRACE 2 — E4(opportunity_book 摘要):**确认 diagnostic-only**
+## TRACE 2 — E4(opportunity_book 摘要):**确认 read-only evidence**
 payload 在 event_reactor_adapter.py:18242(`_actionable_payload_from_receipt` 18084-18089)得该 key,流入 build_actionable_trade_certificate(17178-17182 → certificates/action.py:14-23,certificate_type=ACTIONABLE_TRADE)。唯一构造路径(claims.ACTIONABLE_TRADE 全 src 仅现一次,action.py:15;build_actionable_trade_certificate 仅一 caller)。`grep -in opportunity_book decision_kernel/verifier.py` = 零(查两次)。正面佐证:verify_actionable_trade(verifier.py:212-246)与 _verify_execution_command/_verify_final_intent_payload 从同一 payload dict cherry-pick ~15 个别的字段,从不碰 opportunity_book。
 
 两条 trace 均无 UNCERTAIN。
 
 ## team-lead 合流裁决
 - **E1 SAFE 落地**(仍先冻 golden vectors 兜底其它 receipt 系统)——W3 新写/relocate,不需等 v2 全套。
-- **E4 仍需 v2 版本化**:trace 证 verifier 不读该字段(diagnostic),但 round-2 已定 `payload_hash=stable_hash(payload)` 承诺整个 payload 含 opportunity_book → 原地摘要改 payload_hash→certificate_hash→毁身份。故 E4 = 证书 v2 迁移,v1 永不原地重写。diagnostic 性质只是说明摘要**语义上安全**(无 verifier 依赖),哈希绑定要求它走版本化。
+- **E4 仍需 v2 版本化**:trace 证 verifier 不读该字段(evidence),但 round-2 已定 `payload_hash=stable_hash(payload)` 承诺整个 payload 含 opportunity_book → 原地摘要改 payload_hash→certificate_hash→毁身份。故 E4 = 证书 v2 迁移,v1 永不原地重写。evidence 性质只是说明摘要**语义上安全**(无 verifier 依赖),哈希绑定要求它走版本化。

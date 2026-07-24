@@ -5,7 +5,7 @@
 #   coverage-through-decision. Reuses the existing window-grace + min-count logic
 #   (src/data/observation_client._compute_day0_coverage_status) as the SINGLE authority for that
 #   part; adds the gap / cadence / coverage-through proof on top. Live Day0 entry accepts only
-#   FULL_THROUGH_DECISION (or an explicit canary-only state).
+#   FULL_THROUGH_DECISION (or an explicit probe-only state).
 """Day0CoverageProof — a richer coverage certificate for the Day0 live lane.
 
 The legacy coverage status only proves the first sample landed within a grace window of local

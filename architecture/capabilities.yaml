@@ -106,12 +106,12 @@ capabilities:
       latency_budget_ms: 200
     reversibility_class: TRUTH_REWRITE
 
-  # ─── seeded from source_rationale.yaml::write_routes::backtest_diagnostic_write ─
-  - id: backtest_diagnostic_write
+  # ─── seeded from source_rationale.yaml::write_routes::backtest_audit_write ─
+  - id: backtest_audit_write
     owner_module: src/engine/replay.py
     intent: >
-      Write diagnostic backtest results to state/zeus_backtest.db. Scope is
-      SKILL and DIAGNOSTIC backtest purposes only; ECONOMICS purpose is
+      Write telemetry backtest results to state/zeus_backtest.db. Scope is
+      SKILL and TELEMETRY backtest purposes only; ECONOMICS purpose is
       tombstoned. This surface carries no promotion authority; results are
       read-model facts for operator inspection and do not flow into live
       calibration or settlement without an explicit governance packet.
@@ -124,7 +124,7 @@ capabilities:
     original_intent:
       intent_test: "diff touches replay.py or backtest DB write path"
       does_not_fit: log_and_advisory
-      scope_keywords: [backtest, replay, diagnostic, skill, economics]
+      scope_keywords: [backtest, replay, telemetry, skill, economics]
       out_of_scope_keywords: [paper, mock, live_promotion]
     sunset_date: 2027-05-06
     lease_required: false
@@ -166,10 +166,10 @@ capabilities:
     owner_module: src/calibration/effective_sample_size.py
     intent: >
       Write calibration_decision_group and associated calibration_pairs rows
-      in additive/shadow accounting mode. Promotion to canonical authority
+      in additive/observation accounting mode. Promotion to canonical authority
       requires an explicit governance packet; this capability is never
       self-promoting. Separation from calibration_persistence_write prevents
-      shadow accounting from contaminating the live calibration surface.
+      observation accounting from contaminating the live calibration surface.
     relationships:
       protects_invariants: [INV-15, INV-21]
       blocked_when:
@@ -180,7 +180,7 @@ capabilities:
     original_intent:
       intent_test: "diff touches effective_sample_size.py or decision_group write path"
       does_not_fit: log_and_advisory
-      scope_keywords: [calibration, decision_group, effective_sample_size, shadow]
+      scope_keywords: [calibration, decision_group, effective_sample_size, observation]
       out_of_scope_keywords: [paper, replay, backtest, mock, promotion]
     sunset_date: 2027-05-06
     lease_required: true
@@ -294,7 +294,7 @@ capabilities:
       intent_test: "diff touches live executor or venue adapter submit path"
       does_not_fit: refuse_with_advice
       scope_keywords: [live, submit, order, venue]
-      out_of_scope_keywords: [shadow, paper, replay, simulate, mock, dry-run]
+      out_of_scope_keywords: [observation, paper, replay, simulate, mock, dry-run]
     sunset_date: 2027-05-06
     lease_required: true
     telemetry:
@@ -329,7 +329,7 @@ capabilities:
       intent_test: "diff touches reduce-only exit submit path"
       does_not_fit: refuse_with_advice
       scope_keywords: [exit, reduce_only, sell, held_position, venue]
-      out_of_scope_keywords: [entry, buy, open, increase, shadow, paper, replay, simulate, mock, dry-run]
+      out_of_scope_keywords: [entry, buy, open, increase, observation, paper, replay, simulate, mock, dry-run]
     sunset_date: 2027-05-06
     lease_required: true
     telemetry:
@@ -359,7 +359,7 @@ capabilities:
       intent_test: "diff touches chain reconciliation, fill acknowledgment, void-on-divergence path, or on-chain redeem"
       does_not_fit: refuse_with_advice
       scope_keywords: [chain, reconcile, fill, void, on_chain]
-      out_of_scope_keywords: [shadow, paper, replay, simulate, mock, dry-run]
+      out_of_scope_keywords: [observation, paper, replay, simulate, mock, dry-run]
     sunset_date: 2027-05-06
     lease_required: true
     telemetry:
@@ -428,8 +428,8 @@ capabilities:
   - id: source_validity_flip
     owner_module: src/contracts/world_view/__init__.py
     intent: >
-      Flip the validity flag of a data source (world_view, calibration transfer
-      policy, or data_version sentinel). TRUTH_REWRITE because downstream
+      Flip the validity flag of a data source (world_view or data_version
+      sentinel). TRUTH_REWRITE because downstream
       probability signals treat source validity as a gate; flipping incorrectly
       poisons the entire computation chain. Protects INV-04 (strategy_key
       governance) and INV-06 (data source authority).
@@ -440,11 +440,10 @@ capabilities:
     hard_kernel_paths:
       - src/contracts/world_view/__init__.py
       - src/contracts/world_view/calibration.py
-      - src/data/calibration_transfer_policy.py
     original_intent:
-      intent_test: "diff touches world_view validity, calibration transfer policy, or data_version sentinel"
+      intent_test: "diff touches world_view validity or a data_version sentinel"
       does_not_fit: log_and_advisory
-      scope_keywords: [validity, source, flip, world_view, transfer_policy, data_version]
+      scope_keywords: [validity, source, flip, world_view, data_version]
       out_of_scope_keywords: [paper, replay, backtest, mock]
     sunset_date: 2027-05-06
     lease_required: true

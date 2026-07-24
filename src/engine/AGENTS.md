@@ -25,7 +25,7 @@ evaluation.
 | `evaluator.py` | Signal → calibration → fusion → edge → FDR → sizing → decision | CRITICAL — where trading decisions happen |
 | `monitor_refresh.py` | Monitor and Day0 refresh for held positions | HIGH — Day0 truth plane |
 | `lifecycle_events.py` | Lifecycle event bridging between engine and state | HIGH — event emission |
-| `replay.py` | Replay/diagnostic path (must maintain parity with live) | HIGH — semantic parity |
+| `replay.py` | Replay/telemetry path (must maintain parity with live) | HIGH — semantic parity |
 | `cycle_runtime.py` | Runtime sequencing helpers | MEDIUM |
 | `time_context.py` | Date/lead-time semantics | MEDIUM — timezone sensitivity |
 
@@ -50,7 +50,7 @@ evaluation.
 - **Replay must maintain semantic parity with live.** Replay may differ
   in I/O (reading from DB vs API) but must not differ in semantic law
   (lifecycle transitions, risk rules, FDR computation, sizing). If
-  replay drifts from live semantics, diagnostic output is meaningless.
+  replay drifts from live semantics, telemetry output is meaningless.
 
 - **Engine reads risk policy but does not compute it.** RiskGuard emits
   policy; engine/evaluator consumes it. Engine must not embed risk
@@ -68,7 +68,7 @@ evaluation.
   mispricing during settlement window
 - Locally patching lifecycle transitions inside engine code instead of
   routing through `lifecycle_manager` → INV-01 violation
-- Replay path drifting from live semantic law "because it's just diagnostics"
+- Replay path drifting from live semantic law "because it's just telemetry"
   → replay becomes useless for parity verification
 - Skipping chain reconciliation for "speed" → evaluator sees phantom positions
   that no longer exist on-chain

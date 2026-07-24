@@ -65,7 +65,6 @@ def run_tests(api: Any) -> Any:
         "UNIT_BIN_TOPOLOGY",
         "P_RAW_PROVENANCE",
         "FDR_FAMILY",
-        "NO_DIAGNOSTIC_PROMOTION",
     }
     law_gate = topology.get("law_gate") or {}
     law_test_exceptions = set(topology.get("law_test_category_exceptions") or [])
@@ -74,7 +73,7 @@ def run_tests(api: Any) -> Any:
     for law, spec in law_gate.items():
         if not spec.get("tests"):
             issues.append(api._issue("test_law_gate_missing_tests", law, "law gate has no tests"))
-        for path in spec.get("tests", []):
+        for path in spec.get("tests") or []:
             if path not in actual:
                 issues.append(api._issue("test_law_gate_stale_test", path, f"{law} references absent test"))
             elif classified.get(path) != "core_law_antibody" and path not in law_test_exceptions:

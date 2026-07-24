@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time as _time
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -48,6 +49,10 @@ from src.solve.solver import (
 
 
 GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD = "_global_confirmed_absent"
+
+
+class GlobalAuctionScopeCancelled(RuntimeError):
+    """Raised when held-position monitoring preempts a read-only scope scan."""
 
 
 @dataclass(frozen=True, init=False)
@@ -1899,13 +1904,26 @@ def _current_day0_events(
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
     restrict_to_families: Sequence[tuple[str, str, str]] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[OpportunityEvent, ...]:
+    def _raise_if_cancelled() -> None:
+        if cancelled is None:
+            return
+        try:
+            requested = bool(cancelled())
+        except Exception:
+            return
+        if requested:
+            raise GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED")
+
+    _raise_if_cancelled()
     if not _table_exists(world_conn, "opportunity_events"):
         return ()
     from src.events.day0_authority import normalize_day0_live_authority_status
     from src.config import runtime_cities_by_name
 
     city_configs = runtime_cities_by_name()
+    _raise_if_cancelled()
     held = frozenset(
         (
             str(city or "").strip(),
@@ -2011,6 +2029,7 @@ def _current_day0_events(
             ),
         )
     rows = list(cur.fetchall())
+    _raise_if_cancelled()
     if restricted is None:
         for target_date in sorted(
             {
@@ -2019,6 +2038,7 @@ def _current_day0_events(
                 if not target_floor <= target_date <= target_ceiling
             }
         ):
+            _raise_if_cancelled()
             held_cur = world_conn.execute(
                 select
                 + " AND json_extract(payload_json, '$.target_date')=? "
@@ -2030,6 +2050,7 @@ def _current_day0_events(
                 ),
             )
             rows.extend(held_cur.fetchall())
+            _raise_if_cancelled()
     names = tuple(description[0] for description in cur.description or ())
     indexes = {name: index for index, name in enumerate(names)}
 
@@ -2040,6 +2061,7 @@ def _current_day0_events(
 
     latest: dict[str, tuple[tuple[str, str, str], object]] = {}
     for raw in rows:
+        _raise_if_cancelled()
         family = (
             str(_value(raw, "_day0_city") or "").strip(),
             str(_value(raw, "_day0_target_date") or "").strip(),
@@ -2093,6 +2115,7 @@ def _current_day0_events(
 
     out = []
     for family_key in sorted(latest):
+        _raise_if_cancelled()
         family, raw = latest[family_key]
         if (
             family not in held
@@ -2126,11 +2149,31 @@ def scan_current_global_auction_scope(
     held_families: Sequence[tuple[str, str, str]] = (),
     restrict_to_families: Sequence[tuple[str, str, str]] | None = None,
     day0_only: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> CurrentGlobalAuctionScope:
     """Read the current decision scope and its held-family obligations."""
 
     if decision_at_utc.tzinfo is None:
         raise ValueError("decision_at_utc must be timezone-aware")
+
+    cancellation_seen = False
+
+    def _cancelled() -> bool:
+        nonlocal cancellation_seen
+        if cancelled is None:
+            return False
+        try:
+            requested = bool(cancelled())
+        except Exception:
+            return False
+        cancellation_seen = cancellation_seen or requested
+        return requested
+
+    def _raise_if_cancelled() -> None:
+        if _cancelled():
+            raise GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED")
+
+    _raise_if_cancelled()
     held = tuple(
         sorted(
             {
@@ -2174,34 +2217,85 @@ def scan_current_global_auction_scope(
         if restricted is None
         else set(restricted).union(scope_held)
     )
-    forecast_events = ()
-    if not day0_only or scope_held:
-        trigger = ForecastSnapshotReadyTrigger(
-            EventWriter(world_conn),
-            live_eligibility_reader=executable_forecast_live_eligible_reader(
-                forecasts_conn
+    interrupt_connections = []
+    if cancelled is not None:
+        for conn in (world_conn, forecasts_conn):
+            if any(conn is current for current in interrupt_connections):
+                continue
+            interrupt = getattr(conn, "interrupt", None)
+            if callable(interrupt):
+                interrupt_connections.append(conn)
+    watch_stop = threading.Event()
+    watcher: threading.Thread | None = None
+
+    def _watch_for_cancellation() -> None:
+        while not watch_stop.wait(0.01):
+            if not _cancelled():
+                continue
+            for conn in interrupt_connections:
+                try:
+                    conn.interrupt()
+                except Exception:
+                    pass
+            return
+
+    try:
+        if interrupt_connections:
+            watcher = threading.Thread(
+                target=_watch_for_cancellation,
+                name="global-scope-monitor-handoff",
+                daemon=True,
+            )
+            watcher.start()
+        forecast_events = ()
+        if not day0_only or scope_held:
+            trigger = ForecastSnapshotReadyTrigger(
+                EventWriter(world_conn),
+                live_eligibility_reader=executable_forecast_live_eligible_reader(
+                    forecasts_conn
+                ),
+            )
+            forecast_events = trigger.build_committed_snapshot_events(
+                forecasts_conn=forecasts_conn,
+                decision_time=decision_at_utc,
+                received_at=decision_at_utc.isoformat(),
+                limit=None,
+                source="global-auction-current-scope",
+                phase_filter_exempt_families=set(scope_held),
+                restrict_to_families=(
+                    scoped_families
+                ),
+                cancelled=_cancelled,
+            )
+        _raise_if_cancelled()
+        events = current_global_scope_events_with_day0(
+            forecast_events,
+            _current_day0_events(
+                world_conn,
+                decision_at_utc=decision_at_utc,
+                held_families=scope_held,
+                restrict_to_families=scoped_families,
+                cancelled=_cancelled,
             ),
         )
-        forecast_events = trigger.build_committed_snapshot_events(
-            forecasts_conn=forecasts_conn,
-            decision_time=decision_at_utc,
-            received_at=decision_at_utc.isoformat(),
-            limit=None,
-            source="global-auction-current-scope",
-            phase_filter_exempt_families=set(scope_held),
-            restrict_to_families=(
-                scoped_families
-            ),
+        _raise_if_cancelled()
+    except InterruptedError as exc:
+        if cancellation_seen:
+            raise GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED") from exc
+        raise
+    except sqlite3.OperationalError as exc:
+        interrupted = (
+            getattr(exc, "sqlite_errorcode", None)
+            == getattr(sqlite3, "SQLITE_INTERRUPT", 9)
+            or "interrupted" in str(exc).lower()
         )
-    events = current_global_scope_events_with_day0(
-        forecast_events,
-        _current_day0_events(
-            world_conn,
-            decision_at_utc=decision_at_utc,
-            held_families=scope_held,
-            restrict_to_families=scoped_families,
-        ),
-    )
+        if cancellation_seen and interrupted:
+            raise GlobalAuctionScopeCancelled("GLOBAL_SELECTION_CANCELLED") from exc
+        raise
+    finally:
+        watch_stop.set()
+        if watcher is not None:
+            watcher.join()
     covered = {_event_family(event) for event in events}
     missing = sorted(set(scope_held) - covered)
     if missing:
@@ -2736,6 +2830,7 @@ def current_portfolio_wealth_witness(
         position_max_age = timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS)
         represented_micro: dict[str, int] = {}
         uncertain_micro: dict[str, int] = {}
+        uncertain_endowments: list[tuple[str, str, int]] = []
         native_commitments_micro: dict[str, int] = {}
         position_rows = []
         for position in positions:
@@ -2783,6 +2878,17 @@ def current_portfolio_wealth_witness(
                         evidence = "position_chain_seen"
             target = represented_micro if evidence != "uncertain_local_claim" else uncertain_micro
             target[token] = target.get(token, 0) + micro
+            if evidence == "uncertain_local_claim":
+                position_id = str(
+                    getattr(position, "position_id", "")
+                    or getattr(position, "trade_id", "")
+                    or ""
+                ).strip()
+                if not position_id:
+                    raise ValueError("CURRENT_WEALTH_OPEN_POSITION_INVALID")
+                uncertain_endowments.append(
+                    (f"position_claim:{position_id}", token, micro)
+                )
             try:
                 cost = max(
                     Decimal(
@@ -2882,6 +2988,9 @@ def current_portfolio_wealth_witness(
             positions=positions,
             native_holdings_micro=bounded_claims,
         )
+        pending_endowments = tuple(
+            sorted((*pending_endowments, *uncertain_endowments))
+        )
         inflight_command_ids = {identity[0] for identity in inflight_identities}
         if not inflight_command_ids.issubset(obligation_ids):
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
@@ -2920,10 +3029,6 @@ def current_portfolio_wealth_witness(
         )
         ceiling = floor + sum(
             (Decimal(amount) / Decimal("1000000") for amount in held_balances.values()),
-            Decimal("0"),
-        )
-        ceiling += sum(
-            (Decimal(amount) / Decimal("1000000") for amount in uncertain_micro.values()),
             Decimal("0"),
         )
         ceiling += sum(

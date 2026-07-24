@@ -65,7 +65,7 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 def _pragma_busy_timeout_ms(conn: sqlite3.Connection) -> int | None:
     try:
         row = conn.execute("PRAGMA busy_timeout").fetchone()
-    except Exception:  # noqa: BLE001 - diagnostic/restore best effort only
+    except Exception:  # noqa: BLE001 - telemetry/restore best effort only
         return None
     if row is None:
         return None
@@ -1051,7 +1051,11 @@ def _persist_market_events_to_db(
     resolved_path = Path(db_path) if db_path is not None else ZEUS_FORECASTS_DB_PATH
     inserted = 0
     try:
-        conn = sqlite3.connect(str(resolved_path), timeout=30)
+        from src.state.db_writer_lock import connect_with_cutover_lease
+
+        conn = connect_with_cutover_lease(
+            str(resolved_path), canonical_db_path=resolved_path, timeout=30
+        )
         try:
             for event in results:
                 market_slug = event.get("slug", "")
@@ -1166,7 +1170,7 @@ def _dedupe_condition_ids(values) -> list[str]:
 def extract_executable_condition_ids(events: list[dict]) -> list[str]:
     """Flatten + dedupe executable condition_ids across a list of event dicts.
 
-    Used by ``src/main.py::_start_user_channel_ingestor_if_enabled`` to derive
+    Used by ``src.ingest.price_channel_ingest._start_user_channel_ingestor`` to derive
     the user-channel WS subscription set from the live scanner output instead
     of a hardcoded ``POLYMARKET_USER_WS_CONDITION_IDS`` plist value
     (operator directive 2026-05-01: "任何硬编码bankroll都是一次严重的结构性失误";
@@ -5467,7 +5471,7 @@ def refresh_executable_market_substrate_snapshots(
                         commit_after_persist=snapshot_write_context_factory is not None,
                         capture_trigger="PRIORITY_MARKER" if is_priority_capture else "DISCOVERY_SWEEP",
                     )
-                    # EDLI live-canary WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
+                    # EDLI live-probe WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
                     # capture_executable_market_snapshot does per-outcome venue HTTP
                     # (_fetch_clob_market_info + the GET /book fallback + _fetch_fee_details)
                     # BEFORE its insert_snapshot.  With sqlite3 isolation_level="" the first

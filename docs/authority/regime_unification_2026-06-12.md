@@ -1,13 +1,13 @@
 # Regime Unification (大一统) — 2026-06-12
 
 Authority: operator directive 2026-06-12 (verbatim): "把这些乱套的规则全部都整理一下，
-又有fallback又有shadow又有active又有off又有bias。包括别的方面也是，进行一次大一统."
+又有fallback又有旁路观察又有active又有off又有bias。包括别的方面也是，进行一次大一统."
 Prior law absorbed: no-caps law, no-unsupported-hardcoded-values law, single-authority
 registry law (architecture census 2026-06-11), provenance envelope law.
 
 The disease being killed: ERA LAYERING. Each generation of the system (legacy baseline →
 EMOS → full_transport → edli_per_city → replacement fusion) left behind its own probability
-treatment, its own shadow/active/off switch vocabulary, and its own fallback into the
+treatment, its own parallel-observation/active/off switch vocabulary, and its own fallback into the
 PREVIOUS era. The result is a system where the answer to "which number decided this?"
 depends on which era's fallback happened to fire. 48h evidence: the exit monitor ran 82%
 of its refreshes on a different era's probability than entry used.
@@ -57,24 +57,23 @@ is fixed at the source instead:
 - if still stale: position belief stays fresh=False, BELIEF_AUTHORITY_FAULT escalates —
   blind-and-branded beats wrong-and-confident.
 
-## U3 — ONE regime vocabulary (shadow/active/off dies)
+## U3 — ONE runtime vocabulary
 
-Runtime regimes collapse to TWO orthogonal axes, each typed once:
-- submit_lane (per receipt, built 2026-06-12): LIVE / SUBMIT_DISABLED / NO_SUBMIT_ADAPTER / SHADOW.
-- EventProcessingDisposition (per event, Wave-2.5): PENDING / PROCESSING / TRANSIENT_WAIT /
-  TERMINAL_REJECT / SIDE_EFFECT_UNKNOWN / PROCESSED — persisted, with reason + horizon.
-Everything else that says shadow/active/off/canary/veto is either deleted (Wave 1B
-precedent) or mapped onto these two axes. Specifically scheduled for retirement:
-edli_live_scope strings (admission = event type + source truth), NATIVE_MULTIBIN_*_SHADOW/LIVE,
-openmeteo *_shadow/_veto/_trade_authority flag family, replacement-hook SHADOW_ONLY/
-SHADOW_VETO statuses (data-class markers stay; gate semantics die).
+There is one order-producing lane. A receipt records either a real submit attempt or a
+typed fail-closed refusal; there is no persisted observe-only submit lane, comparator
+lane, promotion lane, or dormant alternate authority. Event processing retains only
+its lifecycle states: PENDING / PROCESSING / TRANSIENT_WAIT / TERMINAL_REJECT /
+SIDE_EFFECT_UNKNOWN / PROCESSED, each with reason and horizon. Old scope strings,
+alternate-lane flags, veto statuses, staged authority labels, and activation switches
+are deleted rather than mapped or retained for later use.
 
-## U4 — Flags collapse to three legitimate kinds
+## U4 — Runtime authority is structural
 
-1. Operator arm (edli_live_operator_authorized + real submit) — policy.
-2. Daemon role (launchd identity / live_execution_mode two-state) — wiring.
-3. Fitted artifacts (sigma_scale_fit.json pattern: provenance + CI + refit cadence) — math.
-Anything else is either always-on (correct), deleted (wrong), or a bug being hidden.
+The live daemon has one submit implementation. Daemon identity is wiring, while
+fitted artifacts carry provenance, uncertainty, and refit cadence; neither may
+select an alternate execution or probability regime. Correct behavior is
+always present, incorrect behavior is deleted, and missing current truth fails
+the affected action closed without creating a disabled live mode.
 Remaining numeric knobs (market-anchor alpha=0.4, redecision tick-multiples, freshness
 budgets) migrate to fitted artifacts on touch.
 

@@ -17,7 +17,7 @@ eras:
       UMA OO V2 on-chain events. Settlement is triggered by a bond-and-dispute
       cycle; final value emitted as PriceSettled event. Last UMA block for weather
       markets: 83,275,667 (~2026-02-20).
-    backfill_path: scripts/backfill_uma_resolution_2026.py
+    backfill_path: retired_after_materialization
     rows_in_settlements_v2: 1300  # snapshot 2026-05-07
     settlements_v2_reconstruction_method: uma_chain_backfill
 
@@ -67,7 +67,6 @@ provenance_field_contract:
 
 references:
   - architecture/fatal_misreads.yaml  # polymarket_low_market_history_starts_2026_04_15
-  - scripts/backfill_uma_resolution_2026.py
   - scripts/backfill_settlements_via_gamma_2026.py
   - docs/historical_evidence/UNMATCHED_GAMMA_CITIES_2026_05_07.md
   - "git:1e5615b9"  # Gamma backfill re-enabled

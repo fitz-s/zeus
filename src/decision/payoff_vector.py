@@ -98,14 +98,9 @@ scalar transform in place):
      position SHRINKS the optimal stake by the concavity of the log — by construction of
      the ΔU objective, not a cap subtracted afterward.
 
-THE SCALAR IS TELEMETRY (spec lines 793-802, 1184). ``CandidateEconomics.q_dot_payoff``
-records ``q @ payoff`` (the point fair value) and a derived scalar ``q - price`` edge
-is available ONLY as logged telemetry via :func:`scalar_trade_score`. The live
-candidate pass (:func:`live_candidate_passes`) selects on the VECTOR quantities
-(``edge_lcb > 0`` AND ``delta_u_at_min > 0`` AND ``optimal_delta_u > 0`` AND executable
-route AND direction-law proof present AND market coherence accepted). The scalar score
-is NOT one of the pass conditions — it cannot promote or block a candidate. There is no
-code path where ``scalar_trade_score`` reaches the selection decision.
+LIVE ADMISSION (spec lines 793-802) selects on VECTOR quantities:
+``edge_lcb > 0`` AND ``delta_u_at_min > 0`` AND ``optimal_delta_u > 0`` AND executable
+route AND direction-law proof present AND market coherence accepted.
 
 DRIFT RESOLVED (recorded per operator law; see docs/rebuild/impl_w4_payoff_vector.md):
 
@@ -1132,8 +1127,7 @@ def compute_candidate_economics(
 
 
 # ===========================================================================
-# Live candidate pass (spec lines 793-802) — selects on the VECTOR quantities.
-# The scalar trade_score is telemetry only and CANNOT select.
+# Live candidate pass (spec lines 793-802) selects on vector quantities.
 # ===========================================================================
 
 def live_candidate_passes(
@@ -1154,13 +1148,9 @@ def live_candidate_passes(
         native side proof present
         market coherence accepted
 
-    EVERY condition is a vector / structural quantity. The scalar ``q - price`` trade
-    score is NOT one of them — :func:`scalar_trade_score` exists ONLY as logged
-    telemetry and is never read here. So the bad selection (promoting on a
-    scalar ``q_i - price`` that ignores the rest of the payoff vector and the family
-    exposure) is unconstructable: the only inputs to the pass are the vector edge_lcb,
-    the vector DeltaU at min and at s*, the route's executability, the native-side proof,
-    and the coherence report.
+    Every condition is a vector or structural quantity: the vector edge_lcb, the vector
+    DeltaU at min and at s*, the route's executability, the native-side proof, and the
+    coherence report.
     """
     edge_lcb = (
         economics.chosen_stake_edge_lcb
@@ -1175,22 +1165,6 @@ def live_candidate_passes(
         and direction_law_proof_present
         and market_coherence_accepted
     )
-
-
-def scalar_trade_score(joint_q: JointQ, candidate_route: CandidateRoute) -> float:
-    """TELEMETRY ONLY — the scalar ``q - price`` edge (spec line 1184; CANNOT select).
-
-    This is the demoted scalar ``trade_score``: the point fair value of the payoff minus
-    the route cost, returned as a bare float for LOGGING. It is intentionally NOT used by
-    :func:`live_candidate_passes` — the live pass runs on ``edge_lcb`` / ``delta_u_at_min``
-    / ``optimal_delta_u`` only. It is the SAME number as ``CandidateEconomics.point_ev``,
-    surfaced under a name that documents its telemetry-only status. There is no code path
-    where this value reaches the selection decision; the scalar score is logged, not acted
-    on (the operator mandate: the scalar q-price is logged but not selected on).
-    """
-    payoff = np.asarray(candidate_route.payoff_vector, dtype=float)
-    cost = _route_cost_value(candidate_route.route_cost)
-    return point_fair_value(joint_q, payoff) - cost
 
 
 # ---------------------------------------------------------------------------

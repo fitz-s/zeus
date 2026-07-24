@@ -8,7 +8,6 @@ Runs from src/ingest_main.py at hourly cadence via acquire_lock("harvester_truth
 
 Design invariants:
 - Single connection: forecasts_conn = get_forecasts_connection(). NO trade_conn.
-- Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or function is a no-op.
 - NO imports from src.engine, src.execution, src.strategy, src.signal,
   src.control, src.main, src.ingest_main — ingest-side only.
 - Logic copied verbatim from src/execution/harvester.py:_write_settlement_truth +
@@ -20,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import re
 import sqlite3
 import time
@@ -869,7 +867,6 @@ def write_settlement_truth_for_open_markets(
     """Write forecasts DB settlement truth for all currently settling markets.
 
     Entry point for the ingest-side harvester tick.
-    Feature flag: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or returns disabled status.
 
     Parameters
     ----------
@@ -882,19 +879,6 @@ def write_settlement_truth_for_open_markets(
     -------
     dict with keys: markets_resolved, settlements_written, errors.
     """
-    if os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED", "0") != "1":
-        logger.info(
-            "harvester_truth_writer disabled by ZEUS_HARVESTER_LIVE_ENABLED flag "
-            "(DR-33-A default-OFF); cycle skipped"
-        )
-        return {
-            "status": "disabled_by_feature_flag",
-            "disabled_by_flag": True,
-            "markets_resolved": 0,
-            "settlements_written": 0,
-            "errors": 0,
-        }
-
     from src.data.market_scanner import _match_city, infer_temperature_metric
 
     settled_events = _fetch_open_settling_markets()

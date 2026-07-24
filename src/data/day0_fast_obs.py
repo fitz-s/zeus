@@ -836,7 +836,7 @@ def running_extremes_for_local_day(
     toward the absorbing direction (HIGH: -margin; LOW: +margin) before
     returning — see day0_oracle_anomaly.metar_margin_units_for_city. 0.0 for
     a settlement-faithful station (no-op, current_temp is never shifted, it
-    is diagnostic only). Callers that compare against a DIFFERENT source at
+    is not a decision input). Callers that compare against a DIFFERENT source at
     face value (the WU-vs-METAR anomaly detector) must NOT pass a margin —
     shifting by the already-known divergence would blunt its own detection
     of a NEW divergence beyond what's already characterized.
@@ -2637,7 +2637,6 @@ class Day0FastObsEmitter:
         prefetch: FastObsPrefetch,
         received_at: str,
         limit: int = 50,
-        day0_is_tradeable: bool = True,
         family_admission=None,
         inserted_event_ids: list[str] | None = None,
         inserted_families: list[tuple[str, str, str]] | None = None,
@@ -2652,9 +2651,6 @@ class Day0FastObsEmitter:
         budget and for observations without live authority (publication clock
         missing, etc.) — those may only advance the monotone kill memo (P0-3).
 
-        ``day0_is_tradeable`` (default True) flows to the trigger so non-tradeable
-        day0 events carry the lower sub-sort (2026-06-11 anti-starvation; the
-        scope-aware claim tier in fetch_pending is the cross-tier authority).
         """
         from src.events.event_writer import EventWriter
         from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
@@ -2728,7 +2724,6 @@ class Day0FastObsEmitter:
         )
         trigger = Day0ExtremeUpdatedTrigger(
             EventWriter(world_conn),
-            day0_is_tradeable=day0_is_tradeable,
             family_admission=family_admission,
         )
         pending_memo_updates: dict[_MemoKey, _MemoUpdate] = {}

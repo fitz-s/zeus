@@ -27,8 +27,8 @@ scripts are registered and safe for their declared class.
 ## Class Quick Guide
 
 - `enforcement`: repeatable topology, policy, lint, or contract gate.
-- `diagnostic`: read-only investigation; stdout only; no live authorization.
-- `diagnostic_report_writer`: repeatable non-authority report artifact writer.
+- `read_only_inspection`: read-only investigation; stdout only; no live authorization.
+- `report_writer`: repeatable non-authority report artifact writer.
 - `runtime_support`: operator health/watch/resume/post-run support wrapper.
 - `etl_writer`: repeatable external/world-data ingestion or backfill writer.
 - `repair`: packet-approved repair with explicit dry-run/apply boundary.
@@ -47,7 +47,7 @@ scripts are registered and safe for their declared class.
   `architecture/script_manifest.yaml` before execution.
 - One-off scripts need `task_YYYY-MM-DD_<purpose>.py` naming plus `delete_by`.
 - Repair/ETL writers must declare write targets and dry-run/apply behavior.
-- Diagnostics and reports must not write canonical DB truth.
+- Read-only inspections and reports must not write canonical DB truth.
 - Scripts are not hidden authority centers.
 - Do not copy or back up canonical Zeus DB files (`state/zeus_trades.db`,
   `state/zeus-world.db`, `state/zeus-forecasts.db`) to `/tmp`,
@@ -70,22 +70,20 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `watch_source_contract.py` | Polymarket settlement source-contract monitor, city source-block writer, and conversion-history reporter |
 | `build_oof_qlcb_reliability_table.py` | Config writer: build generated OOF q_lcb reliability artifact from read-only forecasts DB plus offline forecast JSON (created 2026-06-18) |
 | `source_contract_auto_convert.py` | Cron-safe source-contract transition controller, deterministic date-scope planner, apply/evidence runner, source-block release gate, receipt writer, and Discord reporter |
-| `arm_live_mode.sh` | Deprecated operator tool retained only for non-live execution cleanup checks; it must not be used to introduce runtime modes (created 2026-05-01) |
 | `install_hooks.sh` | Installs git pre-commit and related hook symlinks for fail-closed enforcement (ultrareview25 P0-2; created 2026-05-01) |
 | `check_dynamic_sql.py` | Enforcement scan for f-string SQL interpolations without whitelist; security review §10 antibody (created 2026-05-01) |
 | `check_identity_column_defaults.py` | Enforcement check for identity-column DEFAULT violations per INV-14 and SYNTHESIS K-D (created 2026-05-01) |
 | `check_invariant_test_citations.py` | Enforcement scan verifying all test files carry invariant citation headers per SYNTHESIS K-A two-ring rule (created 2026-05-01) |
-| `check_live_restart_preflight.py` | Read-only pre-restart diagnostic for process state, submit config, posterior freshness, pending-exit risk, and held-position belief coverage (created 2026-06-18) |
+| `check_live_restart_preflight.py` | Read-only pre-restart proof for process state, structural submit authority, posterior freshness, pending-exit risk, and held-position belief coverage (created 2026-06-18) |
 | `migrate_observations_k1.py` | Repair script: migrates live state/zeus-world.db::observations from legacy single-atom to K1 dual-atom shape (dry-run/apply; created 2026-05-01) |
 | `_rebuild_calibration_pairs_parallel.py` | Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs; imported lazily when --workers>1 (created 2026-05-11) |
-| `authority_inventory.py` | Authority inventory v2 per task_2026-05-15_p9_authority_inventory SCAFFOLD; diagnostic report writer (created 2026-05-15) |
+| `authority_inventory.py` | Authority inventory v2 per task_2026-05-15_p9_authority_inventory SCAFFOLD; read_only_inspection report writer (created 2026-05-15) |
 | `backfill_harvester_settlements.py` | Repair: backfill harvester settlement rows per PLAN.md §10, critic v4 ACCEPT 2026-05-11 (dry-run/apply; created 2026-05-11) |
 | `backfill_hko_xml.py` | Backfill HKO XML observations; ETL writer (created 2026-05-02) |
 | `backfill_settlements_via_gamma_2026.py` | Backfill settlements via Gamma API for 2026; ETL writer (created 2026-05-07) |
 | `check_contract_source_fields.py` | Enforcement scan verifying source-contract fields on all contract entries (created 2026-05-01) |
-| `check_pr_identity_collisions.py` | Enforcement scan for PR identity collisions; diagnostic (created 2026-05-04) |
+| `check_pr_identity_collisions.py` | Enforcement scan for PR identity collisions; read_only_inspection (created 2026-05-04) |
 | `check_schema_version.py` | Enforcement check: init_schema boot invariant per task_2026-05-11_init_schema_boot_invariant §5.6 (created 2026-05-11) |
-| `check_live_release_gate.py` | Read-only live-release gate for loaded SHA, current schema, clean command/redeem state, freshness, and paper money-path proof (created 2026-05-21) |
 | `check_table_registry_coherence.py` | Enforcement scan verifying table_registry coherence against live DB schema (created 2026-05-14) |
 | `check_writer_signature_typing.py` | Enforcement scan for writer signature typing conformance (created 2026-05-14) |
 | `ci/semantic_diff_classifier.py` | Money-path semantic diff classifier for CI selected-test routing (created 2026-05-21) |
@@ -93,14 +91,14 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `ci/assert_test_quality.py` | Money-path test-quality metadata gate (created 2026-05-21) |
 | `cloud_tigge_autochain.sh` | Cloud-side TIGGE download autochain; pairs with local_post_extract_chain.sh (created 2026-05-08) |
 | `data_chain_monitor.sh` | Shell monitor for data chain health; runtime support (created 2026-05-11) |
-| `ddd_replay.py` | DDD v1→v2 replay diagnostic; replay correctness probe (created 2026-05-03) |
+| `ddd_replay.py` | DDD v1→v2 replay read_only_inspection; replay correctness probe (created 2026-05-03) |
 | `drop_world_ghost_tables.py` | Repair: drop ghost tables from zeus-world.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P3 D2 (dry-run/apply; created 2026-05-14) |
-| `expire_auto_pause.sh` | Operator tool: expire auto-pause state; sister script of arm_live_mode.sh, runs only step 3 (created 2026-05-01) |
+| `expire_auto_pause.sh` | Operator tool: expire auto-pause state (created 2026-05-01) |
 | `live_health_monitor.sh` | Polls live_health_probe.py every 60s; emits one line per state change; runtime support (created 2026-05-11) |
 | `local_post_extract_chain.sh` | Local post-extract chain for TIGGE downloads; pairs with cloud_tigge_autochain.sh (created 2026-05-04) |
 | `maintenance_worker_install.py` | Installer for maintenance_worker daemon and rules; config_writer (created 2026-05-15) |
-| `init_replacement_forecast_live_schema.py` | Repair: initialize replacement forecast live-support schema on forecasts DB; dry-run unless `--commit` (created 2026-06-18) |
 | `repin_stale_forecast_manifests.py` | Repair: re-pin benign raw forecast manifest byte-size/hash drift after dry-run evidence; `--apply` writes manifest files plus forecast DB manifest rows only (created 2026-07-08) |
+| `prune_terminal_opportunity_events.py` | Canonical WORLD retention sweep; shared whole-cutover lease plus BULK writer lock cover the full connection and mutation lifetime |
 | `migrate_ensemble_snapshots_add_ingest_backend.py` | Migration: add ingest_backend column to ensemble_snapshots per TIGGE_DOWNLOAD_SPEC_v3 §3 Phase 0 #5 (dry-run/apply; created 2026-05-07) |
 | `migrate_phase2_cycle_stratification.py` | Migration: Phase 2 cycle stratification per DESIGN_PHASE2_PLATT_CYCLE_STRATIFICATION (dry-run/apply; created 2026-05-14) |
 | `migrate_world_observations_to_forecasts.py` | Migration: move world observation rows to zeus-forecasts.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P0 (dry-run/apply; created 2026-05-14) |
@@ -110,7 +108,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `repair_active_entry_q_versions.py` | Repair active ENTRY q_version stamps from existing FinalIntentCertificate evidence; no venue action or DB backup (dry-run/apply; created 2026-07-09) |
 | `repair_dust_exit_projection.py` | Repair dust pending-exit projections from existing canonical backoff evidence; no venue action (dry-run/apply; created 2026-06-18) |
 | `replay_correctness_gate.py` | Enforcement gate for replay correctness per IMPLEMENTATION_PLAN Phase 0.G + ADR-5 (created 2026-05-14) |
-| `ritual_signal_aggregate.py` | Aggregate ritual signal metrics per ANTI_DRIFT_CHARTER §3 M1; diagnostic_report_writer (created 2026-05-06) |
-| `zeus_blocks.py` | Zeus block state diagnostic; reads and reports current block conditions (created 2026-05-04) |
+| `ritual_signal_aggregate.py` | Aggregate ritual signal metrics per ANTI_DRIFT_CHARTER §3 M1; report_writer (created 2026-05-06) |
+| `zeus_blocks.py` | Zeus block state read_only_inspection; reads and reports current block conditions (created 2026-05-04) |
 | `doc_citation_lint.py` | Citation-rot detector for Zeus docs; scans .md/.py/.yaml/.json for broken doc references per SCAFFOLD §4 FM-01/FM-04 (created 2026-05-17) |
 | `pr_monitor.py` | Canonical PR monitor; single source of filter logic for Monitor tool armed after gh pr create; 7 filter contracts pinned by tests/test_pr_monitor.py (created 2026-05-17) |

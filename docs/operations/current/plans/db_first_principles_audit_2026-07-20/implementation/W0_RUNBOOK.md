@@ -37,9 +37,9 @@ AND position_lots 中该精确不可变 fill 身份的经济量 < canonical fill
 
 ## 激活顺序
 
-**W0-b 无 shadow 阶段。** consult 提议的 "B shadow → …" 被删除,不是改名。shadow mode 的本质是在 live 进程里常驻并行跑另一套逻辑当 staging tier——Zeus 已根除(operator 指令 2026-06-12,root AGENTS §2)。W0-b 是修一个 bug(旧谓词锚在冻结投影,错;新谓词锚在 canonical fill,对);修 bug **live-direct 换**,信心来自**离线证明**而非并行旁路:
+**W0-b 无 retired 阶段。** consult 提议的 "B retired → …" 被删除,不是改名。retired mode 的本质是在 live 进程里常驻并行跑另一套逻辑当 staging tier——Zeus 已根除(operator 指令 2026-06-12,root AGENTS §2)。W0-b 是修一个 bug(旧谓词锚在冻结投影,错;新谓词锚在 canonical fill,对);修 bug **live-direct 换**,信心来自**离线证明**而非并行旁路:
 
-1. **离线证明 W0-b**(不在 live 进程、不常驻):(a) antibody recovery matrix 全绿(见下矩阵);(b) 一次性只读历史分析 query——对现有 fills 各跑旧谓词、新谓词,列出两者选中的行集,断言:新集 = 合法 canonical-fill 全集,新∖旧 = 预期的 07-02→今缺口,旧∖新 = 旧谓词的漏/误(应可解释),且新谓词无过修(每选中行都对应真实 canonical 正 fill 且经济量确有 shortfall)。这是操作员/我跑一次的 diagnostic,读态,验完即弃,**不落任何常驻旁路代码**。
+1. **离线证明 W0-b**(不在 live 进程、不常驻):(a) antibody recovery matrix 全绿(见下矩阵);(b) 一次性只读历史分析 query——对现有 fills 各跑旧谓词、新谓词,列出两者选中的行集,断言:新集 = 合法 canonical-fill 全集,新∖旧 = 预期的 07-02→今缺口,旧∖新 = 旧谓词的漏/误(应可解释),且新谓词无过修(每选中行都对应真实 canonical 正 fill 且经济量确有 shortfall)。这是操作员/我跑一次的 evidence,读态,验完即弃,**不落任何常驻旁路代码**。
 2. 落地目标 db.py DDL + W0-a 迁移脚本 + antibody + schema 指纹;**同一改动把 command_recovery.py:6500 的谓词直接换成新 fill-authority 谓词**(live-direct,无并行开关)。
 3. 取**全 trades 写者 fence** + 暂停显式 checkpoint owner。
 4. 采集并校验 rollback capsule。

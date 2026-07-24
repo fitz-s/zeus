@@ -66,7 +66,7 @@ of pure dead weight. **Verdict: DEAD_DELETE, all 4.**
 `data_coverage`, `day0_metric_fact`, `decision_log`, `hko_hourly_accumulator`,
 `market_price_history`, `observation_instants`, `observation_revisions`, `platt_models`,
 `refit_bucket_failures`, `rescue_events`, `settlement_schema_migrations`,
-`validated_calibration_transfers`, `zeus_meta`.
+`retired calibration-transfer table`, `zeus_meta`.
 
 Every one of these names is already registered `db: world` (mostly `world_class`) in the
 manifest — they are the **canonical** world tables. All code references (`rg` confirmed

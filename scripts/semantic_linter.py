@@ -101,7 +101,7 @@ SETTLEMENTS_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
 })
 
 # Scripts are not globally under H3 yet because the directory contains many
-# diagnostic and repair tools that intentionally inspect settlements across
+# observation and repair tools that intentionally inspect settlements across
 # metrics. These scripts are replay/training/live consumers where city/date
 # settlement reads must be metric-pinned.
 SETTLEMENTS_METRIC_SCRIPT_SELECT_ENFORCED: frozenset[str] = frozenset({
@@ -139,7 +139,7 @@ _CALIBRATION_PAIRS_TABLE_REF_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
-# Allowlist for files that legitimately need cross-metric diagnostic
+# Allowlist for files that legitimately need cross-metric observation
 # reads (typically operator audit scripts). New entries require
 # operator justification at PR review.
 CALIBRATION_PAIRS_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
@@ -148,12 +148,12 @@ CALIBRATION_PAIRS_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     #   (a) L200 `_count_params(cur, table, where, params)` helper using
     #       f-string `SELECT COUNT(*) FROM {table} WHERE {where}`. Caller
     #       sites pass `table="calibration_pairs_v2"` with various WHERE
-    #       clauses including diagnostic `WHERE 1 = 0` cardinality probes.
+    #       clauses including observation `WHERE 1 = 0` cardinality probes.
     #   (b) L1631 actual v2 SELECT — already includes WHERE
     #       temperature_metric = ?, would pass the lint standalone.
     # The lint can't statically distinguish the legitimate L1631 read from
     # the constant-folded L200-helper invocations. Allowlist the file as
-    # a whole because it's a diagnostic / verification script (operator-
+    # a whole because it's a observation / verification script (operator-
     # run, reviewed at PR time per Zeus convention), not a runtime
     # consumer that could silently leak cross-metric rows into training.
     # If a NEW production data path is added to this file later, remove

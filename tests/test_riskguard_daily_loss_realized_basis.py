@@ -14,7 +14,7 @@ The cross-module invariant this pins (relationship test, not a function test):
     and current RiskLevel MUST NOT depend on a trailing settled-PnL window.
 
 The strongest form of the antibody is STRUCTURAL:
-`_realized_window_loss_diagnostic` returns no RiskLevel and accepts no threshold,
+`_realized_window_loss_telemetry` returns no RiskLevel and accepts no threshold,
 so historical PnL cannot become an admission decision through this seam.
 
 This is the regression guard for the 2026-06-08 live false RED: effective
@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.riskguard.riskguard import _realized_window_loss_diagnostic
+from src.riskguard.riskguard import _realized_window_loss_telemetry
 
 NOW = "2026-06-08T15:29:00+00:00"
 _now_dt = datetime.fromisoformat(NOW)
@@ -41,7 +41,7 @@ def _exit(pnl: float, hours_ago: float) -> dict:
 
 
 def _snap(exits, *, lookback_hours=24, degraded=False):
-    return _realized_window_loss_diagnostic(
+    return _realized_window_loss_telemetry(
         exits,
         now=NOW,
         lookback=timedelta(hours=lookback_hours),
@@ -54,7 +54,7 @@ def _snap(exits, *, lookback_hours=24, degraded=False):
 def test_signature_forbids_equity_input_mark_to_market_unconstructable():
     """The breaker is structurally immune to mark-to-market: there is no
     parameter through which effective_bankroll / current equity could enter."""
-    params = set(inspect.signature(_realized_window_loss_diagnostic).parameters)
+    params = set(inspect.signature(_realized_window_loss_telemetry).parameters)
     forbidden = {
         "current_equity",
         "effective_bankroll",

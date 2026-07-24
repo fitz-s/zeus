@@ -19,7 +19,7 @@ from src.decision_kernel.verifier import (
     verify_executor_expressibility,
     verify_final_intent,
     verify_live_cap_transition,
-    verify_no_submit_decision,
+    verify_pre_submit_decision,
 )
 
 
@@ -239,8 +239,8 @@ def _dt_or_none(value: datetime | None) -> str | None:
 
 
 def _verify_for_persistence(cert: DecisionCertificate, parents: tuple[DecisionCertificate, ...]) -> None:
-    if cert.certificate_type == claims.NO_SUBMIT_DECISION:
-        verify_no_submit_decision(cert, parents)
+    if cert.certificate_type == claims.PRE_SUBMIT_DECISION:
+        verify_pre_submit_decision(cert, parents)
         return
     if cert.certificate_type == claims.ACTIONABLE_TRADE:
         verify_actionable_trade(cert, parents)

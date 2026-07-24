@@ -1,4 +1,4 @@
-"""Cluster/block bootstrap diagnostics for replacement forecast blocked evidence."""
+"""Cluster/block bootstrap telemetry for replacement forecast blocked evidence."""
 
 from __future__ import annotations
 
@@ -212,11 +212,11 @@ def run_replacement_forecast_block_bootstrap(
         reasons.append("REPLACEMENT_BLOCK_BOOTSTRAP_CI_OVERLAPS_ZERO")
     if lower < 0.0:
         reasons.append("REPLACEMENT_BLOCK_BOOTSTRAP_NEGATIVE_LOWER_BOUND")
-    status = "DIAGNOSTIC_PASS" if not reasons else "BLOCKED"
+    status = "TELEMETRY_PASS" if not reasons else "BLOCKED"
 
     return ReplacementForecastBlockBootstrapResult(
         status=status,
-        reason_codes=tuple(reasons or ("REPLACEMENT_BLOCK_BOOTSTRAP_DIAGNOSTIC_PASS",)),
+        reason_codes=tuple(reasons or ("REPLACEMENT_BLOCK_BOOTSTRAP_TELEMETRY_PASS",)),
         total_rows=len(row_tuple),
         scored_rows=len(scored_rows),
         excluded_rows=len(row_tuple) - len(scored_rows),

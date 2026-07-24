@@ -8,7 +8,7 @@
 #   2026-05-14: added intra-`ingest_track` boundary logs to localize the
 #   2026-05-13 ECMWF wedge (no rglob_end after rglob_start at 17:16:44 PDT,
 #   WAL=0 bytes — wedge is somewhere between rglob and first INSERT or in
-#   the per-file loop). Diagnostic; not a fix. Expected to pinpoint the
+#   the per-file loop). Observation; not a fix. Expected to pinpoint the
 #   wedge on the next ingest cycle.
 # Lifecycle: created=2026-03-26; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: Audited GRIB→ensemble_snapshots ingestor (Phase 4B / task #53);
@@ -373,7 +373,7 @@ def _selected_step_ranges(payload: dict) -> list[tuple[int, int]]:
     ):
         ranges.extend(_parsed_ranges_from_payload_key(payload, key))
     # Preserve order while removing duplicates; payloads can repeat a range
-    # across diagnostic fields.
+    # across observation fields.
     return list(dict.fromkeys(ranges))
 
 
@@ -686,7 +686,7 @@ def ingest_json_file(
     import os as _os
     force_replace_env = _os.environ.get("ZEUS_INGEST_FORCE_REPLACE", "") == "1"
     if not overwrite and not force_replace_env:
-        # 2026-05-13 diagnostic (ECMWF wedge investigation): log slow probes so
+        # 2026-05-13 observation (ECMWF wedge investigation): log slow probes so
         # next recurrence isolates whether the SELECT is the wedge or
         # something downstream. Threshold deliberately high to keep the log
         # clean on healthy runs; 200ms exceeds even cold-cache expected
@@ -934,7 +934,7 @@ def ingest_track(
             label="rglob_json_scan",
         )
 
-    # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#A): rglob completed.
+    # 2026-05-14 ECMWF wedge observation — boundary logs (#A): rglob completed.
     # Pairs with `ingest_stage: rglob_start` in ecmwf_open_data.py. If
     # `rglob_start` fires but `ingest_track: rglob_done` does NOT, the wedge
     # is in rglob itself (and run_with_timeout should now raise TimeoutError
@@ -962,7 +962,7 @@ def ingest_track(
     # on 39 GB world DB = 50ms-1s fsync × 364 = 5-10 min wedge — collapsed
     # to a single commit at loop exit.
     #
-    # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#B): loop start.
+    # 2026-05-14 ECMWF wedge observation — boundary logs (#B): loop start.
     # If `rglob_done` fires but `loop_start` does NOT, the wedge is between
     # them (rare — just len() and dict init). If `loop_start` fires but
     # `loop_progress i=10/...` does NOT, the wedge is in the FIRST 10 files
@@ -1019,7 +1019,7 @@ def ingest_track(
                     chunker.increment_rows()
                 chunker.yield_if_live_contended()
 
-            # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#C): per-10 progress.
+            # 2026-05-14 ECMWF wedge observation — boundary logs (#C): per-10 progress.
             # On a 2945-file scan this emits ~295 lines, acceptable noise.
             # If progress stops at i=K, the wedge is in files K..K+9.
             if (_idx + 1) % 10 == 0:
@@ -1032,7 +1032,7 @@ def ingest_track(
                     counters["written"],
                     counters["skipped_exists"],
                 )
-        # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#D): loop end.
+        # 2026-05-14 ECMWF wedge observation — boundary logs (#D): loop end.
         logger.info(
             "ingest_track: loop_end track=%s files=%d written=%d skipped=%d parse_error=%d elapsed_ms=%d",
             track,
@@ -1042,7 +1042,7 @@ def ingest_track(
             counters["parse_error"],
             int((time.monotonic() - _loop_t0) * 1000),
         )
-        # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#E): commit boundary.
+        # 2026-05-14 ECMWF wedge observation — boundary logs (#E): commit boundary.
         # If `loop_end` fires but `commit_done` does NOT, H3 confirmed:
         # the final conn.commit() is wedged (e.g. fsync on the 51 GB DB).
         _commit_t0 = time.monotonic()

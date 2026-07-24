@@ -1039,7 +1039,7 @@ class TestGetCalibrator:
 
 
 class TestTiggeOpendataBridge:
-    """Train-vs-live bridge: HIGH + ecmwf_opendata source falls back to
+    """Train-vs-live path: HIGH + ecmwf_opendata source falls back to
     tigge_*_v1 Platt when OpenData-keyed Platt is missing. LOW does NOT
     (purity doctrine ``_low_purity_doctrine_2026_05_07``). 2026-05-11.
     """
@@ -1098,7 +1098,7 @@ class TestTiggeOpendataBridge:
 
         assert cal is not None, (
             "HIGH + ecmwf_opendata caller must fall back to TIGGE Platt "
-            "when OpenData-keyed Platt is missing (train-vs-live bridge 2026-05-11)."
+            "when OpenData-keyed Platt is missing (train-vs-live path 2026-05-11)."
         )
         # The loaded model should carry tigge bucket attrs.
         assert getattr(cal, "_bucket_data_version", None) == \

@@ -343,17 +343,11 @@ PIPELINE_STEPS = [
         ],
     },
     {
-        "id": "forecast_skill",
-        "name": "Materialize forecast skill and model bias",
-        "script": "etl_forecast_skill_from_forecasts.py",
-    },
-    {
         "id": "historical_forecasts",
         "name": "Materialize historical forecast model skill",
         "script": "etl_historical_forecasts.py",
         # VESTIGIAL: etl_historical_forecasts.py writes to historical_forecasts (0 rows)
-        # and model_skill (table does not exist post-K1-split). Successor is
-        # etl_forecast_skill_from_forecasts.py (step "forecast_skill", CURRENT).
+        # and model_skill (table does not exist post-K1-split).
         # Marked optional so pipeline failure here is logged but non-fatal.
         "optional": True,
     },
@@ -930,8 +924,7 @@ def _verification_tables() -> tuple[list[str], list[str]]:
     """Return (world_tables, forecast_tables) after K1 split.
 
     world-class: observations, observation_instants, solar_daily,
-                 temp_persistence, diurnal_curves, forecasts,
-                 forecast_skill, model_bias, asos_wu_offsets
+                 temp_persistence, diurnal_curves, forecasts, asos_wu_offsets
     forecast-class: settlement_outcomes, market_events, ensemble_snapshots,
                     calibration_pairs
 
@@ -951,8 +944,6 @@ def _verification_tables() -> tuple[list[str], list[str]]:
         "temp_persistence",
         "diurnal_curves",
         "forecasts",
-        "forecast_skill",
-        "model_bias",
         "asos_wu_offsets",
     ]
     forecast_tables = [

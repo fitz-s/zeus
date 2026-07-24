@@ -37,7 +37,7 @@ def build_decision_groups(
     """Build one independent calibration sample per city/date/forecast time.
 
     K4.5 H5 fix: filters by authority='VERIFIED' by default.
-    Pass authority_filter='any' to include all rows (diagnostics only).
+    Pass authority_filter='any' only for explicit offline analysis.
     """
     clauses = ["decision_group_id IS NOT NULL", "decision_group_id != ''"]
     params: tuple = ()
@@ -120,7 +120,7 @@ def build_decision_group_for_key(
     """Build one decision group for a freshly written calibration sample.
 
     K4.5.1 fix: filters by authority='VERIFIED' by default (matches sibling
-    build_decision_groups). Pass authority_filter='any' for diagnostics.
+    build_decision_groups). Pass authority_filter='any' for offline analysis.
     """
     lead_filter = "" if lead_days is None else "AND lead_days = ?"
     auth_filter = "" if authority_filter == "any" else "AND authority = ?"

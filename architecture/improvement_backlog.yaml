@@ -112,7 +112,7 @@ entries:
   raised_by: capsule@object-meaning-invariance-wave3
   status: proposed
   detail_doc: 'current chat: Zeus object-meaning invariance wave 3'
-  notes: 'Wave 3 critic loop repeatedly found the same repair class in validated_calibration_transfers:
+  notes: 'Wave 3 critic loop repeatedly found the same repair class in retired_transfer_table:
     a writer predicate was fixed, but legacy or contaminated rows could still authorize downstream consumers
     until the reader re-proved the predicate. Codify a checklist for any aggregate authority row: consumer
     gates must mirror producer predicates for source identity, active/verified authority, executable parameter
@@ -320,7 +320,7 @@ entries:
     bootstrap supported the calibration task, but navigation had no profile that admitted the OOS writer
     script, the `src/data` policy reader, and the relationship tests together. A narrow object-meaning
     calibration-transfer-OOS profile was added. Future topology maintenance should treat statistical evidence
-    producers and live/shadow policy readers as one boundary when the evidence can affect LIVE_ELIGIBLE/SHADOW_ONLY/BLOCKED
+    producers and live/observation policy readers as one boundary when the evidence can affect LIVE_ELIGIBLE/BLOCKED/BLOCKED
     decisions.
 
     '
@@ -431,10 +431,10 @@ entries:
   detail_doc: architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml
   notes: 'OpenData/TIGGE alignment required proving three different claims that topology did not admit
     as one route: source-family physical quantity equivalence, same-message paired GRIB evidence, and
-    contract-bin money-path preservation. Generic navigation treated diagnostic scripts, calibration domain
-    structs, schema shadow columns, release-calendar config, and source extraction tooling as separate
+    contract-bin money-path preservation. Generic navigation treated telemetry scripts, calibration domain
+    structs, schema observation columns, release-calendar config, and source extraction tooling as separate
     ambiguous surfaces. Future topology maintenance should add a data-source-equivalence route that admits
-    read-only GRIB probes, diagnostic reports, transfer-policy gates, and external extractor/downloader
+    read-only GRIB probes, telemetry reports, transfer-policy gates, and external extractor/downloader
     dry-runs while explicitly blocking live calibration sharing until paired issue/member/step/bin evidence
     exists.
 

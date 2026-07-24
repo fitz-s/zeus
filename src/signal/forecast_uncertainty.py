@@ -71,58 +71,13 @@ def _finite_float(value) -> float | None:
     return parsed
 
 
-def _normalized_bias_reference(bias_reference: dict | None) -> dict:
-    raw = dict(bias_reference or {})
-    normalized: dict = {}
-
-    source = raw.get("source")
-    if source:
-        normalized["source"] = str(source)
-
-    bias = _finite_float(raw.get("bias"))
-    if bias is not None:
-        normalized["bias"] = bias
-
-    mae = _finite_float(raw.get("mae"))
-    if mae is not None and mae >= 0.0:
-        normalized["mae"] = mae
-
-    discount = _finite_float(raw.get("discount_factor"))
-    if discount is not None and discount >= 0.0:
-        normalized["discount_factor"] = discount
-
-    try:
-        n_samples = int(raw.get("n_samples"))
-    except (TypeError, ValueError):
-        n_samples = None
-    if n_samples is not None and n_samples >= 0:
-        normalized["n_samples"] = n_samples
-
-    return normalized
-
-
 def analysis_member_maxes(
     member_maxes,
     *,
     unit: str,
     lead_days: float | None = None,
-    bias_corrected: bool | None = None,
-    bias_reference: dict | None = None,
 ):
-    """Phase-1 seam for future lead-continuous mean/location correction.
-
-    This slice is intentionally behavior-preserving: it carries the member-max
-    surface through a named forecast-layer boundary without changing values yet.
-    """
-    values = np.asarray(member_maxes, dtype=float)
-    offset = analysis_mean_offset(
-        unit=unit,
-        lead_days=lead_days,
-        ensemble_mean=float(values.mean()) if values.size else None,
-        bias_corrected=bias_corrected,
-        bias_reference=bias_reference,
-    )
-    return values + offset
+    return np.asarray(member_maxes, dtype=float)
 
 
 def analysis_sigma_context(
@@ -152,87 +107,6 @@ def analysis_sigma_context(
         "reference_spread": spread_context["reference_spread"],
         "spread_ratio": spread_context["spread_ratio"],
         "final_sigma": base_sigma * lead_multiplier * spread_multiplier,
-    }
-
-
-def analysis_mean_offset(
-    *,
-    unit: str,
-    lead_days: float | None = None,
-    ensemble_mean: float | None = None,
-    bias_corrected: bool | None = None,
-    bias_reference: dict | None = None,
-) -> float:
-    return analysis_mean_context(
-        unit=unit,
-        lead_days=lead_days,
-        ensemble_mean=ensemble_mean,
-        bias_corrected=bias_corrected,
-        bias_reference=bias_reference,
-    )["offset"]
-
-
-def analysis_mean_context(
-    *,
-    unit: str,
-    lead_days: float | None = None,
-    ensemble_mean: float | None = None,
-    city_name: str | None = None,
-    season: str | None = None,
-    forecast_source: str | None = None,
-    bias_corrected: bool | None = None,
-    bias_reference: dict | None = None,
-) -> dict:
-    """Phase-1 seam for future lead-continuous mean/location correction.
-
-    Current behavior is identity/no-op; the seam exists so later forecast-layer
-    work can land mean correction without rewriting consumers again.
-    """
-    base_sigma = sigma_instrument(unit).value
-    lead = 0.0 if lead_days is None else min(6.0, max(0.0, float(lead_days)))
-    lead_factor = lead / 6.0
-    bias_reference = _normalized_bias_reference(bias_reference)
-    raw_offset = 0.0
-    sample_factor = 1.0
-    n_samples = None
-    mae = None
-    mae_factor = 1.0
-    if "n_samples" in bias_reference and bias_reference.get("n_samples") is not None:
-        n_samples = int(bias_reference.get("n_samples"))
-        if n_samples < 20:
-            sample_factor = 0.0
-    if "mae" in bias_reference and bias_reference.get("mae") is not None:
-        mae = float(bias_reference.get("mae"))
-        if mae > 0 and base_sigma > 0:
-            if mae <= base_sigma:
-                mae_factor = 1.0
-            elif mae >= base_sigma * 4.0:
-                mae_factor = 0.0
-            else:
-                mae_factor = 1.0 - ((mae - base_sigma) / (base_sigma * 3.0))
-    if not bias_corrected and bias_reference:
-        bias = float(bias_reference.get("bias", 0.0))
-        discount = float(bias_reference.get("discount_factor", 0.7))
-        raw_offset = -bias * discount * lead_factor * sample_factor * mae_factor
-    max_abs_offset = base_sigma * 2.0
-    offset = max(-max_abs_offset, min(max_abs_offset, raw_offset))
-    return {
-        "unit": unit,
-        "city_name": city_name,
-        "season": season,
-        "forecast_source": forecast_source,
-        "bias_corrected": bias_corrected,
-        "bias_reference": bias_reference or {},
-        "n_samples": n_samples,
-        "sample_factor": sample_factor,
-        "mae": mae,
-        "mae_factor": mae_factor,
-        "lead_days": lead_days,
-        "lead_factor": lead_factor,
-        "ensemble_mean": ensemble_mean,
-        "raw_offset": raw_offset,
-        "max_abs_offset": max_abs_offset,
-        "offset": offset,
     }
 
 
@@ -390,7 +264,7 @@ def day0_blended_highs(
     intraday high has been observed, later samples may exceed it but cannot be
     compressed below their own remaining-member high.  The historical
     observation_weight/backbone arguments remain in the seam for compatibility
-    and diagnostics, but they must not change the physical settlement value.
+    and telemetry, but they must not change the physical settlement value.
 
     Physical law (FIX-3 ruling, 2026-05-23):
         final_high >= cumulative_observed_max, ALWAYS.

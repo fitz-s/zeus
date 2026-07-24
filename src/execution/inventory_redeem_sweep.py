@@ -26,9 +26,8 @@ only). Pipeline per candidate:
        derived positionId MUST equal the API asset id AND live balance > 0)
     -> request_redeem (system path; idempotent against the active-row unique
        index — an active command for the same condition returns its id)
-    -> the existing _redeem_submitter_cycle drives submit_redeem (chain-truth
-       pre-flight + live-balance self-heal)
-    -> redeemed USDC.e proceeds are picked up by the existing balance-driven
+    -> third-party redemption is observed through the settlement command ledger
+    -> externally redeemed USDC.e proceeds are picked up by the balance-driven
        wrap flow (enqueue_wrap_if_balance_above_threshold) -> usable pUSD.
 
 curPrice is a MUTABLE market-data field, NOT redemption truth. It MUST NOT be a
@@ -48,8 +47,7 @@ category). curPrice is therefore demoted to three NON-veto roles:
 Honesty contract: a candidate is enqueued ONLY when chain truth confirms a
 nonzero winning-position balance under the exact API asset id. API lag after a
 successful redeem is harmless twice over: the probe reads live balance 0 (no
-enqueue), and even if a row slipped through, submit_redeem's pre-flight
-terminates it with provenance instead of broadcasting.
+enqueue), and the command remains an accounting record for external settlement.
 """
 
 from __future__ import annotations
@@ -223,8 +221,8 @@ def sweep_chain_inventory_for_redeems(
 
         # Probe routing: negRisk positions derive their ERC1155 id via
         # NegRiskAdapter.wcol(); standard-CTF positions derive directly from
-        # USDC.e collateral. Each lane has its OWN chain-truth probe; the redeem
-        # command downstream (submit_redeem) routes on the same neg_risk fact.
+        # USDC.e collateral. Each lane has its own chain-truth probe, and the
+        # resulting ledger entry retains the same neg_risk fact for accounting.
         probe_fn = negrisk_probe_fn if cand_neg_risk else standard_probe_fn
         if not callable(probe_fn):
             logger.warning(

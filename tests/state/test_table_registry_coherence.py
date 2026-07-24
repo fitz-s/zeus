@@ -95,11 +95,6 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # append-only ConditionalTokens payout observation log (ensure_table wired
     # into init_schema_trade_only via payout_observations_schema.py).
     "payout_observations",
-    # LX-0R 2026-07-13 (docs/rebuild/local_ledger_excision_2026-07-12.md):
-    # trade-DB truth-epoch marker (ensure_truth_epoch_table in
-    # init_schema_trade_only via src/state/truth_epoch.py). LEGACY default,
-    # trade-DB only.
-    "truth_epoch",
     # LX-E packet 2026-07-13: position/command -> decision-certificate attribution
     # (ensure_table wired into init_schema_trade_only via
     # position_decision_attribution_schema.py).
@@ -133,6 +128,7 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
 
 EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
     "_migrations_applied",
+    "single_live_cutover_generation",
     "settlement_schema_migrations",  # P1-3 2026-05-19: migration-tracking for ensure_settlement_schema_ready
     # Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): outcome_fact corrected
     # to trade_class. Live writer (harvester log_settlement_event) writes to trade_conn;
@@ -147,8 +143,6 @@ EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
     "collateral_ledger_snapshots",
     "collateral_reservations",
     "collateral_unsettled_proceeds",
-    "ctf_conversion_command_events",
-    "ctf_conversion_commands",
     "decision_log",
     "exchange_reconcile_findings",
     "exit_mutex_holdings",
@@ -366,34 +360,6 @@ class TestA4AssertDbMatchesRegistry:
 
         with pytest.raises(RegistryAssertionError, match="ghost_unregistered_xyz"):
             assert_db_matches_registry(conn, DBIdentity.WORLD)
-        conn.close()
-
-    def test_a4_names_inert_experimental_tables_without_granting_ownership(self):
-        """Known experimental contamination stays visible but never authoritative."""
-
-        from src.reduce.schema.generation_schema import ensure_tables
-        from src.state.db import init_schema_trade_only
-        from src.state.table_registry import (
-            DBIdentity,
-            SchemaClass,
-            _REGISTRY,
-            assert_db_matches_registry,
-            owner,
-            tables_for,
-        )
-
-        conn = sqlite3.connect(":memory:")
-        init_schema_trade_only(conn)
-        ensure_tables(conn)
-
-        for table in ("reduce_generations", "reduce_position_economics"):
-            entry = _REGISTRY[(table, DBIdentity.TRADE)]
-            assert entry.schema_class == SchemaClass.INERT_EXPERIMENTAL
-            assert table not in tables_for(DBIdentity.TRADE)
-            with pytest.raises(KeyError, match="only has non-owning entries"):
-                owner(table)
-
-        assert_db_matches_registry(conn, DBIdentity.TRADE)
         conn.close()
 
     def test_a4_passes_on_correct_world_schema(self):

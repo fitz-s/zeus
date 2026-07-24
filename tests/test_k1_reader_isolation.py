@@ -5,8 +5,8 @@
 # See docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/FIX_K1_READERS.md §C
 """Antibody: scripts that were K1-misrouted must not regress to world-DB direct access.
 
-Scope: F40 (bridge_oracle_to_calibration) + F41 (evaluate_calibration_transfer_oos).
-These two scripts were confirmed to read forecast_class tables via get_world_connection
+Scope: F40 (bridge_oracle_to_calibration).
+This script was confirmed to read forecast_class tables via get_world_connection
 before the K1 fix. This test prevents regression.
 
 Broader codebase sweep (37+ scripts) is deferred — those are pre-K1 backfill scripts
@@ -42,7 +42,6 @@ BAD_PATTERNS = [
 # Scripts confirmed fixed by F40+F41 — must NOT have BAD_PATTERNS + forecast table
 K1_FIXED_SCRIPTS = [
     "bridge_oracle_to_calibration.py",
-    "evaluate_calibration_transfer_oos.py",
 ]
 
 
@@ -74,37 +73,6 @@ def test_bridge_uses_forecasts_connection_with_world():
     )
     assert "DB_PATH" not in src or "DB_PATH removed" in src, (
         "DB_PATH constant must be removed from bridge_oracle_to_calibration.py (K1 F40)"
-    )
-
-
-def test_cal_transfer_eval_uses_forecasts_connection_with_world():
-    """F41 structural check: evaluate_calibration_transfer_oos must use cross-DB helper."""
-    src = (SCRIPTS / "evaluate_calibration_transfer_oos.py").read_text()
-    assert "get_forecasts_connection_with_world" in src, (
-        "evaluate_calibration_transfer_oos.py must use get_forecasts_connection_with_world()"
-    )
-    assert "get_world_connection" not in src or src.count("get_world_connection") == 0, (
-        "evaluate_calibration_transfer_oos.py must not use get_world_connection() (K1 F41)"
-    )
-
-
-def test_cal_transfer_eval_qualifies_world_table_inserts():
-    """F41 correctness: INSERT into world-class table must be qualified as world.*
-    so it resolves to the ATTACHed world.db under get_forecasts_connection_with_world."""
-    src = (SCRIPTS / "evaluate_calibration_transfer_oos.py").read_text()
-    # Must NOT have bare INSERT INTO validated_calibration_transfers
-    bare_insert = re.search(
-        r'INSERT\s+INTO\s+validated_calibration_transfers\b(?!\s*\(|[^.]*world\.)',
-        src,
-    )
-    assert bare_insert is None, (
-        "evaluate_calibration_transfer_oos.py: bare INSERT INTO validated_calibration_transfers "
-        "found — must be qualified as world.validated_calibration_transfers since "
-        "get_forecasts_connection_with_world uses forecasts.db as MAIN."
-    )
-    # Must have the qualified form
-    assert "world.validated_calibration_transfers" in src, (
-        "evaluate_calibration_transfer_oos.py: INSERT must use world.validated_calibration_transfers"
     )
 
 
@@ -238,7 +206,6 @@ def test_monitor_refresh_temp_persistence_query_uses_world_qualifier():
 # Union of: K-B sweep additions + F43 SELECT/FROM-side antibody set.
 WORLD_ONLY_TABLES_UNDER_K1 = {
     "temp_persistence",                  # F102 — world_class, ETL writes to zeus-world.db
-    "validated_calibration_transfers",   # F41 — world_class
     "observation_instants",              # F43 — canonical (2026-05-29 consolidation merged observation_instants_v2 superset in); ~2.8M rows in world.db
     "platt_models",                   # F43 — 1.4K rows in world.db
     "data_coverage",                     # F43 — world-class (cross-DB write target post-K1)
@@ -269,7 +236,7 @@ def test_monitor_refresh_world_tables_are_qualified():
 # F43 antibody (RESTORED 2026-05-17 per phase critic CRIT-1) — broader scope:
 # scan ALL K1-helper-using scripts (not just monitor_refresh.py) for bare
 # world_class FROM/JOIN refs. K1-sweep's antibody was monitor_refresh-only;
-# F43's was bridge_oracle_to_calibration + evaluate_calibration_transfer_oos.
+# F43's remaining owner is bridge_oracle_to_calibration.
 # Both are needed; this is the union (broader file scope, broader table scope).
 # ---------------------------------------------------------------------------
 

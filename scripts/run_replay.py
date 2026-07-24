@@ -183,9 +183,16 @@ def _print_wu_health_report(summary) -> None:
 def _print_replay_provenance_report(summary) -> None:
     source_counts = summary.limitations.get("decision_reference_source_counts") or {}
     hours_source_counts = summary.limitations.get("hours_since_open_source_counts") or {}
-    diagnostic_subjects = int(summary.limitations.get("diagnostic_replay_subjects") or 0)
+    reference_only_subjects = int(
+        summary.limitations.get("telemetry_replay_subjects") or 0
+    )
     fallback_subjects = int(summary.limitations.get("hours_since_open_fallback_subjects") or 0)
-    if not source_counts and not hours_source_counts and diagnostic_subjects == 0 and fallback_subjects == 0:
+    if (
+        not source_counts
+        and not hours_source_counts
+        and reference_only_subjects == 0
+        and fallback_subjects == 0
+    ):
         return
 
     total = int(summary.n_replayed or 0)
@@ -197,9 +204,12 @@ def _print_replay_provenance_report(summary) -> None:
         hours_text = ", ".join(f"{key}={value}" for key, value in sorted(hours_source_counts.items()))
         print(f"  hours-since-open sources: {hours_text}")
     if total:
-        print(f"  diagnostic replay references: {diagnostic_subjects}/{total} replayed subjects")
-    elif diagnostic_subjects:
-        print(f"  diagnostic replay references: {diagnostic_subjects}")
+        print(
+            f"  reference-only replay inputs: "
+            f"{reference_only_subjects}/{total} replayed subjects"
+        )
+    elif reference_only_subjects:
+        print(f"  reference-only replay inputs: {reference_only_subjects}")
     if total:
         print(f"  hours-since-open fallback: {fallback_subjects}/{total} replayed subjects")
     else:

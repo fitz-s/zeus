@@ -5,9 +5,8 @@ Each definition links to the authoritative source where it is formally defined.
 For a system overview see [`README.md`](../../README.md); for operating law see
 [`AGENTS.md`](../../AGENTS.md).
 
-Terms marked **[live path]** are on the active trading path. Terms marked
-**[diagnostic]** describe the legacy baseline, which runs as a comparison only
-and cannot cap or veto the live probability.
+Terms marked **[live path]** are on the active trading path. Offline historical
+analysis is evidence, never a runtime probability lane.
 
 ---
 
@@ -22,7 +21,7 @@ history, (2) Ledoit–Wolf shrinkage of the model covariance, (3) Bayesian
 precision-weighted fusion of all de-biased models into a single `(μ*, V*)`, (4)
 settlement-exact preimage integration via EMOS to produce per-bin probabilities.
 The output is a single `q` per (city, date, metric, bin). There is no multi-regime
-fallback and no shadow complement on the live path.
+fallback and no parallel complement on the live path.
 
 **Authoritative source:** [`docs/authority/replacement_final_form_2026_06_09.md`](../authority/replacement_final_form_2026_06_09.md)  
 **Implementation:** `src/forecast/bayes_precision_fusion.py` → `src/forecast/emos.py`  
@@ -215,7 +214,6 @@ is the one to use in new code and docs.
 | Canonical term | Aliases / variants | Notes |
 |----------------|--------------------|-------|
 | `replacement_forecast` | `replacement_0_1` (legacy SQL suffix), `bayes_precision_fusion` (function name in `src/forecast/`), `fused-q` (prose shorthand), `q_construction` (authority doc §1e), `T2 Bayesian fusion` (prose) | All refer to the live q-construction path. Grep for `bayes_precision_fusion` to find the implementation; `replacement_forecast` to find authority doc references. |
-| `shadow` (observe-only mode) | `diagnostic` (diagnostic-only baseline), `legacy` (legacy-only, diagnostic-only) | In flag names and NC-10, "shadow" means observe-without-acting. "Diagnostic" in `zeus_strategy_spec.md` and `zeus_math_spec.md` §0 means the Monte Carlo / Platt / α-weighted comparison baseline, not the live path. Do not conflate. |
 | `exact` bin (code enum) | `point` (prose/docs), single-value settlement | Rounding-direction enum value in `settlement_semantics.py`. Docs call it a "point" bin; code uses `exact`. |
 | `ceiling` bin (code enum) | `open-high`, `open_shoulder` (colloquial docs), `75°F or higher` form | Open-ended upper bound. Docs use geometric names; code uses rounding-direction names. |
 | `floor` bin (code enum) | `open-low`, `open_shoulder` (colloquial docs), `30°C or below` form | Open-ended lower bound. Same prose/code split as `ceiling`. |

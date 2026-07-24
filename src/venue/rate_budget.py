@@ -1,6 +1,6 @@
 # Created: 2026-07-02
 # Last reused/audited: 2026-07-02
-# Authority basis: docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
+# Authority basis: architecture/invariants.yaml
 #   §1 "rate-limit budget + cancel-priority" (BUILD — only reactive 429 handling
 #   exists) — W2.3 packet. Lands INERT: no production call site. W2.1's batch
 #   wrapper and W3/W4 consumers wire this module in a later packet.

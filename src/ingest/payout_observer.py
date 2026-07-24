@@ -63,8 +63,7 @@ RpcCall = Callable[[str, str, list[Any]], Any]
 #   mapping(bytes32 => uint256[]) public payoutNumerators;   -> payoutNumerators(bytes32,uint256)
 #   mapping(bytes32 => uint256)   public payoutDenominator;  -> payoutDenominator(bytes32)
 # Verified locally via eth_utils.keccak — same methodology already pinned for
-# every other CTF selector in polymarket_v2_adapter.py (CTF_REDEEM_POSITIONS_SELECTOR
-# et al.), and covered by an antibody test mirroring
+# the adapter's read-only CTF selectors, and covered by an antibody test mirroring
 # tests/test_polymarket_v2_adapter_balance_probe.py::test_selectors_are_canonical.
 PAYOUT_DENOMINATOR_SELECTOR = "0xdd34de67"
 PAYOUT_NUMERATORS_SELECTOR = "0x0504c814"

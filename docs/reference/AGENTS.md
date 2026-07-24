@@ -73,12 +73,12 @@ which module reference matters.
 | `theory_map.md` | Navigation index for theory and reference docs |
 | `schema_cheatsheet.md` | Generated live-DB schema names cheatsheet (regenerate via scripts/generate_schema_cheatsheet.py) |
 | `rule_surface_map.md` | Where each class of rule/law lives; maps to root AGENTS.md precedence |
-| `zeus_strategy_spec.md` | Strategy math spec — probability law superseded 2026-06-09 (see header); diagnostic/provenance only |
+| `zeus_strategy_spec.md` | Strategy math spec — probability law superseded 2026-06-09 (see header); offline evidence only |
 | `zeus_architecture_reference.md` | Durable descriptive architecture reference |
 | `zeus_execution_lifecycle_reference.md` | Lifecycle state machine, chain reconciliation, order execution, current `Position.evaluate_exit` precedence and economics, monitor refresh, settlement harvest, P&L, and redemption |
-| `zeus_risk_strategy_reference.md` | RiskLevel enum (5 levels incl DATA_DEGRADED), current-state risk inputs, trailing settled-PnL diagnostics, strategy gate emission, Kelly sizing (dynamic_kelly_mult thresholds), RiskGuard process architecture (dual-DB, alert emission) |
+| `zeus_risk_strategy_reference.md` | RiskLevel enum (5 levels incl DATA_DEGRADED), current-state risk inputs, trailing settled-PnL evidence, strategy gate emission, Kelly sizing (dynamic_kelly_mult thresholds), RiskGuard process architecture (dual-DB, alert emission) |
 | `zeus_market_settlement_reference.md` | Market structure (event/market/bin hierarchy, token swap guard, VWMP), bin topology (3 types, width normalization), settlement semantics (rounding rules, for_city routing), sensor physics (ASOS σ, per-city overrides), Monte Carlo P_raw, probability chain (Platt, alpha, bootstrap CI) |
-| `zeus_data_and_replay_reference.md` | Database topology (3-DB split), core table schemas, data ingestion (hourly instants, coverage tracking, IngestionGuard layers), provenance/authority contracts, dual-track identity (MetricIdentity type safety), replay diagnostic status |
+| `zeus_data_and_replay_reference.md` | Database topology (3-DB split), core table schemas, data ingestion (hourly instants, coverage tracking, IngestionGuard layers), provenance/authority contracts, dual-track identity (MetricIdentity type safety), replay evidence status |
 | `zeus_failure_modes_reference.md` | Code-grounded failure modes with invariant anchors: settlement/rounding, probability chain, lifecycle/state, data ingestion, execution — each with exact failure mechanism, preventing contract, and code anchor |
 | `zeus_math_spec.md` | Deep math/specification reference; executable law and authority manifests win on disagreement |
 | `zeus_calibration_weighting_authority.md` | Mathematical authority for calibration weight semantics (LOW track binary→continuous, per-city eligibility, ΔT-magnitude forbidden in production); empirical basis PoC v4+v5 on 1.7M pairs |

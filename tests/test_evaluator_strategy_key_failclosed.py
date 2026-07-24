@@ -54,6 +54,8 @@ def _candidate(discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> Mar
 
 
 def _day0_candidate_with_observed_high(observed_high: float) -> MarketCandidate:
+    from src.strategy.market_phase import MarketPhase
+
     return MarketCandidate(
         city=_city(),
         target_date="2026-05-03",
@@ -61,6 +63,7 @@ def _day0_candidate_with_observed_high(observed_high: float) -> MarketCandidate:
         hours_since_open=30.0,
         temperature_metric="high",
         discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+        market_phase=MarketPhase.SETTLEMENT_DAY,
         observation={"high_so_far": observed_high, "current_temp": observed_high},
     )
 

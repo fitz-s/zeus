@@ -1,55 +1,6 @@
 # Created: 2026-07-02
-# Authority basis: docs/rebuild/order_engine_implementation_architecture_2026-07-02.md
-#   §1 "batch submit + safe prefixes" (BUILD (thin)) +
-#   docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
-#   W2 packet ("W2.1 batch submit/cancel wrapper ... lands INERT — no
-#   production call site yet") + architecture/invariants.yaml INV-28
-#   (persist-before-side-effect) applied at batch shape.
-"""W2.1 batch cancel journal orchestrator. Extends the single-order INV-28
-sequence (the reference is execute_exit_order,
-src/execution/executor.py:4394-4476: persist INTENT_CREATED +
-SUBMIT_REQUESTED, COMMIT, THEN the one SDK call, THEN ack) to N orders
-sharing ONE SDK call per chunk.
-
-The W2.1 packet also built a batch SUBMIT orchestrator (``submit_orders_
-batch``) alongside ``cancel_commands_batch`` below; it was deleted as dead
-code in the gate-stack simplification (Phase 1, 2026-07-06) -- it had zero
-live callers and was never wired to a production submit path.
-``BatchSubmitRequest``/``BatchSubmitOutcome`` remain as inert leftover types
-from that removal. Only ``cancel_commands_batch`` is live today (wired by
-``src.execution.staleness_cancel``); the design notes below describe the
-shared batch shape both orchestrators used.
-
-Persist-before-side-effect at batch shape (design decision, documented per
-the W2.1 packet brief's open tension -- INV-28's text is singular and does
-not natively address batching):
-
-  For each chunk of at most MAX_ORDERS_PER_BATCH orders:
-    1. persist: insert_command(INTENT_CREATED) + append_event(SUBMIT_REQUESTED)
-       for EVERY order in the chunk, all in one transaction, COMMITTED.
-    2. ONE SDK call (client.place_limit_orders_batch / cancel_orders_batch)
-       covering the whole chunk.
-    3. ack: one append_event per order, mapped from the one response via
-       src.venue.batch_submit.map_batch_items's fail-closed precedence.
-  Chunks are processed SEQUENTIALLY, and a chunk's persist phase happens
-  immediately before that chunk's own SDK call -- never earlier. This means
-  an UNREACHED chunk (because an earlier chunk's SDK call raised, or a rate
-  budget denied it) is simply never persisted: there is no orphan
-  INTENT_CREATED row to clean up, and the caller can retry those requests
-  fresh via another batch call. This was chosen over "persist all N chunks
-  upfront, then work through them" specifically to avoid a batch-wide
-  half-submitted journal state whose resolution would otherwise require new
-  recovery-loop machinery this inert packet does not build.
-
-  A chunk HALTS further processing (later chunks become "not_attempted")
-  only on an AMBIGUOUS outcome: the SDK call itself raising (side effect
-  possibly crossed, mirrors executor.py's SUBMIT_TIMEOUT_UNKNOWN handling)
-  or a denied/deferred rate-budget grant. An ordinary deterministic
-  per-item outcome (SUBMIT_ACKED, SUBMIT_REJECTED, or even a fail-closed
-  SUBMIT_UNKNOWN from response-mapping ambiguity within an otherwise-
-  received response) does NOT halt later chunks -- each chunk's SDK call is
-  an independent HTTP request.
-"""
+# Authority basis: architecture/invariants.yaml INV-28.
+"""Current journaled batch-cancel orchestration."""
 
 from __future__ import annotations
 
@@ -58,46 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
-from src.contracts.execution_intent import ExecutionIntent
-from src.execution.command_bus import IntentKind
 from src.venue.batch_submit import MAX_ORDERS_PER_BATCH, chunk_orders
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-@dataclass(frozen=True)
-class BatchSubmitRequest:
-    """One order to submit as part of a batch.
-
-    ``intent``/``snapshot`` feed the FC-03 seam directly
-    (``adapter.create_submission_envelope`` -- the sole freshness-assert
-    call site); this module never bypasses it or re-implements freshness
-    logic. Command-row fields (token_id, side, price, size, market_id) are
-    derived from the BUILT envelope, not re-specified here, so they cannot
-    drift from what was actually signed.
-    """
-
-    decision_id: str
-    intent_kind: IntentKind
-    position_id: str
-    intent: ExecutionIntent
-    snapshot: Any
-    order_type: str
-    post_only: bool = False
-    execution_capability_payload: Optional[dict] = None
-
-
-@dataclass(frozen=True)
-class BatchSubmitOutcome:
-    request_index: int
-    status: str  # "acked" | "rejected" | "unknown" | "unknown_side_effect" | "rate_limited" | "not_attempted"
-    command_id: Optional[str] = None
-    idempotency_key: Optional[str] = None
-    order_id: Optional[str] = None
-    error_code: Optional[str] = None
-    error_message: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -32,7 +32,7 @@ erratum_2026_05_07:
       Status flips: EVIDENCE_GATED → BINDING_2026_05_10.
       Legacy static-mapping path (flag-off) is operator-accepted at-launch per
       docs/operations/PLIST_UPDATE_FOR_RELOCK.md §1.5.1 (2026-05-10 update).
-      Phase B (evidence-gated path with validated_calibration_transfers rows) is the
+      Phase B (evidence-gated path with retired_transfer_table rows) is the
       future upgrade, not a current blocker.
   # — Original erratum body preserved below for history —
   reason: >
@@ -57,7 +57,7 @@ erratum_2026_05_07:
     - "Current extracted HIGH same-key cache has selected_step_ranges and member extrema mismatches."
     - "Current extracted LOW cache has no same-key OpenData/TIGGE comparator rows."
     - "OpenData/TIGGE full local-day lead_day=10 coverage can require step 258 for UTC+7/8/9 and step 276 for UTC-negative 00Z city-local windows; the old runtime/calendar surface stopped at 240."
-    - "00Z and 12Z must remain separate calibration strata; 06Z/18Z remain short-horizon/shadow for this purpose."
+    - "00Z and 12Z must remain separate calibration strata; 06Z/18Z remain short-horizon/observation for this purpose."
 
 # ────────────────────────────────────────────────────────────────
 # 1. Physical ensemble equivalence
@@ -95,7 +95,7 @@ calibration_implication:
     _TRANSFER_SOURCE_BY_OPENDATA_VERSION (code_anchors §3) maps each
     ecmwf_opendata_* data_version key to its TIGGE counterpart.  That mapping
     is a candidate transfer route, not sufficient live authority.  A live
-    decision must be backed by paired OpenData/TIGGE equivalence diagnostics
+    decision must be backed by paired OpenData/TIGGE equivalence telemetry
     that prove identical contract forecast-object semantics.
   statistical_sanity_check: >
     Cross-domain OOS validation is required before live promotion.  brier_diff
@@ -125,7 +125,7 @@ code_anchors:
     symbol: evaluate_calibration_transfer_policy_with_evidence
     note: >
       Phase B upgrade path.  When flag is OFF, delegates to legacy (line 166).
-      When flag is ON, requires DB row in validated_calibration_transfers.
+      When flag is ON, requires DB row in retired_transfer_table.
   flag_off_delegation:
     file: src/data/calibration_transfer_policy.py
     lines: 162-180  # post-Fix-G state (2026-05-06): kwarg lands at line 179
@@ -134,7 +134,7 @@ code_anchors:
       can be returned (Fix G in golden-knitting-wand.md Phase 1).  Per the
       2026-05-10 supersession of the 2026-05-07 erratum (see erratum_2026_05_07.superseded
       block above), this IS the operator-accepted live launch basis at-launch.
-      Phase B (evidence-gated path with validated_calibration_transfers rows) is the
+      Phase B (evidence-gated path with retired_transfer_table rows) is the
       future upgrade, not a current blocker.
       Verify: `grep -n live_promotion_approved=True src/data/calibration_transfer_policy.py`
       should return a line in this range.
@@ -146,12 +146,12 @@ flag_state_at_launch:
   ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED: false
   rationale: >
     Post-2026-05-10 supersession (see erratum_2026_05_07.superseded above), the
-    paired-equivalence diagnostic passes locally and the legacy static mapping
+    paired-equivalence telemetry passes locally and the legacy static mapping
     IS the operator-accepted live authority at-launch.  The flag stays OFF for a
     different reason: the evidence-gated path (_with_evidence) requires rows in
-    validated_calibration_transfers, which only accumulate naturally over ~2-4
+    retired_transfer_table, which only accumulate naturally over ~2-4
     weeks of post-launch ingest.  Activating the flag before rows exist would
-    cause every ECMWF candidate to return SHADOW_ONLY (silent live-entry kill).
+    cause every ECMWF candidate to return BLOCKED (silent live-entry kill).
     Flip the flag to true only after Phase B trigger conditions are met (§5).
   do_not_set: >
     DO NOT add ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true to plists or shell
@@ -172,7 +172,7 @@ phase_B_uplift:
   cycle_stratified_coverage: "2026-06-01"
   steps: >
     1. Extend rebuild_calibration_pairs.py for ecmwf_opendata_* data_version.
-    2. Run OOS evaluator (evaluate_calibration_transfer_oos.py) for cross-domain routes.
+    2. Evaluate cross-domain routes from the canonical settlement-graded corpus.
     3. Verify physical-object equivalence plus brier_diff near zero before any LIVE_ELIGIBLE row.
     4. Operator flips ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true in plist.
   plan_ref: golden-knitting-wand.md Phase B (separate plan when triggered)
@@ -183,12 +183,12 @@ phase_B_uplift:
 forbidden_patterns:
   - pattern: synthetic_data
     description: >
-      Never fabricate calibration_pairs_v2 rows, validated_calibration_transfers
+      Never fabricate calibration_pairs_v2 rows, retired_transfer_table
       rows, or Platt parameters from fictional holdout pairs.  "No synthetic data
       ever" is a hard constraint (user-confirmed 2026-05-06).
   - pattern: evidence_rows_with_no_holdout_pairs
     description: >
-      Do not write validated_calibration_transfers rows with status=LIVE_ELIGIBLE
+      Do not write retired_transfer_table rows with status=LIVE_ELIGIBLE
       backed by n_pairs < MIN_PAIRS (30).  The evidence-gated path is only
       activated when real holdout pairs exist.
   - pattern: audit_approach_2

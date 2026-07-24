@@ -191,15 +191,6 @@ def confirmed_blocked_cities(*, artifact: Optional[Mapping] = None) -> list[str]
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Seam helper.
-# ---------------------------------------------------------------------------
-
-def city_skill_gate_live_enabled() -> bool:
-    """Compatibility seam: city-skill gating is direct when this helper is called."""
-    return True
-
-
 def city_skill_gate_admits(
     *,
     city: str,

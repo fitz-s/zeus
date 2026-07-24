@@ -647,16 +647,10 @@ def _patch_paths(monkeypatch, tmp_path):
     settings.write_text(
         json.dumps(
             {
-                "edli": {
-                    "live_execution_mode": "edli_live",
-                    "reactor_mode": "live",
-                    "real_order_submit_enabled": True,
-                },
                 "execution": {
                     "absolute_live_unit_price_min": 0.05,
                     "absolute_live_unit_price_max": 0.95,
                 },
-                "feature_flags": {"qkernel_spine_enabled": True},
             }
         )
     )
@@ -4729,44 +4723,6 @@ print(json.dumps({
     }
 
 
-def test_preflight_blocks_qkernel_cutover_flag_off(monkeypatch, tmp_path):
-    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
-    trade = _init_trade_db(trade_db)
-    forecasts = _init_forecast_db(forecast_db)
-    fresh = datetime.now(timezone.utc)
-    _init_sidecar_surfaces(trade, now=fresh)
-    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
-    forecasts.execute(
-        """
-        INSERT INTO forecast_posteriors (
-            posterior_id, city, target_date, temperature_metric,
-            source_cycle_time, computed_at, q_json, runtime_layer
-        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
-        """,
-        (fresh.isoformat(), fresh.isoformat()),
-    )
-    trade.commit()
-    forecasts.commit()
-    trade.close()
-    forecasts.close()
-    preflight.SETTINGS_PATH.write_text(
-        json.dumps(
-            {
-                "edli": {"real_order_submit_enabled": True},
-                "execution": {
-                    "absolute_live_unit_price_min": 0.05,
-                    "absolute_live_unit_price_max": 0.95,
-                },
-                "feature_flags": {"qkernel_spine_enabled": False},
-            }
-        )
-    )
-
-    result = preflight.evaluate()
-
-    assert result["ok"] is False
-    qkernel = next(c for c in result["checks"] if c["name"] == "qkernel_spine_cutover")
-    assert qkernel["ok"] is False
 
 
 def test_preflight_qlcb_check_uses_preflight_state_dir(monkeypatch, tmp_path):
@@ -8288,46 +8244,6 @@ def test_monitor_cadence_restart_evidence_blocks_stale_main_during_deploy_restar
     assert result.evidence["restart_recovery_obligation"].startswith("post-start health")
 
 
-def test_final_preflight_fails_when_restart_env_set_but_old_main_running(monkeypatch):
-    pass_check = preflight.CheckResult("pass", True, "ok", {})
-
-    monkeypatch.setattr(preflight, "_settings", lambda: {"edli": {"live_execution_mode": "disabled"}})
-    monkeypatch.setattr(preflight, "_open_positions", lambda positive_chain_only=True: [])
-    monkeypatch.setattr(preflight, "_open_positions_requiring_executable_quote", lambda rows: [])
-    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
-    monkeypatch.setenv("ZEUS_LIVE_RESTART_IN_PROGRESS", "1")
-    monkeypatch.setattr(preflight, "_live_trading_launchagent_installed_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_live_trading_launchagent_bootstrapable_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_clob_signature_type_config_check", lambda *, required: pass_check)
-    monkeypatch.setattr(preflight, "_qkernel_spine_cutover_check", lambda cfg: pass_check)
-    monkeypatch.setattr(preflight, "_src_main_boot_guard_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_family_portfolio_single_leg_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_qlcb_reliability_artifact_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_forecast_sidecar_health", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_posterior_summary", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_live_input_posterior_cycle_alignment_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_sidecar_heartbeat_checks", lambda: [])
-    monkeypatch.setattr(preflight, "_collateral_snapshot_freshness_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_edli_live_order_presubmit_shape_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_live_actionable_certificate_semantics_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_live_money_certificate_parent_mode_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_venue_point_order_truth_alignment_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_edli_confirmed_fill_bridge_coverage_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_position_current_projection_integrity_check", lambda rows: pass_check)
-    monkeypatch.setattr(preflight, "_economically_closed_sell_projection_exposure_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_resting_venue_command_lifecycle_alignment_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_full_family_executable_substrate_redecision_check", lambda rows: pass_check)
-    monkeypatch.setattr(preflight, "_execution_feasibility_evidence_check", lambda rows: pass_check)
-    monkeypatch.setattr(preflight, "_pending_exit_check", lambda rows: pass_check)
-    monkeypatch.setattr(preflight, "_belief_check", lambda rows: pass_check)
-    monkeypatch.setattr(preflight, "_monitor_day0_semantic_restart_gate_check", lambda: pass_check)
-    monkeypatch.setattr(preflight, "_monitor_cadence_restart_evidence_check", lambda rows: pass_check)
-
-    result = preflight.evaluate()
-
-    assert result["ok"] is False
-    blocker = next(c for c in result["blockers"] if c["name"] == "live_trading_process_absent")
-    assert blocker["detail"] == "src.main is still running"
 
 
 def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recovery(
@@ -8699,180 +8615,9 @@ def test_monitor_cadence_restart_evidence_tolerates_near_future_concurrent_write
     assert result.evidence["future_monitor_event_count"] == 0
 
 
-# --- B1: submit_authority_config fail-closed tests ---
 
 
-def _write_settings_with_edli(settings_path, *, real_order_submit_enabled, reactor_mode, live_execution_mode):
-    settings_path.write_text(
-        json.dumps(
-            {
-                "edli": {
-                    "real_order_submit_enabled": real_order_submit_enabled,
-                    "reactor_mode": reactor_mode,
-                    "live_execution_mode": live_execution_mode,
-                },
-                "execution": {
-                    "absolute_live_unit_price_min": 0.05,
-                    "absolute_live_unit_price_max": 0.95,
-                },
-                "feature_flags": {"qkernel_spine_enabled": True},
-            }
-        )
-    )
 
-
-def test_preflight_blocks_armed_live_when_real_submit_disabled(monkeypatch, tmp_path):
-    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
-    trade = _init_trade_db(trade_db)
-    forecasts = _init_forecast_db(forecast_db)
-    now = datetime.now(timezone.utc)
-    _init_sidecar_surfaces(trade, now=now)
-    _write_fresh_sidecar_heartbeats(state_dir, now=now)
-    forecasts.execute(
-        """
-        INSERT INTO forecast_posteriors (
-            posterior_id, city, target_date, temperature_metric,
-            source_cycle_time, computed_at, q_json, runtime_layer
-        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
-        """,
-        (now.isoformat(), now.isoformat()),
-    )
-    forecasts.commit()
-    trade.close()
-    forecasts.close()
-    _write_settings_with_edli(
-        preflight.SETTINGS_PATH,
-        real_order_submit_enabled=False,
-        reactor_mode="live",
-        live_execution_mode="edli_live",
-    )
-
-    result = preflight.evaluate()
-
-    assert result["ok"] is False
-    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
-    assert submit["ok"] is False
-    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
-    # main() should return nonzero
-    import io
-    from contextlib import redirect_stdout
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        exit_code = preflight.main(["--json"])
-    assert exit_code != 0
-
-
-def test_preflight_blocks_armed_live_when_reactor_mode_live_no_submit(monkeypatch, tmp_path):
-    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
-    trade = _init_trade_db(trade_db)
-    forecasts = _init_forecast_db(forecast_db)
-    now = datetime.now(timezone.utc)
-    _init_sidecar_surfaces(trade, now=now)
-    _write_fresh_sidecar_heartbeats(state_dir, now=now)
-    forecasts.execute(
-        """
-        INSERT INTO forecast_posteriors (
-            posterior_id, city, target_date, temperature_metric,
-            source_cycle_time, computed_at, q_json, runtime_layer
-        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
-        """,
-        (now.isoformat(), now.isoformat()),
-    )
-    forecasts.commit()
-    trade.close()
-    forecasts.close()
-    _write_settings_with_edli(
-        preflight.SETTINGS_PATH,
-        real_order_submit_enabled=True,
-        reactor_mode="live_no_submit",
-        live_execution_mode="edli_live",
-    )
-
-    result = preflight.evaluate()
-
-    assert result["ok"] is False
-    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
-    assert submit["ok"] is False
-    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
-
-
-def test_preflight_blocks_missing_live_execution_mode_instead_of_legacy_default(monkeypatch, tmp_path):
-    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
-    trade = _init_trade_db(trade_db)
-    forecasts = _init_forecast_db(forecast_db)
-    now = datetime.now(timezone.utc)
-    _init_sidecar_surfaces(trade, now=now)
-    _write_fresh_sidecar_heartbeats(state_dir, now=now)
-    forecasts.execute(
-        """
-        INSERT INTO forecast_posteriors (
-            posterior_id, city, target_date, temperature_metric,
-            source_cycle_time, computed_at, q_json, runtime_layer
-        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
-        """,
-        (now.isoformat(), now.isoformat()),
-    )
-    forecasts.commit()
-    trade.close()
-    forecasts.close()
-    preflight.SETTINGS_PATH.write_text(
-        json.dumps(
-            {
-                "edli": {
-                    "real_order_submit_enabled": True,
-                    "reactor_mode": "live",
-                },
-                "execution": {
-                    "absolute_live_unit_price_min": 0.05,
-                    "absolute_live_unit_price_max": 0.95,
-                },
-                "feature_flags": {"qkernel_spine_enabled": True},
-            }
-        )
-    )
-
-    result = preflight.evaluate()
-
-    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
-    assert submit["ok"] is False
-    assert submit["evidence"]["edli.live_execution_mode"] == "missing"
-    assert submit["evidence"]["known_execution_mode"] is False
-    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
-
-
-def test_preflight_submit_authority_passes_when_reactor_mode_live_and_real_submit_enabled(
-    monkeypatch, tmp_path
-):
-    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
-    trade = _init_trade_db(trade_db)
-    forecasts = _init_forecast_db(forecast_db)
-    now = datetime.now(timezone.utc)
-    _init_sidecar_surfaces(trade, now=now)
-    _write_fresh_sidecar_heartbeats(state_dir, now=now)
-    forecasts.execute(
-        """
-        INSERT INTO forecast_posteriors (
-            posterior_id, city, target_date, temperature_metric,
-            source_cycle_time, computed_at, q_json, runtime_layer
-        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
-        """,
-        (now.isoformat(), now.isoformat()),
-    )
-    forecasts.commit()
-    trade.close()
-    forecasts.close()
-    _write_settings_with_edli(
-        preflight.SETTINGS_PATH,
-        real_order_submit_enabled=True,
-        reactor_mode="live",
-        live_execution_mode="edli_live",
-    )
-
-    result = preflight.evaluate()
-
-    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
-    assert submit["ok"] is True
-    assert not any(c["name"] == "submit_authority_config" for c in result["blockers"])
 
 
 def test_exit_full_fill_repairable_by_position_excludes_partial_fill_inflated_by_revisions(

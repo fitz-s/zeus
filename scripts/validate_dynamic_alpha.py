@@ -20,7 +20,7 @@ POST-MORTEM ANALYSIS (2026-03-31)
 
 Why dynamic α fails — it's NOT about the mapping function.
 
-Five diagnostic findings:
+Five observation findings:
 
 D1 — MAE does NOT predict trading Brier (r = +0.032)
     Correlation between city-season MAE and actual Brier score is essentially

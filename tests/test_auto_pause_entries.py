@@ -46,7 +46,6 @@ def _patch_cycle(monkeypatch):
     monkeypatch.setattr(cr, "save_tracker", lambda _: None)
     monkeypatch.setattr(cr, "PolymarketClient", _NullClob)
     monkeypatch.setattr(cr, "is_entries_paused", lambda: False)
-    monkeypatch.setattr(cr, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cr, "portfolio_heat_for_bankroll", lambda p, b: 0.0)
     monkeypatch.setattr(cr.cutover_guard, "summary", lambda: {"state": "LIVE_ENABLED", "entry": {"allow_submit": True}})
     monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"health": "OK", "entry": {"allow_submit": True}})

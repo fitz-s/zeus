@@ -86,7 +86,7 @@ artifact_classes:
       - docs/archives/work_packets/trees/<tree-name>/<program_domain>/YYYY-MM-DD_slug/
     record_required: true
   - id: generated_evidence
-    purpose: Test output, investigation notes, or diagnostic evidence that supports a task.
+    purpose: Test output, investigation notes, or telemetry evidence that supports a task.
     active_paths:
       - docs/artifacts/
       - docs/to-do-list/

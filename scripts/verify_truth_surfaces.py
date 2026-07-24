@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Diagnostic script: verify canonical truth surface consistency.
+Observation script: verify canonical truth surface consistency.
 
 Checks LIVE state of zeus.db, risk_state-live.db, and JSON state files.
 NOT pytest — run directly to get PASS/FAIL for each surface invariant.
@@ -66,7 +66,7 @@ WARN = "WARN"
 READY = "READY"
 NOT_READY = "NOT_READY"
 LEGACY_OUTCOME_FACT_AUTHORITY_SCOPE = "legacy_lifecycle_projection_not_settlement_authority"
-SETTLEMENT_AUTHORITY_DIAGNOSTIC_SOURCE = "position_events_or_decision_log_verified_settlement"
+SETTLEMENT_AUTHORITY_EVIDENCE_SOURCE = "position_events_or_decision_log_verified_settlement"
 EXECUTION_FACT_AUTHORITY_SCOPE = "execution_lifecycle_projection_not_settlement_authority"
 ELIGIBLE_OBSERVATION_SOURCE_ROLES = frozenset({
     "historical_hourly",
@@ -319,7 +319,7 @@ def build_fact_table_authority_report(cur: sqlite3.Cursor) -> dict:
         "execution_fact_present": execution_rows is not None,
         "terminal_execution_fact_rows": 0 if terminal_execution_rows is None else terminal_execution_rows,
         "execution_fact_authority_scope": EXECUTION_FACT_AUTHORITY_SCOPE,
-        "settlement_authority_source": SETTLEMENT_AUTHORITY_DIAGNOSTIC_SOURCE,
+        "settlement_authority_source": SETTLEMENT_AUTHORITY_EVIDENCE_SOURCE,
         **settlement_counts,
         "blocking_reasons": blockers,
         "authority_status": "authority_ready" if not blockers else "not_ready",
@@ -677,21 +677,21 @@ def _first_accepted_json_artifact(
     paths: tuple[Path, ...],
     validator,
 ) -> tuple[Path | None, list[str]]:
-    diagnostics: list[str] = []
+    failures: list[str] = []
     candidates = _iter_direct_json_candidates(paths)
     if not candidates:
         return None, ["no JSON acceptance artifact found"]
     for candidate in candidates:
         payload, error = _load_json_object(candidate)
         if error:
-            diagnostics.append(f"{candidate}: {error}")
+            failures.append(f"{candidate}: {error}")
             continue
         assert payload is not None
-        errors = validator(payload)
-        if not errors:
-            return candidate, diagnostics
-        diagnostics.append(f"{candidate}: missing " + ", ".join(errors))
-    return None, diagnostics
+        missing = validator(payload)
+        if not missing:
+            return candidate, failures
+        failures.append(f"{candidate}: missing " + ", ".join(missing))
+    return None, failures
 
 
 def _add_p4_check(
@@ -2236,7 +2236,7 @@ def _add_p4_market_rule_acceptance_check(
     *,
     paths: tuple[Path, ...],
 ) -> None:
-    accepted_path, diagnostics = _first_accepted_json_artifact(
+    accepted_path, errors = _first_accepted_json_artifact(
         paths,
         _market_rule_acceptance_errors,
     )
@@ -2248,7 +2248,7 @@ def _add_p4_market_rule_acceptance_check(
             f"accepted market-rule contract at {accepted_path}"
             if accepted_path is not None
             else "market-rule acceptance contract missing or incomplete; "
-            + "; ".join(diagnostics)
+            + "; ".join(errors)
         ),
         code="p4_market_rule_acceptance_contract_missing",
         lane="4.6.A",
@@ -2263,7 +2263,7 @@ def _add_p4_tigge_manifest_check(
     track: str,
     paths: tuple[Path, ...],
 ) -> None:
-    accepted_path, diagnostics = _first_accepted_json_artifact(
+    accepted_path, errors = _first_accepted_json_artifact(
         paths,
         lambda payload: _tigge_manifest_errors(payload, track=track),
     )
@@ -2275,7 +2275,7 @@ def _add_p4_tigge_manifest_check(
             f"{track} accepted TIGGE parity manifest at {accepted_path}"
             if accepted_path is not None
             else f"{track} TIGGE parity/hash/timestamp manifest missing or incomplete; "
-            + "; ".join(diagnostics)
+            + "; ".join(errors)
         ),
         code="p4_tigge_manifest_missing",
         lane="4.7",
@@ -3473,7 +3473,7 @@ if __name__ == "__main__":
             "p4-readiness",
         ),
         default="truth-surfaces",
-        help="Diagnostic mode to run.",
+        help="Evidence scope to run.",
     )
     parser.add_argument(
         "--world-db",

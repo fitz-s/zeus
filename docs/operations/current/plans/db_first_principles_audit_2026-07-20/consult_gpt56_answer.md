@@ -1,4 +1,4 @@
-> **编辑注(Zeus 法)**:本文是外部 GPT-5.6 consult 的 verbatim 记录。其无下线切换段落的 "Shadow-read and compare" 提议常驻并行读比对——**Zeus 已根除 shadow modes**(operator 指令 2026-06-12,root AGENTS §2)。落地**删除该步、不改名保留**:切换正确性由 outbox 幂等 + 对账 query(一次性/读态,见 D 的 atomicity_outbox_contract)+ tests 兜底,live-direct 切,不实现常驻并行分层。
+> **编辑注(Zeus 法)**:本文是外部 GPT-5.6 consult 的 verbatim 记录。其无下线切换段落的 "Retired-read and compare" 提议常驻并行读比对——**Zeus 已根除 retired modes**(operator 指令 2026-06-12,root AGENTS §2)。落地**删除该步、不改名保留**:切换正确性由 outbox 幂等 + 对账 query(一次性/读态,见 D 的 atomicity_outbox_contract)+ tests 兜底,live-direct 切,不实现常驻并行分层。
 
 Verdict
 
@@ -702,7 +702,7 @@ Record target acknowledgement and continuously reconcile.
 
 Backfill historical rows by bounded sequence ranges.
 
-Shadow-read and compare target results.
+Retired-read and compare target results.
 
 Under a short unified writer gate, establish a final watermark and drain the outbox.
 

@@ -26,7 +26,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Ankara": {
@@ -38,7 +38,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Atlanta": {
@@ -50,7 +50,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Auckland": {
@@ -62,7 +62,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0054,
       "n_zero_train": 1,
-      "sigma_diagnostic": 0.073721,
+      "sigma_telemetry": 0.073721,
       "floor_source": "empirical_p05"
     },
     "Austin": {
@@ -74,7 +74,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0163,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.018141,
+      "sigma_telemetry": 0.018141,
       "floor_source": "empirical_p05"
     },
     "Beijing": {
@@ -86,7 +86,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Buenos Aires": {
@@ -98,7 +98,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0109,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.014853,
+      "sigma_telemetry": 0.014853,
       "floor_source": "empirical_p05"
     },
     "Busan": {
@@ -110,7 +110,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0217,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.02089,
+      "sigma_telemetry": 0.02089,
       "floor_source": "empirical_p05"
     },
     "Cape Town": {
@@ -122,7 +122,7 @@
       "final_floor": 0.8571,
       "train_FP_rate": 0.0054,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.038393,
+      "sigma_telemetry": 0.038393,
       "floor_source": "empirical_p05"
     },
     "Chengdu": {
@@ -134,7 +134,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0054,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.010532,
+      "sigma_telemetry": 0.010532,
       "floor_source": "empirical_p05"
     },
     "Chicago": {
@@ -146,7 +146,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Chongqing": {
@@ -158,7 +158,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0054,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.010532,
+      "sigma_telemetry": 0.010532,
       "floor_source": "empirical_p05"
     },
     "Dallas": {
@@ -170,7 +170,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Denver": {
@@ -182,7 +182,7 @@
       "final_floor": 0.8786,
       "train_FP_rate": 0.038,
       "n_zero_train": 4,
-      "sigma_diagnostic": 0.158004,
+      "sigma_telemetry": 0.158004,
       "floor_source": "empirical_p05"
     },
     "Guangzhou": {
@@ -194,7 +194,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Helsinki": {
@@ -206,7 +206,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Hong Kong": {
@@ -222,7 +222,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0109,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.014853,
+      "sigma_telemetry": 0.014853,
       "floor_source": "empirical_p05"
     },
     "Istanbul": {
@@ -238,7 +238,7 @@
       "final_floor": 0.7143,
       "train_FP_rate": 0.1033,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.126606,
+      "sigma_telemetry": 0.126606,
       "floor_source": "empirical_p05"
     },
     "Jeddah": {
@@ -250,7 +250,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Karachi": {
@@ -262,7 +262,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Kuala Lumpur": {
@@ -274,7 +274,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Lagos": {
@@ -286,7 +286,7 @@
       "final_floor": 0.45,
       "train_FP_rate": 0.0598,
       "n_zero_train": 1,
-      "sigma_diagnostic": 0.188594,
+      "sigma_telemetry": 0.188594,
       "floor_source": "physical_override"
     },
     "London": {
@@ -298,7 +298,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0054,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.021063,
+      "sigma_telemetry": 0.021063,
       "floor_source": "empirical_p05"
     },
     "Los Angeles": {
@@ -310,7 +310,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0109,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.023498,
+      "sigma_telemetry": 0.023498,
       "floor_source": "empirical_p05"
     },
     "Lucknow": {
@@ -322,7 +322,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0489,
       "n_zero_train": 1,
-      "sigma_diagnostic": 0.111279,
+      "sigma_telemetry": 0.111279,
       "floor_source": "empirical_p05"
     },
     "Madrid": {
@@ -334,7 +334,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Manila": {
@@ -346,7 +346,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0217,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.02089,
+      "sigma_telemetry": 0.02089,
       "floor_source": "empirical_p05"
     },
     "Mexico City": {
@@ -358,7 +358,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0272,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.023291,
+      "sigma_telemetry": 0.023291,
       "floor_source": "empirical_p05"
     },
     "Miami": {
@@ -370,7 +370,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Milan": {
@@ -382,7 +382,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Moscow": {
@@ -398,7 +398,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "NYC": {
@@ -410,7 +410,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Panama City": {
@@ -422,7 +422,7 @@
       "final_floor": 0.8571,
       "train_FP_rate": 0.0054,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.040811,
+      "sigma_telemetry": 0.040811,
       "floor_source": "empirical_p05"
     },
     "Qingdao": {
@@ -434,9 +434,9 @@
       "final_floor": 1.0,
       "train_FP_rate": null,
       "n_zero_train": 0,
-      "sigma_diagnostic": null,
+      "sigma_telemetry": null,
       "floor_source": "empirical_p05_from_current_obs_v2_2026-05-24",
-      "_onboard_note": "Qingdao added 2026-05-24 (fix/ddd-config-qingdao-nstar) to close SEV-1 silent DDD_CITY_UNCONFIGURED lockout. City has training data + oracle evidence (23 obs, 0 mismatch) but was absent from DDD configs. Floor computed from current observation_instants_v2 (source=wu_icao_history, data_version=v1.wu-native, 22 distinct target_dates): HIGH window [11-17] and LOW window [23,0-5] both mean cov 0.994, min 0.857, p05=1.0 -> final_floor=max(1.0,0.35)=1.0 (joins healthy cluster). Provenance differs from the 2026-05-03 batch (computed on current obs_v2, not the original frozen training snapshot); see branch report. train_FP_rate/sigma_diagnostic null: not recomputed under original methodology."
+      "_onboard_note": "Qingdao added 2026-05-24 (fix/ddd-config-qingdao-nstar) to close SEV-1 silent DDD_CITY_UNCONFIGURED lockout. City has training data + oracle evidence (23 obs, 0 mismatch) but was absent from DDD configs. Floor computed from current observation_instants_v2 (source=wu_icao_history, data_version=v1.wu-native, 22 distinct target_dates): HIGH window [11-17] and LOW window [23,0-5] both mean cov 0.994, min 0.857, p05=1.0 -> final_floor=max(1.0,0.35)=1.0 (joins healthy cluster). Provenance differs from the 2026-05-03 batch (computed on current obs_v2, not the original frozen training snapshot); see branch report. train_FP_rate/sigma_telemetry null: not recomputed under original methodology."
     },
     "Paris": {
       "p05": 1.0,
@@ -447,7 +447,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0054,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0564,
+      "sigma_telemetry": 0.0564,
       "floor_source": "empirical_p05",
       "_workstream_a_resync": "Paris LFPB historical resync completed 2026-05-03 (agent a4c238d864a25ed71). 762 LFPB rows backfilled 2024-01-01..2026-01-31, 747,150 LFPG QUARANTINED pairs deleted, 8/8 Platt buckets refit. Train n=184/184, test n=120/120, mean cov 0.993/0.999, p05=1.0 → empirical floor=1.0 (joins the healthy-40 cluster). Ruling A NOT re-applied; asymmetric loss preference now lives in Kelly multiplier (per-city 0.7×, src/strategy/kelly.py)."
     },
@@ -460,7 +460,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0054,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.010532,
+      "sigma_telemetry": 0.010532,
       "floor_source": "empirical_p05"
     },
     "Sao Paulo": {
@@ -472,7 +472,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Seattle": {
@@ -484,7 +484,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Seoul": {
@@ -496,7 +496,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Shanghai": {
@@ -508,7 +508,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Shenzhen": {
@@ -520,7 +520,7 @@
       "final_floor": 0.7143,
       "train_FP_rate": 0.1087,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.122222,
+      "sigma_telemetry": 0.122222,
       "floor_source": "empirical_p05"
     },
     "Singapore": {
@@ -532,7 +532,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Taipei": {
@@ -544,7 +544,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Tel Aviv": {
@@ -560,7 +560,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Toronto": {
@@ -572,7 +572,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Warsaw": {
@@ -584,7 +584,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.0,
+      "sigma_telemetry": 0.0,
       "floor_source": "empirical_p05"
     },
     "Wellington": {
@@ -596,7 +596,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0054,
       "n_zero_train": 1,
-      "sigma_diagnostic": 0.073721,
+      "sigma_telemetry": 0.073721,
       "floor_source": "empirical_p05"
     },
     "Wuhan": {
@@ -608,7 +608,7 @@
       "final_floor": 1.0,
       "train_FP_rate": 0.0054,
       "n_zero_train": 0,
-      "sigma_diagnostic": 0.010532,
+      "sigma_telemetry": 0.010532,
       "floor_source": "empirical_p05"
     }
   }

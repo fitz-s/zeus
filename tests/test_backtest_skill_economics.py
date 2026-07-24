@@ -18,7 +18,7 @@ import sqlite3
 from src.backtest.economics import check_economics_readiness, run_economics
 from src.backtest.purpose import (
     BacktestPurpose,
-    DIAGNOSTIC_CONTRACT,
+    AUDIT_REPLAY_CONTRACT,
     ECONOMICS_CONTRACT,
     PurposeContract,
     PurposeContractViolation,
@@ -38,7 +38,7 @@ from src.state.portfolio import (
 )
 from scripts import equity_curve as equity_curve_module
 from scripts.equity_curve import (
-    LEGACY_DIAGNOSTIC_COHORT,
+    LEGACY_UNVERIFIED_COHORT,
     _single_exit_economics_cohort,
     require_single_exit_economics_cohort,
 )
@@ -101,7 +101,7 @@ def test_equity_curve_reports_single_corrected_cohort():
 
     assert cohort == CORRECTED_ECONOMICS_COHORT
     assert counts == {CORRECTED_ECONOMICS_COHORT: 2}
-    assert require_single_exit_economics_cohort([]) == LEGACY_DIAGNOSTIC_COHORT
+    assert require_single_exit_economics_cohort([]) == LEGACY_UNVERIFIED_COHORT
 
 
 def test_equity_curve_uses_status_pnl_not_bankroll_delta(monkeypatch):
@@ -370,17 +370,17 @@ def test_run_skill_rejects_economics_contract():
     assert "purpose=SKILL" in str(excinfo.value)
 
 
-def test_run_skill_rejects_diagnostic_contract():
+def test_run_skill_rejects_audit_replay_contract():
     with pytest.raises(PurposeContractViolation) as excinfo:
-        run_skill("2026-04-01", "2026-04-27", contract=DIAGNOSTIC_CONTRACT)
+        run_skill("2026-04-01", "2026-04-27", contract=AUDIT_REPLAY_CONTRACT)
     assert "purpose=SKILL" in str(excinfo.value)
 
 
-def test_run_skill_rejects_promotion_authority_skill_contract():
-    """SKILL with promotion_authority=True is structurally invalid.
+def test_run_skill_rejects_learning_authority_skill_contract():
+    """SKILL with learning_authority=True is structurally invalid.
 
     TRIBUNAL PR H made this UNCONSTRUCTABLE: PurposeContract.__post_init__ refuses a
-    SKILL/DIAGNOSTIC contract that claims promotion_authority, so the bad state is
+    SKILL/AUDIT_REPLAY contract that claims learning_authority, so the bad state is
     rejected at construction (earlier + stronger than the prior run_skill-time check).
     """
     with pytest.raises(PurposeContractViolation) as excinfo:
@@ -388,9 +388,9 @@ def test_run_skill_rejects_promotion_authority_skill_contract():
             purpose=BacktestPurpose.SKILL,
             permitted_outputs=SKILL_CONTRACT.permitted_outputs,
             parity=SKILL_PARITY,
-            promotion_authority=True,
+            learning_authority=True,
         )
-    assert "promotion_authority" in str(excinfo.value)
+    assert "learning_authority" in str(excinfo.value)
 
 
 def test_economics_field_leak_detector_clean():

@@ -77,7 +77,14 @@ def emit_event(
         # via ZEUS_DB_BUSY_TIMEOUT_MS) so the watchdog row is not silently lost
         # when the main thread is stuck in a write (the most critical use-case).
         _timeout_ms = float(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
-        conn = sqlite3.connect(str(db_path), timeout=_timeout_ms / 1000.0)
+        from src.state.db_writer_lock import connect_with_cutover_lease
+
+        canonical_path = Path(db_path)
+        conn = connect_with_cutover_lease(
+            str(canonical_path),
+            canonical_db_path=canonical_path,
+            timeout=_timeout_ms / 1000.0,
+        )
         try:
             # WAL mode: matches db.py:_connect; required so the daemon-thread
             # open does not block the main-thread writer in journal-mode=DELETE.

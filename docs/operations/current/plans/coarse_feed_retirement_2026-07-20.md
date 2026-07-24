@@ -96,7 +96,7 @@ CORRECTED MECHANISM (the "计算/更新/分配" is an EXISTING production engine
 - **更新 (serve it)** = writes `state/source_clock_weights/city_weights_<YYYYMMDD>.json` + `ACTIVE.json`
   pointer; consumed by `source_clock_city_weights.py::scheme_for_city` → `fixed_weight_center_from_values`
   (method SOURCE_CLOCK_FIXED_WEIGHT), fail-closed under PRESENT_WEIGHT_FLOOR=0.25.
-- My scratch `compute_city_fusion_combination.py` is a DIAGNOSTIC that partially re-derives this fitter;
+- My scratch `compute_city_fusion_combination.py` is a EVIDENCE that partially re-derives this fitter;
   use the CANONICAL fitter for production weights.
 
 THE GAP that blocks the operator's intent (fitter line 112): `LIVE_SERVABLE_MODELS = ANCHOR +
@@ -127,7 +127,7 @@ the fitter's walk-forward paired-MAE IS the grading — no separate grader neede
   cwa_township/hko_fnd went dark 2026-07-17 16:03. Re-homed onto `ingest_main._replacement_availability_poll_tick`
   via due-gated `_ingest_station_forecasts_if_due` (~3h monotonic gate, fail-soft). The data-ingest
   daemon picked it up 1m41s after commit; cwa/hko ingesting again (verified fresh to 2026-07-20 04:00).
-  Removed the orphaned duplicate call from the diagnostic cycle (single live owner).
+  Removed the orphaned duplicate call from the evidence cycle (single live owner).
 
 - **FITTER WIDENING — investigated, NOT done (correctly).** Adding cwa/hko (and the extended regionals
   jma_msm/nam_conus/dmi_harmonie/knmi) to `fit_source_clock_city_weights.py::LIVE_SERVABLE_MODELS` is a
@@ -148,7 +148,7 @@ the fitter's walk-forward paired-MAE IS the grading — no separate grader neede
 
 ## Dead residue (separate, low-risk cleanup — verify then delete)
 - `ecmwf_ifs_ens_0p1` 0.1° registry stub in `forecast_source_registry.py` — 0 rows ever, 0 live consumers.
-- `_legacy_coarse_unique_20260607T131448Z` archive tables (posteriors/anchors/shadow) — 0 code refs
+- `_legacy_coarse_unique_20260607T131448Z` archive tables (posteriors/anchors/retired) — 0 code refs
   (DROP is destructive on 42GB live DB → operator sign-off + backup required, do NOT auto-drop).
 - dead `..._aifs_sampled_2t_soft_anchor_*` posterior products (last 2026-06-20).
 - `forecast_posteriors.aifs_source_run_id` residual column (post-AIFS-deletion).

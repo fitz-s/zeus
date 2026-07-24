@@ -64,8 +64,8 @@ Scope: every table in `census_tables.md` (49 rows across trades/forecasts/world)
 | Table | Size | → Class | Rationale | Move |
 |---|---|---|---|---|
 | executable_market_snapshots | 43.11 GiB | **raw-evidence** | Append-only book history; hot mirror already split out as `executable_market_snapshot_latest`. Same shape as `book_hash_transitions`. `[INFERRED]` | clean-move |
-| execution_feasibility_evidence | 19.03 GiB | **raw-evidence** (+ledger slice) | Round-2: full diagnostics→evidence, small decision-used summary→ledger. Trades-side population (25.58M rows), distinct from world's. `[RULED]` | row-level-split |
-| decision_log | 7.60 GiB | **ledger** (+evidence slice) | REDESIGN_v2 §2: diagnostic BLOB→evidence; envelope+preimage commitment bytes→ledger, never let a deletable epoch be the sole home of settled-cert verification bytes. `[RULED]` | row-level-split |
+| execution_feasibility_evidence | 19.03 GiB | **raw-evidence** (+ledger slice) | Round-2: full evidence→evidence, small decision-used summary→ledger. Trades-side population (25.58M rows), distinct from world's. `[RULED]` | row-level-split |
+| decision_log | 7.60 GiB | **ledger** (+evidence slice) | REDESIGN_v2 §2: evidence BLOB→evidence; envelope+preimage commitment bytes→ledger, never let a deletable epoch be the sole home of settled-cert verification bytes. `[RULED]` | row-level-split |
 | book_hash_transitions | 2.13 GiB | **money-hot** (head) / evidence (history) | Round-2 explicit: head row per market/token→hot; transition history→evidence or delete if snapshot-derivable. `[RULED]` | row-level-split |
 | position_events | 0.84 GiB | **ledger** | Round-2: immutable lifecycle facts→ledger; derive `position_current` into hot separately. `[RULED]` | clean-move |
 | decision_certificates | 0.22 GiB | **ledger** | 58,021 rows ≈ round-2's "trades 58K" selected/graded-grain population. `[RULED]` — **manifest says `legacy_archived`/"residual drift"/drop-eligible; that's wrong, see §c.** | clean-move |
@@ -76,7 +76,7 @@ Scope: every table in `census_tables.md` (49 rows across trades/forecasts/world)
 | provenance_envelope_events | 0.05 GiB | **ledger** | Round-2 E7: may be the sole record of what was seen at decision time; verify same-authority before dedupe/evidence-demotion. `[INFERRED]` | needs-probe |
 | token_price_log | 0.05 GiB | **raw-evidence** | 217,102-row append-only tick log. `[INFERRED]` — manifest note contradicts schema_class, see §c. | clean-move |
 | probability_trace_fact | 0.05 GiB | **evidence/DEAD** | Manifest: 33K+ misplaced rows from INV-37 violation, writes now redirected to world's copy. Migrate-or-drop, not a canonical trade table. `[INFERRED]` | needs-probe |
-| token_suppression_history | 0.04 GiB | **raw-evidence** | 94,342-row operational/diagnostic log. `[INFERRED]` — manifest note contradicts schema_class, see §c. | clean-move |
+| token_suppression_history | 0.04 GiB | **raw-evidence** | 94,342-row operational/evidence log. `[INFERRED]` — manifest note contradicts schema_class, see §c. | clean-move |
 | executable_market_snapshot_latest | 0.03 GiB | **money-hot** | Manifest's own words: "hot live refresh-priority readers use this... first." Textbook hot mirror. `[INFERRED]` | clean-move |
 | venue_order_facts | 0.03 GiB | **ledger** | Round-2: immutable lifecycle facts→ledger. `[RULED]` | clean-move |
 | decision_certificate_edges | 0.02 GiB | **ledger** | Sibling of `decision_certificates`(trade); edges for the selected/graded cert population. `[INFERRED]` — manifest mislabel, see §c. | clean-move |
@@ -91,7 +91,7 @@ Scope: every table in `census_tables.md` (49 rows across trades/forecasts/world)
 |---|---|---|---|---|
 | calibration_pairs | 11.96 GiB | **learning-mart** | Round-2 explicit: not spine, rebuildable; canonical truth is a narrow `graded_predictions` fact carved out. `[RULED]` | row-level-split |
 | ensemble_snapshots | 3.35 GiB | **operational-work** (current head) / evidence (historical) / ledger (decision-committed digest) | Round-2 explicit 3-way split, paired with `forecast_posteriors`. "Hot/cache" language, not order-book state — REDESIGN_v2 §1 places this in `forecast-current.db`, a separate file from `money-hot.db` with weaker durability (NORMAL vs FULL+fullfsync); operational-work is the nearest of the 5 classes. `[RULED, class-mapping INFERRED]` | row-level-split |
-| forecast_posteriors | 3.30 GiB | **operational-work** (reusable artifact) / ledger (decision input) / evidence (diagnostic array) | Round-2 explicit: same E1-style byte dissection, 3-way. `[RULED, class-mapping INFERRED]` | row-level-split |
+| forecast_posteriors | 3.30 GiB | **operational-work** (reusable artifact) / ledger (decision input) / evidence (evidence array) | Round-2 explicit: same E1-style byte dissection, 3-way. `[RULED, class-mapping INFERRED]` | row-level-split |
 | raw_model_forecasts | 0.25 GiB | **raw-evidence** | Manifest: `training_allowed=0`, immutable product-identity-tagged capture — textbook raw-evidence. `[INFERRED]` | clean-move |
 | observations | 0.09 GiB | **ledger** | Extends round-2's "canonical observation facts→ledger" (settlement-input observation table, compound key city/date/source). `[INFERRED]` | clean-move |
 | raw_forecast_artifacts | 0.09 GiB | **raw-evidence** | Manifest: "immutable raw... downloaded artifacts," name says what it is. `[INFERRED]` | clean-move |
@@ -123,7 +123,7 @@ Scope: every table in `census_tables.md` (49 rows across trades/forecasts/world)
 | edli_live_order_events | 0.17 GiB | **ledger** | Round-2 explicit: immutable lifecycle facts→ledger. This is the manifest-authoritative copy. `[RULED]` | clean-move |
 | decision_compile_failures | 0.16 GiB | **ledger** | Manifest: "durable compiler failure denominator... so no-submit reports cannot hide rejected looks" — permanent decision-adjacent fact. `[INFERRED]` | clean-move |
 | forecasts | 0.10 GiB | **operational-work** | Manifest: "active forecast cache." REDESIGN_v2 §1 explicitly separates `world-current.db` from `money-hot.db` (different durability tier); operational-work nearest fit among the 5. `[INFERRED]` | clean-move |
-| probability_trace_fact | 0.09 GiB | **raw-evidence** | Diagnostic trace of probability computation, not itself a truth fact; this is the manifest-authoritative copy (trade's copy is contamination). `[INFERRED]` | clean-move |
+| probability_trace_fact | 0.09 GiB | **raw-evidence** | Evidence trace of probability computation, not itself a truth fact; this is the manifest-authoritative copy (trade's copy is contamination). `[INFERRED]` | clean-move |
 | hourly_observations | 0.09 GiB | **raw-evidence/DEAD** | Manifest: `legacy_archived`, **"no INSERT matches in src/ as of 2026-05-18"** — no active writer. Round-2's "hourly→ledger" pattern-match does not apply to this specific dead copy. `[INFERRED, contradicts naive pattern-match]` | needs-probe |
 | data_coverage | 0.08 GiB | **operational-work** | Manifest: per-city/date coverage-status tracking — same flavor as `source_run_coverage`/`readiness_state`. `[INFERRED]` | clean-move |
 
@@ -131,12 +131,12 @@ Scope: every table in `census_tables.md` (49 rows across trades/forecasts/world)
 
 ## (a) Tables needing a row-level split (the hard ones)
 
-1. **execution_feasibility_evidence** (both DBs) — decision-used summary rows/fields → ledger; bulk diagnostics → evidence. Populations don't overlap 1:1 (25.58M trades vs 12.98M world), so this is two separate split jobs, not one.
-2. **decision_log** (trade) — diagnostic BLOB columns → evidence; envelope+preimage commitment-hash columns → ledger. High stakes: round-2 explicitly warns a deletable evidence epoch must never become the sole home of bytes a settled certificate's hash depends on.
+1. **execution_feasibility_evidence** (both DBs) — decision-used summary rows/fields → ledger; bulk evidence → evidence. Populations don't overlap 1:1 (25.58M trades vs 12.98M world), so this is two separate split jobs, not one.
+2. **decision_log** (trade) — evidence BLOB columns → evidence; envelope+preimage commitment-hash columns → ledger. High stakes: round-2 explicitly warns a deletable evidence epoch must never become the sole home of bytes a settled certificate's hash depends on.
 3. **book_hash_transitions** (trade) — head row per (market_slug, token) → money-hot; transition history → evidence (or delete if snapshot-derivable — needs the snapshot-sufficiency proof from REDESIGN_v2 §4).
 4. **collateral_ledger_snapshots** (trade) — 3-way: current row(s) → money-hot; deltas → ledger; periodic full snapshots → derived checkpoint/evidence.
 5. **calibration_pairs** (forecasts) — narrow `graded_predictions` fact (prediction_id, cert_id, city/date/metric/lead, model version, p, y, weight, timestamp) → new ledger-adjacent fact; everything else (bucket/grouping columns, the 8 B-trees) → learning-mart, rebuilt not migrated.
-6. **ensemble_snapshots** + **forecast_posteriors** (forecasts) — 3-way each: current head/reusable artifact → operational-work cache; decision-committed exact digest → ledger; diagnostic/historical → evidence.
+6. **ensemble_snapshots** + **forecast_posteriors** (forecasts) — 3-way each: current head/reusable artifact → operational-work cache; decision-committed exact digest → ledger; evidence/historical → evidence.
 7. **opportunity_events** (world) — immutable envelope columns → evidence; availability/lease/retry/pending-order projection columns → operational-work. This is a column split, not a row split — same physical event needs both halves.
 8. **opportunity_event_processing** (world) — pending + leased + short-horizon-complete rows → operational-work (kept); the ~11M-row historical tail → evidence or delete (~5GiB recovery target per REDESIGN_v2).
 9. **observation_instants** (world) — split by the existing `authority` column: A1/A2/A6-gated native-source rows → ledger; UNVERIFIED OpenMeteo filler/backfill rows → evidence. `[INFERRED refinement — not explicit in round-2]`.
@@ -160,7 +160,7 @@ Scope: every table in `census_tables.md` (49 rows across trades/forecasts/world)
 **Manifest rot — label contradicts measured reality (highest severity first)**:
 1. **execution_feasibility_evidence (world)** — manifest `legacy_archived` + "Ghost... pre-trade-repoint drift"; census **10.83 GiB, 15.77M cells**, round-2 treats as real distinct 12.98M-row population. `legacy_archived` reads as "safe to drop" — it is NOT. Most dangerous manifest/reality gap in the set.
 2. **decision_certificates + decision_certificate_edges (trade)** — manifest `legacy_archived`, "Drop after 2026-08-09"; census 58,021 certs / 105,275 edges, and round-2's classification DEPENDS on the 58K count to establish selected-grain vs world's 1.35M candidate-grain. Drop-date framing is stale and contradicts the verdict built on it.
-3. **decision_log (trade)** — `schema_class: trade_class` correct, but note text "Ghost... Drop after 2026-08-09" is a copy-paste artifact from neighboring genuine ghosts. 7.60 GiB, 190,032 rows, the diagnostic-BLOB shape E1 targets. Note wrong, class right.
+3. **decision_log (trade)** — `schema_class: trade_class` correct, but note text "Ghost... Drop after 2026-08-09" is a copy-paste artifact from neighboring genuine ghosts. 7.60 GiB, 190,032 rows, the evidence-BLOB shape E1 targets. Note wrong, class right.
 4. **market_price_history, token_price_log, token_suppression_history (trade)** — same pattern: class correct, copy-pasted "Ghost... Drop" note despite real rows (657K/217K/94K). Low-severity cleanup.
 
 **Recommendation (→ team-lead 裁决 2, now a W2 BLOCKING gate)**: before this matrix drives any wave, run a scripted consistency check — grep `notes:.*[Gg]host` against `schema_class:(trade|world|forecast)_class` (non-legacy_archived) to enumerate the full stale-copy-paste set rather than the 6 this pass hit via census overlap.

@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-07-24
 # Authority basis: D4 emos_mu_bias_probe.md + law 8 (airport-settlement-honest center).
 # Purpose: DISCRIMINATING PROBE — does the live EMOS μ* cold residual for cold-biased cities come
 #   from (a) the absent S2 representativeness de-bias on x̄ BEFORE the EMOS formula, or (b) the EMOS
@@ -201,7 +201,13 @@ def main():
     # Save machine-readable summary
     out = os.environ.get(
         "PROBE_OUT",
-        os.path.join(REPO, "docs", "evidence", "deadloop_2026-06-14", "emos_mu_correction_probe_out.json"),
+        os.path.join(
+            REPO,
+            "docs",
+            "evidence",
+            "deadloop_2026-06-14",
+            "emos_mu_correction_probe_out.json.md",
+        ),
     )
     with open(out, "w") as f:
         json.dump({str(k): v for k, v in summary.items()}, f, indent=2)

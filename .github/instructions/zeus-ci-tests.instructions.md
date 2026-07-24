@@ -66,5 +66,5 @@ daemon, reader, executor, scheduler, or manifest consumer.
   Good: fake clock / monotonic injection / deterministic fixture.
 
 When a manifest has `required_tests:`, the test must cover the SAME
-runtime surface as the invariant — not an earlier diagnostic or unit
+runtime surface as the invariant — not an earlier helper or unit
 test. Manifest pointer drift to wrong test path is Important.

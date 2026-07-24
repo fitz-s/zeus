@@ -114,4 +114,4 @@ scripts/ops/loop_status.sh          # 活性一屏
 
 ## 8. 谱系
 
-v1(五文件五级+shadow,否决)→ v2(2026-07-06:三文件三级、wrapper 机制、consult 裁决、claude 引擎;guard 三轮硬化史见 loop_guard.py/tests)→ **v3(本文:codex Seatbelt 内核、单 tick、INTERVAL 旋钮、查询 escrow、commit-auto、自进化棘轮)**。v2 文档保留为方法论权威;冲突处以本文为准。执行件:`loop/tick.sh`、`loop/prompts/l1.md`、`scripts/ops/loop_guard.py`(interval-check / run-queries / commit-auto 三个 v3 子命令)、`deploy/launchd/com.zeus.loop-tick.plist`。
+v1(五文件五级+retired,否决)→ v2(2026-07-06:三文件三级、wrapper 机制、consult 裁决、claude 引擎;guard 三轮硬化史见 loop_guard.py/tests)→ **v3(本文:codex Seatbelt 内核、单 tick、INTERVAL 旋钮、查询 escrow、commit-auto、自进化棘轮)**。v2 文档保留为方法论权威;冲突处以本文为准。执行件:`loop/tick.sh`、`loop/prompts/l1.md`、`scripts/ops/loop_guard.py`(interval-check / run-queries / commit-auto 三个 v3 子命令)、`deploy/launchd/com.zeus.loop-tick.plist`。

@@ -87,7 +87,7 @@ Promote script (`659ca79637 perf(promote): skip post-DELETE VACUUM + drop indexe
 - A2. On completion, read `state/zeus-forecasts.db` for ensemble_snapshots max(fetch_time). If advanced past `2026-05-12T02:57` → A3. Else → A5.
 - A3. Wait 30 min after first advance. Re-read max(fetch_time) — should advance by ≥1 cycle.
 - A4. Mark task #28 completed in TaskUpdate. Proceed to Phase B.
-- A5. If ECMWF still stale after fix landed: spawn second opus executor with deeper diagnostic (py-spy with sudo if needed, EXPLAIN QUERY PLAN on every SQL the ingest path runs, identify any other missing infrastructure).
+- A5. If ECMWF still stale after fix landed: spawn second opus executor with deeper inspection (py-spy with sudo if needed, EXPLAIN QUERY PLAN on every SQL the ingest path runs, identify any other missing infrastructure).
 
 ### Escalation thresholds (Phase A)
 - Executor `a23445483b0b87b66` not returning within 90 min → spawn new fresh executor with same brief + current state delta.

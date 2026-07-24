@@ -6,7 +6,7 @@
 #   ForecastCaseFactory used by ARM replay and reactor bridge". The ARM replay
 #   (scripts/qkernel_arm_replay.py:283-319) constructs the pure-predictive
 #   decision-cycle case with season=season_for(target), lead_hours=24.0,
-#   regime_key="default"; the live bridge MUST derive the SAME (season, lead,
+#   regime_key="default"; the live path MUST derive the SAME (season, lead,
 #   regime) so the served sigma is the validated realized floor, not a missed
 #   lookup. season_for is the canonical NH season helper already used by the
 #   settlement sigma floor table (src/calibration/emos.py:389 / :408 emos_season,
@@ -23,7 +23,7 @@ cell-keyed authority diverge from what the replay validated — the live sigma
 would no longer be the realized walk-forward floor it was certified to be.
 
 ``forecast_case_metadata`` is that single derivation. Both the ARM replay and the
-live bridge call it so their ``ForecastCase`` season / lead_hours / regime_key are
+live path call it so their ``ForecastCase`` season / lead_hours / regime_key are
 identical for the same ``(city, target_date, metric, decision_time)``.
 
 Lead derivation. The ARM replay decides one day before the target finalization,
@@ -46,7 +46,7 @@ from src.calibration.emos import emos_season
 
 # The canonical regime key the ARM-replay pure-predictive path uses. There is no
 # fitted per-cell regime artifact at this seam (the sigma floor table is keyed by
-# city/season/metric); "default" is the replay convention and the live bridge
+# city/season/metric); "default" is the replay convention and the live path
 # matches it so the cell identity is the same.
 DEFAULT_REGIME_KEY = "default"
 
@@ -64,7 +64,7 @@ REPLAYED_LEAD_BUCKET = "24h"
 class ForecastCaseMetadata:
     """The (season, lead_hours, regime_key) the ForecastCase must carry.
 
-    Derived ONCE here so the live bridge and the ARM replay agree by construction.
+    Derived ONCE here so the live path and the ARM replay agree by construction.
     """
 
     season: str

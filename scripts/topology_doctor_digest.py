@@ -981,10 +981,10 @@ def _operation_vector_resolution(
         "new_evidence",
         "new_findings",
     }
-    source_canary_task_hint = any(
+    source_probe_task_hint = any(
         phrase in task_l
         for phrase in (
-            "source canary",
+            "source probe",
             "canary",
             "provider hot-swap",
             "hot-swap",
@@ -1002,9 +1002,9 @@ def _operation_vector_resolution(
     if operation_stage == "closeout" and (feedback_artifact_target or feedback_task_hint):
         candidate_ids.append("direct operation feedback capsule")
     if "source_behavior" in mutation_surfaces and (
-        mutation_source == "cli" or source_canary_task_hint
+        mutation_source == "cli" or source_probe_task_hint
     ):
-        candidate_ids.append("source canary readiness hot-swap")
+        candidate_ids.append("source probe readiness hot-swap")
     if "evaluator_behavior" in mutation_surfaces and mutation_source == "cli":
         candidate_ids.append("evaluator script import bridge")
     if (
