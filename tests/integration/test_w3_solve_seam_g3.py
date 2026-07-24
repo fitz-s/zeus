@@ -4535,7 +4535,7 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as current_target_plan
-    import src.engine.replacement_forecast_hook_factory as hook_factory
+    import src.data.replacement_forecast_readiness as readiness_reader
 
     forecast = sqlite3.connect(":memory:")
     forecast.row_factory = sqlite3.Row
@@ -4660,8 +4660,8 @@ def test_provisional_hko_held_probability_uses_remaining_day_without_entry_autho
         return SimpleNamespace(ok=True, bundle=bundle, reason_code="READY")
 
     monkeypatch.setattr(
-        hook_factory,
-        "_latest_replacement_readiness",
+        readiness_reader,
+        "latest_replacement_readiness",
         lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
